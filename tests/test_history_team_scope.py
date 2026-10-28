@@ -112,7 +112,6 @@ def _build_pair(
         refresh_scheduler=None,
         active_model_names=None,
     )
-    assert members.failed_agent_names == []
     return build_team_spec(
         members=members,
         mode=TeamMode.COORDINATE,
@@ -288,7 +287,7 @@ def test_the_team_build_takes_the_configured_team_s_call_limit_and_members(
     ad_hoc = _build_pair(config, runtime_paths, monkeypatch, configured_team_name=None)
 
     assert (configured.spec.leader.id, configured.spec.leader.max_tool_calls_per_turn) == ("pair", 3)
-    assert [(member.spec.id, member.spec.name) for member in configured.spec.members] == [
+    assert [(member.id, member.name) for member in configured.spec.members] == [
         ("zeta", "Zeta"),
         ("alpha", "Alpha"),
     ]

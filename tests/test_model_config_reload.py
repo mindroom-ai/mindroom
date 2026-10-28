@@ -142,7 +142,7 @@ def _materialize(runtime: _MultiAgentOrchestrator) -> tuple[AgentBuild, AgentBui
         timezone="UTC",
     )
     router = build_model_provider(config, runtime.runtime_paths, config.router.model)
-    return agent, members.builds[0], team, router
+    return agent, members.build("general", members.model_names["general"]), team, router
 
 
 def _temperature(model: ModelProvider) -> float | None:

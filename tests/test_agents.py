@@ -5497,14 +5497,15 @@ def test_team_member_matches_solo_agent_construction() -> None:
         knowledge=None,
         active_model_name=None,
     )
-    [member] = materialize_exact_team_members(
+    members = materialize_exact_team_members(
         ["calculator"],
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=None,
         refresh_scheduler=None,
         active_model_names=None,
-    ).builds
+    )
+    member = members.build("calculator", members.model_names["calculator"])
     assert member.prompt.role == solo.prompt.role
     assert (member.spec.id, member.spec.name) == (solo.spec.id, solo.spec.name)
     assert member.spec.model.identity == solo.spec.model.identity

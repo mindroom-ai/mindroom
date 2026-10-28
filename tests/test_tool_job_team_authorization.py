@@ -563,14 +563,10 @@ async def test_the_member_that_posts_an_ad_hoc_teams_replies_hears_when_its_jobs
             active_model_names=None,
         )
         hooks = {
-            build.spec.id: _team_member(
-                build,
-                "",
-                config=config,
-                runtime_paths=runtime_paths,
-                model_name="default",
-            ).hooks("member-run")
-            for build in members.builds
+            name: _team_member(name, members, "", config=config, runtime_paths=runtime_paths)
+            .build()
+            .hooks("member-run")
+            for name in members.requested_agent_names
         }
         await start_job(runtime, "ended", tool_name="report", depth=0, adapter={}, owner=identity, operation=operation)
         await wait_for_status(runtime, "ended", "completed")

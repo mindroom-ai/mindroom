@@ -203,8 +203,8 @@ def test_team_leader_keeps_date_when_members_have_stable_roles(monkeypatch: pyte
             configured_team_name=None,
             timezone="UTC",
         )
+        member = members.build("general", members.model_names["general"])
 
-    [member] = members.builds
     assert member.prompt.role is not None
     assert "## Current Date and Time" not in member.prompt.role
     leader_prompt = system_text(team.spec.leader.system_messages)

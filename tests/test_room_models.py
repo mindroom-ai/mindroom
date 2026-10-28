@@ -393,7 +393,7 @@ def test_runtime_model_precedence_applies_to_materialized_team_members(tmp_path:
         refresh_scheduler=None,
         active_model_names=None,
     )
-    assert members.builds[0].spec.model.identity.id == "large-model"
+    assert members.build("assistant", members.model_names["assistant"]).spec.model.identity.id == "large-model"
 
     thread_id = "$thread:localhost"
     set_thread_model_override(
@@ -419,7 +419,10 @@ def test_runtime_model_precedence_applies_to_materialized_team_members(tmp_path:
         refresh_scheduler=None,
         active_model_names=None,
     )
-    assert thread_members.builds[0].spec.model.identity.id == "default-model"
+    assert (
+        thread_members.build("assistant", thread_members.model_names["assistant"]).spec.model.identity.id
+        == "default-model"
+    )
 
 
 def test_stale_runtime_room_override_falls_back_to_static_room_model(

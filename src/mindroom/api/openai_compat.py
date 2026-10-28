@@ -997,9 +997,9 @@ def _build_team(
     *,
     models: TeamTurnModelSelection,
 ) -> BuiltTeam:
-    """Create member builds and build one team for a configured team.
+    """Build one configured team, whose members build on their first delegation.
 
-    Raises when the configured team cannot be materialized.
+    Raises when the configured team's members are not supported.
     """
     team_config = config.teams[team_name]
     config.assert_team_agents_supported(team_config.agents, team_name=team_name)
