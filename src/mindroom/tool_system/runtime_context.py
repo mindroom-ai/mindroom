@@ -149,10 +149,11 @@ class ToolRuntimeContext:
     membership: PrincipalStore | None = None
     membership_turn_id: str | None = None
     source_kind: str | None = None
-    # What posted this turn's message when a hook did; a resumed approval turn restores it.
-    hook_source: str | None = None
     config_provider: Callable[[], Config] | None = None
     cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None = None
+    # What posted this turn's message when a hook did; a resumed approval turn restores it.
+    # Last, so plugins that build this context positionally keep their argument order.
+    hook_source: str | None = None
 
     @property
     def current_config(self) -> Config:
