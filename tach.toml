@@ -4980,9 +4980,10 @@ depends_on = [
     "mindroom.startup_errors",
     # Deferred import in the Vertex AI Claude connection check, so the anthropic SDK loads only when used.
     "mindroom.providers.anthropic.messages",
-    # Deferred imports in the Ollama server checks, so the Ollama SDK and memory setup load only when used.
+    # Deferred imports in the Ollama server checks, so the Ollama SDK, memory setup, and model registry load only when used.
     "mindroom.memory.config",
     "mindroom.providers.ollama.adapter",
+    "mindroom.providers.registry",
 ]
 
 [[modules]]

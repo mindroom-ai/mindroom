@@ -436,11 +436,12 @@ def _ollama_reachable(options: Mapping[str, Any]) -> tuple[bool | None, str]:
     return True, ""
 
 
-def _ollama_model_options(model_config: ModelConfig, runtime_paths: RuntimePaths) -> dict[str, Any]:
-    """Return the client options of the Ollama adapter the runtime builds for ``model_config``."""
+def _ollama_model_options(config: Config, model_name: str, runtime_paths: RuntimePaths) -> dict[str, Any]:
+    """Return the client options of the Ollama adapter the runtime builds for ``model_name``, its saved key included."""
     from mindroom.providers.ollama.adapter import build_provider  # noqa: PLC0415 - loads the Ollama SDK
+    from mindroom.providers.registry import configured_model  # noqa: PLC0415 - loads every provider family
 
-    return build_provider(model_config, runtime_paths).client_options()
+    return build_provider(configured_model(config, runtime_paths, model_name), runtime_paths).client_options()
 
 
 def _mem0_ollama_options(config: Config, runtime_paths: RuntimePaths) -> dict[str, Any]:
@@ -476,7 +477,7 @@ def _check_ollama_models(config: Config, runtime_paths: RuntimePaths) -> tuple[i
     for name, model_config in config.models.items():
         if provider_route(model_config.provider) != "ollama":
             continue
-        options = _ollama_options(f"models.{name}", partial(_ollama_model_options, model_config, runtime_paths))
+        options = _ollama_options(f"models.{name}", partial(_ollama_model_options, config, name, runtime_paths))
         if options is None:
             warnings += 1
         else:

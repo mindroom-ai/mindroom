@@ -327,6 +327,20 @@ def test_doctor_checks_each_ollama_server_through_the_client_its_models_send_wit
     ]
 
 
+def test_doctor_checks_an_ollama_server_with_the_key_the_dashboard_saved_for_its_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A key saved in the dashboard for the model replaces the configured one, as it does for the model's replies."""
+    runtime_paths = _runtime_with_env(tmp_path, {}, dashboard={"model:gpu": "saved-key"})
+    probed = _ollama_servers(monkeypatch)
+    model = ModelConfig(provider="ollama", id="qwen3.8:27b", host="http://gpu.example:11434", api_key="stale-key")
+    config = Config(models={"gpu": model}, router=RouterConfig(model="gpu"))
+
+    assert _check_providers(config, runtime_paths) == (1, 0, 0)
+    assert _servers_and_keys(probed) == [("http://gpu.example:11434/api/tags", "Bearer saved-key")]
+
+
 def test_doctor_fails_an_ollama_server_that_rejects_the_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
