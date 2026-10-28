@@ -24,7 +24,7 @@ from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
 from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from starlette.background import BackgroundTask
     from starlette.types import Receive, Scope, Send
@@ -92,10 +92,16 @@ class OpenAIJSONResponse(_FinalizedResponse, JSONResponse):
 class OpenAIStreamingResponse(_FinalizedResponse, StreamingResponse):
     """Streaming response with completion-aware compaction and always-run finalizers."""
 
+    # Closes the stream the body reads from, which a body that never started, such as when sending the headers
+    # failed, cannot close itself.
+    close_stream: Callable[[], Awaitable[None]] | None = None
+
     async def _close_body(self) -> None:
         """Close a stream the client left early, so the turn cut short is stored while its session is still held."""
         if isinstance(self.body_iterator, AsyncGenerator):
             await self.body_iterator.aclose()
+        if self.close_stream is not None:
+            await self.close_stream()
 
 
 # ---------------------------------------------------------------------------

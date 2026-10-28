@@ -2100,6 +2100,8 @@ class TestStreamingCompletion:
         assert model.closed
         assert response.completion_predicate is not None
         assert response.completion_predicate()
+        # The response, not only its body, closes the agent stream, so a body that never started cannot leave it open.
+        assert response.close_stream is not None
         body = b"".join(sent).decode()
         assert '"content":"Hello"' in body
         assert '"content":" world"' in body
@@ -2802,6 +2804,39 @@ async def test_a_stream_the_client_left_closes_while_its_session_is_still_held(s
 
     with suppress(ClientDisconnect):
         await response({"type": "http", "asgi": {"spec_version": spec_version}}, receive, send)
+
+    assert held_at_close == [True]
+    assert not completion_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_a_stream_whose_headers_never_reached_the_client_closes_while_its_session_is_still_held() -> None:
+    """A body that never started cannot close the stream it reads from, so the response closes that stream itself."""
+    completion_lock = asyncio.Lock()
+    await completion_lock.acquire()
+    held_at_close: list[bool] = []
+
+    async def body() -> AsyncIterator[str]:
+        yield "data: [DONE]\n\n"
+
+    async def close_stream() -> None:
+        held_at_close.append(completion_lock.locked())
+
+    streaming_response = openai_compat.OpenAIStreamingResponse(body(), media_type="text/event-stream")
+    streaming_response.completion_predicate = lambda: False
+    streaming_response.close_stream = close_stream
+    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock, None)
+
+    async def receive() -> dict[str, str]:
+        return {"type": "http.request"}
+
+    async def send(message: dict[str, object]) -> None:
+        if message["type"] == "http.response.start":
+            error_message = "client closed"
+            raise OSError(error_message)
+
+    with suppress(ClientDisconnect, OSError):
+        await response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send)
 
     assert held_at_close == [True]
     assert not completion_lock.locked()

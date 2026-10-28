@@ -929,6 +929,7 @@ async def _stream_completion(
         media_type="text/event-stream",
     )
     response.completion_predicate = lambda: stream_completed
+    response.close_stream = stream.aclose
     return response
 
 
@@ -1290,6 +1291,7 @@ async def _stream_team_completion(  # noqa: C901
         media_type="text/event-stream",
     )
     response.completion_predicate = lambda: stream_completed
+    response.close_stream = _cleanup
     return response
 
 
