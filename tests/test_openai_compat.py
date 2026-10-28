@@ -4355,7 +4355,9 @@ class TestTeamCompletion:
                 refresh_scheduler=None,
             )
 
-        assert isinstance(response, StreamingResponse)
+        assert isinstance(response, openai_compat.OpenAIStreamingResponse)
+        # The response closes the team stream too, for a body that never started.
+        assert response.close_stream is not None
         body_iterator = response.body_iterator
         await asyncio.create_task(anext(body_iterator), context=Context())
         await asyncio.create_task(body_iterator.aclose(), context=Context())
