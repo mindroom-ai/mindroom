@@ -7907,6 +7907,33 @@ def test_sandbox_runner_refuses_another_worker_protocol(
 
 
 @pytest.mark.parametrize("route", list(_PROTOCOL_PAYLOADS))
+def test_another_protocol_is_named_before_the_request_shape(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    route: str,
+) -> None:
+    """A newer primary's request adds fields this worker does not know; the answer names the versions, not a field."""
+    _set_sandbox_token(monkeypatch)
+    newer = WORKER_PROTOCOL_VERSION + 1
+
+    response = runner_client.post(
+        f"/api/sandbox-runner/{route}",
+        headers=SANDBOX_HEADERS,
+        json={"protocol": newer, "field_from_a_newer_release": True, **_PROTOCOL_PAYLOADS[route]},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "ok": False,
+        "error": (
+            f"The primary speaks worker protocol {newer}, this worker {WORKER_PROTOCOL_VERSION}; "
+            "run the same MindRoom release on both."
+        ),
+        "failure_kind": "worker",
+    }
+
+
+@pytest.mark.parametrize("route", list(_PROTOCOL_PAYLOADS))
 def test_sandbox_runner_refuses_unknown_fields_as_a_tool_failure(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

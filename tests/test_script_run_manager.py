@@ -43,7 +43,7 @@ from mindroom.tool_system.sandbox_proxy import runner_config_snapshot
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, worker_root_path
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import ScriptResourceProfileName, WorkerHandle, WorkerSpec
-from mindroom.workers.runtime import current_worker_launch_config
+from mindroom.workers.runtime import build_worker_launch_config, current_worker_launch_config
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
@@ -407,6 +407,43 @@ async def test_recovery_contract_binds_the_authority_the_worker_launches_with(tm
 
     assert run.recovery_signature == signature(config=_config())
     assert run.recovery_signature != signature(config=stale_turn.config)
+
+
+@pytest.mark.asyncio
+async def test_a_launch_admitted_after_a_reload_binds_the_reloaded_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A launch that waited for admission while a reload applied launches, and records recovery, with the new config."""
+    manager, backend, _client = _manager(tmp_path, backend="kubernetes", isolated_script_gateway=True)
+    backend.backend_name = "kubernetes"
+    context = _context(tmp_path, backend="kubernetes", isolated_script_gateway=True)
+    reloaded = _config().model_copy(
+        update={"defaults": DefaultsConfig(tools=[], worker_grantable_credentials=["openai"])},
+    )
+    applied = {"config": _config()}
+    admit = manager_module.ScriptRunManager._admit_launch
+
+    async def admit_after_a_reload(self: manager_module.ScriptRunManager) -> None:
+        applied["config"] = reloaded
+        await admit(self)
+
+    monkeypatch.setattr(manager_module.ScriptRunManager, "_admit_launch", admit_after_a_reload)
+    monkeypatch.setattr(
+        manager_module,
+        "current_worker_launch_config",
+        lambda _paths: build_worker_launch_config(applied["config"], tool_validation_snapshot={}),
+    )
+
+    run = await manager.run(context, source="print('ok')\n")
+
+    assert run.recovery_signature == script_recovery_signature(
+        backend=backend,
+        config=reloaded,
+        agent_name="watcher",
+        gateway_url="http://script-gateway.test/api/script-gateway",
+        resource_profile=None,
+    )
 
 
 @pytest.mark.asyncio

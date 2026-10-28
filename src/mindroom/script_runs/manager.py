@@ -60,7 +60,7 @@ from mindroom.tool_system.worker_routing import (
     build_agent_toolkit_worker_target,
     serialize_tool_execution_identity,
 )
-from mindroom.workers.backend import WorkerBackendError, required_launch
+from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import ScriptResourceProfileName, WorkerHandle, WorkerLaunchConfig, WorkerSpec
 from mindroom.workers.runtime import current_worker_launch_config
@@ -389,7 +389,6 @@ class ScriptRunManager:
             else WorkerSpec(
                 worker_key=_require_worker_key(worker_key),
                 private_agent_names=worker_target.private_agent_names,
-                launch=_script_worker_launch(context.runtime_paths),
                 mirror_grantable_credentials=False,
                 state_scope_worker_key=worker_target.worker_key,
                 resource_profile=selected_profile,
@@ -431,9 +430,13 @@ class ScriptRunManager:
         worker_spec: WorkerSpec,
         requested_profile: ScriptResourceProfileName | None,
     ) -> tuple[ScriptRunRecord, WorkerSpec]:
-        """Bind persisted quantities to the same refreshed backend that creates the worker."""
+        """Bind persisted quantities to the same refreshed backend that creates the worker.
+
+        The launch is read once admitted, so no reload changes the applied config before the worker is created.
+        """
         backend = _require_script_launch_backend(self._worker_backend_for(None), context.runtime_paths)
         profile, requests, limits = _resolve_script_resource_profile(backend, requested_profile)
+        launch = _script_worker_launch(context.runtime_paths)
         return (
             replace(
                 run,
@@ -441,7 +444,7 @@ class ScriptRunManager:
                 recovery_signature=script_recovery_signature(
                     backend=self.worker_backend,
                     # The config the worker launches with, so recovery binds to the authority it actually got.
-                    config=required_launch(worker_spec).config,
+                    config=launch.config,
                     agent_name=context.agent_name,
                     gateway_url=self.gateway_url,
                     resource_profile=profile,
@@ -450,7 +453,7 @@ class ScriptRunManager:
                 resource_requests=requests,
                 resource_limits=limits,
             ),
-            replace(worker_spec, resource_profile=profile),
+            replace(worker_spec, resource_profile=profile, launch=launch),
         )
 
     async def _create_and_launch(

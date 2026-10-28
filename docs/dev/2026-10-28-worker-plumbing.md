@@ -21,16 +21,16 @@ Background script runs are the one caller that pins its launch, because a run's 
 Accepted limit: the tool validation snapshot reflects the tool registry loaded when a launch is derived, so a launch derived while a plugin reload is in flight can carry the new registry with the previously applied config; the next derivation after the reload, or after its recovery, corrects it at the cost of one more Docker restart.
 The snapshot is validation metadata the trusted primary sends and grants a worker nothing.
 
-Docker workers now project the applied config instead of reading the YAML on disk, and their launch hash covers only what the worker sees (its own projected config and assets, the tool snapshot, and its startup manifest), so edits to models, prompts, or other agents no longer restart them.
+A Docker worker's launch hash covers only what that worker sees (its projected config and assets, the tool snapshot, and its startup manifest), because a hash over the whole config restarted every worker, ending its background shells, on edits it cannot observe.
 
 ## One typed wire protocol
 
 Both sides import one set of request and response models that refuse unknown fields, and every request names its worker protocol.
 Before, the runner's own models ignored fields they did not know, so every protocol bump from 2 to 5 had patched one dropped field after another.
-From protocol 6 on, a worker or shared runner refuses a request naming another protocol with both versions, and a field one side does not know fails the request instead of being dropped.
+From protocol 6 on, a worker or shared runner refuses a request naming another protocol with both versions, checked before the request's shape because a newer release's request usually carries fields this worker does not know, and an unknown field in a request of the same protocol fails it instead of being dropped.
 The primary does not health-check a shared runner's protocol: every request already names its protocol, so only a runner from before protocol 6 can drop fields, a one-release window the upgrade notes cover.
 
-The runner prepares every route in one step with one workspace rule, chosen after characterization tests showed that every request whose `base_dir` is the calling agent's workspace, which is every request the primary sends, gets the same answer from all six former resolvers; the rule changes answers only where the former resolvers disagreed with one another.
+The runner prepares every route in one step with one workspace rule, chosen after characterization tests showed that every request whose `base_dir` is the calling agent's workspace gets the same answer from all six former resolvers; the rule changes answers only where the former resolvers disagreed with one another.
 An explicit `base_dir` that fails confinement is refused, never replaced by a fallback.
 
 A worker counts a failure against itself only when its own typed answer says so, or when no typed answer arrived (transport errors, a missing route, a rejected token, a malformed answer); timeouts never do.
@@ -44,11 +44,10 @@ The environment fields kept their meaning and were only grouped.
 
 The runner environment and startup manifest of a dedicated worker have one builder; Docker and Kubernetes render it with their own container layouts.
 Kept per backend on purpose: knowledge delivery (Docker copies, Kubernetes mounts read-only, as `security-posture.md` requires), the per-worker token derivation (Docker's includes a runtime namespace, so two storage roots sharing one proxy token never share worker tokens), the process command (Docker's image entrypoint already runs `tini`), HOME, operator extra env filtering and telemetry opt-outs (unifying either would change what reaches a worker), and container security settings.
-Kubernetes uses the shared lifecycle transitions, and both backends share one protocol check-and-replace-once rule; Docker pulls its image again only for a worker older than the primary.
+Both backends replace a worker of another protocol once and then fail; Docker pulls its image again only for a worker older than the primary, because no pull provides the newer runtime a newer worker needs.
 
 ## One call result for calls outside the model loop
 
 `run_tool_call` returns what a call came to (ok, failed, declined, denied, connection required) with the tool's own value, and the tool-call policy marks the calls it refused itself, so a tool's own failed answer is never mistaken for a plugin decline.
 Each origin projects that result into its own answer; their answers stayed as they were, except where they were wrong: the MCP gateway gained a `tool_failed` code for a tool's own failure, and scheduled calls no longer let a synchronous body's late exception replace a cancellation or an OAuth connection prompt.
-Completion tracking is not part of `run_tool_call`: the resource owner sets its extent.
-The CLI, scheduled calls, and jobs share one "wait in place" helper; the MCP gateway and the script broker keep handing a cancelled call's toolkit to a retained cleanup.
+Completion tracking is not part of `run_tool_call`, because how long a cancelled call's resources must outlive it is the resource owner's decision: a caller that waits in place differs from one that hands a cancelled call's toolkit to a retained cleanup.

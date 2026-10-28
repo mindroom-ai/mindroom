@@ -398,6 +398,24 @@ def test_each_resolver_picks_the_pinned_workspace(
     assert _resolve_every_endpoint(shape, monkeypatch) == expected
 
 
+@pytest.mark.parametrize(("scope", "agent"), [(None, "general"), ("shared", "general"), ("user_agent", "writer")])
+def test_a_tool_without_a_base_dir_runs_in_the_agent_workspace(tmp_path: Path, scope: str | None, agent: str) -> None:
+    """A tool that declares no base_dir and gets no workspace env still runs its subprocess in the agent's workspace."""
+    shape = _shape(tmp_path, scope=scope, agent=agent, client_base_dir="none")
+    request = ExecuteRequest(**shape.execute_payload("calculator", "add"))
+    route = sandbox_runner._prepare_route_with_config(
+        request,
+        runtime_paths=shape.runtime_paths,
+        config=shape.config,
+        runner_token=TOKEN,
+    )
+    assert not isinstance(route, WorkerFailure), route
+    context = sandbox_runner._prepare_execute_request(sandbox_runner._ExecuteCall(request=request, route=route))
+
+    assert "MINDROOM_AGENT_WORKSPACE" not in context.execution_env
+    assert shape.label(sandbox_runner._prepare_subprocess_context(context).subprocess_cwd) == "agent"
+
+
 @pytest.mark.parametrize("client_base_dir", ["outside", "absolute"])
 @pytest.mark.parametrize("route", ["execute", "view-file", "save-attachment", "browser"])
 def test_keyed_base_dir_outside_visible_roots_is_refused(

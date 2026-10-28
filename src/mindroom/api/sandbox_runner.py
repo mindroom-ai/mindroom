@@ -574,6 +574,18 @@ def _protocol_failure(protocol: int) -> WorkerFailure | None:
     )
 
 
+async def _request_body_protocol_failure(request: Request) -> WorkerFailure | None:
+    """Return the protocol refusal of a request body that names another worker protocol."""
+    try:
+        body = await request.json()
+    except ValueError:
+        return None
+    protocol = body.get("protocol") if isinstance(body, dict) else None
+    if not isinstance(protocol, int) or isinstance(protocol, bool):
+        return None
+    return _protocol_failure(protocol)
+
+
 def _prepare_route(app: FastAPI, route: WorkerRoute) -> _PreparedRoute | WorkerFailure:
     """Prepare the config, caller, worker and workspace one routed request acts on, or say why it cannot run."""
     if (failure := _protocol_failure(route.protocol)) is not None:
@@ -761,12 +773,16 @@ class _WorkerFailureRoute(APIRoute):
         async def handle(request: Request) -> Response:
             try:
                 return await handler(request)
-            except (RequestValidationError, HTTPException) as exc:
-                status_code = 422 if isinstance(exc, RequestValidationError) else exc.status_code
+            except RequestValidationError as exc:
+                # Another release's request usually fails on its shape first, so its protocol says why.
+                if (failure := await _request_body_protocol_failure(request)) is not None:
+                    return JSONResponse(failure.model_dump(mode="json"))
+                return JSONResponse(_worker_failure(exc).model_dump(mode="json"), status_code=422)
+            except HTTPException as exc:
                 # Authentication failures stay untyped, like the token middleware's, so they count against the worker.
-                if status_code >= 500 or status_code == 401:
+                if exc.status_code >= 500 or exc.status_code == 401:
                     raise
-                return JSONResponse(_worker_failure(exc).model_dump(mode="json"), status_code=status_code)
+                return JSONResponse(_worker_failure(exc).model_dump(mode="json"), status_code=exc.status_code)
 
         return handle
 

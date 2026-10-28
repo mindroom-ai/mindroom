@@ -183,7 +183,7 @@ To verify, ask two agents to run `hostname`, then list the worker containers:
 docker ps --format '{{.Names}}\t{{.ID}}' | grep '^mindroom-worker'
 ```
 
-Each worker gets a read-only copy of the [live config snapshot](#live-config-snapshots) built from `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH`, together with the config-relative plugins and knowledge it needs.
+Each worker gets a read-only copy of the [live config snapshot](#live-config-snapshots) of the config MindRoom has applied, together with the config-relative plugins and knowledge it needs, resolved against the directory of `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH`.
 Agent-scoped workers get only their agent and its assigned knowledge bases, while `worker_scope: user` workers get every agent that shares them.
 Workers never see `~/.mindroom` or the config-adjacent `.env`.
 The called tool's own inline overrides still reach the worker, but if it needs a secret from `.env` or from elsewhere in `config.yaml`, provide it through a [credential lease](#credential-leases), [environment passthrough](#shell-environment-and-path), or `MINDROOM_DOCKER_WORKER_ENV_JSON` instead.
