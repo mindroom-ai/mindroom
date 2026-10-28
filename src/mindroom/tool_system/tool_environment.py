@@ -26,7 +26,8 @@ class ToolEnvironment:
 
     ``values`` maps a variable to its value, or to None to keep it from the command. ``pass_through`` holds names or
     glob patterns of MindRoom's own variables the command also receives, as the shell tool's ``extra_env_passthrough``
-    setting does. ``path_prepend`` holds directories a local command finds first on ``PATH``.
+    setting does. ``path_prepend`` holds directories the command finds first on ``PATH``, before the shell tool's
+    ``shell_path_prepend`` and a worker's own entries.
     """
 
     values: Mapping[str, str | None] = field(default_factory=dict)

@@ -12,7 +12,9 @@ if TYPE_CHECKING:
 # 3: /execute streams progress and keep-alive lines before its result line, and job calls have no time limit.
 # 4: a shell call's set and removed variables (execution_env_set, execution_env_unset) apply over the worker's own
 #    environment and workspace script, so a worker that ignored them would hand commands what a plugin removed.
-_WORKER_PROTOCOL_VERSION = 4
+# 5: a shell call's PATH directories (execution_path_prepend) go first on the command's PATH, so a worker that ignored
+#    them would run a configured program in place of a plugin's wrapper.
+_WORKER_PROTOCOL_VERSION = 5
 
 
 @dataclass(frozen=True)

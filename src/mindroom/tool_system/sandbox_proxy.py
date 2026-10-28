@@ -968,6 +968,8 @@ def _call_proxy_sync(
             payload["execution_env_set"] = execution_env_set
         if call_environment.removed:
             payload["execution_env_unset"] = sorted(call_environment.removed)
+        if call_environment.path_prepend:
+            payload["execution_path_prepend"] = list(call_environment.path_prepend)
         if extra_env_passthrough is not None:
             payload["extra_env_passthrough"] = extra_env_passthrough
         if tool_config_overrides:
