@@ -178,11 +178,12 @@ def _tool(
     *,
     requester: str = "@alice:example.org",
     query: str = _CUSTOM_QUERY,
+    process_env: dict[str, str] | None = None,
 ) -> AgentQLTools:
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
-        process_env={"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1"},
+        process_env={"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1", **(process_env or {})},
     )
     credentials = CredentialsManager(tmp_path / "credentials")
     identity = ToolExecutionIdentity(
@@ -245,7 +246,8 @@ def test_agentql_resolved_key_reaches_request_without_shared_auth_mutation(
     file_text = f"[DEFAULT]\nagentql_api_key = {file_key}\n" if file_key is not None else None
     if file_text is not None:
         agentql_boundary.config_path.write_text(file_text)
-    tool = _tool(tmp_path, stored_key)
+    # The runtime's process environment is the one the SDK sees, which the boundary checks stays untouched.
+    tool = _tool(tmp_path, stored_key, process_env={"AGENTQL_API_KEY": env_key} if env_key is not None else None)
 
     result = getattr(tool, method)(_URL)
 
@@ -260,6 +262,36 @@ def test_agentql_resolved_key_reaches_request_without_shared_auth_mutation(
     else:
         assert not agentql_boundary.config_path.exists()
     assert all(browser.closed for browser in agentql_boundary.browsers)
+
+
+@pytest.mark.parametrize("method", ["scrape_website", "custom_scrape_website"])
+def test_agentql_reads_its_key_from_the_env_file_beside_config(
+    tmp_path: Path,
+    agentql_boundary: _AgentQLBoundary,
+    method: str,
+) -> None:
+    """An `AGENTQL_API_KEY` only in the `.env` beside `config.yaml` is the key both tools send."""
+    (tmp_path / ".env").write_text("AGENTQL_API_HOST=https://api.agentql.test\nAGENTQL_API_KEY=env-file-key\n")
+
+    result = getattr(_tool(tmp_path), method)(_URL)
+
+    assert [request.headers["X-API-Key"] for request in agentql_boundary.requests] == ["env-file-key"]
+    assert not result.startswith("Error")
+    assert agentql_boundary.observed_auth == [(None, None)]
+
+
+def test_agentql_reads_no_key_from_outside_its_runtime_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    agentql_boundary: _AgentQLBoundary,
+) -> None:
+    """A key only in the live process environment, outside the runtime's own, is not the toolkit's key."""
+    monkeypatch.setenv("AGENTQL_API_KEY", "live-only-key")
+
+    with pytest.raises(ValueError, match="AGENTQL_API_KEY not set"):
+        _tool(tmp_path)
+
+    assert agentql_boundary.requests == []
 
 
 @pytest.mark.parametrize(
