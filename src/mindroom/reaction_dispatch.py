@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-    from mindroom.coalescing.prompt_ingress_reservation import PromptIngressReservationOwner
+    from mindroom.coalescing.ingress_ticket import IngressTicket
     from mindroom.commands.config_confirmation import ConfigConfirmationContext
     from mindroom.constants import RuntimePaths
     from mindroom.ingress_validation import IngressValidator
@@ -44,7 +44,7 @@ class ReactionDispatcherDeps:
     turn_policy: TurnPolicy
     user_stop_reconciler: UserStopReconciler
     ingress: IngressValidator
-    reserve_prompt_ingress_order: Callable[..., PromptIngressReservationOwner]
+    reserve_prompt_ingress_order: Callable[..., IngressTicket]
     enqueue_interactive_selection: Callable[..., Awaitable[None]]
     emit_reaction_received_hooks: Callable[..., Awaitable[None]]
     wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]]
@@ -143,7 +143,7 @@ class ReactionDispatcher:
         room: nio.MatrixRoom,
         event: nio.ReactionEvent,
         consumer: SemanticConsumer | None,
-        reservation_owner: PromptIngressReservationOwner,
+        ticket: IngressTicket,
         requester_user_id: str,
     ) -> TurnDispatchOutcome | None:
         """Route an interactive choice only through its source-owned selection."""
@@ -160,7 +160,7 @@ class ReactionDispatcher:
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED if interactive_claimed else None
 
         await self.deps.enqueue_interactive_selection(
-            reservation_owner,
+            ticket,
             room,
             selection=selection,
             requester_user_id=requester_user_id,
@@ -174,7 +174,7 @@ class ReactionDispatcher:
         room: nio.MatrixRoom,
         event: nio.ReactionEvent,
         consumer: SemanticConsumer | None,
-        reservation_owner: PromptIngressReservationOwner,
+        ticket: IngressTicket,
         requester_user_id: str,
     ) -> TurnDispatchOutcome | None:
         """Route one authorized reaction among the non-config consumers."""
@@ -198,7 +198,7 @@ class ReactionDispatcher:
                     room,
                     event,
                     consumer,
-                    reservation_owner,
+                    ticket,
                     requester_user_id,
                 )
                 if outcome is not None:
@@ -218,7 +218,7 @@ class ReactionDispatcher:
             room,
             event,
             consumer,
-            reservation_owner,
+            ticket,
             requester_user_id,
         )
 
@@ -258,7 +258,7 @@ class ReactionDispatcher:
             sender=event.sender,
             source=event.source,
         )
-        reservation_owner = self.deps.reserve_prompt_ingress_order(
+        ticket = self.deps.reserve_prompt_ingress_order(
             room,
             requester_user_id,
             receipt_time=time.monotonic(),
@@ -292,13 +292,13 @@ class ReactionDispatcher:
                     room,
                     event,
                     semantic_consumer,
-                    reservation_owner,
+                    ticket,
                     requester_user_id,
                 )
             ) is not None:
                 return outcome
         finally:
-            await reservation_owner.release()
+            ticket.close()
         self.deps.logger.warning(
             "reaction_consumer_did_not_match_event",
             event_id=event.event_id,

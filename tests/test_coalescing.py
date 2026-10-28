@@ -6,7 +6,7 @@ import asyncio
 import time
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
@@ -31,7 +31,7 @@ from mindroom.coalescing.gate import (
 )
 from mindroom.coalescing.ingress_lanes import LaneDelivery, ReceiptLaneKey
 from mindroom.config.main import Config
-from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress
+from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active, turn_dispatch_recovery_scope
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -40,10 +40,11 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
 from mindroom.execution_preparation import _messages_with_current_prompt
+from mindroom.response_lifecycle import QueuedHumanNoticeReservation
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.turn_record import SourceEventMetadata
-from tests.conftest import make_pending_event
+from tests.conftest import live_turn_claim, make_pending_event, turn_claim_is_live
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -572,20 +573,19 @@ def test_active_follow_up_source_kind_is_not_coalescing_exempt() -> None:
     assert not is_coalescing_exempt_source_kind(event, ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND)
 
 
-def test_pending_dispatch_metadata_closes_at_most_once() -> None:
-    """Turn and gate cleanup may converge without releasing ownership twice."""
-    close_count = 0
+def test_pending_event_close_releases_its_claim_and_is_idempotent() -> None:
+    """Turn and gate cleanup may converge on one event; closing it releases its claim and its queued notice."""
+    claim = live_turn_claim("$text:localhost")
+    notice = MagicMock(spec=QueuedHumanNoticeReservation)
+    pending = _pending(_text_event("$text:localhost", "typed", 1_000_000))
+    pending.claim = claim
+    pending.notice = notice
 
-    def close() -> None:
-        nonlocal close_count
-        close_count += 1
+    pending.close()
+    pending.close()
 
-    metadata = PendingDispatchMetadata(kind="test", payload=object(), close=close)
-
-    metadata.close_once()
-    metadata.close_once()
-
-    assert close_count == 1
+    assert not turn_claim_is_live(claim)
+    notice.release.assert_called_with()
 
 
 def test_single_prepared_turn_owns_final_dispatch_event_and_turn_record() -> None:
@@ -1983,13 +1983,8 @@ async def test_bounded_drain_does_not_wait_forever_on_external_dispatch_gate() -
 
 @pytest.mark.asyncio
 async def test_bounded_shutdown_closes_metadata_for_abandoned_ready_work() -> None:
-    """Gate-owned metadata must close before bounded shutdown discards failed queued work."""
-    close_count = 0
-
-    def close_metadata() -> None:
-        nonlocal close_count
-        close_count += 1
-
+    """Gate-owned events must close before bounded shutdown discards failed queued work."""
+    claim = live_turn_claim("$text:localhost")
     gate = CoalescingGate(
         dispatch_turn=AsyncMock(),
         debounce_seconds=lambda: 60.0,
@@ -1997,7 +1992,7 @@ async def test_bounded_shutdown_closes_metadata_for_abandoned_ready_work() -> No
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost"))
     pending = _pending(_text_event("$text:localhost", "typed", 1_000_000))
-    pending.dispatch_metadata = (PendingDispatchMetadata(kind="test", payload=object(), close=close_metadata),)
+    pending.claim = claim
     await gate.admit(key, ready_result=ReadyPendingEvent(pending_event=pending))
 
     async def fail_dispatch_claim(
@@ -2015,7 +2010,7 @@ async def test_bounded_shutdown_closes_metadata_for_abandoned_ready_work() -> No
     assert result.completed is False
     assert result.dispatch_failure_count == 1
     assert result.dropped_ready_count == 1
-    assert close_count == 1
+    assert not turn_claim_is_live(claim)
     assert gate._gates == {}
 
 

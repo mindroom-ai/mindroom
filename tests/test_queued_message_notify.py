@@ -7,7 +7,7 @@ import threading
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Literal, Protocol, Self, cast
+from typing import TYPE_CHECKING, Literal, Self, cast
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import nio
@@ -38,7 +38,7 @@ from mindroom.config.main import Config
 from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
-from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress
+from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
@@ -119,14 +119,6 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.delivery_gateway import FinalDeliveryRequest
     from mindroom.turn_origin import TurnOrigin
-
-
-class _ReservationLike(Protocol):
-    def consume(self) -> None:
-        """Consume the reserved queued-human notice."""
-
-    def cancel(self) -> None:
-        """Release the reserved queued-human notice."""
 
 
 class _NoopResponseLifecycle:
@@ -282,30 +274,6 @@ def _reserved_follow_up_case(
         event=event,
         queued_signal=queued_signal,
         reservation=reservation,
-    )
-
-
-def _queued_notice_metadata(reservation: _ReservationLike) -> tuple[PendingDispatchMetadata, ...]:
-    return (
-        PendingDispatchMetadata(
-            kind="queued_notice_reservation",
-            payload=reservation,
-            close=reservation.cancel,
-        ),
-    )
-
-
-def _targeted_queued_notice_metadata(
-    reservation: _ReservationLike,
-    target: MessageTarget,
-) -> tuple[PendingDispatchMetadata, ...]:
-    return (
-        PendingDispatchMetadata(
-            kind="queued_notice_reservation",
-            payload=reservation,
-            close=reservation.cancel,
-            target_key=target.lifecycle_key,
-        ),
     )
 
 
@@ -619,7 +587,6 @@ async def test_room_mode_root_batch_consumes_all_same_target_reservations(tmp_pa
     bot.config.agents["general"].thread_mode = "room"
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!room:localhost"
-    target = MessageTarget.resolve(room.room_id, None, "$a1", room_mode=True)
     first_reservation = MagicMock()
     second_reservation = MagicMock()
     first_event = _prepared_text_event(event_id="$a1")
@@ -631,13 +598,13 @@ async def test_room_mode_root_batch_consumes_all_same_target_reservations(tmp_pa
                 first_event,
                 room,
                 source_kind=MESSAGE_SOURCE_KIND,
-                dispatch_metadata=_targeted_queued_notice_metadata(first_reservation, target),
+                notice=first_reservation,
             ),
             make_pending_event(
                 second_event,
                 room,
                 source_kind=MESSAGE_SOURCE_KIND,
-                dispatch_metadata=_targeted_queued_notice_metadata(second_reservation, target),
+                notice=second_reservation,
             ),
         ],
     )
@@ -645,10 +612,8 @@ async def test_room_mode_root_batch_consumes_all_same_target_reservations(tmp_pa
     with patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()):
         await bot._turn_controller.handle_prepared_turn(batch)
 
-    first_reservation.consume.assert_called_once_with()
-    second_reservation.consume.assert_called_once_with()
-    first_reservation.cancel.assert_not_called()
-    second_reservation.cancel.assert_not_called()
+    first_reservation.release.assert_called_once_with()
+    second_reservation.release.assert_called_once_with()
 
 
 class _PrelockBarrierLock:
@@ -2220,7 +2185,7 @@ async def test_reserved_human_follow_up_reaches_active_turn_before_dispatch(tmp_
     assert reservation is not None
     await asyncio.wait_for(active_saw_follow_up.wait(), timeout=0.2)
     assert queued_signal.pending_human_messages == 1
-    reservation.consume()
+    reservation.release()
 
     follow_up_task = asyncio.create_task(
         lifecycle.run_locked_response(
@@ -2289,7 +2254,7 @@ async def test_response_lifecycle_reservations_clear_individual_notices(tmp_path
         queued_items.append((source_event_id, envelope, reservation))
 
     for _source_event_id, _envelope_item, reservation in queued_items:
-        reservation.consume()
+        reservation.release()
 
     follow_up_tasks = [
         asyncio.create_task(
@@ -2387,7 +2352,7 @@ async def test_non_human_lock_owner_does_not_clear_pending_human_notice(tmp_path
     assert {
         message.event_id for message in lifecycle._get_or_create_queued_signal(target).pending_message_snapshot()
     } == {"$human"}
-    human_reservation.consume()
+    human_reservation.release()
 
     assert (
         await lifecycle.run_locked_response(
@@ -2767,7 +2732,7 @@ async def test_reserved_follow_up_cleanup_when_handle_prepared_turn_fails_before
                     room,
                     source_kind=MESSAGE_SOURCE_KIND,
                     dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-                    dispatch_metadata=_queued_notice_metadata(reservation),
+                    notice=reservation,
                 ),
             ],
         )
@@ -2836,14 +2801,14 @@ async def test_coalesced_batch_consumes_queued_notice_for_batch_thread(tmp_path:
                     room,
                     source_kind=MESSAGE_SOURCE_KIND,
                     dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-                    dispatch_metadata=_targeted_queued_notice_metadata(pre_reservation, pre_target),
+                    notice=pre_reservation,
                 ),
                 make_pending_event(
                     voice_event,
                     room,
                     source_kind=VOICE_SOURCE_KIND,
                     dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-                    dispatch_metadata=_targeted_queued_notice_metadata(post_reservation, post_target),
+                    notice=post_reservation,
                 ),
             ],
         )
@@ -2908,7 +2873,7 @@ async def test_room_scoped_root_voice_consumes_final_target_queued_notice(tmp_pa
                     room,
                     source_kind=VOICE_SOURCE_KIND,
                     dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-                    dispatch_metadata=_targeted_queued_notice_metadata(voice_reservation, target),
+                    notice=voice_reservation,
                 ),
             ],
         )
@@ -2939,18 +2904,17 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
     lifecycle = coordinator._lifecycle_coordinator
     queued_signal = lifecycle._get_or_create_queued_signal(target)
     queued_signal.begin_response_turn()
+    reserved_before_enqueue: list[int] = []
+
+    async def cancel_enqueue(*_args: object, **_kwargs: object) -> None:
+        reserved_before_enqueue.append(queued_signal.pending_human_messages)
+        raise asyncio.CancelledError
+
     try:
-        reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
-        assert reservation is not None
-        assert queued_signal.pending_human_messages == 1
-        reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
+        ticket = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
         try:
             with (
-                patch.object(
-                    bot._turn_controller,
-                    "_enqueue_for_dispatch",
-                    new=AsyncMock(side_effect=asyncio.CancelledError),
-                ),
+                patch.object(bot._turn_controller, "_enqueue_for_dispatch", new=cancel_enqueue),
                 pytest.raises(asyncio.CancelledError),
             ):
                 await bot._turn_controller._enqueue_prepared_text_for_dispatch(
@@ -2959,13 +2923,14 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
                     envelope=envelope,
                     coalescing_thread_id="$thread",
                     requester_user_id="@user:localhost",
-                    reservation_owner=reservation_owner,
-                    queued_notice_reservation=reservation,
+                    ticket=ticket,
                 )
         finally:
-            await reservation_owner.release()
+            ticket.close()
     finally:
         queued_signal.finish_response_turn()
+
+    assert reserved_before_enqueue == [1]
 
     assert queued_signal.pending_human_messages == 0
     assert not queued_signal.has_pending_human_messages()
@@ -2988,10 +2953,15 @@ def test_queued_human_reservation_is_idempotent(tmp_path: Path) -> None:
         reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
         assert reservation is not None
         assert queued_signal.pending_human_messages == 1
-        reservation.consume()
-        reservation.consume()
-        reservation.cancel()
+        reservation.release()
+        reservation.release()
         assert queued_signal.pending_human_messages == 0
+        # A later notice for the same message survives a stale release of the first.
+        later = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
+        assert later is not None
+        reservation.release()
+        assert queued_signal.pending_human_messages == 1
+        later.release()
     finally:
         queued_signal.finish_response_turn()
 
@@ -3046,7 +3016,7 @@ async def test_lifecycle_notice_is_cancelled_when_lock_wait_is_cancelled(tmp_pat
     reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
     assert reservation is not None
     assert queued_signal.pending_human_messages == 1
-    reservation.consume()
+    reservation.release()
 
     lock = lifecycle._response_lifecycle_lock(target)
     await lock.acquire()
@@ -3900,4 +3870,4 @@ async def test_response_runner_binds_agent_mid_turn_judge(  # noqa: PLR0915
                 assert "yes (install)" in evidence
     finally:
         for reservation in reservations:
-            reservation.cancel()
+            reservation.release()

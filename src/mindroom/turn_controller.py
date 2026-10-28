@@ -21,9 +21,7 @@ from mindroom.coalescing.batch import (
 )
 from mindroom.coalescing.gate import CoalescingGate, ReadyPendingEvent
 from mindroom.coalescing.ingress_lanes import IngressRetryError, ReceiptLaneKey
-from mindroom.coalescing.prompt_ingress_reservation import (
-    PromptIngressReservationOwner as _PromptIngressReservationOwner,
-)
+from mindroom.coalescing.ingress_ticket import IngressTicket
 from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
     ROUTER_AGENT_NAME,
@@ -39,7 +37,6 @@ from mindroom.dispatch_handoff import (
     DispatchIngressMetadata,
     DispatchPayloadMetadata,
     MediaDispatchEvent,
-    PendingDispatchMetadata,
     PreparedIngress,
     payload_metadata_from_source,
     prepare_media_ingress,
@@ -136,7 +133,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.relation_lookup import RelationLookup
-    from mindroom.message_target import MessageTarget, ResponseLifecycleKey
+    from mindroom.message_target import MessageTarget
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
     from mindroom.teams.spec import TeamMode
@@ -145,13 +142,9 @@ if TYPE_CHECKING:
     from mindroom.visible_response_reconciliation import VisibleResponseReconciler
     from mindroom.voice.visible_voice_echo import VisibleVoiceEchoLifecycle
 
-_QUEUED_NOTICE_METADATA_KIND = "queued_notice_reservation"
-_PENDING_TURN_CLAIM_METADATA_KIND = "pending_turn_claim"
-_INTERACTIVE_SELECTION_METADATA_KIND = "interactive_selection"
-
 
 @dataclass(frozen=True)
-class _InteractiveSelectionDispatch:
+class InteractiveSelectionDispatch:
     """Deferred selection work carried through receipt-ordered coalescing."""
 
     response_factory: Callable[[], Awaitable[bool]]
@@ -213,36 +206,6 @@ def _scheduled_history_budget_for_dispatch(
     if source_event_id is None:
         return None
     return ScheduledHistoryBudget(limit=history_limit, source_event_id=source_event_id)
-
-
-def _queued_notice_dispatch_metadata(
-    reservation: QueuedHumanNoticeReservation | None,
-    target: MessageTarget | None,
-) -> tuple[PendingDispatchMetadata, ...]:
-    if reservation is None:
-        return ()
-    if target is None:
-        msg = "Queued notice dispatch metadata requires a response target"
-        raise ValueError(msg)
-    return (
-        PendingDispatchMetadata(
-            kind=_QUEUED_NOTICE_METADATA_KIND,
-            payload=reservation,
-            close=reservation.cancel,
-            target_key=target.lifecycle_key,
-        ),
-    )
-
-
-def _consume_queued_notice_reservations_from_metadata(
-    dispatch_metadata: tuple[PendingDispatchMetadata, ...],
-    *,
-    target_key: ResponseLifecycleKey,
-) -> None:
-    reservation_items = [item for item in dispatch_metadata if item.kind == _QUEUED_NOTICE_METADATA_KIND]
-    for item in reservation_items:
-        reservation = cast("QueuedHumanNoticeReservation", item.payload)
-        item.finish_once(reservation.consume if item.target_key == target_key else reservation.cancel)
 
 
 class _EditRegenerator(Protocol):
@@ -342,14 +305,15 @@ class TurnController:
         requester_user_id: str,
         *,
         receipt_time: float | None = None,
-    ) -> _PromptIngressReservationOwner:
+    ) -> IngressTicket:
         """Reserve receipt order for one prompt-like Matrix ingress item."""
-        return _PromptIngressReservationOwner(
+        return IngressTicket(
             gate=self.deps.coalescing_gate,
             slot=self.deps.coalescing_gate.enter_lane(
                 ReceiptLaneKey(room_id=room.room_id, sender_id=requester_user_id),
                 receipt_time=receipt_time,
             ),
+            turn_store=self.deps.turn_store,
         )
 
     async def _precheck_dispatch_event[T: DispatchEvent | MatrixMediaEvent](
@@ -449,11 +413,8 @@ class TurnController:
         *,
         target: MessageTarget,
         envelope: MessageEnvelope,
-        existing: QueuedHumanNoticeReservation | None = None,
     ) -> QueuedHumanNoticeReservation | None:
         """Reserve the mid-turn queued notice when this conversation has a running response."""
-        if existing is not None:
-            return existing
         if not envelope.origin.may_answer_interactive_prompt:
             return None
         if not self.deps.response_runner.has_active_response_for_target(target):
@@ -507,13 +468,13 @@ class TurnController:
                 target,
             )
         ):
-            queued_notice_reservation.cancel()
+            queued_notice_reservation.release()
             queued_notice_reservation = None
         busy = self.deps.response_runner.has_active_response_for_target(target)
         if queued_notice_reservation is not None:
             if busy:
                 return queued_notice_reservation
-            queued_notice_reservation.cancel()
+            queued_notice_reservation.release()
             return None
         if not busy:
             return None
@@ -527,9 +488,8 @@ class TurnController:
         envelope: MessageEnvelope,
         coalescing_thread_id: str | None,
         requester_user_id: str,
-        reservation_owner: _PromptIngressReservationOwner,
+        ticket: IngressTicket,
         trust_internal_payload_metadata: bool | None = None,
-        queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
     ) -> _IngressAdmissionOutcome:
         """Queue one normalized text event; the gate decides busy-conversation routing."""
         target = self.deps.resolver.build_message_target(
@@ -539,40 +499,21 @@ class TurnController:
             event_source=prepared_event.source,
         )
         if self._event_allows_queued_notice(room, prepared_event, envelope):
-            queued_notice_reservation = self._queued_notice_reservation_if_busy(
-                target=target,
-                envelope=envelope,
-                existing=queued_notice_reservation,
-            )
-        elif queued_notice_reservation is not None:
-            queued_notice_reservation.cancel()
-            queued_notice_reservation = None
-        try:
-            await self._enqueue_for_dispatch(
-                prepared_event,
-                room,
-                source_kind=envelope.source_kind,
-                dispatch_policy_source_kind=envelope.dispatch_policy_source_kind,
-                hook_source=envelope.hook_source,
-                message_received_depth=envelope.message_received_depth,
-                requester_user_id=requester_user_id,
-                reservation_owner=reservation_owner,
-                coalescing_key=requester_coalescing_key(room.room_id, coalescing_thread_id, requester_user_id),
-                queued_notice_reservation=queued_notice_reservation,
-                queued_notice_target=target,
-                trust_internal_payload_metadata=trust_internal_payload_metadata,
-            )
-        except asyncio.CancelledError:
-            if queued_notice_reservation is not None:
-                queued_notice_reservation.cancel()
-            raise
-        except Exception:
-            if queued_notice_reservation is not None:
-                queued_notice_reservation.cancel()
-            raise
-        else:
-            self._mark_waiting_for_approval(room, prepared_event.source, target, envelope)
-            return _IngressAdmissionOutcome.DEFERRED
+            ticket.notice = self._queued_notice_reservation_if_busy(target=target, envelope=envelope)
+        await self._enqueue_for_dispatch(
+            prepared_event,
+            room,
+            source_kind=envelope.source_kind,
+            dispatch_policy_source_kind=envelope.dispatch_policy_source_kind,
+            hook_source=envelope.hook_source,
+            message_received_depth=envelope.message_received_depth,
+            requester_user_id=requester_user_id,
+            ticket=ticket,
+            coalescing_key=requester_coalescing_key(room.room_id, coalescing_thread_id, requester_user_id),
+            trust_internal_payload_metadata=trust_internal_payload_metadata,
+        )
+        self._mark_waiting_for_approval(room, prepared_event.source, target, envelope)
+        return _IngressAdmissionOutcome.DEFERRED
 
     def _mark_waiting_for_approval(
         self,
@@ -608,7 +549,7 @@ class TurnController:
         event: MediaDispatchEvent,
         coalescing_thread_id: str | None,
         requester_user_id: str,
-        reservation_owner: _PromptIngressReservationOwner,
+        ticket: IngressTicket,
     ) -> _IngressAdmissionOutcome:
         """Queue one media event; the gate decides busy-conversation routing."""
         source_kind = IMAGE_SOURCE_KIND if is_image_message_event(event) else MEDIA_SOURCE_KIND
@@ -624,29 +565,17 @@ class TurnController:
             target=target,
             source_kind=source_kind,
         )
-        queued_notice_reservation = self._queued_notice_reservation_if_busy(target=target, envelope=envelope)
-        try:
-            await self._enqueue_for_dispatch(
-                event,
-                room,
-                source_kind=envelope.source_kind,
-                requester_user_id=requester_user_id,
-                reservation_owner=reservation_owner,
-                coalescing_key=requester_coalescing_key(room.room_id, coalescing_thread_id, requester_user_id),
-                queued_notice_reservation=queued_notice_reservation,
-                queued_notice_target=target,
-            )
-        except asyncio.CancelledError:
-            if queued_notice_reservation is not None:
-                queued_notice_reservation.cancel()
-            raise
-        except Exception:
-            if queued_notice_reservation is not None:
-                queued_notice_reservation.cancel()
-            raise
-        else:
-            self._mark_waiting_for_approval(room, event.source, target, envelope)
-            return _IngressAdmissionOutcome.DEFERRED
+        ticket.notice = self._queued_notice_reservation_if_busy(target=target, envelope=envelope)
+        await self._enqueue_for_dispatch(
+            event,
+            room,
+            source_kind=envelope.source_kind,
+            requester_user_id=requester_user_id,
+            ticket=ticket,
+            coalescing_key=requester_coalescing_key(room.room_id, coalescing_thread_id, requester_user_id),
+        )
+        self._mark_waiting_for_approval(room, event.source, target, envelope)
+        return _IngressAdmissionOutcome.DEFERRED
 
     async def _should_skip_router_before_shared_ingress_work(
         self,
@@ -752,7 +681,7 @@ class TurnController:
         room: nio.MatrixRoom,
         prepared_event: PreparedIngress,
         requester_user_id: str,
-        reservation_owner: _PromptIngressReservationOwner,
+        ticket: IngressTicket,
         coalescing_thread_id: str | None,
     ) -> _IngressAdmissionOutcome:
         """Run shared ingress dispatch for text events and sidecar text previews."""
@@ -794,11 +723,9 @@ class TurnController:
                 # As a reaction's answer does, the response runs on a runner-owned task behind this conversation's
                 # earlier messages, so neither its run nor an approval it waits for holds the room's event lane. The
                 # queue and that task own the source from here, so a retry of it must not meet this turn's claim.
-                if (turn_claim := reservation_owner.pending_turn_claim) is not None:
-                    self.deps.turn_store.release_pending_turn_claim(turn_claim)
-                    reservation_owner.pending_turn_claim = None
+                ticket.take_claim().release()
                 await self.enqueue_interactive_selection(
-                    reservation_owner,
+                    ticket,
                     room,
                     selection=selection,
                     requester_user_id=envelope.requester_id,
@@ -807,15 +734,13 @@ class TurnController:
                 )
                 return _IngressAdmissionOutcome.DEFERRED
         if self.deps.ingress.command_control_input(prepared_event, source_kind=envelope.source_kind) is not None:
-            if (turn_claim := reservation_owner.pending_turn_claim) is not None:
-                self.deps.turn_store.release_pending_turn_claim(turn_claim)
-                reservation_owner.pending_turn_claim = None
             await self._dispatch_command_control_input(
                 room=room,
                 dispatch_event=prepared_event,
                 envelope=envelope,
                 coalescing_thread_id=coalescing_thread_id,
                 requester_user_id=requester_user_id,
+                ticket=ticket,
             )
             return _IngressAdmissionOutcome.CONSUMED
         return await self._enqueue_prepared_text_for_dispatch(
@@ -824,7 +749,7 @@ class TurnController:
             envelope=envelope,
             coalescing_thread_id=coalescing_thread_id,
             requester_user_id=requester_user_id,
-            reservation_owner=reservation_owner,
+            ticket=ticket,
         )
 
     def _reply_target_event_id(self, event: PreparedIngress) -> str:
@@ -1009,8 +934,9 @@ class TurnController:
         envelope: MessageEnvelope,
         coalescing_thread_id: str | None,
         requester_user_id: str,
+        ticket: IngressTicket,
     ) -> None:
-        """Dispatch one command as a control input without entering the coalescing gate."""
+        """Dispatch one command as a control input without entering the coalescing gate, under its ingress claim."""
         # A command an entity wrote for a human runs with that human's authority, as its conversation would;
         # handle_command refuses the commands only the human may send.
         acting_requester = self.deps.ingress.acting_requester_for_event(dispatch_event)
@@ -1033,7 +959,7 @@ class TurnController:
             requester_coalescing_key(room.room_id, coalescing_thread_id, requester_user_id),
             [pending_event],
         )
-        await dispatch_text_message(self, turn)
+        await dispatch_text_message(self, replace(turn, claims=(ticket.take_claim(),)))
 
     async def _adaptive_text_debounce_seconds(
         self,
@@ -1083,13 +1009,11 @@ class TurnController:
         *,
         source_kind: str,
         requester_user_id: str,
-        reservation_owner: _PromptIngressReservationOwner,
+        ticket: IngressTicket,
         dispatch_policy_source_kind: str | None = None,
         hook_source: str | None = None,
         message_received_depth: int = 0,
         coalescing_key: CoalescingKey | None = None,
-        queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
-        queued_notice_target: MessageTarget | None = None,
         trust_internal_payload_metadata: bool | None = None,
     ) -> _IngressAdmissionOutcome:
         """Route one inbound event through the live coalescing gate."""
@@ -1120,15 +1044,6 @@ class TurnController:
             timing_scope=timing_scope,
         )
         gate_enqueue_start = time.monotonic()
-        dispatch_metadata = _queued_notice_dispatch_metadata(queued_notice_reservation, queued_notice_target)
-        if (turn_claim := reservation_owner.pending_turn_claim) is not None:
-            dispatch_metadata += (
-                PendingDispatchMetadata(
-                    kind=_PENDING_TURN_CLAIM_METADATA_KIND,
-                    payload=turn_claim,
-                    close=lambda: self.deps.turn_store.release_pending_turn_claim(turn_claim),
-                ),
-            )
         if isinstance(event, PreparedIngress):
             prepared_event = event
         elif is_matrix_media_dispatch_event(event):
@@ -1161,16 +1076,8 @@ class TurnController:
                 for_another_participant=self._mentions_another_participant(room, prepared_event.source),
             ),
             room=room,
-            dispatch_metadata=dispatch_metadata,
         )
-        if turn_claim is not None:
-            reservation_owner.pending_turn_claim = None
-        await reservation_owner.admit(
-            resolved_key,
-            source_event_id=event.event_id,
-            source_kind=source_kind,
-            ready_result=ReadyPendingEvent(pending_event=pending_event),
-        )
+        ticket.admit(resolved_key, pending_event)
         emit_elapsed_timing(
             "ingress_handoff.enqueue_for_dispatch.coalescing_gate",
             gate_enqueue_start,
@@ -1599,7 +1506,7 @@ class TurnController:
 
     async def enqueue_interactive_selection(
         self,
-        reservation_owner: _PromptIngressReservationOwner,
+        ticket: IngressTicket,
         room: nio.MatrixRoom,
         *,
         selection: interactive.InteractiveSelection,
@@ -1610,7 +1517,7 @@ class TurnController:
         """Queue a selection handoff as a FIFO barrier behind earlier ingress."""
         response_target = self._interactive_selection_target(room.room_id, selection)
 
-        dispatch = _InteractiveSelectionDispatch(
+        selection_dispatch = InteractiveSelectionDispatch(
             response_factory=lambda: self._handle_interactive_selection(
                 room,
                 selection=selection,
@@ -1636,36 +1543,25 @@ class TurnController:
                 source_kind=INTERACTIVE_SELECTION_SOURCE_KIND,
             ),
             room=room,
-            dispatch_metadata=(
-                PendingDispatchMetadata(
-                    kind=_INTERACTIVE_SELECTION_METADATA_KIND,
-                    payload=dispatch,
-                    close=lambda: None,
-                    target_key=response_target.lifecycle_key,
-                ),
-            ),
+            selection=selection_dispatch,
         )
-        await reservation_owner.admit(
+        ticket.admit(
             requester_coalescing_key(
                 room.room_id,
                 response_target.lifecycle_key.thread_id,
                 requester_user_id,
             ),
-            source_event_id=source_event_id,
-            source_kind=INTERACTIVE_SELECTION_SOURCE_KIND,
-            ready_result=ReadyPendingEvent(pending_event=pending_event),
+            pending_event,
         )
 
     async def _dispatch_interactive_selection_turn(self, turn: PreparedTurn) -> bool:
-        """Start one receipt-ordered selection barrier and transfer its claim."""
-        items = [item for item in turn.dispatch_metadata if item.kind == _INTERACTIVE_SELECTION_METADATA_KIND]
-        if not items:
+        """Start one receipt-ordered selection barrier and transfer its source to the runner."""
+        dispatch = turn.selection
+        if dispatch is None:
             return False
-        if len(items) != 1 or len(turn.handled_turn.source_event_ids) != 1:
+        if len(turn.handled_turn.source_event_ids) != 1:
             msg = "Interactive selection dispatch must be a single FIFO barrier"
             raise ValueError(msg)
-        item = items[0]
-        dispatch = cast("_InteractiveSelectionDispatch", item.payload)
         await self._start_interactive_selection(
             dispatch.response_factory,
             response_target=dispatch.response_target,
@@ -1674,7 +1570,6 @@ class TurnController:
             requester_user_id=dispatch.requester_user_id,
             selected_value=dispatch.selected_value,
         )
-        item.finish_once(lambda: None)
         return True
 
     async def _handle_interactive_selection(
@@ -2137,25 +2032,21 @@ class TurnController:
             return
         coalescing_key = turn.ingress.coalescing_key
         assert coalescing_key is not None
-        target_key = self._queued_notice_target_key(turn.room, turn.event, coalescing_key)
-        _consume_queued_notice_reservations_from_metadata(turn.dispatch_metadata, target_key=target_key)
+        for notice in turn.notices:
+            notice.release()
         if is_active_follow_up_coalescing_key(coalescing_key):
             # Follow-ups held back by a requester split waited on the response
             # that just finished; left pending, they would cut this turn short
             # and hand its unfinished work to the next requester's turn.
             for pending_event in self.deps.coalescing_gate.queued_pending_events(coalescing_key):
-                _consume_queued_notice_reservations_from_metadata(
-                    pending_event.dispatch_metadata,
-                    target_key=target_key,
-                )
+                if pending_event.notice is not None:
+                    pending_event.notice.release()
         timing_scope = event_timing_scope(turn.event.event_id)
         dispatch_timing = get_dispatch_pipeline_timing(turn.event.source)
         if dispatch_timing is not None:
             dispatch_timing.mark("gate_exit")
         async with self.deps.resolver.turn_lookup_scope():
             dispatch_start = time.monotonic()
-            for item in turn.dispatch_metadata:
-                item.close_once()
             await dispatch_text_message(self, turn)
             emit_elapsed_timing(
                 "coalescing.handle_turn.dispatch_text_message",
@@ -2164,67 +2055,21 @@ class TurnController:
                 timing_scope=timing_scope,
             )
 
-    def _queued_notice_target_key(
-        self,
-        room: nio.MatrixRoom,
-        event: PreparedIngress,
-        coalescing_key: CoalescingKey,
-    ) -> ResponseLifecycleKey:
-        """Return the response lifecycle key for one prepared logical turn."""
-        context_event = _room_level_context_event(event) if coalescing_key.thread_id is None else event
-        return self.deps.resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id=coalescing_key.thread_id,
-            reply_to_event_id=self._reply_target_event_id(event),
-            event_source=context_event.source,
-        ).lifecycle_key
-
-    async def _claim_live_turn(
-        self,
-        turn_claim: TurnRecord,
-        *,
-        source_event_id: str,
-        lane_reservation: _PromptIngressReservationOwner | None = None,
-    ) -> TurnRecord | TurnDispatchOutcome:
-        """Claim one live source or return its explicit competing-owner outcome.
-
-        A contended claim waits for the competing owner's turn to settle, and
-        that wait must not hold an ingress lane slot. The competing owner's
-        coalesced batch does not flush until every undelivered slot in the
-        sender's lane settles, and its turn does not settle until it flushes,
-        so a held slot wedges both sides permanently and silently.
-        """
-        if self.deps.turn_store.try_claim_turn(turn_claim):
-            return turn_claim
-
-        if lane_reservation is not None:
-            await lane_reservation.release()
-        await self.deps.turn_store.wait_for_turn_settled(turn_claim.indexed_event_ids)
-        if self.deps.turn_store.is_handled(source_event_id):
-            return TurnDispatchOutcome.DEFERRED
-        if self.deps.turn_store.try_claim_turn(turn_claim):
-            if lane_reservation is not None:
-                lane_reservation.reenter_lane()
-            return turn_claim
-        # A settled discovery-alias owner or a newer competing claimant owns
-        # this duplicate semantic turn.
-        return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-
     async def handle_text_event(
         self,
         room: nio.MatrixRoom,
         event: nio.RoomMessageFormatted,
         *,
         receipt_time: float | None = None,
-        reservation_owner: _PromptIngressReservationOwner | None = None,
+        ticket: IngressTicket | None = None,
     ) -> TurnDispatchOutcome:
-        """Handle one inbound text event."""
+        """Handle one inbound text event, through a ticket the caller reserved early or one of its own."""
         async with self.deps.resolver.turn_lookup_scope():
             return await self._handle_message_inner(
                 room,
                 event,
                 receipt_time=receipt_time,
-                reservation_owner=reservation_owner,
+                ticket=ticket,
             )
 
     async def _handle_message_inner(
@@ -2233,7 +2078,7 @@ class TurnController:
         event: nio.RoomMessageFormatted,
         *,
         receipt_time: float | None = None,
-        reservation_owner: _PromptIngressReservationOwner | None = None,
+        ticket: IngressTicket | None = None,
     ) -> TurnDispatchOutcome:
         """Handle one text message inside the per-turn conversation lookup scope."""
         event_info = EventInfo.from_event(event.source)
@@ -2262,38 +2107,32 @@ class TurnController:
             room_id=room.room_id,
         )
         attach_dispatch_pipeline_timing(event.source, dispatch_timing)
-        owns_reservation = reservation_owner is None
-        if reservation_owner is None:
-            reservation_owner = self.reserve_prompt_ingress_order(
+        if ticket is None:
+            ticket = self.reserve_prompt_ingress_order(
                 room,
                 prechecked_event.requester_user_id,
                 receipt_time=receipt_time,
             )
         try:
             if is_edit:
-                await reservation_owner.release()
+                ticket.close()
                 handed_off = await self._handle_edit_event(room, prechecked_event, event_info)
                 return TurnDispatchOutcome.DEFERRED if handed_off is True else TurnDispatchOutcome.INTENTIONALLY_IGNORED
             discovery_alias = self.deps.ingress.discovery_event_id(event)
-            claim_aliases = (discovery_alias,) if discovery_alias else ()
-            pending_turn = TurnRecord.create(
-                [event.event_id],
-                discovery_event_ids=claim_aliases,
-                completed=False,
+            claimed = await ticket.claim_turn(
+                TurnRecord.create(
+                    [event.event_id],
+                    discovery_event_ids=(discovery_alias,) if discovery_alias else (),
+                    completed=False,
+                ),
             )
-            turn_claim = await self._claim_live_turn(
-                pending_turn,
-                source_event_id=event.event_id,
-                lane_reservation=reservation_owner,
-            )
-            if isinstance(turn_claim, TurnDispatchOutcome):
-                return turn_claim
-            reservation_owner.pending_turn_claim = turn_claim
+            if claimed is not None:
+                return claimed
             outcome = await self._ingest_live_text_event(
                 room,
                 prechecked_event,
                 dispatch_timing=dispatch_timing,
-                reservation_owner=reservation_owner,
+                ticket=ticket,
             )
             return (
                 TurnDispatchOutcome.DEFERRED
@@ -2301,10 +2140,7 @@ class TurnController:
                 else TurnDispatchOutcome.INTENTIONALLY_IGNORED
             )
         finally:
-            if reservation_owner.pending_turn_claim is not None and not reservation_owner.admitted:
-                self.deps.turn_store.release_pending_turn_claim(reservation_owner.pending_turn_claim)
-            if owns_reservation:
-                await reservation_owner.release()
+            ticket.close()
 
     async def _ingest_live_text_event(
         self,
@@ -2312,7 +2148,7 @@ class TurnController:
         prechecked_event: _PrecheckedEvent[nio.RoomMessageFormatted],
         *,
         dispatch_timing: DispatchPipelineTiming | None,
-        reservation_owner: _PromptIngressReservationOwner,
+        ticket: IngressTicket,
     ) -> _IngressAdmissionOutcome:
         """Resolve, normalize, and admit one live (non-edit) text event."""
         event = prechecked_event.event
@@ -2358,7 +2194,7 @@ class TurnController:
             room=room,
             prepared_event=prepared_event,
             requester_user_id=prechecked_event.requester_user_id,
-            reservation_owner=reservation_owner,
+            ticket=ticket,
             coalescing_thread_id=ingress_thread_id,
         )
 
@@ -2404,24 +2240,15 @@ class TurnController:
             room,
             sender_id=prechecked_event.requester_user_id,
         )
-        pending_turn = TurnRecord.create([prechecked_event.event.event_id], completed=False)
-        turn_claim = await self._claim_live_turn(
-            pending_turn,
-            source_event_id=prechecked_event.event.event_id,
+        ticket = self.reserve_prompt_ingress_order(
+            room,
+            prechecked_event.requester_user_id,
+            receipt_time=receipt_time,
         )
-        if isinstance(turn_claim, TurnDispatchOutcome):
-            return turn_claim
         try:
-            reservation_owner = self.reserve_prompt_ingress_order(
-                room,
-                prechecked_event.requester_user_id,
-                receipt_time=receipt_time,
-            )
-        except BaseException:
-            self.deps.turn_store.release_pending_turn_claim(turn_claim)
-            raise
-        reservation_owner.pending_turn_claim = turn_claim
-        try:
+            claimed = await ticket.claim_turn(TurnRecord.create([prechecked_event.event.event_id], completed=False))
+            if claimed is not None:
+                return claimed
             if is_audio_message_event(prechecked_event.event):
                 dispatch_outcome = await self._on_audio_media_message(
                     room,
@@ -2430,8 +2257,7 @@ class TurnController:
                         requester_user_id=prechecked_event.requester_user_id,
                     ),
                     dispatch_timing=dispatch_timing,
-                    reservation_owner=reservation_owner,
-                    turn_claim=turn_claim,
+                    ticket=ticket,
                 )
             else:
                 try:
@@ -2442,7 +2268,7 @@ class TurnController:
                 admission_outcome = await self._dispatch_special_media_as_text(
                     room,
                     prechecked_event,
-                    reservation_owner=reservation_owner,
+                    ticket=ticket,
                     coalescing_thread_id=coalescing_thread_id,
                 )
                 if admission_outcome is _IngressAdmissionOutcome.DEFERRED:
@@ -2457,13 +2283,11 @@ class TurnController:
                         event=prechecked_event.event,
                         coalescing_thread_id=coalescing_thread_id,
                         requester_user_id=prechecked_event.requester_user_id,
-                        reservation_owner=reservation_owner,
+                        ticket=ticket,
                     )
                     dispatch_outcome = TurnDispatchOutcome.DEFERRED
         finally:
-            if reservation_owner.pending_turn_claim is not None and not reservation_owner.admitted:
-                self.deps.turn_store.release_pending_turn_claim(reservation_owner.pending_turn_claim)
-            await reservation_owner.release()
+            ticket.close()
         return dispatch_outcome
 
     async def _dispatch_special_media_as_text(
@@ -2471,7 +2295,7 @@ class TurnController:
         room: nio.MatrixRoom,
         prechecked_event: _PrecheckedInboundMediaEvent,
         *,
-        reservation_owner: _PromptIngressReservationOwner,
+        ticket: IngressTicket,
         coalescing_thread_id: str | None,
     ) -> _IngressAdmissionOutcome:
         """Handle media events that normalize into the text dispatch pipeline."""
@@ -2483,7 +2307,7 @@ class TurnController:
                     event=event,
                     requester_user_id=prechecked_event.requester_user_id,
                 ),
-                reservation_owner=reservation_owner,
+                ticket=ticket,
                 coalescing_thread_id=coalescing_thread_id,
             )
         return _IngressAdmissionOutcome.IGNORED
@@ -2494,8 +2318,7 @@ class TurnController:
         prechecked_event: _PrecheckedEvent[AudioMessageEvent],
         *,
         dispatch_timing: DispatchPipelineTiming | None,
-        reservation_owner: _PromptIngressReservationOwner,
-        turn_claim: TurnRecord,
+        ticket: IngressTicket,
     ) -> TurnDispatchOutcome:
         """Resolve the audio conversation key once, then defer voice normalization."""
         event = prechecked_event.event
@@ -2534,18 +2357,10 @@ class TurnController:
                 readiness=readiness,
                 coalescing_thread_id=coalescing_thread_id,
                 dispatch_timing=dispatch_timing,
-                turn_claim=turn_claim,
             ),
             name=f"voice_ready:{room.room_id}:{event.event_id}",
         )
-        await reservation_owner.admit(
-            admission_key,
-            ready_task=ready_task,
-            source_event_id=event.event_id,
-            source_kind=VOICE_SOURCE_KIND,
-        )
-        # The ready task now owns the claim and releases it however it ends.
-        reservation_owner.pending_turn_claim = None
+        ticket.admit_ready(admission_key, ready_task, source_event_id=event.event_id, source_kind=VOICE_SOURCE_KIND)
         return TurnDispatchOutcome.DEFERRED
 
     async def _ready_voice_event(
@@ -2557,18 +2372,11 @@ class TurnController:
         readiness: VoiceReadiness,
         coalescing_thread_id: str | None,
         dispatch_timing: DispatchPipelineTiming | None,
-        turn_claim: TurnRecord,
     ) -> ReadyPendingEvent:
-        """Normalize a raw voice event after its conversation key is fixed."""
+        """Normalize a raw voice event after its conversation key is fixed; its lane holds the turn claim."""
         event = prechecked_event.event
         queued_notice_reservation = None
         reservation_released_or_handed_off = False
-        claim_transferred = False
-        claim_metadata = PendingDispatchMetadata(
-            kind=_PENDING_TURN_CLAIM_METADATA_KIND,
-            payload=turn_claim,
-            close=lambda: self.deps.turn_store.release_pending_turn_claim(turn_claim),
-        )
         try:
             envelope = self.deps.resolver.build_ingress_envelope(
                 event=cast("DispatchEvent", event),
@@ -2615,10 +2423,7 @@ class TurnController:
                         for_another_participant=self._mentions_another_participant(room, normalized_event.source),
                     ),
                     room=room,
-                    dispatch_metadata=(
-                        *_queued_notice_dispatch_metadata(queued_notice_reservation, normalized_target),
-                        claim_metadata,
-                    ),
+                    notice=queued_notice_reservation,
                 ),
             )
         except IngressRetryError:
@@ -2632,21 +2437,18 @@ class TurnController:
             raise IngressRetryError from exc
         else:
             reservation_released_or_handed_off = True
-            claim_transferred = True
             self._mark_waiting_for_approval(room, event.source, normalized_target, envelope)
             return ready
         finally:
             if not reservation_released_or_handed_off and queued_notice_reservation is not None:
-                queued_notice_reservation.cancel()
-            if not claim_transferred:
-                self.deps.turn_store.release_pending_turn_claim(turn_claim)
+                queued_notice_reservation.release()
 
     async def _dispatch_file_sidecar_text_preview(
         self,
         room: nio.MatrixRoom,
         prechecked_event: _PrecheckedEvent[FileMessageEvent],
         *,
-        reservation_owner: _PromptIngressReservationOwner,
+        ticket: IngressTicket,
         coalescing_thread_id: str | None,
     ) -> _IngressAdmissionOutcome:
         """Dispatch one sidecar-backed file preview through the normal text pipeline."""
@@ -2666,6 +2468,6 @@ class TurnController:
             room=room,
             prepared_event=prepared_text_event,
             requester_user_id=prechecked_event.requester_user_id,
-            reservation_owner=reservation_owner,
+            ticket=ticket,
             coalescing_thread_id=coalescing_thread_id,
         )

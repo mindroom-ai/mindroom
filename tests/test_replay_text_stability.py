@@ -101,6 +101,7 @@ async def _persist_and_reload(journal_store: EventJournalStore, record: TurnReco
             resolver=MagicMock(),
             tool_runtime=MagicMock(),
             response_recovery_state=AsyncMock(),
+            retry_dispatch_sources=MagicMock(),
         ),
     )
     await store.warm()

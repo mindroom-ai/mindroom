@@ -39,6 +39,7 @@ from mindroom.coalescing.batch import (
     RequesterCoalescingOwner,
     active_follow_up_coalescing_key,
     build_prepared_turn,
+    requester_coalescing_key,
 )
 from mindroom.coalescing.gate import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.command_turn_executor import CommandTurnExecutor, CommandTurnExecutorDeps
@@ -55,6 +56,7 @@ from mindroom.conversation_state_writer import ConversationStateWriter, Conversa
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.desktop.credentials import load_desktop_credentials, save_desktop_credentials
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
+from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     EXTERNAL_TRIGGER_SOURCE_KIND,
@@ -113,11 +115,11 @@ from mindroom.scheduling.executor import _prepare_scheduled_trigger
 from mindroom.scheduling.tasks import ScheduledWorkflow
 from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
-from mindroom.turn_controller import TurnController, TurnControllerDeps
+from mindroom.turn_controller import InteractiveSelectionDispatch, TurnController, TurnControllerDeps
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy
 from mindroom.turn_record import canonicalize_turn_record
-from mindroom.turn_store import TurnStore, TurnStoreDeps
+from mindroom.turn_store import ClaimContended, ClaimRefused, TurnClaim, TurnStore, TurnStoreDeps
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
 from mindroom.voice.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 from tests.access_schema_support import with_responder_access
@@ -135,13 +137,13 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.journal_helpers import admit_dispatch_event
+from tests.turn_dispatch_helpers import make_test_turn
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping
     from pathlib import Path
 
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
-    from mindroom.dispatch_handoff import PreparedIngress
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.event_info import EventInfo
@@ -190,7 +192,7 @@ class _RecordingResponseRunner:
     inbox_tasks: list[asyncio.Task[None]] = field(default_factory=list)
     recovery_proof_checks: list[Callable[[], Awaitable[bool]]] = field(default_factory=list)
     failure_callbacks: list[Callable[[], None] | None] = field(default_factory=list)
-    terminal_callbacks: list[Callable[[], None] | None] = field(default_factory=list)
+    claims: list[TurnClaim] = field(default_factory=list)
     process_shutdown_started: bool = False
     admission_waiter: Callable[[], Awaitable[bool]] | None = None
     # Records a turn answered, as a reply's records do when its answer settles its sources.
@@ -232,18 +234,21 @@ class _RecordingResponseRunner:
         room_id: str,  # noqa: ARG002
         recovery_proof_ready: Callable[[], Awaitable[bool]],
         on_failure: Callable[[], None] | None = None,
-        on_terminal: Callable[[], None] | None = None,
+        claim: TurnClaim | None = None,
         source_event_ids: tuple[str, ...] = (),  # noqa: ARG002
     ) -> asyncio.Task[None]:
         if self.process_shutdown_started:
             response.close()
+            if claim is not None:
+                claim.release()
             raise ResponseAdmissionRefusedError
         self.recovery_proof_checks.append(recovery_proof_ready)
         self.failure_callbacks.append(on_failure)
-        self.terminal_callbacks.append(on_terminal)
         task = asyncio.get_running_loop().create_task(response, name=name)
-        if on_terminal is not None:
-            task.add_done_callback(lambda _finished: on_terminal())
+        if claim is not None:
+            # Like the runner, release the handed-off claim when the task ends, however early.
+            self.claims.append(claim)
+            task.add_done_callback(lambda _finished: claim.release())
         self.inbox_tasks.append(task)
         return task
 
@@ -559,6 +564,8 @@ def _build_harness(
                 agent_name=agent_name,
                 redaction_target=replayable_redaction_target,
             ),
+            # Resolved late: the retry recorder is defined below, with the controller's.
+            retry_dispatch_sources=lambda room_id, event_ids: _retry_dispatch_sources(room_id, event_ids),
         ),
     )
     policy = _SpyTurnPolicy(
@@ -1269,7 +1276,6 @@ async def test_router_relay_is_admitted_while_original_ingress_claim_is_active(
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
     original_event_id = "$human-active:localhost"
-    original_claim = TurnRecord.create([original_event_id], completed=False)
     relay = _router_relay_event(
         config,
         event_id="$relay-active:localhost",
@@ -1277,12 +1283,13 @@ async def test_router_relay_is_admitted_while_original_ingress_claim_is_active(
         body=f"{_entity_user_id(config, 'general')} respond",
         origin_server_ts=1_000_000,
     )
-    assert harness.turn_store.try_claim_turn(original_claim) is True
+    original_claim = await harness.turn_store.claim(TurnRecord.create([original_event_id], completed=False))
+    assert isinstance(original_claim, TurnClaim)
 
     try:
         await harness.deliver(room, relay)
     finally:
-        harness.turn_store.release_pending_turn_claim(original_claim)
+        original_claim.release()
 
     assert len(harness.runner.requests) == 1
     metadata = harness.runner.requests[0].matrix_run_metadata
@@ -1385,16 +1392,15 @@ async def test_duplicate_router_relay_claim_settles_without_restart(config: Conf
 
 
 @pytest.mark.asyncio
-async def test_router_alias_claim_loser_reclaims_after_failed_owner(config: Config, tmp_path: Path) -> None:
-    """A relay retries ingress when the competing alias owner exits without terminal truth."""
+async def test_router_alias_claim_loser_defers_and_retries_after_failed_owner(config: Config, tmp_path: Path) -> None:
+    """A relay losing its alias to a live owner defers without waiting, and returns to the journal once that owner exits."""
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
     original_event_id = "$human-retry:localhost"
-    active_claim = TurnRecord.create(
-        ["$failed-relay:localhost"],
-        discovery_event_ids=[original_event_id],
-        completed=False,
+    active_claim = await harness.turn_store.claim(
+        TurnRecord.create(["$failed-relay:localhost"], discovery_event_ids=[original_event_id], completed=False),
     )
+    assert isinstance(active_claim, TurnClaim)
     event = _router_relay_event(
         config,
         event_id="$retry-relay:localhost",
@@ -1402,17 +1408,241 @@ async def test_router_alias_claim_loser_reclaims_after_failed_owner(config: Conf
         body=f"{_entity_user_id(config, 'general')} retry",
         origin_server_ts=1_000_000,
     )
-    assert harness.turn_store.try_claim_turn(active_claim)
 
-    dispatch = asyncio.create_task(harness.controller.handle_text_event(room, event))
-    await asyncio.sleep(0)
-    assert not dispatch.done()
-    harness.turn_store.release_pending_turn_claim(active_claim)
+    assert await harness.controller.handle_text_event(room, event) is TurnDispatchOutcome.DEFERRED
+    assert harness.turn_store.has_live_turn_claim(event.event_id), "the deferred relay still counts as owned"
+    assert all(slot.released for slot in harness.gate.lanes.unsettled_slots()), "the loser gave its lane slot up"
+    assert harness.retried_dispatch_sources == []
+    active_claim.release()
+    assert harness.retried_dispatch_sources == [(event.event_id,)]
+    assert not harness.turn_store.has_live_turn_claim(event.event_id)
 
-    assert await dispatch is TurnDispatchOutcome.DEFERRED
+    # The journal runs the retried relay's callback again.
+    assert await harness.controller.handle_text_event(room, event) is TurnDispatchOutcome.DEFERRED
     await harness.gate.drain_all()
     await harness.runner.settle_inbox_responses()
     assert len(harness.runner.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_alias_contender_does_not_hold_its_room_lane_while_the_turn_it_lost_to_waits(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """A duplicate relay whose original a waiting turn owns defers without blocking its room.
+
+    The owner stands for a relay's turn held behind an approval. The journal
+    still runs a later message in the same room, such as the approval decision,
+    and the duplicate stays owned until the owner ends, then returns to the
+    journal and is answered.
+    """
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
+    mention = _entity_user_id(config, "general")
+    original_event_id = "$human-held:localhost"
+    held = await harness.turn_store.claim(
+        TurnRecord.create(["$relay-held:localhost"], discovery_event_ids=[original_event_id], completed=False),
+    )
+    assert isinstance(held, TurnClaim)
+    contender = _router_relay_event(
+        config,
+        event_id="$relay-contender:localhost",
+        original_event_id=original_event_id,
+        body=f"{mention} answer the relayed question",
+        origin_server_ts=1_000_000,
+    )
+    later = _text_event(f"{mention} a later message", event_id="$later:localhost", origin_server_ts=1_000_001)
+    dispatcher = _obligation_runner(
+        harness,
+        tracking_path=tmp_path / "dispatch-tracking",
+        principal_id=_entity_user_id(config, "general"),
+        entity_name="general",
+        room=room,
+    )
+    harness.turn_store.deps = replace(harness.turn_store.deps, retry_dispatch_sources=dispatcher.retry_turn_sources)
+    await admit_dispatch_event(dispatcher, room, contender, EventKind.MESSAGE, EventClass.ACTIONABLE)
+    await admit_dispatch_event(dispatcher, room, later, EventKind.MESSAGE, EventClass.ACTIONABLE)
+
+    async with asyncio.timeout(5):
+        await dispatcher.drain_once()
+        await harness.gate.drain_all()
+        await harness.runner.settle_inbox_responses()
+
+    assert [batch.event.event_id for batch in harness.gate_batches] == [later.event_id]
+    assert await dispatcher.store.is_pending(contender.event_id)
+    assert harness.turn_store.has_live_turn_claim(contender.event_id)
+
+    held.release()
+    await _settle_dispatcher(harness, dispatcher)
+
+    assert [batch.event.event_id for batch in harness.gate_batches] == [later.event_id, contender.event_id]
+    assert len(harness.runner.requests) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refusal", ["live_claim_outside_the_batch", "alias_answered_meanwhile"])
+async def test_a_refused_gate_exit_merge_returns_its_sources_to_the_journal_at_once(
+    config: Config,
+    tmp_path: Path,
+    refusal: str,
+) -> None:
+    """A batch whose turn can no longer be claimed hands its sources back now, instead of leaving them deferred."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
+    original_event_id = "$human-merge:localhost"
+    relay = _router_relay_event(
+        config,
+        event_id="$relay-merge:localhost",
+        original_event_id=original_event_id,
+        body=f"{_entity_user_id(config, 'general')} respond",
+        origin_server_ts=1_000_000,
+    )
+    outsider = None
+    if refusal == "live_claim_outside_the_batch":
+        message_claim = await harness.turn_store.claim(TurnRecord.create([relay.event_id], completed=False))
+        outsider = await harness.turn_store.claim(
+            TurnRecord.create(["$other-relay:localhost"], discovery_event_ids=[original_event_id], completed=False),
+        )
+        assert isinstance(outsider, TurnClaim)
+    else:
+        message_claim = await harness.turn_store.claim(
+            TurnRecord.create([relay.event_id], discovery_event_ids=[original_event_id], completed=False),
+        )
+        # Another relay of the same original is answered while this batch waits.
+        await harness.turn_store.record_turn(
+            TurnRecord.create(["$other-relay:localhost"], discovery_event_ids=[original_event_id]),
+        )
+    assert isinstance(message_claim, TurnClaim)
+    turn = make_test_turn(
+        room,
+        relay,
+        _SENDER,
+        handled_turn=TurnRecord.create([relay.event_id], discovery_event_ids=[original_event_id], completed=False),
+        claim=message_claim,
+    )
+
+    await harness.controller.handle_prepared_turn(turn)
+
+    assert harness.retried_dispatch_sources == [(relay.event_id,)]
+    assert harness.runner.requests == []
+    assert not harness.turn_store.has_live_turn_claim(relay.event_id)
+    if outsider is not None:
+        assert harness.turn_store.has_live_turn_claim(original_event_id), "the outside owner keeps its claim"
+        outsider.release()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answered", [False, True])
+async def test_a_relay_of_an_answered_original_is_settled_unless_it_was_answered_itself(
+    config: Config,
+    tmp_path: Path,
+    *,
+    answered: bool,
+) -> None:
+    """A relay whose original another relay answered is refused; only one not already answered settles as ignored."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
+    original_event_id = "$human-answered:localhost"
+    await harness.turn_store.record_turn(
+        TurnRecord.create(["$first-relay:localhost"], discovery_event_ids=[original_event_id]),
+    )
+    if answered:
+        await harness.turn_store.record_turn(TurnRecord.create(["$second-relay:localhost"]))
+    ticket = harness.controller.reserve_prompt_ingress_order(room, _SENDER)
+
+    try:
+        outcome = await ticket.claim_turn(
+            TurnRecord.create(["$second-relay:localhost"], discovery_event_ids=[original_event_id], completed=False),
+        )
+    finally:
+        ticket.close()
+
+    assert outcome is (TurnDispatchOutcome.DEFERRED if answered else TurnDispatchOutcome.INTENTIONALLY_IGNORED)
+    assert not harness.turn_store.has_live_turn_claim("$second-relay:localhost")
+    assert harness.retried_dispatch_sources == []
+
+
+@pytest.mark.asyncio
+async def test_a_selection_coalesced_with_another_message_is_refused(config: Config, tmp_path: Path) -> None:
+    """An interactive selection only ever dispatches alone, as the barrier the gate makes of it."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    target = MessageTarget.resolve(room_id=room.room_id, thread_id=None, reply_to_event_id="$question:localhost")
+    selection = PendingEvent(
+        event=PreparedIngress(sender=_SENDER, event_id="$selection:localhost", body="", source={}),
+        room=room,
+        selection=InteractiveSelectionDispatch(
+            response_factory=AsyncMock(return_value=True),
+            response_target=target,
+            source_event_id="$selection:localhost",
+            transport_sender_id=_SENDER,
+            requester_user_id=_SENDER,
+            selected_value="yes",
+        ),
+    )
+    message = PendingEvent(
+        event=PreparedIngress(sender=_SENDER, event_id="$message:localhost", body="hello", source={}),
+        room=room,
+    )
+    turn = build_prepared_turn(requester_coalescing_key(room.room_id, None, _SENDER), [message, selection])
+
+    with pytest.raises(ValueError, match="single FIFO barrier"):
+        await harness.controller.handle_prepared_turn(turn)
+
+    assert harness.runner.inbox_tasks == []
+
+
+@pytest.mark.asyncio
+async def test_command_dispatch_keeps_the_alias_its_ingress_claimed(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A command dispatched past the gate keeps every event its ingress claimed, its discovery alias included."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    alias = "$placeholder:localhost"
+    event = _text_event("!help", event_id="$command-alias:localhost")
+    prepared = PreparedIngress(sender=_SENDER, event_id=event.event_id, body="!help", source=event.source)
+    ticket = harness.controller.reserve_prompt_ingress_order(room, _SENDER)
+    assert (
+        await ticket.claim_turn(TurnRecord.create([event.event_id], discovery_event_ids=[alias], completed=False))
+        is None
+    )
+    alias_claimed_during_command: list[bool] = []
+
+    async def execute_if_owned(**_kwargs: object) -> bool:
+        alias_claimed_during_command.append(harness.turn_store.has_live_turn_claim(alias))
+        return True
+
+    monkeypatch.setattr(harness.controller.deps.command_executor, "execute_if_owned", execute_if_owned)
+    target = harness.controller.deps.resolver.build_message_target(
+        room_id=room.room_id,
+        thread_id=None,
+        reply_to_event_id=event.event_id,
+        event_source=event.source,
+    )
+    envelope = harness.controller.deps.resolver.build_ingress_envelope(
+        event=prepared,
+        requester_user_id=_SENDER,
+        target=target,
+    )
+
+    try:
+        await harness.controller._dispatch_command_control_input(
+            room=room,
+            dispatch_event=prepared,
+            envelope=envelope,
+            coalescing_thread_id=None,
+            requester_user_id=_SENDER,
+            ticket=ticket,
+        )
+    finally:
+        ticket.close()
+
+    assert alias_claimed_during_command == [True]
+    assert not harness.turn_store.has_live_turn_claim(alias)
+    assert not harness.turn_store.has_live_turn_claim(event.event_id)
 
 
 @pytest.mark.asyncio
@@ -1483,12 +1713,20 @@ async def test_failed_gate_admission_releases_ingress_claim_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Rejected gate admission transfers and closes the pending claim exactly once."""
+    """Rejected gate admission closes the claim it moved into the pending event."""
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")
     event = _text_event("admission closes")
-    release_claim = MagicMock(wraps=harness.turn_store.release_pending_turn_claim)
-    monkeypatch.setattr(harness.turn_store, "release_pending_turn_claim", release_claim)
+    claims: list[TurnClaim] = []
+    real_claim = harness.turn_store.claim
+
+    async def record_claim(record: TurnRecord) -> TurnClaim | ClaimRefused | ClaimContended:
+        result = await real_claim(record)
+        if isinstance(result, TurnClaim):
+            claims.append(result)
+        return result
+
+    monkeypatch.setattr(harness.turn_store, "claim", record_claim)
     monkeypatch.setattr(
         harness.gate,
         "submit_lane_slot",
@@ -1507,11 +1745,12 @@ async def test_failed_gate_admission_releases_ingress_claim_once(
     with pytest.raises(IngressAdmissionClosedError):
         await obligation_runner.callbacks.on_message(room, event)
 
-    release_claim.assert_called_once()
+    assert len(claims) == 1
     assert await obligation_runner.store.is_pending(event.event_id)
-    competing_claim = TurnRecord.create([event.event_id], completed=False)
-    assert harness.turn_store.try_claim_turn(competing_claim) is True
-    harness.turn_store.release_pending_turn_claim(competing_claim)
+    assert not harness.turn_store.has_live_turn_claim(event.event_id)
+    competing_claim = await real_claim(TurnRecord.create([event.event_id], completed=False))
+    assert isinstance(competing_claim, TurnClaim)
+    competing_claim.release()
 
 
 @pytest.mark.asyncio
@@ -3480,20 +3719,12 @@ async def test_router_relay_keeps_original_alias_unsettled_through_gate_handoff(
     delivery = asyncio.create_task(harness.deliver(room, event))
     await normalization_started.wait()
 
-    wait_started = asyncio.Event()
-
-    async def wait_for_alias() -> None:
-        wait_started.set()
-        await harness.turn_store.wait_for_turn_settled((original_event_id,))
-
-    waiter = asyncio.create_task(wait_for_alias())
-    await wait_started.wait()
     try:
-        assert not waiter.done()
+        assert harness.turn_store.has_live_turn_claim(original_event_id)
     finally:
         release_normalization.set()
         await delivery
-    await waiter
+    assert not harness.turn_store.has_live_turn_claim(original_event_id)
 
 
 @pytest.mark.asyncio
@@ -3982,9 +4213,10 @@ async def test_process_shutdown_recovery_requires_exact_journal_or_outbox_owner(
             source={"event_id": journal_source_id, "content": {"msgtype": "m.text", "body": "journal"}},
         ),
     )
-    assert harness.turn_store.try_claim_turn(journal_turn)
+    journal_claim = await harness.turn_store.claim(journal_turn)
+    assert isinstance(journal_claim, TurnClaim)
     assert await store.response_recovery_ready(journal_turn) is False
-    harness.turn_store.release_pending_turn_claim(journal_turn)
+    journal_claim.release()
     assert await store.response_recovery_ready(journal_turn) is True
 
     await harness.journal_principal.settle(journal_source_id)
@@ -4357,7 +4589,7 @@ async def test_never_started_runner_task_releases_transferred_turn_claim(
     await harness.gate.drain_all()
     await asyncio.gather(*harness.runner.inbox_tasks, return_exceptions=True)
 
-    assert harness.runner.terminal_callbacks
+    assert harness.runner.claims
     assert harness.turn_store.has_live_turn_claim(event.event_id) is False
 
 

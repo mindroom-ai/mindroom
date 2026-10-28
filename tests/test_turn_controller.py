@@ -14,11 +14,11 @@ from mindroom import interactive
 from mindroom.coalescing.batch import CoalescingKey, PendingEvent, RequesterCoalescingOwner
 from mindroom.coalescing.gate import CoalescingGate, IngressAdmissionClosedError, LaneSlot, ReadyPendingEvent
 from mindroom.coalescing.ingress_lanes import ReceiptLaneKey
-from mindroom.coalescing.prompt_ingress_reservation import PromptIngressReservationOwner
+from mindroom.coalescing.ingress_ticket import IngressTicket
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY
-from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress
+from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
@@ -28,10 +28,12 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
     install_generate_response_mock,
+    live_turn_claim,
     make_pending_event,
     replace_turn_controller_deps,
     runtime_paths_for,
     test_runtime_paths,
+    turn_claim_is_live,
     wrap_extracted_collaborators,
 )
 
@@ -87,24 +89,18 @@ def _pending(event: nio.RoomMessageText) -> PendingEvent:
 
 
 @pytest.mark.asyncio
-async def test_late_admit_rejection_closes_completed_ready_task_metadata_once() -> None:
-    """Owner cleanup should close completed ready-task metadata once after late admit rejection."""
-    close_count = 0
-
-    def close_metadata() -> None:
-        nonlocal close_count
-        close_count += 1
-
+async def test_rejected_readiness_admission_releases_its_claim_once_readiness_ends() -> None:
+    """A readiness task the gate refuses is cancelled, its late result closed, and its claim released only after it ends."""
+    result_claim = live_turn_claim("$late:localhost")
     pending_event = _pending(_text_event("$late:localhost", "late", 1000))
-    pending_event.dispatch_metadata = (
-        PendingDispatchMetadata(
-            kind="test",
-            payload=object(),
-            close=close_metadata,
-        ),
-    )
+    pending_event.claim = result_claim
+    finish = asyncio.Event()
 
     async def ready() -> ReadyPendingEvent:
+        # Readiness that finishes despite cancellation, like a checkpoint write.
+        with suppress(asyncio.CancelledError):
+            await asyncio.Event().wait()
+        await finish.wait()
         return ReadyPendingEvent(pending_event=pending_event)
 
     class RejectingGate:
@@ -116,83 +112,36 @@ async def test_late_admit_rejection_closes_completed_ready_task_metadata_once() 
             slot.released = True
             slot.settled.set()
 
-    slot = LaneSlot(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        receipt_time=1.0,
-    )
-    owner = PromptIngressReservationOwner(gate=RejectingGate(), slot=slot)
+    slot = LaneSlot(room_id="!room:localhost", sender_id="@user:localhost", receipt_time=1.0)
+    ticket_claim = live_turn_claim("$voice:localhost")
+    ticket = IngressTicket(gate=RejectingGate(), slot=slot, turn_store=MagicMock(), claim=ticket_claim)
     ready_task = asyncio.create_task(ready())
-    await ready_task
-
-    with pytest.raises(IngressAdmissionClosedError):
-        await owner.admit(
-            CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost")),
-            ready_task=ready_task,
-            source_event_id="$late:localhost",
-            source_kind=MESSAGE_SOURCE_KIND,
-        )
-
-    await owner.release()
-
-    assert slot.released is True
-    assert slot.settled.is_set()
-    assert close_count == 1
-
-
-@pytest.mark.asyncio
-async def test_owner_cancel_ready_task_closes_ready_result_returned_during_cancellation() -> None:
-    """Owner cancellation should close metadata even when a task returns a ready result while cancelling."""
-    close_count = 0
-    cancelled = asyncio.Event()
-
-    def close_metadata() -> None:
-        nonlocal close_count
-        close_count += 1
-
-    pending_event = _pending(_text_event("$late:localhost", "late", 1000))
-    pending_event.dispatch_metadata = (
-        PendingDispatchMetadata(
-            kind="test",
-            payload=object(),
-            close=close_metadata,
-        ),
-    )
-
-    async def ready() -> ReadyPendingEvent:
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            cancelled.set()
-            return ReadyPendingEvent(pending_event=pending_event)
-
-    gate = CoalescingGate(
-        dispatch_turn=AsyncMock(),
-        debounce_seconds=lambda: 0.0,
-        is_shutting_down=lambda: False,
-    )
-    slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost"))
-    owner = PromptIngressReservationOwner(gate=gate, slot=slot)
-    owner.ready_task = asyncio.create_task(ready())
     await asyncio.sleep(0)
 
-    await owner._cancel_ready_task()
+    with pytest.raises(IngressAdmissionClosedError):
+        ticket.admit_ready(
+            CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost")),
+            ready_task,
+            source_event_id="$voice:localhost",
+            source_kind=MESSAGE_SOURCE_KIND,
+        )
+    ticket.close()
 
-    assert cancelled.is_set()
-    assert close_count == 1
-    await owner._cancel_ready_task()
-    assert close_count == 1
-
-    await owner.release()
-    await asyncio.wait_for(slot.settled.wait(), timeout=1.0)
+    assert slot.released is True
+    await asyncio.sleep(0)
+    assert turn_claim_is_live(ticket_claim), "a source whose readiness still runs stays claimed"
+    finish.set()
+    await ready_task
+    await asyncio.sleep(0)
+    assert not turn_claim_is_live(ticket_claim)
+    assert not turn_claim_is_live(result_claim)
 
 
 @pytest.mark.asyncio
-async def test_owner_release_settles_lane_slot_when_cancelled_during_ready_task_cleanup() -> None:
-    """Owner release must not orphan its ready task when callback cancellation interrupts cleanup."""
+async def test_rejected_readiness_admission_cancelled_before_its_first_step_releases_its_claim() -> None:
+    """A readiness task cancelled before it ever ran still ends, which releases the claim it was to hold."""
 
-    async def never_ready() -> ReadyPendingEvent | None:
-        await asyncio.Event().wait()
+    async def ready() -> ReadyPendingEvent | None:
         return None
 
     gate = CoalescingGate(
@@ -201,26 +150,24 @@ async def test_owner_release_settles_lane_slot_when_cancelled_during_ready_task_
         is_shutting_down=lambda: False,
     )
     slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost"))
-    owner = PromptIngressReservationOwner(gate=gate, slot=slot)
-    ready_task = asyncio.create_task(never_ready())
-    owner.ready_task = ready_task
+    gate.release_lane_slot(slot)
+    claim = live_turn_claim("$voice:localhost")
+    ticket = IngressTicket(gate=gate, slot=slot, turn_store=MagicMock(), claim=claim)
+    ready_task = asyncio.create_task(ready())
 
-    try:
-        release_task = asyncio.create_task(owner.release())
-        await asyncio.sleep(0)
-        release_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await release_task
+    with pytest.raises(IngressAdmissionClosedError):
+        ticket.admit_ready(
+            CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost")),
+            ready_task,
+            source_event_id="$voice:localhost",
+            source_kind=MESSAGE_SOURCE_KIND,
+        )
 
-        assert slot.released
-        await asyncio.wait_for(slot.settled.wait(), timeout=1.0)
-        assert ready_task.done()
-        assert ready_task.cancelled()
-        assert owner.ready_task is None
-    finally:
-        if not ready_task.done():
-            ready_task.cancel()
-        await asyncio.gather(ready_task, return_exceptions=True)
+    await asyncio.gather(ready_task, return_exceptions=True)
+    await asyncio.sleep(0)
+    assert ready_task.cancelled()
+    assert not turn_claim_is_live(claim)
+    await asyncio.wait_for(slot.settled.wait(), timeout=1.0)
 
 
 @pytest.mark.asyncio

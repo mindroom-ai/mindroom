@@ -53,6 +53,7 @@ async def _store(journal_store: EventJournalStore) -> TurnStore:
             resolver=MagicMock(),
             tool_runtime=MagicMock(),
             response_recovery_state=MagicMock(),
+            retry_dispatch_sources=MagicMock(),
         ),
     )
     await store.warm()

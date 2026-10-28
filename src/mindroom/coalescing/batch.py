@@ -12,7 +12,6 @@ from mindroom.dispatch_handoff import (
     DispatchIngressMetadata,
     DispatchPayloadMetadata,
     MediaDispatchEvent,
-    PendingDispatchMetadata,
     PreparedIngress,
     dispatch_prompt_for_event,
     event_content_dict,
@@ -33,6 +32,10 @@ from mindroom.timestamp_formatting import normalize_timestamp_ms
 
 if TYPE_CHECKING:
     import nio
+
+    from mindroom.response_lifecycle import QueuedHumanNoticeReservation
+    from mindroom.turn_controller import InteractiveSelectionDispatch
+    from mindroom.turn_store import TurnClaim
 
 
 @dataclass(frozen=True)
@@ -85,18 +88,27 @@ def coalescing_owner_log_label(owner: CoalescingOwner) -> str:
 
 @dataclass
 class PendingEvent:
-    """One queued prepared ingress plus its queue-local lifecycle state.
+    """One queued prepared ingress plus what the queue owns for it until it dispatches.
 
     All per-source evidence lives on the frozen ``PreparedIngress``; this
-    wrapper only carries state owned by the queue itself (enqueue timing and
-    opaque dispatch metadata).
+    wrapper carries the queue's own state: enqueue timing, the turn claim and
+    queued notice ingress moved into it, and an interactive selection's work.
     """
 
     event: PreparedIngress
     room: nio.MatrixRoom
     enqueue_time: float = field(default_factory=time.time)
     text_debounce_seconds: float = 0.0
-    dispatch_metadata: tuple[PendingDispatchMetadata, ...] = ()
+    claim: TurnClaim | None = None
+    notice: QueuedHumanNoticeReservation | None = None
+    selection: InteractiveSelectionDispatch | None = None
+
+    def close(self) -> None:
+        """Release this event's claim and queued notice when it will not dispatch; idempotent."""
+        if self.claim is not None:
+            self.claim.release()
+        if self.notice is not None:
+            self.notice.release()
 
 
 @dataclass(frozen=True)
@@ -111,7 +123,10 @@ class PreparedTurn:
     payload: DispatchPayloadMetadata
     current_prompt_is_structured: bool
     media_events: tuple[MediaDispatchEvent, ...]
-    dispatch_metadata: tuple[PendingDispatchMetadata, ...]
+    # The batch's per-event claims and queued notices, which dispatch replaces and releases.
+    claims: tuple[TurnClaim, ...]
+    notices: tuple[QueuedHumanNoticeReservation, ...]
+    selection: InteractiveSelectionDispatch | None
 
 
 _COALESCED_MESSAGES_INTRO = (
@@ -422,19 +437,6 @@ def _batch_message_received_depth(ordered_pending_events: list[PendingEvent]) ->
     return max((pending_event.event.message_received_depth for pending_event in ordered_pending_events), default=0)
 
 
-def _batch_dispatch_metadata(
-    ordered_pending_events: list[PendingEvent],
-) -> tuple[PendingDispatchMetadata, ...]:
-    return tuple(item for pending_event in ordered_pending_events for item in pending_event.dispatch_metadata)
-
-
-def close_pending_event_metadata(pending_events: list[PendingEvent]) -> None:
-    """Close opaque metadata owned by pending events that cannot dispatch."""
-    for pending_event in pending_events:
-        for item in pending_event.dispatch_metadata:
-            item.close_once()
-
-
 def _batch_source_event_prompts(ordered_pending_events: list[PendingEvent]) -> dict[str, str]:
     return {
         pending_event.event.event_id: dispatch_prompt_for_event(pending_event.event)
@@ -503,5 +505,7 @@ def build_prepared_turn(
             for pending_event in ordered_pending_events
             if pending_event.event.raw_event is not None
         ),
-        dispatch_metadata=_batch_dispatch_metadata(ordered_pending_events),
+        claims=tuple(event.claim for event in ordered_pending_events if event.claim is not None),
+        notices=tuple(event.notice for event in ordered_pending_events if event.notice is not None),
+        selection=next((event.selection for event in ordered_pending_events if event.selection is not None), None),
     )

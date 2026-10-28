@@ -139,6 +139,7 @@ class TurnStateAdapter:
                 resolver=MagicMock(),
                 tool_runtime=MagicMock(),
                 response_recovery_state=AsyncMock(),
+                retry_dispatch_sources=MagicMock(),
             ),
         )
         await self.store.warm()

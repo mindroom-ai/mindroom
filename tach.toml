@@ -147,6 +147,7 @@ path = "mindroom.dispatch_callback_outcome"
 depends_on = []
 visibility = [
     "mindroom.bot",
+    "mindroom.coalescing.ingress_ticket",
     "mindroom.journal_dispatch",
     "mindroom.reaction_dispatch",
     "mindroom.turn_controller",
@@ -5876,8 +5877,13 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.coalescing.prompt_ingress_reservation"
-depends_on = ["mindroom.coalescing.gate"]
+path = "mindroom.coalescing.ingress_ticket"
+depends_on = [
+    "mindroom.coalescing.gate",
+    "mindroom.coalescing.ingress_lanes",
+    "mindroom.dispatch_callback_outcome",
+    "mindroom.turn_store",
+]
 visibility = ["mindroom.turn_controller"]
 
 [[modules]]
@@ -6038,7 +6044,7 @@ depends_on = [
     "mindroom.matrix.thread_membership",
     "mindroom.matrix.transport_progress",
     "mindroom.metadata_merge",
-    "mindroom.coalescing.prompt_ingress_reservation",
+    "mindroom.coalescing.ingress_ticket",
     "mindroom.response_lifecycle",
     "mindroom.response_payload_preparation",
     "mindroom.response_runner",
@@ -6840,7 +6846,6 @@ expose = [
     "TimestampFormatter",
     "active_follow_up_coalescing_key",
     "build_prepared_turn",
-    "close_pending_event_metadata",
     "coalesced_prompt",
     "coalescing_owner_log_label",
     "is_active_follow_up_coalescing_key",

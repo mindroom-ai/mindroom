@@ -12,7 +12,7 @@ from contextlib import closing
 from dataclasses import dataclass, replace
 from io import BytesIO, StringIO
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
 import pytest
@@ -1591,6 +1591,7 @@ async def test_runtime_redaction_observer_rejects_recovered_revision_without_phy
             resolver=_redaction_observer_store().deps.resolver,
             tool_runtime=Mock(spec=ToolRuntimeSupport),
             response_recovery_state=AsyncMock(),
+            retry_dispatch_sources=MagicMock(),
         ),
     )
     await store.warm()

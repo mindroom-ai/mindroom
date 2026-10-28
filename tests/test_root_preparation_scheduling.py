@@ -10,18 +10,17 @@ import pytest
 
 from mindroom.coalescing.batch import CoalescingKey, PreparedTurn, RequesterCoalescingOwner
 from mindroom.coalescing.gate import CoalescingGate, ReadyPendingEvent
-from mindroom.dispatch_handoff import PendingDispatchMetadata
 from mindroom.matrix.conversation_reads import ThreadReadMode
-from tests.conftest import make_pending_event
+from tests.conftest import live_turn_claim, make_pending_event, turn_claim_is_live
 from tests.test_turn_controller_focused import _build_harness, _room_with_members, _single_agent_config, _text_event
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.conversation_resolver import DispatchContextResult
     from mindroom.dispatch_handoff import DispatchEvent, DispatchPayloadMetadata
     from mindroom.matrix.media import MatrixMediaEvent
+    from mindroom.turn_store import TurnClaim
 
 
 _KEY = CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost"))
@@ -32,7 +31,7 @@ async def _admit_root(
     event_id: str,
     *,
     key: CoalescingKey = _KEY,
-    close: Callable[[], None] | None = None,
+    claim: TurnClaim | None = None,
 ) -> None:
     event = nio.RoomMessageText.from_dict(
         {
@@ -44,8 +43,7 @@ async def _admit_root(
         },
     )
     pending = make_pending_event(event, nio.MatrixRoom(key.room_id, "@mindroom:localhost"), source_kind="message")
-    if close is not None:
-        pending.dispatch_metadata = (PendingDispatchMetadata(kind="test", payload=object(), close=close),)
+    pending.claim = claim
     await gate.admit(
         key,
         source_event_id=event_id,
@@ -190,12 +188,12 @@ async def test_drain_started_before_root_dispatch_registration_waits_for_child()
 
 
 @pytest.mark.asyncio
-async def test_bounded_drain_cancels_detached_roots_and_closes_metadata_once() -> None:
+async def test_bounded_drain_cancels_detached_roots_and_closes_their_events() -> None:
     """Every detached owner participates in the shared shutdown budget."""
     started = [asyncio.Event(), asyncio.Event()]
     release = asyncio.Event()
     cancelled: list[str] = []
-    closed: list[str] = []
+    claims = {event_id: live_turn_claim(event_id) for event_id in ("$0", "$1")}
 
     async def dispatch(turn: PreparedTurn) -> None:
         started[int(turn.event.event_id[1:])].set()
@@ -207,16 +205,14 @@ async def test_bounded_drain_cancels_detached_roots_and_closes_metadata_once() -
 
     gate = CoalescingGate(dispatch_turn=dispatch, debounce_seconds=lambda: 0.0, is_shutting_down=lambda: False)
     try:
-        await _admit_root(gate, "$0", close=lambda: closed.append("$0"))
-        await _admit_root(gate, "$1", close=lambda: closed.append("$1"))
+        await _admit_root(gate, "$0", claim=claims["$0"])
+        await _admit_root(gate, "$1", claim=claims["$1"])
         await asyncio.wait_for(asyncio.gather(*(event.wait() for event in started)), timeout=1)
         result = await asyncio.wait_for(gate.drain_all(ready_timeout_seconds=0.01), timeout=1)
         assert not result.completed
         assert result.dispatch_cancelled_count == 2
         assert sorted(cancelled) == ["$0", "$1"]
-        assert sorted(closed) == ["$0", "$1"]
-        await gate.drain_all()
-        assert sorted(closed) == ["$0", "$1"]
+        assert not any(map(turn_claim_is_live, claims.values()))
     finally:
         release.set()
         await gate.drain_all()
@@ -263,10 +259,10 @@ async def test_shared_conversation_preparation_keeps_fifo_order(
 
 
 @pytest.mark.asyncio
-async def test_expired_shutdown_budget_closes_waiting_root_metadata_once() -> None:
+async def test_expired_shutdown_budget_closes_waiting_root_events() -> None:
     """Shutdown closes a root waiting for preparation capacity as well as active roots."""
     started: list[str] = []
-    closed: list[str] = []
+    claims = {f"${index}": live_turn_claim(f"${index}") for index in range(9)}
     capacity_full = asyncio.Event()
     release = asyncio.Event()
 
@@ -278,18 +274,15 @@ async def test_expired_shutdown_budget_closes_waiting_root_metadata_once() -> No
 
     gate = CoalescingGate(dispatch_turn=dispatch, debounce_seconds=lambda: 0.0, is_shutting_down=lambda: False)
     try:
-        for index in range(9):
-            event_id = f"${index}"
-            await _admit_root(gate, event_id, close=lambda event_id=event_id: closed.append(event_id))
+        for event_id, claim in claims.items():
+            await _admit_root(gate, event_id, claim=claim)
         await asyncio.wait_for(capacity_full.wait(), timeout=1)
         async with asyncio.timeout(1):
             result = await gate.drain_all(ready_timeout_seconds=0)
         assert not result.completed
         assert "$8" not in started
-        assert sorted(closed) == ["$0", "$1", "$2", "$3", "$4", "$5", "$6", "$7", "$8"]
+        assert not any(map(turn_claim_is_live, claims.values()))
         assert not gate.has_pending_source_event("$8")
-        await gate.drain_all()
-        assert len(closed) == 9
     finally:
         release.set()
         await gate.drain_all()
@@ -297,8 +290,8 @@ async def test_expired_shutdown_budget_closes_waiting_root_metadata_once() -> No
 
 @pytest.mark.asyncio
 async def test_failed_root_releases_ownership_and_requests_retry_once() -> None:
-    """Detached dispatch errors retain the existing retry and metadata contract."""
-    closed: list[str] = []
+    """Detached dispatch errors retain the existing retry and cleanup contract."""
+    claim = live_turn_claim("$a")
     retry_sources: list[tuple[str, ...]] = []
 
     async def dispatch(_turn: PreparedTurn) -> None:
@@ -311,12 +304,12 @@ async def test_failed_root_releases_ownership_and_requests_retry_once() -> None:
         is_shutting_down=lambda: False,
         on_dispatch_failure=lambda events: retry_sources.append(tuple(event.event.event_id for event in events)),
     )
-    await _admit_root(gate, "$a", close=lambda: closed.append("$a"))
+    await _admit_root(gate, "$a", claim=claim)
     result = await gate.drain_all()
     assert not result.completed
     assert result.dispatch_failure_count == 1
     assert retry_sources == [("$a",)]
-    assert closed == ["$a"]
+    assert not turn_claim_is_live(claim)
     assert not gate.has_pending_source_event("$a")
 
 

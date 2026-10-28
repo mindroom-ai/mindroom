@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from .batch import PendingEvent, close_pending_event_metadata
+if TYPE_CHECKING:
+    from .batch import PendingEvent
 
 __all__ = [
     "ClaimedSegmentOwner",
     "ReadyPendingEvent",
-    "close_pending_event_metadata_once",
-    "close_ready_task_result_metadata",
+    "close_pending_events",
+    "close_ready_result",
 ]
 
 
@@ -21,35 +23,34 @@ class ReadyPendingEvent:
     pending_event: PendingEvent
 
 
-def close_pending_event_metadata_once(pending_events: list[PendingEvent]) -> None:
-    """Close pending-event metadata and clear it so later cleanup is idempotent."""
-    close_pending_event_metadata(pending_events)
+def close_pending_events(pending_events: list[PendingEvent]) -> None:
+    """Close pending events that will not dispatch."""
     for pending_event in pending_events:
-        pending_event.dispatch_metadata = ()
+        pending_event.close()
 
 
-def close_ready_task_result_metadata(result: object) -> int:
-    """Close dispatch metadata for a ready-task result and report dropped ready work."""
+def close_ready_result(result: object) -> int:
+    """Close a ready-task result that will not dispatch and report dropped ready work."""
     if isinstance(result, ReadyPendingEvent):
-        close_pending_event_metadata_once([result.pending_event])
+        result.pending_event.close()
         return 1
     return 0
 
 
 @dataclass
 class ClaimedSegmentOwner:
-    """Own metadata closure for one resolved dispatch segment."""
+    """Own closure for one resolved dispatch segment."""
 
     pending_events: list[PendingEvent]
-    metadata_closed: bool = False
+    closed: bool = False
 
     def event_ids(self) -> set[str]:
         """Return source event IDs owned by this segment."""
         return {pending_event.event.event_id for pending_event in self.pending_events}
 
-    def close_metadata_once(self) -> None:
-        """Close metadata for this segment if it has not already been closed."""
-        if self.metadata_closed:
+    def close_once(self) -> None:
+        """Close this segment's events if it has not already been closed."""
+        if self.closed:
             return
-        close_pending_event_metadata_once(self.pending_events)
-        self.metadata_closed = True
+        close_pending_events(self.pending_events)
+        self.closed = True

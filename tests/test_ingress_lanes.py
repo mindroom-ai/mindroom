@@ -14,11 +14,11 @@ from mindroom import inbound_turn_normalizer, interactive
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.coalescing.batch import ActiveFollowUpCoalescingOwner, CoalescingKey, RequesterCoalescingOwner
 from mindroom.coalescing.gate import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
-from mindroom.coalescing.ingress_lanes import ReceiptLaneKey
+from mindroom.coalescing.ingress_lanes import IngressRetryError, ReceiptLaneKey
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress
+from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
@@ -26,19 +26,23 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
 from mindroom.event_journal import EventClass, EventKind
+from mindroom.handled_turns import TurnRecord
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.thread_membership import RelatedEventUnavailableError, ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
+from mindroom.turn_store import ClaimContended, TurnClaim
 from mindroom.voice import handler as voice_handler
 from tests.bot_helpers import dispatch_reaction_durably
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
+    live_turn_claim,
     make_pending_event,
     prepared_dispatch_result,
     record_turn_answered,
     replace_interactive_selection_handlers,
     replace_turn_controller_deps,
+    turn_claim_is_live,
     unwrap_extracted_collaborator,
 )
 from tests.journal_helpers import admit_dispatch_event
@@ -52,6 +56,7 @@ from tests.test_live_message_coalescing import (
     _text_event,
     _wait_for,
 )
+from tests.test_turn_store import _store as _turn_store
 from tests.turn_dispatch_helpers import prepared_turn_recorder
 
 if TYPE_CHECKING:
@@ -61,7 +66,6 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.coalescing.batch import PreparedTurn
     from mindroom.event_journal import EventJournalStore
-    from mindroom.handled_turns import TurnRecord
 
 
 def _room(room_id: str = "!room:localhost") -> nio.MatrixRoom:
@@ -1536,18 +1540,13 @@ async def test_cancelled_lane_worker_settles_remaining_slots() -> None:
 async def test_abandoned_slot_does_not_deliver_after_late_readiness() -> None:
     """A slot abandoned mid-readiness never delivers the payload the drain dropped."""
     gate, batches = _gate(debounce_seconds=0.0)
-    close_count = 0
-
-    def close_metadata() -> None:
-        nonlocal close_count
-        close_count += 1
-
+    result_claim = live_turn_claim("$late-result")
     pending = make_pending_event(
         _plain_event("$late", "stubborn voice", 1_000_000),
         _room(),
         source_kind=VOICE_SOURCE_KIND,
-        dispatch_metadata=(PendingDispatchMetadata(kind="test", payload=object(), close=close_metadata),),
     )
+    pending.claim = result_claim
 
     async def stubborn_ready() -> ReadyPendingEvent:
         # Readiness that completes with a result despite cancellation, like STT
@@ -1563,6 +1562,7 @@ async def test_abandoned_slot_does_not_deliver_after_late_readiness() -> None:
         source_event_id="$late",
         source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(stubborn_ready()),
+        claim=(source_claim := live_turn_claim("$late")),
     )
     await asyncio.sleep(0)
     await asyncio.sleep(0)
@@ -1572,8 +1572,193 @@ async def test_abandoned_slot_does_not_deliver_after_late_readiness() -> None:
 
     result = await gate.drain_all()
     assert batches == []
-    assert close_count == 1
+    assert not turn_claim_is_live(result_claim)
+    assert not turn_claim_is_live(source_claim)
     assert result.completed is True
+
+
+@pytest.mark.asyncio
+async def test_abandoned_voice_readiness_keeps_its_source_claimed_until_readiness_ends(
+    journal_store: EventJournalStore,
+) -> None:
+    """A drain gives a voice slot up while its readiness still runs; the source stays claimed until readiness ends.
+
+    Readiness can be finishing a checkpoint write that completes despite
+    cancellation, so a replacement runtime's store for the same agent must not
+    start on the source meanwhile.
+    """
+    first = await _turn_store(journal_store)
+    replacement = await _turn_store(journal_store)
+    record = TurnRecord.create(["$voice"], completed=False)
+    claim = await first.claim(record)
+    assert isinstance(claim, TurnClaim)
+    finish = asyncio.Event()
+
+    late_result = _ready(_plain_event("$voice", "transcript", 1_000_000), source_kind=VOICE_SOURCE_KIND)
+
+    async def stubborn_ready() -> ReadyPendingEvent | None:
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.Event().wait()
+        await finish.wait()
+        return late_result
+
+    gate, batches = _gate(debounce_seconds=0.0)
+    slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost"))
+    ready_task = asyncio.create_task(stubborn_ready())
+    gate.submit_lane_slot(
+        slot,
+        key=CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
+        source_event_id="$voice",
+        source_kind=VOICE_SOURCE_KIND,
+        ready_task=ready_task,
+        claim=claim,
+    )
+    await asyncio.sleep(0)
+
+    outcome = await gate.lanes.abandon_slot(slot, ready_timeout_seconds=0.01)
+
+    assert outcome.cancelled_unready_count == 1
+    assert await replacement.claim(record) == ClaimContended(claim)
+    finish.set()
+    await ready_task
+    await asyncio.sleep(0)
+    replacement_claim = await replacement.claim(record)
+    assert isinstance(replacement_claim, TurnClaim)
+    replacement_claim.release()
+    assert batches == []
+
+
+_VOICE_KEY = CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost"))
+_VOICE_LANE = ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["cancelled", "retry", "ignored"])
+async def test_readiness_that_delivers_nothing_releases_its_claim_before_the_source_returns(ending: str) -> None:
+    """Readiness that is cancelled, asks for a retry, or produces nothing gives its source's claim back first."""
+    claim = live_turn_claim("$voice")
+    claim_live_at_return: list[bool] = []
+
+    def retry(_room_id: str, _source_event_id: str) -> None:
+        claim_live_at_return.append(turn_claim_is_live(claim))
+
+    async def settle_ignored(_source_event_id: str) -> None:
+        claim_live_at_return.append(turn_claim_is_live(claim))
+
+    async def ready() -> ReadyPendingEvent | None:
+        if ending == "cancelled":
+            raise asyncio.CancelledError
+        if ending == "retry":
+            raise IngressRetryError
+        return None
+
+    gate, batches = _gate(on_undelivered_source=retry, on_intentionally_ignored_source=settle_ignored)
+    slot = gate.enter_lane(_VOICE_LANE)
+    gate.submit_lane_slot(
+        slot,
+        key=_VOICE_KEY,
+        source_event_id="$voice",
+        source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready()),
+        claim=claim,
+    )
+
+    await asyncio.wait_for(slot.settled.wait(), timeout=1.0)
+
+    assert claim_live_at_return == [False]
+    assert batches == []
+
+
+@pytest.mark.asyncio
+async def test_abandoned_voice_slot_behind_an_undelivered_one_releases_its_claim() -> None:
+    """A slot a drain abandons before its worker reaches it still gives its claim back once readiness ends."""
+    gate, batches = _gate(debounce_seconds=0.0)
+    head = gate.enter_lane(_VOICE_LANE)
+    behind = gate.enter_lane(_VOICE_LANE)
+    claim = live_turn_claim("$voice")
+
+    async def ready() -> ReadyPendingEvent | None:
+        await asyncio.Event().wait()
+        return None
+
+    gate.submit_lane_slot(
+        behind,
+        key=_VOICE_KEY,
+        source_event_id="$voice",
+        source_kind=VOICE_SOURCE_KIND,
+        ready_task=asyncio.create_task(ready()),
+        claim=claim,
+    )
+
+    outcome = await gate.lanes.abandon_slot(behind, ready_timeout_seconds=1.0)
+
+    assert outcome.cancelled_unready_count == 1
+    assert not turn_claim_is_live(claim)
+    gate.release_lane_slot(head)
+    await gate.drain_all()
+    assert batches == []
+
+
+@pytest.mark.asyncio
+async def test_a_dead_lane_worker_releases_its_slots_claims_once_their_readiness_ends() -> None:
+    """A lane whose worker dies gives every claim its slots hold back, waiting for readiness still running."""
+    gate, batches = _gate(debounce_seconds=0.0)
+    head = gate.enter_lane(_VOICE_LANE)
+    behind = gate.enter_lane(_VOICE_LANE)
+    queued = gate.enter_lane(_VOICE_LANE)
+    head_claim = live_turn_claim("$head")
+    behind_claim = live_turn_claim("$behind")
+    queued_claim = live_turn_claim("$queued")
+    finish = asyncio.Event()
+
+    async def ready() -> ReadyPendingEvent | None:
+        await finish.wait()
+        return None
+
+    head_task = asyncio.create_task(ready())
+    behind_task = asyncio.create_task(ready())
+    gate.submit_lane_slot(
+        head,
+        key=_VOICE_KEY,
+        source_event_id="$head",
+        source_kind=VOICE_SOURCE_KIND,
+        ready_task=head_task,
+        claim=head_claim,
+    )
+    gate.submit_lane_slot(
+        behind,
+        key=_VOICE_KEY,
+        source_event_id="$behind",
+        source_kind=VOICE_SOURCE_KIND,
+        ready_task=behind_task,
+        claim=behind_claim,
+    )
+    queued_event = _ready(_plain_event("$queued", "typed", 1_000_000))
+    queued_event.pending_event.claim = queued_claim
+    gate.submit_lane_slot(
+        queued,
+        key=_VOICE_KEY,
+        source_event_id="$queued",
+        source_kind="message",
+        ready_result=queued_event,
+    )
+    await asyncio.sleep(0)
+    worker = gate.lanes._workers[_VOICE_LANE]
+
+    worker.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await worker
+    await asyncio.sleep(0)
+
+    assert not turn_claim_is_live(queued_claim), "a ready event no worker will deliver is closed"
+    assert turn_claim_is_live(head_claim), "readiness still running keeps its source claimed"
+    assert turn_claim_is_live(behind_claim)
+    finish.set()
+    await asyncio.gather(head_task, behind_task)
+    await asyncio.sleep(0)
+    assert not turn_claim_is_live(head_claim)
+    assert not turn_claim_is_live(behind_claim)
+    assert batches == []
 
 
 @pytest.mark.asyncio

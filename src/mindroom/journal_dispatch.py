@@ -164,10 +164,9 @@ class JournalDispatcher:
         What it deliberately does not do is forget which sources are in flight.
         A drain runs beside live turns rather than before them -- every bot
         that reports ready schedules one, and so does every hot reload -- and a
-        source it hands to a second turn is not merely wasteful. `TurnStore`
-        refuses the second claim, but refusing is not returning: the loser
-        waits for the winner to settle, and it waits inside the room's lane, so
-        the room answers nothing until the original turn ends.
+        source it hands to a second turn is not merely wasteful: `TurnStore`
+        refuses the second claim, and the loser runs ingress again for nothing
+        once the winner hands the source back.
 
         A deferral nobody kept is still reconsidered, because the liveness
         probe answers that question exactly rather than by assumption.
@@ -231,9 +230,9 @@ class JournalDispatcher:
         if has_deferrable_owner and self._has_live_owner(event.event_id):
             # A coalescing batch or a running turn already holds this source
             # and will hand it back. Starting a second turn on it does not
-            # answer twice, but the loser of the claim blocks until the winner
-            # settles, and it blocks holding the room's lane. Returning here
-            # leaves the source deferred, which is what it already was.
+            # answer twice, but the loser of the claim only defers again.
+            # Returning here leaves the source deferred, which is what it
+            # already was.
             return False
         approval_settled = await self.callbacks.on_approval_continuation(event.event_id)
         if approval_settled is not None:

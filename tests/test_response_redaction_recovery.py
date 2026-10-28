@@ -26,7 +26,7 @@ from mindroom.reply_scope import ReplyRuntime
 from mindroom.response_runner import ResponseRunner
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession
-from mindroom.turn_store import TurnStore
+from mindroom.turn_store import TurnClaim, TurnStore
 from tests.conftest import seed_session
 from tests.journal_helpers import admit_dispatch_event
 from tests.redaction_helpers import remove_redacted_history_like_next_response
@@ -130,20 +130,19 @@ async def test_pending_redaction_owns_interrupted_initial_response(  # noqa: PLR
         delivered_projections=(),
     )
     started = asyncio.Event()
+    claim = await store.claim(turn)
+    assert isinstance(claim, TurnClaim)
 
     async def generate() -> None:
-        assert store.try_claim_turn(turn)
         started.set()
-        try:
-            await asyncio.Event().wait()
-        finally:
-            store.release_pending_turn_claim(turn)
+        await asyncio.Event().wait()
 
     runner = ResponseRunner(deps=MagicMock())
     response = runner.track_inbox_response(
         generate(),
         name="inbox_response:deleted",
         recovery_proof_ready=lambda: store.response_recovery_ready(turn),
+        claim=claim,
         source_event_ids=turn.source_event_ids,
         room_id=ROOM,
     )

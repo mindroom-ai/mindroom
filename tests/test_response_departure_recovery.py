@@ -13,6 +13,7 @@ from mindroom.event_journal import DeliveryStage, EventClass, EventKind, Inbound
 from mindroom.handled_turns import TurnRecord
 from mindroom.response_runner import ResponseRunner
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
+from mindroom.turn_store import TurnClaim
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_turn_store import _store
 
@@ -52,19 +53,18 @@ async def test_departure_during_generation_allows_orderly_shutdown(
     await turn_store.record_pending_turn(turn)
     runner = ResponseRunner(deps=MagicMock())
     generating = asyncio.Event()
+    claim = await turn_store.claim(turn)
+    assert isinstance(claim, TurnClaim)
 
     async def generate() -> None:
-        assert turn_store.try_claim_turn(turn)
         generating.set()
-        try:
-            await asyncio.Event().wait()
-        finally:
-            turn_store.release_pending_turn_claim(turn)
+        await asyncio.Event().wait()
 
     response = runner.track_inbox_response(
         generate(),
         name="generation_during_departure",
         recovery_proof_ready=lambda: turn_store.response_recovery_ready(turn),
+        claim=claim,
         source_event_ids=sources,
         room_id=ROOM,
     )
@@ -111,11 +111,14 @@ async def test_departure_proof_rejects_unexplained_or_inexact_sources(
         await principal.admit(_source("$current", "!current:localhost"))
         await principal.settle("$current")
         turn = TurnRecord.create(["$source", "$current"])
-    elif case == "live_claim":
-        assert turn_store.try_claim_turn(turn)
+    claim = None
+    if case == "live_claim":
+        claim = await turn_store.claim(turn)
+        assert isinstance(claim, TurnClaim)
     elif case == "no_anchor":
         turn = replace(turn, anchor_event_id=None)
     try:
         assert await turn_store.response_recovery_ready(turn) is False
     finally:
-        turn_store.release_pending_turn_claim(turn)
+        if claim is not None:
+            claim.release()

@@ -11,20 +11,19 @@ from mindroom.coalescing.batch import PendingEvent, PreparedTurn, build_prepared
 from mindroom.dispatch_handoff import (
     DispatchIngressMetadata,
     DispatchPayloadMetadata,
-    PendingDispatchMetadata,
     PreparedIngress,
     payload_metadata_from_source,
 )
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
+from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.event_info import EventInfo
-from mindroom.message_target import ResponseLifecycleKey
 from mindroom.turn_controller import _PrecheckedEvent
+from mindroom.turn_store import TurnClaim
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from mindroom.dispatch_handoff import MediaDispatchEvent
-    from mindroom.handled_turns import TurnRecord
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.turn_controller import TurnController
 
@@ -67,8 +66,9 @@ def make_test_turn(
     ingress_metadata: DispatchIngressMetadata | None = None,
     payload_metadata: DispatchPayloadMetadata | None = None,
     current_prompt_is_structured: bool = False,
+    claim: TurnClaim | None = None,
 ) -> PreparedTurn:
-    """Build realistic gate output for focused downstream-dispatch tests."""
+    """Build realistic gate output for focused downstream-dispatch tests, carrying the ingress claim given."""
     prepared, requester_user_id = _prepared_ingress(event, requester_user_id)
     event_info = EventInfo.from_event(prepared.source)
     key = (
@@ -90,21 +90,9 @@ def make_test_turn(
         message_received_depth=ingress_metadata.message_received_depth if ingress_metadata is not None else 0,
         trust_internal_payload_metadata=ingress_metadata is not None,
     )
-    dispatch_metadata = (
-        (
-            PendingDispatchMetadata(
-                kind="queued_notice_reservation",
-                payload=queued_notice_reservation,
-                close=queued_notice_reservation.cancel,
-                target_key=ResponseLifecycleKey(room_id=key.room_id, thread_id=key.thread_id),
-            ),
-        )
-        if queued_notice_reservation is not None
-        else ()
-    )
     turn = build_prepared_turn(
         key,
-        [PendingEvent(event=prepared, room=room, dispatch_metadata=dispatch_metadata)],
+        [PendingEvent(event=prepared, room=room, claim=claim, notice=queued_notice_reservation)],
     )
     return replace(
         turn,
@@ -127,8 +115,21 @@ async def dispatch_test_turn(
     requester_user_id: str | None = None,
     **kwargs: object,
 ) -> None:
-    """Dispatch one test turn through same single-object production boundary."""
-    await controller.handle_prepared_turn(make_test_turn(room, event, requester_user_id, **kwargs))
+    """Dispatch one test turn through same single-object production boundary, claimed as ingress claims it.
+
+    A turn some live owner already holds is dispatched without a claim, so the
+    gate-exit merge meets that owner as production would.
+    """
+    turn = make_test_turn(room, event, requester_user_id, **kwargs)
+    claimed = await controller.deps.turn_store.claim(
+        TurnRecord.create(
+            turn.handled_turn.source_event_ids,
+            discovery_event_ids=turn.handled_turn.discovery_event_ids,
+            completed=False,
+        ),
+    )
+    claims = (claimed,) if isinstance(claimed, TurnClaim) else ()
+    await controller.handle_prepared_turn(replace(turn, claims=claims))
 
 
 def prepared_turn_recorder(callback: Callable[..., Awaitable[None]]) -> Callable[..., Awaitable[None]]:

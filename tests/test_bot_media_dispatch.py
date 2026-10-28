@@ -42,6 +42,7 @@ from mindroom.teams.formation import TeamResolution
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_controller import _IngressAdmissionOutcome
 from mindroom.turn_policy import PreparedDispatch
+from mindroom.turn_store import ClaimContended, TurnClaim
 from tests.bot_helpers import (
     AgentBotTestBase,
     _agent_response_handled_turn,
@@ -83,15 +84,14 @@ def mock_agent_user() -> AgentMatrixUser:
     return make_mock_agent_user()
 
 
-def _assert_ready_voice_claim_handoff(ready_event: ReadyPendingEvent | None) -> None:
-    """Assert a ready voice task transfers its source claim to the gate."""
+def _assert_ready_voice_claim_handoff(ready_event: ReadyPendingEvent | None, lane_claim: TurnClaim | None) -> None:
+    """Assert voice ingress hands its source claim to the lane, which the ready task never touches."""
     _assert_ready_voice_text_fallback(ready_event)
     assert ready_event is not None
-    claim_metadata = next(
-        item for item in ready_event.pending_event.dispatch_metadata if item.kind == "pending_turn_claim"
-    )
-    assert claim_metadata.payload == TurnRecord.create(["$voice_event"], completed=False)
-    claim_metadata.close()
+    assert ready_event.pending_event.claim is None
+    assert lane_claim is not None
+    assert lane_claim.source_event_ids == {"$voice_event"}
+    lane_claim.release()
 
 
 def _synced_room(own_user_id: str) -> nio.MatrixRoom:
@@ -245,6 +245,7 @@ class TestAgentBot(AgentBotTestBase):
         event = self._make_handler_event("voice", sender="@user:localhost", event_id="$voice_event")
         call_order: list[str] = []
         admitted_ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None
+        admitted_claim: TurnClaim | None = None
         release_stt = asyncio.Event()
 
         async def record_thread_id(_room: object, _event: object) -> str:
@@ -268,16 +269,18 @@ class TestAgentBot(AgentBotTestBase):
             source_event_id: str | None,
             source_kind: str,
             ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None,
+            claim: TurnClaim | None = None,
             **_ignored: object,
         ) -> None:
             assert ready_task is not None
-            nonlocal admitted_ready_task
+            nonlocal admitted_ready_task, admitted_claim
             call_order.append("admit")
             assert key == CoalescingKey("!test:localhost", "$thread_root", RequesterCoalescingOwner("@user:localhost"))
             assert source_event_id == "$voice_event"
             assert source_kind == VOICE_SOURCE_KIND
             assert slot.released is False
             admitted_ready_task = ready_task
+            admitted_claim = claim
 
         async def record_voice_normalization(*_args: object, **_kwargs: object) -> None:
             call_order.append("normalize")
@@ -305,7 +308,7 @@ class TestAgentBot(AgentBotTestBase):
         admitted_slot = mock_submit.call_args.args[0]
         bot._coalescing_gate.release_lane_slot(admitted_slot)
         await asyncio.wait_for(admitted_slot.settled.wait(), timeout=1.0)
-        _assert_ready_voice_claim_handoff(ready_event)
+        _assert_ready_voice_claim_handoff(ready_event, admitted_claim)
         assert call_order == ["reserve", "coalescing_thread", "admit", "normalize"]
         bot._conversation_resolver.coalescing_thread_id.assert_awaited_once_with(
             room,
@@ -341,22 +344,23 @@ class TestAgentBot(AgentBotTestBase):
 
         await resolution_started.wait()
         competing_claim = TurnRecord.create([event.event_id], completed=False)
-        assert controller.deps.turn_store.try_claim_turn(competing_claim) is False
+        assert isinstance(await controller.deps.turn_store.claim(competing_claim), ClaimContended)
 
         first.cancel()
         with pytest.raises(asyncio.CancelledError):
             await first
 
-        assert controller.deps.turn_store.try_claim_turn(competing_claim) is True
-        controller.deps.turn_store.release_pending_turn_claim(competing_claim)
+        claim = await controller.deps.turn_store.claim(competing_claim)
+        assert isinstance(claim, TurnClaim)
+        claim.release()
 
     @pytest.mark.asyncio
-    async def test_media_ingress_defers_after_competing_claim_settles_durably(
+    async def test_media_ingress_defers_to_a_competing_claim_without_resolving_media(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """A durable competing owner settles redelivery without repeating media resolution."""
+        """A redelivery a live owner holds defers at once, stays owned, and returns to the journal when that owner ends."""
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
@@ -369,24 +373,26 @@ class TestAgentBot(AgentBotTestBase):
         resolver = MagicMock(wraps=bot._conversation_resolver)
         resolver.coalescing_thread_id = AsyncMock()
         controller = replace_turn_controller_deps(bot, ingress=ingress, resolver=resolver)
-        active_claim = TurnRecord.create([event.event_id], completed=False)
-        assert controller.deps.turn_store.try_claim_turn(active_claim)
-        redelivery = asyncio.create_task(controller._handle_media_message_inner(room, event))
-        await asyncio.sleep(0)
+        active_claim = await controller.deps.turn_store.claim(TurnRecord.create([event.event_id], completed=False))
+        assert isinstance(active_claim, TurnClaim)
 
-        await controller.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
-        controller.deps.turn_store.release_pending_turn_claim(active_claim)
+        with patch.object(bot._journal_dispatcher, "retry_turn_sources") as retry_turn_sources:
+            assert await controller._handle_media_message_inner(room, event) is TurnDispatchOutcome.DEFERRED
+            resolver.coalescing_thread_id.assert_not_awaited()
+            assert controller.deps.turn_store.has_live_turn_claim(event.event_id)
+            retry_turn_sources.assert_not_called()
+            active_claim.release()
 
-        assert await redelivery is TurnDispatchOutcome.DEFERRED
-        resolver.coalescing_thread_id.assert_not_awaited()
+        retry_turn_sources.assert_called_once_with(room.room_id, (event.event_id,))
+        assert not controller.deps.turn_store.has_live_turn_claim(event.event_id)
 
     @pytest.mark.asyncio
-    async def test_media_ingress_releases_claim_when_lane_reservation_fails(
+    async def test_media_ingress_leaves_source_claimable_when_lane_reservation_fails(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Claim-and-reserve must leave the source retryable when lane creation fails."""
+        """A lane reservation that fails comes before the claim, so the source stays retryable."""
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
@@ -400,7 +406,7 @@ class TestAgentBot(AgentBotTestBase):
         gate = MagicMock(spec=CoalescingGate, wraps=bot._coalescing_gate)
 
         def reject_lane_reservation(*_args: object, **_kwargs: object) -> None:
-            assert bot._turn_store.try_claim_turn(competing_claim) is False
+            assert not bot._turn_store.has_live_turn_claim(event.event_id)
             msg = "lane unavailable"
             raise RuntimeError(msg)
 
@@ -410,8 +416,9 @@ class TestAgentBot(AgentBotTestBase):
         with pytest.raises(RuntimeError, match="lane unavailable"):
             await controller._handle_media_message_inner(room, event)
 
-        assert controller.deps.turn_store.try_claim_turn(competing_claim) is True
-        controller.deps.turn_store.release_pending_turn_claim(competing_claim)
+        claim = await controller.deps.turn_store.claim(competing_claim)
+        assert isinstance(claim, TurnClaim)
+        claim.release()
 
     @pytest.mark.asyncio
     async def test_audio_dispatch_releases_receive_order_when_target_resolution_is_cancelled(

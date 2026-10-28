@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.turn_controller import TurnController
     from mindroom.turn_policy import PreparedDispatch, ResponseAction
+    from mindroom.turn_store import TurnClaim
 
 
 class _TurnPlan(Protocol):
@@ -87,15 +88,23 @@ async def dispatch_text_message(
     controller: TurnController,
     turn: PreparedTurn,
 ) -> None:
-    """Run the normal text or command dispatch pipeline for a prepared text event."""
-    turn_claim = turn.handled_turn
-    if not controller.deps.turn_store.try_claim_turn(turn_claim):
-        return
-    claim_transferred = False
+    """Run the normal text or command dispatch pipeline for a prepared text event.
 
-    def mark_claim_transferred() -> None:
-        nonlocal claim_transferred
-        claim_transferred = True
+    The turn's per-event claims become one claim on the whole turn, which this
+    dispatch owns until a response task takes it.
+    """
+    claim = await controller.deps.turn_store.merge_claims(turn.claims, turn.handled_turn)
+    if claim is None:
+        # Another live owner shares an event, or a completed turn answered an alias: its sources go back to
+        # the journal, whose ingress decides them one by one.
+        controller.deps.retry_dispatch_sources(turn.room.room_id, turn.handled_turn.source_event_ids)
+        return
+
+    def take_claim() -> TurnClaim:
+        nonlocal claim
+        taken, claim = claim, None
+        assert taken is not None
+        return taken
 
     timing_scope_token = None
     try:
@@ -152,12 +161,11 @@ async def dispatch_text_message(
                 message_attachment_ids=message_attachment_ids,
                 trusted_attachment_ids=trusted_attachment_ids,
                 media_events=list(turn.media_events) or None,
-                turn_claim=turn_claim,
-                mark_claim_transferred=mark_claim_transferred,
+                take_claim=take_claim,
             )
     finally:
-        if not claim_transferred:
-            controller.deps.turn_store.release_pending_turn_claim(turn_claim)
+        if claim is not None:
+            claim.release()
         if timing_scope_token is not None:
             timing_scope_context.reset(timing_scope_token)
 
@@ -367,8 +375,7 @@ async def _apply_turn_plan(
     message_attachment_ids: list[str],
     trusted_attachment_ids: list[str],
     media_events: list[MediaDispatchEvent] | None,
-    turn_claim: TurnRecord,
-    mark_claim_transferred: Callable[[], None],
+    take_claim: Callable[[], TurnClaim],
 ) -> None:
     visible_responses = controller.deps.visible_responses
     if plan.kind == "ignore":
@@ -423,33 +430,19 @@ async def _apply_turn_plan(
     # The inbox handoff is complete once the runner takes the conversation's
     # response lock; the response itself keeps running on a runner-owned task.
     response_started = asyncio.Event()
-    response_claim_released = False
-
-    def release_response_claim() -> None:
-        nonlocal response_claim_released
-        if response_claim_released:
-            return
-        response_claim_released = True
-        controller.deps.turn_store.release_pending_turn_claim(turn_claim)
-
     response_task = controller.deps.response_runner.track_inbox_response(
-        _run_lazily_claimed_response(
-            controller,
-            turn_claim,
-            lambda: controller._execute_response_action(
-                room,
-                prepared.event,
-                prepared.dispatch,
-                response_action,
-                payload_inputs,
-                processing_log="Processing",
-                dispatch_started_at=prepared.dispatch_started_at,
-                handled_turn=handled_turn,
-                matrix_run_metadata=controller.deps.turn_store.build_run_metadata(handled_turn),
-                on_lifecycle_lock_acquired=response_started.set,
-                reconcile_visible_response=reconcile_visible_response,
-            ),
-            release_response_claim,
+        controller._execute_response_action(
+            room,
+            prepared.event,
+            prepared.dispatch,
+            response_action,
+            payload_inputs,
+            processing_log="Processing",
+            dispatch_started_at=prepared.dispatch_started_at,
+            handled_turn=handled_turn,
+            matrix_run_metadata=controller.deps.turn_store.build_run_metadata(handled_turn),
+            on_lifecycle_lock_acquired=response_started.set,
+            reconcile_visible_response=reconcile_visible_response,
         ),
         name=f"inbox_response:{prepared.event.event_id}",
         room_id=room.room_id,
@@ -459,13 +452,11 @@ async def _apply_turn_plan(
             if response_started.is_set()
             else None
         ),
-        on_terminal=release_response_claim,
+        # The claim moves to the response task, which releases it when it ends. If this dispatch is
+        # cancelled while waiting for the lifecycle lock, it must not reopen the source meanwhile.
+        claim=take_claim(),
         source_event_ids=handled_turn.source_event_ids,
     )
-    # Ownership moves synchronously after task creation. If this dispatch task
-    # is cancelled while waiting for the lifecycle lock, its finally block must
-    # not reopen the source while the runner-owned response still exists.
-    mark_claim_transferred()
     started_wait = asyncio.ensure_future(response_started.wait())
     try:
         await asyncio.wait({started_wait, response_task}, return_when=asyncio.FIRST_COMPLETED)
@@ -479,32 +470,6 @@ async def _apply_turn_plan(
     # own cancellation state.
     if response_task.done() and not response_task.cancelled() and not response_started.is_set():
         response_task.result()
-
-
-async def _run_claimed_response(
-    controller: TurnController,
-    turn_claim: TurnRecord,
-    response: Awaitable[None],
-    release_claim: Callable[[], None] | None = None,
-) -> None:
-    """Release exclusive response ownership after every terminal path."""
-    try:
-        await response
-    finally:
-        if release_claim is None:
-            controller.deps.turn_store.release_pending_turn_claim(turn_claim)
-        else:
-            release_claim()
-
-
-async def _run_lazily_claimed_response(
-    controller: TurnController,
-    turn_claim: TurnRecord,
-    response_factory: Callable[[], Awaitable[None]],
-    release_claim: Callable[[], None],
-) -> None:
-    """Create a claimed response only after its runner task starts."""
-    await _run_claimed_response(controller, turn_claim, response_factory(), release_claim)
 
 
 async def _run_admitted_router_relay(

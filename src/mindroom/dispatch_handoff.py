@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeGuard, cast
 
 import nio
@@ -26,10 +26,7 @@ from mindroom.matrix.media import (
 from mindroom.tool_system.events import body_without_tool_markers
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from mindroom.coalescing.batch import CoalescingKey
-    from mindroom.message_target import ResponseLifecycleKey
 
 
 # Voice messages are normalized into PreparedIngress before coalescing, so
@@ -74,28 +71,6 @@ class PreparedIngress:
     # Whom it mentions: ``None`` nobody, ``False`` this agent, ``True`` only other agents or people.
     # A message for another participant never shares a turn with messages for this agent.
     for_another_participant: bool | None = None
-
-
-@dataclass
-class PendingDispatchMetadata:
-    """Opaque metadata that must be closed if claimed work cannot dispatch."""
-
-    kind: str
-    payload: object
-    close: Callable[[], None]
-    target_key: ResponseLifecycleKey | None = None
-    _closed: bool = field(default=False, init=False, repr=False)
-
-    def finish_once(self, finish: Callable[[], None]) -> None:
-        """Finish the owned resource at most once across converging paths."""
-        if self._closed:
-            return
-        self._closed = True
-        finish()
-
-    def close_once(self) -> None:
-        """Release the owned resource at most once across converging cleanup paths."""
-        self.finish_once(self.close)
 
 
 @dataclass(frozen=True)

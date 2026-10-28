@@ -23,7 +23,6 @@ from mindroom.approval.tool_approval import (
     shutdown_approval_runtime,
 )
 from mindroom.coalescing.batch import PendingEvent, PreparedTurn, requester_coalescing_key
-from mindroom.coalescing.gate import ReadyPendingEvent
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
@@ -907,29 +906,28 @@ class TestAgentBot(AgentBotTestBase):
         )
         startup_observed = asyncio.Event()
         release_startup = asyncio.Event()
-        reservation_owner = MagicMock()
-        reservation_owner.release = AsyncMock()
-        release_count_during_startup = -1
+        ticket = MagicMock()
+        close_count_during_startup = -1
 
         async def blocked_enqueue(*_args: object, **_kwargs: object) -> None:
-            nonlocal release_count_during_startup
-            release_count_during_startup = reservation_owner.release.await_count
+            nonlocal close_count_during_startup
+            close_count_during_startup = ticket.close.call_count
             startup_observed.set()
             await release_startup.wait()
 
         replace_reaction_dispatcher_deps(
             bot,
-            reserve_prompt_ingress_order=MagicMock(return_value=reservation_owner),
+            reserve_prompt_ingress_order=MagicMock(return_value=ticket),
             enqueue_interactive_selection=blocked_enqueue,
         )
         with _mock_interactive_claim(bot, selection):
             dispatch = asyncio.create_task(_dispatch_reaction(bot, room, event))
             await startup_observed.wait()
-            assert release_count_during_startup == 0
+            assert close_count_during_startup == 0
             release_startup.set()
             await dispatch
 
-        reservation_owner.release.assert_awaited_once()
+        ticket.close.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_interactive_reaction_waits_for_earlier_same_thread_ingress(
@@ -982,11 +980,9 @@ class TestAgentBot(AgentBotTestBase):
             requester_user_id="@user:localhost",
             source_kind=MESSAGE_SOURCE_KIND,
         )
-        await earlier_owner.admit(
+        earlier_owner.admit(
             requester_coalescing_key(room.room_id, "$thread-a", "@user:localhost"),
-            source_event_id=earlier_event.event_id,
-            source_kind=MESSAGE_SOURCE_KIND,
-            ready_result=ReadyPendingEvent(pending_event=PendingEvent(event=earlier_event, room=room)),
+            PendingEvent(event=earlier_event, room=room),
         )
 
         try:
@@ -2026,7 +2022,7 @@ class TestAgentBot(AgentBotTestBase):
                 try:
                     assert reaction_slots[0].receipt_time < later_owner.slot.receipt_time
                 finally:
-                    await later_owner.release()
+                    later_owner.close()
             finally:
                 release_approval.set()
                 await reaction_task

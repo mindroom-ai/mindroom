@@ -177,6 +177,7 @@ from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
     initialize_approval_store_for_test,
     install_model_providers,
+    live_turn_claim,
     live_turn_tools_for_test,
     make_matrix_client_mock,
     make_visible_message,
@@ -186,6 +187,7 @@ from tests.conftest import (
     replace_response_runner_deps,
     request_envelope,
     seed_session,
+    turn_claim_is_live,
     unwrap_extracted_collaborator,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer
@@ -303,20 +305,16 @@ async def test_process_shutdown_releases_claim_when_response_never_starts() -> N
     """Task-lifetime cleanup must release a claim before recovery proof."""
     runner = ResponseRunner(deps=MagicMock())
     response_started = False
-    claim_live = True
+    claim = live_turn_claim("$source")
     proof_claim_states: list[bool] = []
 
     async def never_started_response() -> None:
         nonlocal response_started
         response_started = True
 
-    def release_claim() -> None:
-        nonlocal claim_live
-        claim_live = False
-
     def recovery_proof_ready() -> bool:
-        proof_claim_states.append(claim_live)
-        return not claim_live
+        proof_claim_states.append(turn_claim_is_live(claim))
+        return not turn_claim_is_live(claim)
 
     response = never_started_response()
     try:
@@ -324,7 +322,7 @@ async def test_process_shutdown_releases_claim_when_response_never_starts() -> N
             response,
             name="test_never_started_claimed_response",
             recovery_proof_ready=recovery_proof_ready,
-            on_terminal=release_claim,
+            claim=claim,
             room_id=_target().room_id,
         )
     except BaseException:
@@ -339,9 +337,67 @@ async def test_process_shutdown_releases_claim_when_response_never_starts() -> N
     await asyncio.gather(response_task, return_exceptions=True)
 
     assert response_started is False
-    assert claim_live is False
+    assert not turn_claim_is_live(claim)
     assert proof_claim_states == [False]
     assert runner.pending_inbox_response_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_before_start", [False, True])
+async def test_inbox_response_releases_its_claim_before_its_sources_return_to_the_journal(
+    *,
+    cancel_before_start: bool,
+) -> None:
+    """A retried source must not meet the claim of the response that just ended, however early that response ended."""
+    deps = MagicMock()
+    deps.replies.waits_to_claim.return_value = False
+    claim = live_turn_claim("$source")
+    claim_live_at_retry: list[bool] = []
+    deps.retry_approval_sources.side_effect = lambda _room_id, _sources: claim_live_at_retry.append(
+        turn_claim_is_live(claim),
+    )
+    runner = ResponseRunner(deps=deps)
+    held = asyncio.Event()
+
+    async def response() -> None:
+        assert turn_claim_is_live(claim), "a running response owns its claim"
+        held.set()
+
+    task = runner.track_inbox_response(
+        response(),
+        name="inbox_response:$source",
+        recovery_proof_ready=lambda: True,
+        claim=claim,
+        source_event_ids=("$source",),
+        room_id=_target().room_id,
+    )
+    if cancel_before_start:
+        task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    assert held.is_set() is not cancel_before_start
+    assert claim_live_at_retry == [False]
+
+
+@pytest.mark.asyncio
+async def test_inbox_response_refused_at_shutdown_releases_its_claim() -> None:
+    """A response refused because shutdown began never runs, so the claim handed to it goes back at once."""
+    runner = ResponseRunner(deps=MagicMock())
+    runner.begin_process_shutdown()
+    claim = live_turn_claim("$source")
+    response = asyncio.sleep(0)
+
+    with pytest.raises(ResponseAdmissionRefusedError):
+        runner.track_inbox_response(
+            response,
+            name="inbox_response:$source",
+            recovery_proof_ready=lambda: True,
+            claim=claim,
+            room_id=_target().room_id,
+        )
+
+    assert not turn_claim_is_live(claim)
 
 
 @pytest.mark.asyncio
@@ -6552,7 +6608,7 @@ async def test_queued_human_notice_is_registered_exactly_once() -> None:
         is None
     )
     assert queued_signal.pending_human_messages == 1
-    reservation.consume()
+    reservation.release()
     assert queued_signal.pending_human_messages == 0
 
     async def second_turn(_target: MessageTarget) -> str:

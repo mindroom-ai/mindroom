@@ -723,6 +723,11 @@ class AgentBot:
                     agent_name=self.agent_name,
                     redaction_target=replayable_redaction_target,
                 ),
+                # Resolved late: the dispatcher is built after the turn store.
+                retry_dispatch_sources=lambda room_id, event_ids: self._journal_dispatcher.retry_turn_sources(
+                    room_id,
+                    event_ids,
+                ),
             ),
         )
         self._journal_dispatcher = JournalDispatcher(
@@ -2531,14 +2536,14 @@ class AgentBot:
             )
             approval_reply_claimed = True
 
-        early_reservation_owner = None
+        early_ticket = None
         approval_reply_to_event_id = EventInfo.from_event(event.source).reply_to_event_id
         if approval_reply_to_event_id is not None and is_process_active_approval_card(approval_reply_to_event_id):
             requester_user_id = self._ingress_validator.requester_user_id(
                 sender=event.sender,
                 source=event.source,
             )
-            early_reservation_owner = self._turn_controller.reserve_prompt_ingress_order(
+            early_ticket = self._turn_controller.reserve_prompt_ingress_order(
                 room,
                 requester_user_id,
                 receipt_time=receipt_time,
@@ -2562,11 +2567,11 @@ class AgentBot:
                 room,
                 event,
                 receipt_time=receipt_time,
-                reservation_owner=early_reservation_owner,
+                ticket=early_ticket,
             )
         finally:
-            if early_reservation_owner is not None:
-                await early_reservation_owner.release()
+            if early_ticket is not None:
+                early_ticket.close()
 
     async def _on_redaction(self, room: nio.MatrixRoom, event: nio.Event) -> None:
         """Tombstone the redacted source so no replay reruns the turn it started.

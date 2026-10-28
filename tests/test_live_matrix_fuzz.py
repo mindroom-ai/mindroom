@@ -79,7 +79,7 @@ import json
 import shutil
 from collections import defaultdict
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import scripts.testing.fuzz_live_matrix as live_fuzz
 from mindroom.constants import SOURCE_KIND_KEY
@@ -6064,6 +6064,7 @@ async def test_unconsumed_edit_physical_tombstone_settles_checkpoint(
             resolver=Mock(),
             tool_runtime=Mock(),
             response_recovery_state=AsyncMock(),
+            retry_dispatch_sources=MagicMock(),
         ),
     )
     try:

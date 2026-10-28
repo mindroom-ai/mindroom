@@ -38,8 +38,8 @@ from .batch import (
 from .cleanup import (
     ClaimedSegmentOwner,
     ReadyPendingEvent,
-    close_pending_event_metadata_once,
-    close_ready_task_result_metadata,
+    close_pending_events,
+    close_ready_result,
 )
 from .ingress_lanes import IngressAdmissionClosedError, IngressLanes, LaneSlot, ReceiptLaneKey
 from .policy import (
@@ -54,6 +54,8 @@ from .policy import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
+    from mindroom.turn_store import TurnClaim
+
     from .ingress_lanes import LaneDelivery
 
 __all__ = [
@@ -62,7 +64,7 @@ __all__ = [
     "IngressAdmissionClosedError",
     "LaneSlot",
     "ReadyPendingEvent",
-    "close_ready_task_result_metadata",
+    "close_ready_result",
     "is_coalescing_exempt_source_kind",
 ]
 
@@ -347,6 +349,7 @@ class CoalescingGate:
         source_kind: str,
         ready_result: ReadyPendingEvent | None = None,
         ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None,
+        claim: TurnClaim | None = None,
         received_at: float | None = None,
     ) -> None:
         """Load one lane slot with its resolved conversation key and ready payload."""
@@ -357,6 +360,7 @@ class CoalescingGate:
             source_kind=source_kind,
             ready_result=ready_result,
             ready_task=ready_task,
+            claim=claim,
             received_at=received_at,
             busy_at_submit=self._conversation_is_busy(key),
         )
@@ -1076,13 +1080,13 @@ class CoalescingGate:
             ):
                 await self._dispatch_events(key, gate, segment_owner.pending_events)
         except asyncio.CancelledError:
-            segment_owner.close_metadata_once()
+            segment_owner.close_once()
             # Bounded abandonment clears drain_task after accounting for cancellation.
             if gate.drain_task is not None and (drain_context := self._current_drain_context(gate)) is not None:
                 drain_context.result.dispatch_cancelled_count += 1
             raise
         except Exception as error:
-            segment_owner.close_metadata_once()
+            segment_owner.close_once()
             drain_context = self._current_drain_context(gate)
             if type(error) is ResponseAdmissionRefusedError and (
                 self._is_shutting_down()
@@ -1113,8 +1117,8 @@ class CoalescingGate:
             dispatched = await self._dispatch_claimed_events(key, gate, segment_owner)
         except BaseException:
             if segment_owner is not None:
-                closed_before = segment_owner.metadata_closed
-                segment_owner.close_metadata_once()
+                closed_before = segment_owner.closed
+                segment_owner.close_once()
                 if not closed_before and (drain_context := self._current_drain_context(gate)) is not None:
                     drain_context.result.dropped_ready_count += len(segment_owner.pending_events)
             raise
@@ -1154,7 +1158,7 @@ class CoalescingGate:
         key, gate = self._root_dispatches.pop(task)
         # A task cancelled before its first step never enters _dispatch_claim.
         if gate.claimed_admissions:
-            close_pending_event_metadata_once([queued.pending_event for queued in gate.claimed_admissions])
+            close_pending_events([queued.pending_event for queued in gate.claimed_admissions])
         if not task.cancelled() and (error := task.exception()) is not None:
             if (context := self._current_drain_context(gate)) is not None:
                 context.result.dispatch_failure_count += 1
@@ -1394,7 +1398,7 @@ class _CoalescingDrainCoordinator:
                 gate.drain_task = None
             admissions = [*gate.claimed_admissions, *gate.queue]
             for queued in admissions:
-                close_pending_event_metadata_once([queued.pending_event])
+                queued.pending_event.close()
                 dropped_ready_count += 1
             gate.claimed_admissions = []
             gate.queue.clear()

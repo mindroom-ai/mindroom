@@ -270,12 +270,14 @@ async def _enqueue_for_dispatch(
             source=event.source,
             server_timestamp=event.server_timestamp,
         )
-    reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, requester_user_id)
+    ticket = bot._turn_controller.reserve_prompt_ingress_order(room, requester_user_id)
     try:
+        # Ingress claims a source before it reaches the gate.
+        assert await ticket.claim_turn(TurnRecord.create([event.event_id], completed=False)) is None
         return await bot._turn_controller._enqueue_for_dispatch(
             event,
             room,
-            reservation_owner=reservation_owner,
+            ticket=ticket,
             source_kind=source_kind,
             requester_user_id=requester_user_id,
             dispatch_policy_source_kind=dispatch_policy_source_kind,
@@ -285,7 +287,7 @@ async def _enqueue_for_dispatch(
             trust_internal_payload_metadata=trust_internal_payload_metadata,
         )
     finally:
-        await reservation_owner.release()
+        ticket.close()
 
 
 async def _admit_ready(
@@ -380,7 +382,7 @@ async def test_duplicate_delivery_is_claimed_before_dispatch_resolution(tmp_path
             await first
 
     plan_turn.assert_awaited_once()
-    duplicate_reservation.cancel.assert_called_once_with()
+    duplicate_reservation.release.assert_called_once_with()
 
 
 async def _wait_for(condition: Callable[[], bool]) -> None:
@@ -2423,7 +2425,7 @@ async def test_command_executes_immediately_despite_unresolved_ingress(tmp_path:
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
+    ticket = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
     try:
         with patch(
             "mindroom.turn_controller.dispatch_text_message",
@@ -2433,7 +2435,7 @@ async def test_command_executes_immediately_despite_unresolved_ingress(tmp_path:
 
         assert calls == [("!help", ["$cmd"])]
     finally:
-        await reservation_owner.release()
+        ticket.close()
 
 
 @pytest.mark.asyncio
@@ -7573,14 +7575,14 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
             new=AsyncMock(side_effect=record_payload_request),
         ),
     ):
-        reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
+        ticket = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
         handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
             room,
             _PrecheckedEvent(event=sidecar_event, requester_user_id="@user:localhost"),
-            reservation_owner=reservation_owner,
+            ticket=ticket,
             coalescing_thread_id="$thread",
         )
-        await reservation_owner.release()
+        ticket.close()
         await bot._coalescing_gate.drain_all()
 
     assert handled is _IngressAdmissionOutcome.DEFERRED
@@ -7734,11 +7736,11 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
             new=AsyncMock(side_effect=RuntimeError("dispatch failed")),
         ),
     ):
-        reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, sidecar.sender)
+        ticket = bot._turn_controller.reserve_prompt_ingress_order(room, sidecar.sender)
         outcome = await bot._turn_controller._dispatch_file_sidecar_text_preview(
             room,
             _PrecheckedEvent(event=sidecar, requester_user_id=sidecar.sender),
-            reservation_owner=reservation_owner,
+            ticket=ticket,
             coalescing_thread_id=None,
         )
         drain_result = await bot._coalescing_gate.drain_all()

@@ -62,9 +62,9 @@ from mindroom.response_runner import (
 from mindroom.response_sources import ResponseSources
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamResolution, TeamResolutionMember
 from mindroom.teams.spec import TeamMode
-from mindroom.text_ingress_dispatch import _run_claimed_response
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
+from mindroom.turn_store import ClaimContended, TurnClaim
 from mindroom.voice.readiness import VoiceReadiness
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import (
@@ -169,9 +169,6 @@ class TestAgentBot(AgentBotTestBase):
             body="🎤 [Attached voice message]",
             source=voice_event.source,
         )
-        turn_claim = TurnRecord.create([voice_event.event_id], completed=False)
-        assert controller.deps.turn_store.try_claim_turn(turn_claim)
-
         with (
             patch.object(
                 InboundTurnNormalizer,
@@ -205,7 +202,6 @@ class TestAgentBot(AgentBotTestBase):
                 ),
                 coalescing_thread_id="$thread-root",
                 dispatch_timing=None,
-                turn_claim=turn_claim,
             )
 
         await_publication.assert_awaited_once_with(
@@ -217,8 +213,6 @@ class TestAgentBot(AgentBotTestBase):
         assert checkpoint is not None
         assert checkpoint.body == "🎤 [Attached voice message]"
         assert checkpoint.coalescing_thread_id == "$thread-root"
-        assert controller.deps.turn_store.try_claim_turn(turn_claim)
-        controller.deps.turn_store.release_pending_turn_claim(turn_claim)
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_sends_visible_rejection_for_unsupported_team_request(
@@ -269,10 +263,10 @@ class TestAgentBot(AgentBotTestBase):
         handled_turn = TurnRecord.create([event.event_id], completed=False)
         turn_store = unwrap_extracted_collaborator(bot._turn_store)
         controller = unwrap_extracted_collaborator(bot._turn_controller)
-        assert turn_store.try_claim_turn(handled_turn)
+        claim = await turn_store.claim(handled_turn)
+        assert isinstance(claim, TurnClaim)
         send_started = asyncio.Event()
         release_send = asyncio.Event()
-        wait_started = asyncio.Event()
 
         bot.client = AsyncMock(spec=nio.AsyncClient)
 
@@ -281,34 +275,29 @@ class TestAgentBot(AgentBotTestBase):
             await release_send.wait()
             return "$reply"
 
-        async def wait_for_settlement() -> None:
-            wait_started.set()
-            await turn_store.wait_for_turn_settled(handled_turn.indexed_event_ids)
-
         with patch.object(DeliveryGateway, "send_text", new=AsyncMock(side_effect=send_rejection)) as send_text:
-            response_task = asyncio.create_task(
-                _run_claimed_response(
-                    controller,
-                    handled_turn,
-                    controller._execute_response_action(
-                        room,
-                        event,
-                        dispatch,
-                        action,
-                        DispatchPayloadInputs((), (), ()),
-                        processing_log="processing",
-                        dispatch_started_at=0.0,
-                        handled_turn=handled_turn,
-                    ),
+            response_task = bot._response_runner.track_inbox_response(
+                controller._execute_response_action(
+                    room,
+                    event,
+                    dispatch,
+                    action,
+                    DispatchPayloadInputs((), (), ()),
+                    processing_log="processing",
+                    dispatch_started_at=0.0,
+                    handled_turn=handled_turn,
                 ),
+                name="inbox_response:$event",
+                room_id=room.room_id,
+                recovery_proof_ready=lambda: True,
+                claim=claim,
             )
-            waiter = asyncio.create_task(wait_for_settlement())
             await send_started.wait()
-            await wait_started.wait()
-            assert not waiter.done()
+            assert turn_store.has_live_turn_claim(event.event_id), "the response owns its turn while it delivers"
             release_send.set()
             await response_task
-            await waiter
+            await asyncio.sleep(0)
+            assert not turn_store.has_live_turn_claim(event.event_id)
 
         send_text.assert_awaited_once()
         delivered_request = send_text.await_args.args[0]
@@ -1184,7 +1173,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
-            reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
+            ticket = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
             await bot._turn_controller._enqueue_for_dispatch(
                 PreparedIngress(
                     sender=event.sender,
@@ -1196,9 +1185,9 @@ class TestAgentBot(AgentBotTestBase):
                 room,
                 source_kind=MESSAGE_SOURCE_KIND,
                 requester_user_id="@user:localhost",
-                reservation_owner=reservation_owner,
+                ticket=ticket,
             )
-            await asyncio.wait_for(reservation_owner.slot.settled.wait(), timeout=1.0)
+            await asyncio.wait_for(ticket.slot.settled.wait(), timeout=1.0)
 
         mock_dispatch.assert_not_awaited()
         mock_admit.assert_awaited_once()
@@ -1470,12 +1459,13 @@ class TestAgentBot(AgentBotTestBase):
             task = asyncio.create_task(bot._on_message(room, event))
             await _first_of(ingress_started.wait(), task)
             competing_claim = TurnRecord.create([event.event_id], completed=False)
-            assert bot._turn_store.try_claim_turn(competing_claim) is False
+            assert isinstance(await bot._turn_store.claim(competing_claim), ClaimContended)
             release_ingress.set()
             await task
 
-        assert bot._turn_store.try_claim_turn(competing_claim) is True
-        bot._turn_store.release_pending_turn_claim(competing_claim)
+        claim = await bot._turn_store.claim(competing_claim)
+        assert isinstance(claim, TurnClaim)
+        claim.release()
 
     @pytest.mark.asyncio
     async def test_router_relay_marks_original_alias_unsettled_before_first_async_preparation(
@@ -1512,19 +1502,11 @@ class TestAgentBot(AgentBotTestBase):
             # this waiting forever on a task that already finished, and the
             # real error is never read. Racing the two surfaces it instead.
             await _first_of(ingress_started.wait(), task)
-            wait_started = asyncio.Event()
-
-            async def wait_for_alias() -> None:
-                wait_started.set()
-                await bot._turn_store.wait_for_turn_settled(("$user_msg:localhost",))
-
-            waiter = asyncio.create_task(wait_for_alias())
-            await wait_started.wait()
-            assert not waiter.done()
+            assert bot._turn_store.has_live_turn_claim("$user_msg:localhost")
             release_ingress.set()
             await task
 
-        await waiter
+        assert not bot._turn_store.has_live_turn_claim("$user_msg:localhost")
 
     @pytest.mark.asyncio
     async def test_handle_message_inner_enqueues_active_thread_follow_up_as_coalescible_gate_event(
@@ -1638,13 +1620,9 @@ class TestAgentBot(AgentBotTestBase):
         assert pending_event.event.body == event.body
         assert pending_event.event.source_kind == MESSAGE_SOURCE_KIND
         assert pending_event.event.dispatch_policy_source_kind is None
-        assert {item.kind for item in pending_event.dispatch_metadata} == {
-            "pending_turn_claim",
-            "queued_notice_reservation",
-        }
-        metadata = next(item for item in pending_event.dispatch_metadata if item.kind == "queued_notice_reservation")
-        assert metadata.kind == "queued_notice_reservation"
-        assert metadata.payload is mock_reserve_waiting_human_message.return_value
+        assert pending_event.claim is not None
+        assert pending_event.claim.source_event_ids == {event.event_id}
+        assert pending_event.notice is mock_reserve_waiting_human_message.return_value
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("mention_kind", ["other_agent", "joined_human"])
@@ -1696,22 +1674,22 @@ class TestAgentBot(AgentBotTestBase):
             ) as reserve_waiting_human_message,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as admit,
         ):
-            reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
+            ticket = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
             outcome = await bot._turn_controller._dispatch_prepared_text_like_ingress(
                 room=room,
                 prepared_event=prepared_event,
                 requester_user_id="@user:localhost",
-                reservation_owner=reservation_owner,
+                ticket=ticket,
                 coalescing_thread_id="$thread_root:localhost",
             )
-            await asyncio.wait_for(reservation_owner.slot.settled.wait(), timeout=1.0)
+            await asyncio.wait_for(ticket.slot.settled.wait(), timeout=1.0)
 
         assert outcome is _IngressAdmissionOutcome.DEFERRED
         reserve_waiting_human_message.assert_not_called()
         admit.assert_awaited_once()
         ready_result = admit.await_args.kwargs["ready_result"]
         assert isinstance(ready_result, ReadyPendingEvent)
-        assert all(item.kind != "queued_notice_reservation" for item in ready_result.pending_event.dispatch_metadata)
+        assert ready_result.pending_event.notice is None
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("target_kind", ["self", "none", "absent_human"])
@@ -1762,22 +1740,22 @@ class TestAgentBot(AgentBotTestBase):
             ) as reserve_waiting_human_message,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as admit,
         ):
-            reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
+            ticket = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
             outcome = await bot._turn_controller._dispatch_prepared_text_like_ingress(
                 room=room,
                 prepared_event=prepared_event,
                 requester_user_id="@user:localhost",
-                reservation_owner=reservation_owner,
+                ticket=ticket,
                 coalescing_thread_id="$thread_root:localhost",
             )
-            await asyncio.wait_for(reservation_owner.slot.settled.wait(), timeout=1.0)
+            await asyncio.wait_for(ticket.slot.settled.wait(), timeout=1.0)
 
         assert outcome is _IngressAdmissionOutcome.DEFERRED
         reserve_waiting_human_message.assert_called_once()
         admit.assert_awaited_once()
         ready_result = admit.await_args.kwargs["ready_result"]
         assert isinstance(ready_result, ReadyPendingEvent)
-        assert any(item.kind == "queued_notice_reservation" for item in ready_result.pending_event.dispatch_metadata)
+        assert ready_result.pending_event.notice is not None
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("source_kind", ["hook", "hook_dispatch"])
@@ -1900,17 +1878,16 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_reserve_waiting_human_message,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
-            reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
-            turn_claim = TurnRecord.create([voice_event.event_id], completed=False)
-            assert bot._turn_store.try_claim_turn(turn_claim)
+            ticket = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
+            assert await ticket.claim_turn(TurnRecord.create([voice_event.event_id], completed=False)) is None
+            turn_claim = ticket.claim
             await bot._turn_controller._on_audio_media_message(
                 room,
                 _PrecheckedEvent(event=voice_event, requester_user_id="@user:localhost"),
                 dispatch_timing=None,
-                reservation_owner=reservation_owner,
-                turn_claim=turn_claim,
+                ticket=ticket,
             )
-            await asyncio.wait_for(reservation_owner.slot.settled.wait(), timeout=1.0)
+            await asyncio.wait_for(ticket.slot.settled.wait(), timeout=1.0)
             mock_admit.assert_awaited_once()
             key = mock_admit.await_args.args[0]
             assert key == CoalescingKey(room.room_id, "$thread_root", RequesterCoalescingOwner("@user:localhost"))
@@ -1929,13 +1906,10 @@ class TestAgentBot(AgentBotTestBase):
         assert pending_event.event.body == prepared_event.body
         assert pending_event.event.source_kind == VOICE_SOURCE_KIND
         assert pending_event.event.dispatch_policy_source_kind is None
-        assert len(pending_event.dispatch_metadata) == 2
-        metadata = next(item for item in pending_event.dispatch_metadata if item.kind == "queued_notice_reservation")
-        assert metadata.kind == "queued_notice_reservation"
-        assert metadata.payload is mock_reserve_waiting_human_message.return_value
-        claim_metadata = next(item for item in pending_event.dispatch_metadata if item.kind == "pending_turn_claim")
-        assert claim_metadata.payload == turn_claim
-        claim_metadata.close()
+        assert pending_event.notice is mock_reserve_waiting_human_message.return_value
+        assert pending_event.claim is turn_claim, "the lane hands the voice claim to the ready event"
+        pending_event.close()
+        assert not bot._turn_store.has_live_turn_claim(voice_event.event_id)
 
     @pytest.mark.asyncio
     async def test_file_sidecar_text_preview_enqueues_prepared_text(
@@ -2008,14 +1982,14 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
-            reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
+            ticket = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
             handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
                 room,
                 _PrecheckedEvent(event=sidecar_event, requester_user_id="@user:localhost"),
-                reservation_owner=reservation_owner,
+                ticket=ticket,
                 coalescing_thread_id="$thread_root",
             )
-            await asyncio.wait_for(reservation_owner.slot.settled.wait(), timeout=1.0)
+            await asyncio.wait_for(ticket.slot.settled.wait(), timeout=1.0)
 
         assert handled is _IngressAdmissionOutcome.DEFERRED
         mock_dispatch.assert_not_awaited()
@@ -2117,14 +2091,14 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
-            reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
+            ticket = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
             handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
                 room,
                 _PrecheckedEvent(event=sidecar_event, requester_user_id="@user:localhost"),
-                reservation_owner=reservation_owner,
+                ticket=ticket,
                 coalescing_thread_id="$thread_root",
             )
-            await asyncio.wait_for(reservation_owner.slot.settled.wait(), timeout=1.0)
+            await asyncio.wait_for(ticket.slot.settled.wait(), timeout=1.0)
 
         assert handled is _IngressAdmissionOutcome.DEFERRED
         mock_dispatch.assert_not_awaited()
@@ -2141,10 +2115,8 @@ class TestAgentBot(AgentBotTestBase):
         assert pending_event.event.body == prepared_event.body
         assert pending_event.event.source_kind == MESSAGE_SOURCE_KIND
         assert pending_event.event.dispatch_policy_source_kind is None
-        assert len(pending_event.dispatch_metadata) == 1
-        metadata = pending_event.dispatch_metadata[0]
-        assert metadata.kind == "queued_notice_reservation"
-        assert metadata.payload is mock_reserve_waiting_human_message.return_value
+        assert pending_event.claim is None
+        assert pending_event.notice is mock_reserve_waiting_human_message.return_value
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_team_defers_placeholder_creation_to_coordinator(

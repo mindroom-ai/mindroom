@@ -5,15 +5,13 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -56,7 +54,6 @@ from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
 from mindroom.session_storage.types import ConversationSession
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamResolution, TeamResolutionMember
 from mindroom.teams.spec import TeamMode
-from mindroom.text_ingress_dispatch import _run_claimed_response
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import (
     PreparedVoiceSource,
@@ -64,7 +61,15 @@ from mindroom.turn_record import (
     RevisionSnapshotChangedError,
     canonicalize_turn_record,
 )
-from mindroom.turn_store import TurnStore, TurnStoreDeps, _recovery_gap, _RecoveryGap
+from mindroom.turn_store import (
+    ClaimContended,
+    ClaimRefused,
+    TurnClaim,
+    TurnStore,
+    TurnStoreDeps,
+    _recovery_gap,
+    _RecoveryGap,
+)
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -110,6 +115,7 @@ async def _store(journal_store: EventJournalStore, *, agent_name: str = "agent")
                 agent_name=agent_name,
                 redaction_target=replayable_redaction_target,
             ),
+            retry_dispatch_sources=MagicMock(),
         ),
     )
     await store.warm()
@@ -158,6 +164,7 @@ def test_a_team_reply_records_the_history_scope_of_the_members_it_formed_with(tm
             resolver=MagicMock(),
             tool_runtime=MagicMock(),
             response_recovery_state=AsyncMock(),
+            retry_dispatch_sources=MagicMock(),
         ),
     )
 
@@ -392,6 +399,7 @@ async def _store_with_storage(
             resolver=MagicMock(),
             tool_runtime=MagicMock(),
             response_recovery_state=AsyncMock(),
+            retry_dispatch_sources=MagicMock(),
         ),
     )
     await store.warm()
@@ -836,16 +844,16 @@ async def test_a_live_claim_is_observable_without_waiting_for_it(journal_store: 
     turn has to be able to ask without joining the wait.
     """
     store = await _store(journal_store)
-    claim = TurnRecord.create(("$source",), discovery_event_ids=("$alias",), completed=False)
 
     assert store.has_live_turn_claim("$source") is False
 
-    assert store.try_claim_turn(claim) is True
+    claim = await store.claim(TurnRecord.create(("$source",), discovery_event_ids=("$alias",), completed=False))
+    assert isinstance(claim, TurnClaim)
     assert store.has_live_turn_claim("$source") is True
     assert store.has_live_turn_claim("$alias") is True, "an alias is indexed by the same claim"
     assert store.has_live_turn_claim("$unrelated") is False
 
-    store.release_pending_turn_claim(claim)
+    claim.release()
 
     assert store.has_live_turn_claim("$source") is False
     assert store.has_live_turn_claim("$alias") is False
@@ -856,40 +864,72 @@ async def test_pending_turn_claim_allows_only_one_concurrent_owner(journal_store
     """Overlapping delivery of one source event must start one response."""
     store = await _store(journal_store)
     turn = TurnRecord.create(["$source"], completed=False)
-    barrier = threading.Barrier(8)
-    claims = [False] * barrier.parties
 
-    def claim(index: int) -> None:
-        barrier.wait()
-        claims[index] = store.try_claim_turn(turn)
+    results = await asyncio.gather(*(store.claim(turn) for _ in range(8)))
 
-    threads = [threading.Thread(target=claim, args=(index,)) for index in range(barrier.parties)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-
-    assert sum(claims) == 1
-    store.release_pending_turn_claim(turn)
-    assert store.try_claim_turn(turn) is True
+    owners = [result for result in results if isinstance(result, TurnClaim)]
+    assert len(owners) == 1
+    assert all(result.blocking is owners[0] for result in results if isinstance(result, ClaimContended))
+    owners[0].release()
+    assert isinstance(await store.claim(turn), TurnClaim)
 
 
 @pytest.mark.asyncio
 async def test_discovery_alias_allows_original_but_excludes_second_relay(journal_store: EventJournalStore) -> None:
     """One human original may overlap its relay, but two relays for it may not."""
     store = await _store(journal_store)
-    original = TurnRecord.create(["$human"], completed=False)
-    first_relay = TurnRecord.create(["$relay-one"], discovery_event_ids=["$human"], completed=False)
+    original = await store.claim(TurnRecord.create(["$human"], completed=False))
+    first_relay = await store.claim(
+        TurnRecord.create(["$relay-one"], discovery_event_ids=["$human"], completed=False),
+    )
     duplicate_relay = TurnRecord.create(["$relay-two"], discovery_event_ids=["$human"], completed=False)
+    assert isinstance(original, TurnClaim)
+    assert isinstance(first_relay, TurnClaim)
 
-    assert store.try_claim_turn(original) is True
-    assert store.try_claim_turn(first_relay) is True
-    assert store.try_claim_turn(duplicate_relay) is False
+    assert await store.claim(duplicate_relay) == ClaimContended(first_relay)
 
-    store.release_pending_turn_claim(first_relay)
-    assert store.try_claim_turn(duplicate_relay) is True
-    store.release_pending_turn_claim(duplicate_relay)
-    store.release_pending_turn_claim(original)
+    first_relay.release()
+    duplicate = await store.claim(duplicate_relay)
+    assert isinstance(duplicate, TurnClaim)
+    duplicate.release()
+    original.release()
+
+
+@pytest.mark.asyncio
+async def test_a_stale_release_cannot_drop_another_owners_equal_claim(journal_store: EventJournalStore) -> None:
+    """Release is by handle: a finished owner releasing again leaves the next owner of the same turn alone."""
+    store = await _store(journal_store)
+    turn = TurnRecord.create(["$source"], discovery_event_ids=["$alias"], completed=False)
+    first = await store.claim(turn)
+    assert isinstance(first, TurnClaim)
+    first.release()
+    second = await store.claim(turn)
+    assert isinstance(second, TurnClaim)
+
+    first.release()
+
+    assert store.has_live_turn_claim("$source") is True
+    assert await store.claim(turn) == ClaimContended(second)
+    second.release()
+    assert store.has_live_turn_claim("$source") is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [asyncio.CancelledError, RuntimeError])
+async def test_a_claim_whose_alias_lookup_fails_leaks_nothing(
+    journal_store: EventJournalStore,
+    failure: type[BaseException],
+) -> None:
+    """A claim published before its alias-owner lookup is released when the lookup is cancelled or fails."""
+    store = await _store(journal_store)
+    turn = TurnRecord.create(["$relay"], discovery_event_ids=["$human"], completed=False)
+
+    with patch.object(store, "get_turn_record", side_effect=failure("lookup failed")), pytest.raises(failure):
+        await store.claim(turn)
+
+    assert store.has_live_turn_claim("$relay") is False
+    assert store.has_live_turn_claim("$human") is False
+    assert isinstance(await store.claim(turn), TurnClaim)
 
 
 @pytest.mark.asyncio
@@ -903,11 +943,32 @@ async def test_same_turn_can_reclaim_its_handled_alias(
     store = await _store(journal_store)
     completed = TurnRecord.create(["$relay"], discovery_event_ids=["$human"])
     await store.record_turn(completed)
-    claim = replace(completed, completed=completed_claim)
 
-    assert store.try_claim_turn(claim) is True
+    claim = await store.claim(replace(completed, completed=completed_claim))
 
-    store.release_pending_turn_claim(claim)
+    assert isinstance(claim, TurnClaim)
+    claim.release()
+
+
+@pytest.mark.asyncio
+async def test_a_duplicate_of_an_answered_relay_is_refused(journal_store: EventJournalStore) -> None:
+    """A second relay of an original another relay answered may not claim, and holds nothing."""
+    store = await _store(journal_store)
+    await store.record_turn(TurnRecord.create(["$relay-one"], discovery_event_ids=["$human"]))
+
+    refused = await store.claim(TurnRecord.create(["$relay-two"], discovery_event_ids=["$human"], completed=False))
+
+    assert refused == ClaimRefused()
+    assert store.has_live_turn_claim("$relay-two") is False
+
+
+@pytest.mark.asyncio
+async def test_a_turn_without_sources_is_refused(journal_store: EventJournalStore) -> None:
+    """Only physical sources make a turn claimable; a turn without any holds nothing, not even its aliases."""
+    store = await _store(journal_store)
+
+    assert await store.claim(TurnRecord.create([], discovery_event_ids=["$alias"], completed=False)) == ClaimRefused()
+    assert store.has_live_turn_claim("$alias") is False
 
 
 @pytest.mark.asyncio
@@ -923,139 +984,139 @@ async def test_pending_coalesced_turn_can_reclaim_tombstoned_alias(journal_store
     await store.record_pending_turn(pending)
 
     assert store.is_handled("$human-two") is True
-    assert store.try_claim_turn(pending) is True
-
-    store.release_pending_turn_claim(pending)
-
-
-@pytest.mark.asyncio
-async def test_turn_settlement_waits_for_pending_claim_release(journal_store: EventJournalStore) -> None:
-    """A waiter should remain blocked until response ownership reaches its existing release seam."""
-    store = await _store(journal_store)
-    turn = TurnRecord.create(["$source"], completed=False)
-    assert store.try_claim_turn(turn) is True
-    wait_started = asyncio.Event()
-
-    async def wait_for_settlement() -> None:
-        wait_started.set()
-        await store.wait_for_turn_settled(turn.indexed_event_ids)
-
-    waiter = asyncio.create_task(wait_for_settlement())
-    await wait_started.wait()
-    assert not waiter.done()
-
-    store.release_pending_turn_claim(turn)
-    await waiter
+    claim = await store.claim(pending)
+    assert isinstance(claim, TurnClaim)
+    claim.release()
 
 
 @pytest.mark.asyncio
-async def test_distinct_physical_claims_can_share_alias_until_both_settle(journal_store: EventJournalStore) -> None:
-    """A discovery alias coordinates settlement without rejecting its physical relay."""
+async def test_a_merge_keeps_every_replaced_event_and_retires_the_replaced_handles(
+    journal_store: EventJournalStore,
+) -> None:
+    """The batch claim covers what each message claimed, and a late release of a message's claim does nothing."""
     store = await _store(journal_store)
-    original = TurnRecord.create(["$human"], completed=False)
-    relay = TurnRecord.create(["$relay"], discovery_event_ids=["$human"], completed=False)
-    assert store.try_claim_turn(original) is True
-    assert store.try_claim_turn(relay) is True
-    first_wait_started = asyncio.Event()
+    relay = await store.claim(TurnRecord.create(["$relay"], discovery_event_ids=["$human"], completed=False))
+    text = await store.claim(TurnRecord.create(["$text"], completed=False))
+    assert isinstance(relay, TurnClaim)
+    assert isinstance(text, TurnClaim)
 
-    async def wait_for_alias(started: asyncio.Event) -> None:
-        started.set()
-        await store.wait_for_turn_settled(("$human",))
+    merged = await store.merge_claims((relay, text), TurnRecord.create(["$relay"], completed=False))
 
-    waiter = asyncio.create_task(wait_for_alias(first_wait_started))
-    await first_wait_started.wait()
-    assert not waiter.done()
-
-    store.release_pending_turn_claim(original)
-    second_wait_started = asyncio.Event()
-    second_waiter = asyncio.create_task(wait_for_alias(second_wait_started))
-    await second_wait_started.wait()
-    assert not second_waiter.done()
-    store.release_pending_turn_claim(relay)
-    await asyncio.gather(waiter, second_waiter)
+    assert isinstance(merged, TurnClaim)
+    assert merged.source_event_ids == {"$relay", "$text"}, "a source only a message claim held stays claimed"
+    assert merged.discovery_event_ids == {"$human"}, "the alias only a message claim held stays claimed"
+    relay.release()
+    text.release()
+    assert all(store.has_live_turn_claim(event_id) for event_id in ("$relay", "$text", "$human"))
+    merged.release()
+    assert not any(store.has_live_turn_claim(event_id) for event_id in ("$relay", "$text", "$human"))
 
 
 @pytest.mark.asyncio
-async def test_turn_settlement_wait_does_not_consume_default_executor(journal_store: EventJournalStore) -> None:
-    """Claim settlement must progress while every default-executor worker is occupied."""
+async def test_a_merge_overlapping_a_claim_outside_it_is_refused(journal_store: EventJournalStore) -> None:
+    """A batch whose turn reaches an event another live owner holds takes nothing and gives its claims up."""
     store = await _store(journal_store)
-    turn = TurnRecord.create(["$source"], completed=False)
-    loop = asyncio.get_running_loop()
-    # One worker, entirely occupied below: anything that reaches for the default
-    # executor from here on cannot make progress, which is the point.
-    loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
-    worker_started = asyncio.Event()
-    release_worker = threading.Event()
+    mine = await store.claim(TurnRecord.create(["$mine"], completed=False))
+    outsider = await store.claim(TurnRecord.create(["$theirs"], completed=False))
+    assert isinstance(mine, TurnClaim)
+    assert isinstance(outsider, TurnClaim)
 
-    def occupy_worker() -> None:
-        loop.call_soon_threadsafe(worker_started.set)
-        release_worker.wait()
+    assert await store.merge_claims((mine,), TurnRecord.create(["$mine", "$theirs"], completed=False)) is None
 
-    blocker = asyncio.create_task(asyncio.to_thread(occupy_worker))
-    await worker_started.wait()
-    try:
-        assert store.try_claim_turn(turn) is True
-        wait_started = asyncio.Event()
-
-        async def wait_for_settlement() -> None:
-            wait_started.set()
-            await store.wait_for_turn_settled(turn.indexed_event_ids)
-
-        waiter = asyncio.create_task(wait_for_settlement())
-        await wait_started.wait()
-        assert not waiter.done()
-        store.release_pending_turn_claim(turn)
-        async with asyncio.timeout(1):
-            await waiter
-    finally:
-        release_worker.set()
-        await blocker
+    assert store.has_live_turn_claim("$mine") is False
+    assert store.has_live_turn_claim("$theirs") is True
+    outsider.release()
 
 
 @pytest.mark.asyncio
-async def test_failed_claimed_response_releases_turn_for_replay(journal_store: EventJournalStore) -> None:
-    """A failed owner must not permanently suppress a later delivery."""
+async def test_a_merge_whose_alias_another_turn_answered_is_refused(journal_store: EventJournalStore) -> None:
+    """A batch carrying an alias an answered turn of another identity owns leaves every one of its events unowned."""
     store = await _store(journal_store)
-    turn = TurnRecord.create(["$source"], completed=False)
-    assert store.try_claim_turn(turn) is True
+    claim = await store.claim(TurnRecord.create(["$relay-two"], completed=False))
+    assert isinstance(claim, TurnClaim)
+    await store.record_turn(TurnRecord.create(["$relay-one"], discovery_event_ids=["$human"]))
 
-    async def fail() -> None:
-        msg = "response failed"
-        raise RuntimeError(msg)
+    merged = await store.merge_claims(
+        (claim,),
+        TurnRecord.create(["$relay-two"], discovery_event_ids=["$human"], completed=False),
+    )
 
-    controller = SimpleNamespace(deps=SimpleNamespace(turn_store=store))
-    with pytest.raises(RuntimeError, match="response failed"):
-        await _run_claimed_response(controller, turn, fail())
-
-    assert store.try_claim_turn(turn) is True
+    assert merged is None
+    assert store.has_live_turn_claim("$relay-two") is False
+    assert store.has_live_turn_claim("$human") is False
 
 
 @pytest.mark.asyncio
-async def test_terminal_turn_keeps_claim_until_response_task_finishes(journal_store: EventJournalStore) -> None:
-    """Terminal persistence must not reopen a source before task cleanup completes."""
+async def test_a_contended_source_counts_as_owned_until_its_blocker_releases(journal_store: EventJournalStore) -> None:
+    """A source that lost its claim is left to the journal only once the claim it lost to is gone."""
     store = await _store(journal_store)
-    turn = TurnRecord.create(["$source"], completed=False)
-    other_turn = TurnRecord.create(["$discovery"], completed=False)
-    expanded_turn = replace(turn, discovery_event_ids=other_turn.source_event_ids)
-    terminal_recorded = asyncio.Event()
-    release_response = asyncio.Event()
-    assert store.try_claim_turn(turn) is True
-    assert store.try_claim_turn(other_turn) is True
+    retry = cast("MagicMock", store.deps.retry_dispatch_sources)
+    winner = await store.claim(TurnRecord.create(["$relay-one"], discovery_event_ids=["$human"], completed=False))
+    contended = await store.claim(TurnRecord.create(["$relay-two"], discovery_event_ids=["$human"], completed=False))
+    assert isinstance(winner, TurnClaim)
+    assert contended == ClaimContended(winner)
 
-    async def finish_response() -> None:
-        await store.record_turn(expanded_turn)
-        terminal_recorded.set()
-        await release_response.wait()
+    store.retry_when_released(winner, "!room", "$relay-two")
 
-    controller = SimpleNamespace(deps=SimpleNamespace(turn_store=store))
-    response_task = asyncio.create_task(_run_claimed_response(controller, turn, finish_response()))
-    await terminal_recorded.wait()
+    assert store.has_live_turn_claim("$relay-two") is True
+    retry.assert_not_called()
+    winner.release()
+    retry.assert_called_once_with("!room", ("$relay-two",))
+    assert store.has_live_turn_claim("$relay-two") is False
 
-    assert store.try_claim_turn(turn) is False
-    release_response.set()
-    await response_task
-    assert store.try_claim_turn(turn) is True
-    assert store.try_claim_turn(other_turn) is False
+
+@pytest.mark.asyncio
+async def test_a_contended_source_waits_for_the_claim_that_replaced_its_blocker(
+    journal_store: EventJournalStore,
+) -> None:
+    """A batch merge carries the sources waiting on a message's claim, so they return when the batch ends."""
+    store = await _store(journal_store)
+    retry = cast("MagicMock", store.deps.retry_dispatch_sources)
+    winner = await store.claim(TurnRecord.create(["$relay-one"], discovery_event_ids=["$human"], completed=False))
+    assert isinstance(winner, TurnClaim)
+    store.retry_when_released(winner, "!room", "$relay-two")
+
+    merged = await store.merge_claims((winner,), TurnRecord.create(["$relay-one"], completed=False))
+    assert isinstance(merged, TurnClaim)
+    winner.release()
+
+    retry.assert_not_called()
+    assert store.has_live_turn_claim("$relay-two") is True
+    merged.release()
+    retry.assert_called_once_with("!room", ("$relay-two",))
+
+
+@pytest.mark.asyncio
+async def test_a_source_contending_with_a_released_claim_is_retried_at_once(journal_store: EventJournalStore) -> None:
+    """A blocker gone before its loser registers leaves nothing to wait for."""
+    store = await _store(journal_store)
+    retry = cast("MagicMock", store.deps.retry_dispatch_sources)
+    winner = await store.claim(TurnRecord.create(["$source"], completed=False))
+    assert isinstance(winner, TurnClaim)
+    winner.release()
+
+    store.retry_when_released(winner, "!room", "$source")
+
+    retry.assert_called_once_with("!room", ("$source",))
+    assert store.has_live_turn_claim("$source") is False
+
+
+@pytest.mark.asyncio
+async def test_sibling_turn_stores_of_one_agent_share_their_claims(journal_store: EventJournalStore) -> None:
+    """A replacement runtime's store meets the claims its predecessor still holds, and another agent's do not."""
+    first = await _store(journal_store)
+    replacement = await _store(journal_store)
+    other_agent = await _store(journal_store, agent_name="other")
+    claim = await first.claim(TurnRecord.create(["$source"], completed=False))
+    assert isinstance(claim, TurnClaim)
+
+    assert await replacement.claim(TurnRecord.create(["$source"], completed=False)) == ClaimContended(claim)
+    assert replacement.has_live_turn_claim("$source") is True
+    other = await other_agent.claim(TurnRecord.create(["$source"], completed=False))
+    assert isinstance(other, TurnClaim)
+    other.release()
+    claim.release()
+    assert replacement.has_live_turn_claim("$source") is False
 
 
 @pytest.mark.asyncio
@@ -1356,6 +1417,7 @@ async def test_each_history_scope_that_read_a_redacted_source_drops_it_when_open
             resolver=MagicMock(),
             tool_runtime=MagicMock(),
             response_recovery_state=AsyncMock(),
+            retry_dispatch_sources=MagicMock(),
         ),
     )
     await store.warm()
@@ -1428,6 +1490,7 @@ async def test_another_requesters_private_scope_drops_a_redacted_source_when_ope
             resolver=MagicMock(),
             tool_runtime=tool_runtime,
             response_recovery_state=AsyncMock(),
+            retry_dispatch_sources=MagicMock(),
         ),
     )
     await store.warm()
@@ -1785,6 +1848,7 @@ async def test_active_ad_hoc_team_redaction_uses_pending_response_scope(
             resolver=MagicMock(),
             tool_runtime=MagicMock(),
             response_recovery_state=AsyncMock(),
+            retry_dispatch_sources=MagicMock(),
         ),
     )
     await store.warm()
@@ -2571,6 +2635,7 @@ async def test_router_turn_replay_uses_persisted_ledger_across_two_restarts(
                 resolver=MagicMock(),
                 tool_runtime=MagicMock(),
                 response_recovery_state=AsyncMock(),
+                retry_dispatch_sources=MagicMock(),
             ),
         )
         await store.warm()

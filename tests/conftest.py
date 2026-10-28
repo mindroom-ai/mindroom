@@ -80,7 +80,6 @@ from mindroom.conversation_resolver import DispatchContextResult, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.dispatch_handoff import (
     MediaDispatchEvent,
-    PendingDispatchMetadata,
     PreparedIngress,
     prepare_media_ingress,
 )
@@ -152,6 +151,7 @@ from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
 from mindroom.providers import registry as provider_registry
 from mindroom.providers.pipeline import media as media_pipeline
 from mindroom.reaction_dispatch import ReactionDispatcher
+from mindroom.response_lifecycle import QueuedHumanNoticeReservation
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
     ResponsePayloadPreparation,
@@ -173,7 +173,7 @@ from mindroom.turn_controller import TurnController, _DispatchPreparation, _Repl
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_record import canonicalize_turn_record
-from mindroom.turn_store import TurnStore
+from mindroom.turn_store import TurnClaim, TurnStore, _ClaimRegistry, _reset_turn_claim_registries
 from mindroom.usage.storage import quote_identifier
 from mindroom.user_stop_reconciliation import UserStopReconciler
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
@@ -889,6 +889,16 @@ def request_envelope(
     )
 
 
+def live_turn_claim(*source_event_ids: str) -> TurnClaim:
+    """Return a live claim on these sources, alone in its own registry, for gate and lane cleanup tests."""
+    return _ClaimRegistry().register(frozenset(source_event_ids), frozenset())
+
+
+def turn_claim_is_live(claim: TurnClaim) -> bool:
+    """Return whether a claim from ``live_turn_claim`` is still held."""
+    return any(claim._registry.owns(event_id) for event_id in claim.source_event_ids)
+
+
 def make_pending_event(
     event: PreparedIngress | nio.RoomMessageFormatted | MediaDispatchEvent,
     room: nio.MatrixRoom,
@@ -902,7 +912,7 @@ def make_pending_event(
     discovery_event_id: str | None = None,
     turn_dispatch_recovery: bool = False,
     enqueue_time: float | None = None,
-    dispatch_metadata: tuple[PendingDispatchMetadata, ...] = (),
+    notice: QueuedHumanNoticeReservation | None = None,
 ) -> PendingEvent:
     """Build one PendingEvent with per-source evidence stamped on its PreparedIngress.
 
@@ -937,8 +947,8 @@ def make_pending_event(
         turn_dispatch_recovery=turn_dispatch_recovery,
     )
     if enqueue_time is None:
-        return PendingEvent(event=prepared, room=room, dispatch_metadata=dispatch_metadata)
-    return PendingEvent(event=prepared, room=room, enqueue_time=enqueue_time, dispatch_metadata=dispatch_metadata)
+        return PendingEvent(event=prepared, room=room, notice=notice)
+    return PendingEvent(event=prepared, room=room, enqueue_time=enqueue_time, notice=notice)
 
 
 def requires_linux(
@@ -3581,6 +3591,7 @@ def _reset_handled_turn_ledger_state(
     empty map while the rows it cares about sit unread.
     """
     _reset_handled_turn_ledger_runtime()
+    _reset_turn_claim_registries()
     loads_from_disk = (
         request.node.path.name in _LEDGER_LOADING_TEST_MODULES
         or request.node.get_closest_marker("ledger_loads_from_disk") is not None
@@ -3596,6 +3607,7 @@ def _reset_handled_turn_ledger_state(
         monkeypatch.setattr(handled_turns_module, "_shared_ledger_state", pre_warmed_ledger_state)
     yield
     _reset_handled_turn_ledger_runtime()
+    _reset_turn_claim_registries()
 
 
 @pytest.fixture(autouse=True)

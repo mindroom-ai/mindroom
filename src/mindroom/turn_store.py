@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import threading
 from dataclasses import asdict, dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -73,6 +72,135 @@ class TurnStoreDeps:
     # One consistent read of everything that can still own a response after its
     # task exits: the journal, the outbox, reply rows, and the stored turn records.
     response_recovery_state: Callable[[TurnRecord], Awaitable[ResponseRecoveryState]]
+    # Hands sources back to the journal: those a claim contention deferred, once their
+    # blocking claim releases, and those a refused batch merge leaves unowned.
+    retry_dispatch_sources: Callable[[str, tuple[str, ...]], None]
+
+
+@dataclass(eq=False)
+class TurnClaim:
+    """One live owner of a turn's sources and discovery aliases in this process.
+
+    The handle is the identity: releasing it removes exactly this owner, so a
+    stale release can never drop another owner's claim on the same events.
+    """
+
+    source_event_ids: frozenset[str]
+    discovery_event_ids: frozenset[str]
+    _registry: _ClaimRegistry = field(repr=False)
+
+    def release(self) -> None:
+        """Give the claimed events up; a released or replaced handle does nothing."""
+        self._registry.release(self)
+
+
+@dataclass(frozen=True)
+class ClaimRefused:
+    """No owner may claim this turn: it has no sources, or a completed turn of another identity owns an alias."""
+
+
+@dataclass(frozen=True)
+class ClaimContended:
+    """A live claim already owns one of the turn's sources or aliases."""
+
+    blocking: TurnClaim
+
+
+@dataclass(frozen=True)
+class _DeferredSource:
+    """A source whose claim lost to a live owner, handed back to the journal once that owner releases."""
+
+    room_id: str
+    source_event_id: str
+    retry: Callable[[str, tuple[str, ...]], None]
+
+
+@dataclass(eq=False)
+class _ClaimRegistry:
+    """The live claims of one agent's turns, shared by every ``TurnStore`` of that agent in this process.
+
+    A runtime replacement or re-login builds a second store for the same agent
+    while the first may still own turns; a registry per store would let both
+    run one turn. Claims are touched only on the event loop, so each operation
+    below is atomic.
+    """
+
+    _live: dict[TurnClaim, list[_DeferredSource]] = field(default_factory=dict)
+
+    def blocking_claim(
+        self,
+        source_event_ids: frozenset[str],
+        discovery_event_ids: frozenset[str],
+        *,
+        excluded: Collection[TurnClaim] = (),
+    ) -> TurnClaim | None:
+        """Return a live claim sharing a source with these sources or an alias with these aliases.
+
+        Roles are compared separately: a human message and the router's relay of
+        it, which indexes that message as its alias, are different turns.
+        """
+        return next(
+            (
+                claim
+                for claim in self._live
+                if claim not in excluded
+                and (
+                    not source_event_ids.isdisjoint(claim.source_event_ids)
+                    or not discovery_event_ids.isdisjoint(claim.discovery_event_ids)
+                )
+            ),
+            None,
+        )
+
+    def register(self, source_event_ids: frozenset[str], discovery_event_ids: frozenset[str]) -> TurnClaim:
+        """Publish one new live claim."""
+        claim = TurnClaim(source_event_ids, discovery_event_ids, self)
+        self._live[claim] = []
+        return claim
+
+    def replace(self, claims: Sequence[TurnClaim], replacement: TurnClaim) -> None:
+        """Retire live claims a replacement covers, moving their deferred sources onto it."""
+        for claim in claims:
+            self._live[replacement].extend(self._live.pop(claim, ()))
+
+    def release(self, claim: TurnClaim) -> None:
+        """Drop one live claim and hand back every source that waited for it."""
+        for deferred in self._live.pop(claim, ()):
+            deferred.retry(deferred.room_id, (deferred.source_event_id,))
+
+    def retry_when_released(self, blocking: TurnClaim, deferred: _DeferredSource) -> None:
+        """Hand one source back once ``blocking`` releases, or now if it already has."""
+        waiting = self._live.get(blocking)
+        if waiting is None:
+            deferred.retry(deferred.room_id, (deferred.source_event_id,))
+            return
+        waiting.append(deferred)
+
+    def owns(self, event_id: str) -> bool:
+        """Return whether a live claim indexes this event or holds it deferred."""
+        return any(
+            event_id in claim.source_event_ids
+            or event_id in claim.discovery_event_ids
+            or any(deferred.source_event_id == event_id for deferred in waiting)
+            for claim, waiting in self._live.items()
+        )
+
+
+_CLAIM_REGISTRIES: dict[str, _ClaimRegistry] = {}
+
+
+def _shared_claim_registry(store_key: str, agent_name: str) -> _ClaimRegistry:
+    """Return the claim registry every ``TurnStore`` of one agent over one database shares.
+
+    Keyed like the shared ledger state: by the database as well as the agent,
+    so stores over two databases never see each other's claims.
+    """
+    return _CLAIM_REGISTRIES.setdefault(f"{store_key}\x00{agent_name}", _ClaimRegistry())
+
+
+def _reset_turn_claim_registries() -> None:
+    """Drop every live claim (tests and forked runtimes)."""
+    _CLAIM_REGISTRIES.clear()
 
 
 @dataclass(frozen=True)
@@ -109,9 +237,7 @@ class TurnStore:
 
     deps: TurnStoreDeps
     _ledger: HandledTurnLedger = field(init=False, repr=False)
-    _pending_claim_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
-    _pending_claim_changed: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
-    _pending_turn_claims: list[TurnRecord] = field(default_factory=list, init=False, repr=False)
+    _claims: _ClaimRegistry = field(init=False, repr=False)
     _recovery_diagnostic_classes: set[tuple[str, tuple[str, ...], str | None]] = field(
         default_factory=set,
         init=False,
@@ -119,12 +245,13 @@ class TurnStore:
     )
 
     def __post_init__(self) -> None:
-        """Construct the private handled-turn ledger for this runtime entity."""
+        """Construct the private handled-turn ledger and bind the agent's shared claims."""
         self._ledger = HandledTurnLedger(
             self.deps.agent_name,
             records=self.deps.turn_records,
             legacy_responses_file=self.deps.legacy_responses_file,
         )
+        self._claims = _shared_claim_registry(self.deps.turn_records.state_key, self.deps.agent_name)
 
     async def warm(self) -> None:
         """Load the ledger without pruning truth needed by startup recovery."""
@@ -554,52 +681,88 @@ class TurnStore:
             merge_pending,
         )
 
-    def try_claim_turn(self, turn_record: TurnRecord) -> bool:
-        """Claim exclusive physical sources while aliases remain advisory."""
-        alias_owners = map(self.get_turn_record, turn_record.discovery_event_ids)
-        if not turn_record.source_event_ids or any(
-            owner is not None and owner.completed and not same_turn_identity(owner, turn_record)
-            for owner in alias_owners
-        ):
-            return False
-        source_ids, discovery_ids = set(turn_record.source_event_ids), set(turn_record.discovery_event_ids)
-        with self._pending_claim_lock:
-            if any(
-                source_ids.intersection(claim.source_event_ids) or discovery_ids.intersection(claim.discovery_event_ids)
-                for claim in self._pending_turn_claims
-            ):
-                return False
-            self._pending_turn_claims.append(turn_record)
-        return True
+    async def claim(self, turn_record: TurnRecord) -> TurnClaim | ClaimRefused | ClaimContended:
+        """Claim a turn's sources and aliases for one live owner.
 
-    def release_pending_turn_claim(self, turn_record: TurnRecord) -> None:
-        """Release a response claim after terminal settlement or failure."""
-        with self._pending_claim_lock:
-            self._pending_turn_claims = [claim for claim in self._pending_turn_claims if claim != turn_record]
-            claim_changed, self._pending_claim_changed = self._pending_claim_changed, asyncio.Event()
-        claim_changed.set()
+        The claim is published before anything is awaited, so two ingress paths
+        racing for one turn cannot both win; whatever fails after that releases
+        it before propagating.
+        """
+        source_event_ids = frozenset(turn_record.source_event_ids)
+        discovery_event_ids = frozenset(turn_record.discovery_event_ids)
+        if not source_event_ids:
+            return ClaimRefused()
+        blocking = self._claims.blocking_claim(source_event_ids, discovery_event_ids)
+        if blocking is not None:
+            return ClaimContended(blocking)
+        claim = self._claims.register(source_event_ids, discovery_event_ids)
+        return await self._unless_alias_answered(claim, turn_record)
+
+    async def merge_claims(self, claims: Sequence[TurnClaim], turn_record: TurnRecord) -> TurnClaim | None:
+        """Replace live claims with one covering them and a turn they became, or refuse.
+
+        The replacement covers the turn's sources and aliases and every replaced
+        claim's, so ownership never shrinks across the handoff, and the swap
+        happens in one step: no other owner can take an event in between. The
+        replaced handles are dead from then on. The supplied claims are consumed
+        whatever the outcome: a refusal releases them, and ``None`` leaves the
+        turn's sources unowned.
+        """
+        source_event_ids = frozenset(turn_record.source_event_ids).union(
+            *(claim.source_event_ids for claim in claims),
+        )
+        discovery_event_ids = frozenset(turn_record.discovery_event_ids).union(
+            *(claim.discovery_event_ids for claim in claims),
+        )
+        if not turn_record.source_event_ids or self._claims.blocking_claim(
+            source_event_ids,
+            discovery_event_ids,
+            excluded=claims,
+        ):
+            for claim in claims:
+                claim.release()
+            return None
+        merged = self._claims.register(source_event_ids, discovery_event_ids)
+        self._claims.replace(claims, merged)
+        result = await self._unless_alias_answered(merged, turn_record)
+        return result if isinstance(result, TurnClaim) else None
+
+    async def _unless_alias_answered(self, claim: TurnClaim, turn_record: TurnRecord) -> TurnClaim | ClaimRefused:
+        """Keep a just-published claim unless a completed turn of another identity owns one of its aliases."""
+        try:
+            if any(
+                (owner := self.get_turn_record(event_id)) is not None
+                and owner.completed
+                and not same_turn_identity(owner, turn_record)
+                for event_id in claim.discovery_event_ids
+            ):
+                claim.release()
+                return ClaimRefused()
+        except BaseException:
+            claim.release()
+            raise
+        return claim
+
+    def retry_when_released(self, blocking: TurnClaim, room_id: str, source_event_id: str) -> None:
+        """Hand a source whose claim lost to ``blocking`` back to the journal once that claim releases.
+
+        Until then the source counts as owned, so the journal leaves it deferred
+        instead of dispatching it again. A replacement from ``merge_claims``
+        inherits the source.
+        """
+        self._claims.retry_when_released(
+            blocking,
+            _DeferredSource(room_id, source_event_id, self.deps.retry_dispatch_sources),
+        )
 
     def has_live_turn_claim(self, event_id: str) -> bool:
-        """Return whether some unsettled turn still holds this source or alias.
+        """Return whether some unsettled turn still holds this source or alias, or a lost claim waits on one.
 
-        The non-blocking form of the test ``wait_for_turn_settled`` waits on.
-        A claim is taken before its turn is handed off and dropped in the
-        ``finally`` that ends the turn however it ends, so its presence is the
-        one in-process fact that distinguishes "a turn owns this" from "a turn
-        owned this and is gone".
+        A claim is taken before its turn is handed off and dropped however the
+        turn ends, so its presence is the one in-process fact that distinguishes
+        "a turn owns this" from "a turn owned this and is gone".
         """
-        with self._pending_claim_lock:
-            return any(event_id in claim.indexed_event_ids for claim in self._pending_turn_claims)
-
-    async def wait_for_turn_settled(self, event_ids: tuple[str, ...]) -> None:
-        """Wait until every claim indexed by a source or alias settles."""
-        event_id_set = set(event_ids)
-        while True:
-            with self._pending_claim_lock:
-                if not any(event_id_set.intersection(claim.indexed_event_ids) for claim in self._pending_turn_claims):
-                    return
-                claim_changed = self._pending_claim_changed
-            await claim_changed.wait()
+        return self._claims.owns(event_id)
 
     async def response_recovery_ready(self, turn_record: TurnRecord) -> bool:
         """Prove that a terminal response is complete or still durably owned."""

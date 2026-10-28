@@ -62,7 +62,7 @@ class ResponseLifecycleReservation:
             self._acquire_task = asyncio.create_task(self._acquire())
         await self._ready.wait()
 
-    def consume(
+    def _consume(
         self,
         coordinator: ResponseLifecycleCoordinator,
         target: MessageTarget,
@@ -232,19 +232,12 @@ class QueuedHumanNoticeReservation:
     _source_event_id: str
     _active: bool = True
 
-    def _release_waiting_human_message(self) -> None:
+    def release(self) -> None:
+        """Stop counting this message as waiting for the running response; idempotent."""
         if not self._active:
             return
         self._state.consume_waiting_human_message(self._source_event_id)
         self._active = False
-
-    def consume(self) -> None:
-        """Mark the reservation as owned by the response lifecycle."""
-        self._release_waiting_human_message()
-
-    def cancel(self) -> None:
-        """Release a reservation that will not reach response lifecycle ownership."""
-        self._release_waiting_human_message()
 
 
 @dataclass
@@ -478,7 +471,7 @@ class ResponseLifecycleCoordinator:
         reservation: ResponseLifecycleReservation | None,
     ) -> tuple[asyncio.Lock, _QueuedMessageState, str | None]:
         if reservation is not None:
-            return reservation.consume(self, target), reservation._queued_signal, None
+            return reservation._consume(self, target), reservation._queued_signal, None
         lifecycle_lock = self._response_lifecycle_lock(target)
         queued_signal = self._get_or_create_queued_signal(target)
         notice = self._begin_response_turn_notice(

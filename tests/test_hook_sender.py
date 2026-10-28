@@ -1897,7 +1897,7 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
     replace_turn_controller_deps(bot, interactive_questions=interactive_questions)
     with patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch:
         assert isinstance(sidecar_event, nio.RoomMessageFile)
-        reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(
+        ticket = bot._turn_controller.reserve_prompt_ingress_order(
             room,
             "@mindroom_router:localhost",
         )
@@ -1907,10 +1907,10 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
                 event=sidecar_event,
                 requester_user_id="@mindroom_router:localhost",
             ),
-            reservation_owner=reservation_owner,
+            ticket=ticket,
             coalescing_thread_id=None,
         )
-        await reservation_owner.release()
+        ticket.close()
         await bot._coalescing_gate.drain_all()
 
     assert handled is _IngressAdmissionOutcome.DEFERRED
@@ -1964,7 +1964,7 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
     replace_turn_controller_deps(bot, interactive_questions=interactive_questions)
     with patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch:
         assert isinstance(sidecar_event, nio.RoomMessageFile)
-        reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(
+        ticket = bot._turn_controller.reserve_prompt_ingress_order(
             room,
             "@mindroom_router:localhost",
         )
@@ -1974,10 +1974,10 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
                 event=sidecar_event,
                 requester_user_id="@mindroom_router:localhost",
             ),
-            reservation_owner=reservation_owner,
+            ticket=ticket,
             coalescing_thread_id=None,
         )
-        await reservation_owner.release()
+        ticket.close()
 
     assert handled is _IngressAdmissionOutcome.CONSUMED
     interactive_questions.claim_interactive_text.assert_not_awaited()
