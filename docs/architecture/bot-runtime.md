@@ -15,14 +15,19 @@ Turn handling applies the general [architecture principles](../dev/2026-04-15-mi
 ## Target Boundaries
 
 - `AgentBot` owns Matrix lifecycle only.
-- `TurnController` owns one inbound turn from ingress to recorded outcome.
+- `TurnIngress` owns one inbound event from its Matrix callback to coalescing-gate admission; `VoiceIngress` admits voice messages and `InteractiveSelections` admits answers to interactive questions for it.
+- `TurnDispatcher` owns one turn from the gate's exit to its recorded outcome.
 - `TurnPolicy` owns pure decision logic only: it sends nothing, runs no AI, and writes no persistence state.
 - `ResponseRunner` owns response execution and lifecycle only.
 - `TurnStore` owns durable turn truth.
 - `DeliveryGateway` owns Matrix transport only.
 
-The ingress-to-execution seam is one-way: ingress hands the runner immutable values, and the runner assembles the final payload itself after it takes the lifecycle lock.
-A callback that runs payload building back inside `TurnController` after the lock was rejected, because data must cross the seam as values, not closures.
+The gate-to-dispatch seam is one-way: the gate hands dispatch each turn together with what dispatch may know about the queue it left, so dispatch never holds the gate and the gate is built after the dispatcher it calls.
+The queued notices of follow-ups still waiting behind a flushed batch are a snapshot taken at the flush, but whether the queue holds another run stays a live read, because dispatch asks after awaiting the turn's context and a message admitted meanwhile must still keep a newer message from absorbing the turn out of receipt order.
+An interactive selection crosses the gate as a value its owner runs after the gate, not as a closure.
+
+The dispatch-to-execution seam is one-way too: dispatch hands the runner immutable values, and the runner assembles the final payload itself after it takes the lifecycle lock.
+A callback that runs payload building back inside turn dispatch after the lock was rejected, because data must cross the seam as values, not closures.
 
 Edit regeneration runs on a runner-owned task and does not wait for its claim, so another reply holding the conversation never holds up the room's event lane.
 
@@ -163,7 +168,7 @@ Clients consume approval events under these rules, which this repository's code 
 
 ## Simplifications Still Planned
 
-- `TurnController` is the only normal-turn owner but is still too large: interactive-selection execution and response-action assembly should move out of it.
+- `TurnDispatcher` still assembles response actions itself; that assembly should become a response executor that edit regeneration shares.
 - `ResponseRunner` still owns too much execution detail: its team turn driver, interrupted persistence, inbox tracking, and enrichment helpers should become their own modules.
 - `IngressHookRunner` is a thin hook adapter with a vague name; it may stay a helper but must not grow into another top-level orchestration object.
 - Only after those steps, revisit `MessageTarget`, which combines conversation identity and delivery placement, and split them only if the runtime still needs it.
