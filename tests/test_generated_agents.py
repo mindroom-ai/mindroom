@@ -454,7 +454,9 @@ def test_the_runtime_hands_docker_workers_the_generated_agents_of_each_config_it
     orchestrator._commit_config(config)
 
     assert orchestrator.config is config
-    published = docker_projection._COMMITTED_GENERATED_AGENTS[test_runtime_paths(tmp_path).config_path.resolve()]
+    published = docker_projection._COMMITTED_GENERATED_AGENTS[
+        personal_agent_roster_path(test_runtime_paths(tmp_path)).resolve()
+    ]
     assert published == config.generated_agent_data()
     assert "creator_research" in published
 

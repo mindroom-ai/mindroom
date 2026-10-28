@@ -704,8 +704,12 @@ def test_docker_worker_projection_includes_created_agents_and_edits(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Created agents and owners' edits come from the config the runtime committed, even once the file is broken."""
+    """Created agents and owners' edits come from the config the runtime committed, even once the file is broken.
+
+    Workers read a separate host config file here, as with `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH`.
+    """
     paths = test_runtime_paths(tmp_path)
+    host_config_path = tmp_path / "host" / "config.yaml"
     helper = {"display_name": "Helper", "model": "default", "tools": ["shell"], "worker_scope": "shared"}
     config_data = PERSONAL_AGENTS_BASE | {"agents": {"helper": helper | {"created_agents_per_owner": 1}}}
     created = CreatedAgentEntry(
@@ -722,6 +726,7 @@ def test_docker_worker_projection_includes_created_agents_and_edits(
         config_text=yaml.safe_dump(config_data),
         runtime_paths=paths,
         storage_path=paths.storage_root,
+        host_config_path=host_config_path,
     )
     docker_projection_module.publish_generated_agents(
         paths,
@@ -740,7 +745,7 @@ def test_docker_worker_projection_includes_created_agents_and_edits(
 
     # A rejected edit to the file leaves the runtime, and so the workers, on the committed config.
     config_data["agents"]["broken"] = {"display_name": "Broken", "model": "default", "delegate_to": ["nobody"]}
-    (tmp_path / "config.yaml").write_text(yaml.safe_dump(config_data), encoding="utf-8")
+    host_config_path.write_text(yaml.safe_dump(config_data), encoding="utf-8")
     assert list(projected_agents("v1:default:shared:helper_research")) == ["helper_research"]
 
 
