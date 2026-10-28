@@ -1119,6 +1119,44 @@ async def test_batch_failure_falls_back_to_per_file_without_reembedding_successe
         assert embedder.embedded_count(f"content {index}") == 1
 
 
+def _tokens_per_minute_error() -> Exception:
+    """Return what the OpenAI embedder raises for a request larger than the account's tokens-per-minute limit."""
+    import httpx  # noqa: PLC0415
+    from openai import RateLimitError  # noqa: PLC0415
+
+    message = (
+        "Request too large for text-embedding-3-small in organization org-test on tokens per min (TPM): Limit 40000, "
+        "Requested 80000. The input or output tokens must be reduced in order to run successfully."
+    )
+    body = {"message": message, "type": "tokens", "param": None, "code": "rate_limit_exceeded"}
+    response = httpx.Response(429, request=httpx.Request("POST", "http://embeddings.local/v1/embeddings"))
+    return openai_embedder_error(RateLimitError(message, response=response, body=body))
+
+
+@pytest.mark.asyncio
+async def test_a_batch_above_the_tokens_per_minute_limit_is_embedded_one_chunk_per_request(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """Only a smaller request fits the account's per-minute token limit, so the batch's chunks go one at a time."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    embedder.batch_error = _tokens_per_minute_error()
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert _stored_paths(config, state.collection) == names
+    assert (len(embedder.batch_requests), sorted(embedder.single_requests)) == (
+        1,
+        [f"content {index}" for index in range(3)],
+    )
+
+
 class _InFlightEmbedder(_RecordingEmbedder):
     """Recording embedder that counts how many batch requests run at once."""
 

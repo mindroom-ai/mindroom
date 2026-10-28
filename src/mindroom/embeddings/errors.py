@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from mindroom.llm.errors import AuthenticationFailed, ProviderUnavailable
+from mindroom.llm.errors import AuthenticationFailed, ContextWindowExceeded, ProviderUnavailable
 from mindroom.providers.openai.errors import provider_error
 
 if TYPE_CHECKING:
@@ -24,15 +24,25 @@ class EmbedderRequestError(RuntimeError):
 
     The embedder boundary raises this instead of the provider exception so
     upstream loggers cannot render a raw response body that may echo a secret.
-    ``retryable`` says whether the same request may succeed later, and
-    ``retry_after_seconds`` carries the provider's ``Retry-After`` hint; both
-    would otherwise be lost with the original exception.
+    ``retryable`` says whether the same request may succeed later,
+    ``retry_after_seconds`` carries the provider's ``Retry-After`` hint, and
+    ``too_large`` says the request was too large for the model's input limit
+    or the account's tokens-per-minute limit, so a smaller one may pass; all
+    three would otherwise be lost with the original exception.
     """
 
-    def __init__(self, detail: str, *, retryable: bool = False, retry_after_seconds: float | None = None) -> None:
+    def __init__(
+        self,
+        detail: str,
+        *,
+        retryable: bool = False,
+        retry_after_seconds: float | None = None,
+        too_large: bool = False,
+    ) -> None:
         super().__init__(detail)
         self.retryable = retryable
         self.retry_after_seconds = retry_after_seconds
+        self.too_large = too_large
 
 
 def is_embedder_auth_failure_detail(detail: str | None) -> bool:
@@ -93,7 +103,12 @@ def embedder_request_error(error: BaseException, failure: ProviderError | None) 
         detail = f"embedder request failed ({type(error).__name__})"
     if failure is None:
         return EmbedderRequestError(detail)
-    return EmbedderRequestError(detail, retryable=failure.retryable, retry_after_seconds=failure.retry_after_seconds)
+    return EmbedderRequestError(
+        detail,
+        retryable=failure.retryable,
+        retry_after_seconds=failure.retry_after_seconds,
+        too_large=isinstance(failure, ContextWindowExceeded),
+    )
 
 
 def openai_embedder_error(error: Exception) -> EmbedderRequestError:
