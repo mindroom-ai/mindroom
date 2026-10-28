@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 __all__ = ["legacy_failure_text", "stored_content"]
 
-# Every paused notice of an agent run Agno's runtime wrote; the owned runtime wrote only the confirmation one.
+# Every wording of an agent run's paused notice Agno's runtime wrote; from v2026.10.499 only the confirmation one.
 _AGENT_PAUSED_NOTICES = frozenset(
     {
         "I have tools to execute, but I need confirmation.",
