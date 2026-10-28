@@ -26,7 +26,11 @@ from uuid import uuid4
 
 from mindroom import ai_runtime
 from mindroom.agent_cli.lifetime import CliTurnLifetime
-from mindroom.background_tasks import create_background_task, run_blocking_until_complete
+from mindroom.background_tasks import (
+    create_background_task,
+    run_blocking_until_complete,
+    wait_for_future_until_complete,
+)
 from mindroom.cancellation import current_task_is_process_shutdown
 from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
@@ -854,11 +858,14 @@ async def _record_interrupted(
     if not sinks.persist_interrupted:
         return
     response_event_id = sinks.response_event_id() if sinks.response_event_id is not None else None
-    run.record.store = create_background_task(
-        asyncio.to_thread(_persist_interrupted, ctx, adapter, run, response_event_id),
-        name="persist_interrupted_turn",
+    # A Stop that cancels this task again, as the streamer's bounded unwind does, waits for the record, so the reply
+    # settles, and the conversation's next turn reads history, only once it is stored.
+    await wait_for_future_until_complete(
+        create_background_task(
+            asyncio.to_thread(_persist_interrupted, ctx, adapter, run, response_event_id),
+            name="persist_interrupted_turn",
+        ),
     )
-    await asyncio.shield(run.record.store)
 
 
 def _persist_interrupted(

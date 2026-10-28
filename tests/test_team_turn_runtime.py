@@ -30,7 +30,6 @@ from mindroom.approval.manager import get_approval_store
 from mindroom.approval.receipt import build_approval_receipt
 from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.approval.tool_approval import shutdown_approval_runtime
-from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.coalescing.batch import CoalescingKey, RequesterCoalescingOwner, build_prepared_turn
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
@@ -3005,11 +3004,11 @@ async def test_a_stopped_team_turn_whose_record_cannot_be_stored_still_ends_as_s
 
 
 @pytest.mark.asyncio
-async def test_a_stopped_team_turn_cancelled_again_while_its_record_is_stored_ends_and_the_record_still_lands(
+async def test_a_stopped_team_turn_cancelled_again_while_its_record_is_stored_ends_once_the_record_lands(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A second cancellation while the record is stored off the event loop ends the turn; the store finishes anyway."""
+    """A second cancellation while the record is stored off the event loop ends the turn once the store finishes."""
     working = asyncio.Event()
     team = squad_turn(tmp_path, monkeypatch, leader=_leader_writing_then_waiting(working))
     storing = threading.Event()
@@ -3027,12 +3026,12 @@ async def test_a_stopped_team_turn_cancelled_again_while_its_record_is_stored_en
     task.cancel()
     assert await asyncio.to_thread(storing.wait, 5)
     task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=5)
-    assert task.done()
+    done, _pending = await asyncio.wait({task}, timeout=0.2)
+    assert not done
 
     release.set()
-    assert await wait_for_background_tasks(timeout=5)
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5)
     record, _members = team.stored_runs()
     assert record.metadata is not None
     assert record.metadata["mindroom_original_status"] == "cancelled"

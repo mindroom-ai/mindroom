@@ -13,7 +13,6 @@ import pytest
 
 from mindroom import response_turn as response_turn_module
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
-from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
@@ -1057,8 +1056,11 @@ async def test_interrupted_record_is_stored_off_the_event_loop(monkeypatch: pyte
 
 
 @pytest.mark.asyncio
-async def test_a_second_cancel_does_not_cancel_the_interrupted_record_store(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A cancellation that lands while the stopped turn's record is being stored leaves the store running to its end."""
+async def test_a_second_cancel_waits_for_the_interrupted_record_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cancellation that lands while the stopped turn's record is stored ends the turn only once the record is stored.
+
+    The reply settles and the conversation's next turn reads history once the turn ends.
+    """
     store_started = threading.Event()
     release_store = threading.Event()
     stored: list[str] = []
@@ -1084,10 +1086,11 @@ async def test_a_second_cancel_does_not_cancel_the_interrupted_record_store(monk
     )
     assert await asyncio.to_thread(store_started.wait, 5)
     turn.cancel()
+    done, _pending = await asyncio.wait({turn}, timeout=0.2)
+    assert not done
+    release_store.set()
     with pytest.raises(asyncio.CancelledError):
         await turn
-    release_store.set()
-    assert await wait_for_background_tasks(timeout=5)
 
     assert stored == ["run-1"]
 

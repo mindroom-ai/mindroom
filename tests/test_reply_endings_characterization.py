@@ -46,11 +46,13 @@ from mindroom.hooks import (
     EVENT_MESSAGE_BEFORE_RESPONSE,
     EVENT_MESSAGE_CANCELLED,
     EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM,
+    EVENT_SESSION_STARTED,
     AfterResponseContext,
     BeforeResponseContext,
     CancelledResponseContext,
     FinalResponseTransformContext,
     HookRegistry,
+    SessionHookContext,
     hook,
 )
 from mindroom.llm.provider import TextDelta
@@ -209,8 +211,11 @@ class _Hooks:
         return payload
 
 
-def _hook_registry(hooks: _Hooks) -> HookRegistry:
-    """Return a registry whose response hooks record into ``hooks``; the before hook suppresses when asked."""
+def _hook_registry(hooks: _Hooks, *, session_started: bool = False) -> HookRegistry:
+    """Return a registry whose response hooks record into ``hooks``; the before hook suppresses when asked.
+
+    ``session_started`` also registers, and records, a ``session:started`` hook.
+    """
 
     @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
     async def before(ctx: BeforeResponseContext) -> None:
@@ -252,12 +257,22 @@ def _hook_registry(hooks: _Hooks) -> HookRegistry:
             ),
         )
 
+    @hook(EVENT_SESSION_STARTED)
+    async def on_session_started(ctx: SessionHookContext) -> None:
+        hooks.fired.append(("session_started", {"session_id": ctx.session_id}))
+
     plugin = type(
         "PluginStub",
         (),
         {
             "name": "reply-endings",
-            "discovered_hooks": (before, transform, after, cancelled),
+            "discovered_hooks": (
+                before,
+                transform,
+                after,
+                cancelled,
+                *((on_session_started,) if session_started else ()),
+            ),
             "discovered_automations": (),
             "entry_config": PluginEntryConfig(path="./plugins/reply-endings"),
             "plugin_order": 0,
@@ -665,43 +680,46 @@ async def test_a_stopped_turn_holds_its_conversation_until_its_interrupted_recor
 ) -> None:
     """A stopped turn's record can take longer to store than the stream's bounded unwind; the turn waits for it.
 
-    The conversation's next turn reads history once this turn ends, so it must find the stopped turn there.
+    The conversation's next turn reads history once this turn ends, so it must find the stopped turn there. Stopped
+    while it prepared its prompt, before its run stored anything, the record is its session's first row, which starts
+    the session.
     """
-    running = asyncio.Event()
-    turn = await _turn(
-        tmp_path,
-        monkeypatch,
-        streaming=True,
-        scripts={"default": [_streams_then_blocks("Partial answer", running)]},
-    )
+    preparing = asyncio.Event()
+    turn = await _turn(tmp_path, monkeypatch, streaming=True, scripts={"default": [answer("Never sent.")]})
+    turn.bot.hook_registry = _hook_registry(turn.hooks, session_started=True)
+
+    async def prepare_until_stopped(*_args: object, **_kwargs: object) -> None:
+        preparing.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("mindroom.ai._prepare_agent_run_context", prepare_until_stopped)
+    storing = threading.Event()
     release = threading.Event()
     store = persist_interrupted_replay_snapshot
 
     def slow_store(**kwargs: Any) -> None:  # noqa: ANN401
+        storing.set()
         release.wait(timeout=30)
         store(**kwargs)
 
     monkeypatch.setattr("mindroom.response_turn.persist_interrupted_replay_snapshot", slow_store)
     response = asyncio.create_task(turn.runner.generate_response(_plain_request(_target())))
     try:
-        await asyncio.wait_for(running.wait(), timeout=10)
-        await _wait_shown(turn, "Partial answer")
+        await asyncio.wait_for(preparing.wait(), timeout=10)
+        await _wait_shown(turn, "Thinking...")
         assert await _stop(turn)
-
-        async def reply_ended() -> None:
-            while "cancelled" not in turn.hooks.names:  # noqa: ASYNC110
-                await asyncio.sleep(0.005)
-
-        await asyncio.wait_for(reply_ended(), timeout=10)
-        done, _pending = await asyncio.wait({response}, timeout=1)
+        assert await asyncio.wait_for(asyncio.to_thread(storing.wait, 10), timeout=15)
+        # Past the stream's 0.5 s unwind, the turn still waits for its record.
+        done, _pending = await asyncio.wait({response}, timeout=1.5)
         assert response not in done
-        assert not any(is_interrupted_replay_run(run) for run in turn.agent_runs())
+        assert turn.agent_runs() == []
     finally:
         release.set()
 
     assert await asyncio.wait_for(response, timeout=10) == "$sent0"
     [run] = turn.agent_runs()
     assert is_interrupted_replay_run(run)
+    assert turn.hooks.names == ["session_started", "cancelled"]
 
 
 async def test_a_user_stop_while_a_whole_delivery_runs_the_model(
