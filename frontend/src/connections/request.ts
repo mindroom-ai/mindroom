@@ -5,6 +5,9 @@ export function setSignedInUser(user: string | null) {
   signedInUser = user;
 }
 
+/** The Matrix ID the portal rendered, or `null` before sign-in. */
+export const getSignedInUser = () => signedInUser;
+
 /** Replacement messages for callers outside the Connections portal. */
 export interface RequestErrorMessages {
   forbidden?: string;

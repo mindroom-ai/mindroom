@@ -8,6 +8,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConnectionsHeader } from "./ConnectionsHeader";
+import { setSignedInUser } from "./request";
 import type { ConnectionsIdentity } from "./types";
 
 const json = (value: unknown, status = 200) =>
@@ -48,6 +49,7 @@ const renderHeader = (
 beforeEach(() => answerWith(async () => json(identity())));
 afterEach(() => {
   cleanup();
+  setSignedInUser(null);
   vi.restoreAllMocks();
 });
 
@@ -74,6 +76,20 @@ describe("connections header", () => {
       "/api/connections/me",
       expect.objectContaining({ credentials: "same-origin" }),
     );
+  });
+
+  it("shows the identity it loaded only for the account signed in", async () => {
+    setSignedInUser("@bob:example.org");
+    renderHeader();
+    await screen.findByText("Signed in as Bob Builder");
+    cleanup();
+    answerWith(() => new Promise<Response>(() => {}));
+    renderHeader();
+    expect(screen.getByText("Signed in as Bob Builder")).toBeVisible();
+    cleanup();
+    setSignedInUser("@alice:example.org");
+    renderHeader();
+    expect(screen.queryByText(/Signed in as/)).not.toBeInTheDocument();
   });
 
   it("marks the page that is open", () => {
