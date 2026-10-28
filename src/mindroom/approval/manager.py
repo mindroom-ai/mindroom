@@ -62,7 +62,7 @@ DEFAULT_ROUTER_MANAGED_ROOM_REASON = (
     "Tool approval needs the router in this room. If `router.accept_invites` allows this Matrix transport account, "
     "call `invite_router` and wait for the router to join; otherwise enable it or add the router manually, then retry."
 )
-# What an approval request or settlement meets while no router card store is bound.
+# What an approval request or settlement meets before the approval runtime and the router's card store are bound.
 RUNTIME_NOT_READY_REASON = "Tool approval runtime is not ready."
 _DEFAULT_TRUNCATED_APPROVAL_REASON = (
     "Cannot approve: the tool arguments cannot be shown in full, so a human cannot review "
