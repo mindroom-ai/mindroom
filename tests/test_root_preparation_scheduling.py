@@ -9,7 +9,7 @@ import nio
 import pytest
 
 from mindroom.coalescing.batch import CoalescingKey, PreparedTurn, RequesterCoalescingOwner
-from mindroom.coalescing.gate import CoalescingGate, ReadyPendingEvent
+from mindroom.coalescing.gate import _MAX_ROOT_PREPARATIONS, CoalescingGate, ReadyPendingEvent
 from mindroom.matrix.conversation_reads import ThreadReadMode
 from tests.conftest import live_turn_claim, make_pending_event, turn_claim_is_live
 from tests.test_turns_focused import _build_harness, _room_with_members, _single_agent_config, _text_event
@@ -150,39 +150,43 @@ async def test_drain_waits_for_detached_root_preparation() -> None:
 
 @pytest.mark.asyncio
 async def test_drain_started_before_root_dispatch_registration_waits_for_child() -> None:
-    """A queue drain may create children after shutdown took its first task snapshot."""
-    admission_waiting = asyncio.Event()
-    allow_dispatch = asyncio.Event()
-    preparation_started = asyncio.Event()
-    release = asyncio.Event()
+    """A queue drain may create children after shutdown took its first task snapshot.
 
-    async def wait_allowed(_key: CoalescingKey) -> None:
-        admission_waiting.set()
-        await allow_dispatch.wait()
+    Every root preparation slot is taken, so the next root registers only once one of them ends, after the drain began.
+    """
+    roots = [f"$root{index}" for index in range(_MAX_ROOT_PREPARATIONS + 1)]
+    started = {event_id: asyncio.Event() for event_id in roots}
+    released = {event_id: asyncio.Event() for event_id in roots}
 
-    async def dispatch(_turn: PreparedTurn) -> None:
-        preparation_started.set()
-        await release.wait()
+    async def dispatch(turn: PreparedTurn) -> None:
+        started[turn.event.event_id].set()
+        await released[turn.event.event_id].wait()
 
     gate = CoalescingGate(
         dispatch_turn=dispatch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
-        wait_until_dispatch_allowed=wait_allowed,
     )
-    await _admit_root(gate, "$a")
-    await asyncio.wait_for(admission_waiting.wait(), timeout=1)
+    for index, event_id in enumerate(roots):
+        await _admit_root(
+            gate,
+            event_id,
+            key=CoalescingKey("!room:localhost", None, RequesterCoalescingOwner(f"@user{index}:localhost")),
+        )
+    *preparing, waiting = roots
+    await asyncio.wait_for(asyncio.gather(*(started[event_id].wait() for event_id in preparing)), timeout=1)
+    assert not started[waiting].is_set()
     drain = asyncio.create_task(gate.drain_all())
     try:
         await asyncio.sleep(0)
-        allow_dispatch.set()
-        await asyncio.wait_for(preparation_started.wait(), timeout=1)
+        released[preparing[0]].set()
+        await asyncio.wait_for(started[waiting].wait(), timeout=1)
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(asyncio.shield(drain), timeout=0.02)
-        assert gate.has_pending_source_event("$a")
+        assert gate.has_pending_source_event(waiting)
     finally:
-        allow_dispatch.set()
-        release.set()
+        for release in released.values():
+            release.set()
         result = await asyncio.wait_for(drain, timeout=1)
     assert result.completed
 
@@ -302,7 +306,7 @@ async def test_failed_root_releases_ownership_and_requests_retry_once() -> None:
         dispatch_turn=dispatch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
-        on_dispatch_failure=lambda events: retry_sources.append(tuple(event.event.event_id for event in events)),
+        on_dispatch_failure=lambda _room_id, source_event_ids: retry_sources.append(source_event_ids),
     )
     await _admit_root(gate, "$a", claim=claim)
     result = await gate.drain_all()

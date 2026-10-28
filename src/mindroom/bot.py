@@ -19,6 +19,7 @@ from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_live_bot
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal.legacy_turn_rows import legacy_responses_file_path
 from mindroom.event_journal.matrix_delivery import TurnHandoff
 from mindroom.hooks import (
@@ -76,7 +77,6 @@ from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 
 from . import constants
 from .background_tasks import create_background_task, wait_for_background_tasks
-from .coalescing.batch import CoalescingKey, PendingEvent, is_active_follow_up_coalescing_key
 from .coalescing.gate import CoalescingGate
 from .command_turn_executor import CommandTurnExecutor, CommandTurnExecutorDeps
 from .commands import config_confirmation
@@ -549,14 +549,6 @@ class AgentBot:
         def format_local_timestamp(timestamp_ms: float | None) -> str | None:
             return format_timestamp_ms(timestamp_ms, timezone=self.config.get_entity_timezone(self.agent_name))
 
-        self._hook_context_support = HookContextSupport(
-            runtime=self._runtime_view,
-            runtime_paths=self.runtime_paths,
-            agent_name=self.agent_name,
-            hook_registry_state=self._hook_registry_state,
-            hook_send_message=self._hook_send_message,
-            agent_message_snapshot_reader=self._hook_agent_message_snapshot,
-        )
         self._knowledge_access_support = KnowledgeAccessSupport(
             runtime=self._runtime_view,
             runtime_paths=self.runtime_paths,
@@ -600,38 +592,23 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
             ),
         )
-        self._reply_runtime = ReplyRuntime(
-            store=principal,
-            entity_name=self.agent_name,
-            generation=self._approval_runtime_generation,
-            # Resolved late: the dispatcher is built after the reply runtime.
-            retry_sources=lambda room_id, event_ids: self._journal_dispatcher.retry_turn_sources(room_id, event_ids),
-            hold_conversation=lambda continuation: self._response_runner.hold_for_approval(continuation),
-            approval_ended=lambda ended: self._approval_ended(ended),
-        )
-        self._delivery_gateway = DeliveryGateway(
-            DeliveryGatewayDeps(
+        self._turn_policy = TurnPolicy(
+            TurnPolicyDeps(
                 runtime=self._runtime_view,
+                logger=self.logger,
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,
-                logger=self.logger,
-                resolver=self._conversation_resolver,
-                redact_message_event=self._redact_message_event,
-                response_hooks=ResponseHookService(
-                    hook_context=self._hook_context_support,
-                ),
-                outbox=principal,
-                turn_handoff=TurnHandoff(
-                    # Resolved late: the dispatcher is built after the gateway.
-                    released=lambda event_ids: self._journal_dispatcher.release_delivered_turn_sources(event_ids),
-                ),
-                # Resolved late for the same reason: this gateway is built
-                # before the bot has logged in, and a re-login replaces the
-                # device that the frozen transaction IDs belong to.
-                sending_device_id=lambda: self._sending_device_id,
-                reply_effects=self._reply_runtime.run_effects,
-                reply_row_resolved=self._reply_row_resolved,
+                matrix_id=runtime_matrix_id,
+                agent_reply_memberships=self._runtime_view.agent_reply_memberships,
             ),
+        )
+        self._hook_context_support = HookContextSupport(
+            runtime=self._runtime_view,
+            runtime_paths=self.runtime_paths,
+            agent_name=self.agent_name,
+            hook_registry_state=self._hook_registry_state,
+            hook_send_message=self._hook_send_message,
+            agent_message_snapshot_reader=self._hook_agent_message_snapshot,
         )
         self._tool_runtime_support = ToolRuntimeSupport(
             runtime=self._runtime_view,
@@ -644,24 +621,10 @@ class AgentBot:
             hook_context=self._hook_context_support,
             membership=principal,
         )
-        self._turn_store = TurnStore(
-            TurnStoreDeps(
-                agent_name=self.agent_name,
-                turn_records=self._journal_store.turn_records(self.agent_name),
-                legacy_responses_file=legacy_responses_file_path(self.storage_path, self.agent_name),
-                state_writer=self._conversation_state_writer,
-                resolver=self._conversation_resolver,
-                tool_runtime=self._tool_runtime_support,
-                response_recovery_state=partial(principal.response_recovery_state, agent_name=self.agent_name),
-                # Resolved late: the dispatcher is built after the turn store.
-                retry_dispatch_sources=lambda room_id, event_ids: self._journal_dispatcher.retry_turn_sources(
-                    room_id,
-                    event_ids,
-                ),
-            ),
-        )
         self._journal_dispatcher = JournalDispatcher(
             store=principal,
+            # Every callback reaches an owner built below, which hands its sources back through this dispatcher, so
+            # each callback is a bot routing method or resolves its owner when it runs.
             callbacks=JournalCallbacks(
                 on_message=self._on_message,
                 on_media=self._on_media_message,
@@ -676,23 +639,60 @@ class AgentBot:
                     self._coalescing_gate.has_pending_source_event(event_id)
                     or self._response_runner.has_live_inbox_response(event_id)
                 ),
-                turn_has_live_claim=self._turn_store.has_live_turn_claim,
+                turn_has_live_claim=lambda event_id: self._turn_store.has_live_turn_claim(event_id),
                 replies_ended=self._replies_ended,
                 on_job_follow_up=lambda event: self._response_runner.handoff_job_follow_up(event),
             ),
             room_for_id=self._room_for_journal_event,
-            schedule_trigger_sender_is_managed=lambda sender: (
-                self._ingress_validator.sender_is_trusted_for_ingress_metadata(sender)
-            ),
+            schedule_trigger_sender_is_managed=lambda sender: entity_identity_registry(
+                self.config,
+                self.runtime_paths,
+            ).is_managed_user_id(sender),
             runtime_generation=self._approval_runtime_generation,
         )
-        self._decryption_diagnostics = DecryptionDiagnostics(
-            agent_name=self.agent_name,
-            runtime=self._runtime_view,
-            runtime_paths=self.runtime_paths,
-            read_position=lambda room_id: self.journal_principal().ingestion_membership_position(room_id),
-            admit_response=lambda: admitted_response_decision(self.admission_gate, self.wait_for_admission_or_shutdown),
-            notice_is_fenced=self._room_lifecycle.decrypt_notice_is_fenced,
+        self._turn_store = TurnStore(
+            TurnStoreDeps(
+                agent_name=self.agent_name,
+                turn_records=self._journal_store.turn_records(self.agent_name),
+                legacy_responses_file=legacy_responses_file_path(self.storage_path, self.agent_name),
+                state_writer=self._conversation_state_writer,
+                resolver=self._conversation_resolver,
+                tool_runtime=self._tool_runtime_support,
+                response_recovery_state=partial(principal.response_recovery_state, agent_name=self.agent_name),
+                retry_dispatch_sources=self._journal_dispatcher.retry_turn_sources,
+            ),
+        )
+        self._reply_runtime = ReplyRuntime(
+            store=principal,
+            entity_name=self.agent_name,
+            generation=self._approval_runtime_generation,
+            retry_sources=self._journal_dispatcher.retry_turn_sources,
+            # Resolved late: the runner, built below, holds this reply runtime. The reply runtime and the delivery
+            # gateway hold each other the same way, through the reply-debt methods `_approval_ended` and
+            # `_reply_row_resolved`.
+            hold_conversation=lambda continuation: self._response_runner.hold_for_approval(continuation),
+            approval_ended=self._approval_ended,
+        )
+        self._delivery_gateway = DeliveryGateway(
+            DeliveryGatewayDeps(
+                runtime=self._runtime_view,
+                runtime_paths=self.runtime_paths,
+                agent_name=self.agent_name,
+                logger=self.logger,
+                resolver=self._conversation_resolver,
+                redact_message_event=self._redact_message_event,
+                response_hooks=ResponseHookService(
+                    hook_context=self._hook_context_support,
+                ),
+                outbox=principal,
+                turn_handoff=TurnHandoff(released=self._journal_dispatcher.release_delivered_turn_sources),
+                # Read when each send is claimed: this gateway is built before
+                # the bot has logged in, and a re-login replaces the device
+                # that the frozen transaction IDs belong to.
+                sending_device_id=lambda: self._sending_device_id,
+                reply_effects=self._reply_runtime.run_effects,
+                reply_row_resolved=self._reply_row_resolved,
+            ),
         )
         self._post_response_effects_support = PostResponseEffectsSupport(
             runtime=self._runtime_view,
@@ -733,15 +733,16 @@ class AgentBot:
                 replies=self._reply_runtime,
             ),
         )
-        self._turn_policy = TurnPolicy(
-            TurnPolicyDeps(
-                runtime=self._runtime_view,
-                logger=self.logger,
-                runtime_paths=self.runtime_paths,
-                agent_name=self.agent_name,
-                matrix_id=runtime_matrix_id,
-                agent_reply_memberships=self._runtime_view.agent_reply_memberships,
+        self._decryption_diagnostics = DecryptionDiagnostics(
+            agent_name=self.agent_name,
+            runtime=self._runtime_view,
+            runtime_paths=self.runtime_paths,
+            read_position=principal.ingestion_membership_position,
+            admit_response=lambda: admitted_response_decision(
+                self.admission_gate,
+                self._response_runner.wait_for_admission_or_shutdown,
             ),
+            notice_is_fenced=self._room_lifecycle.decrypt_notice_is_fenced,
         )
         self._edit_regenerator = EditRegenerator(
             EditRegeneratorDeps(
@@ -879,13 +880,13 @@ class AgentBot:
             dispatch_turn=self._turn_dispatcher.handle_prepared_turn,
             debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
             is_shutting_down=lambda: self._sync_shutting_down,
-            wait_until_dispatch_allowed=self._wait_until_coalesced_dispatch_allowed,
-            room_scope_is_single_conversation=self._room_scope_is_single_conversation,
-            dispatch_allowed_now=self._coalesced_dispatch_allowed_now,
+            wait_for_thread_response_idle=self._response_runner.wait_for_thread_response_idle,
+            room_scope_is_single_conversation=self._conversation_resolver.room_is_one_conversation,
+            active_thread_ids_for_room=self._response_runner.active_thread_ids_for_room,
             timestamp_formatter=format_local_timestamp,
-            on_dispatch_failure=self._retry_failed_coalesced_dispatch,
-            on_undelivered_source=self._retry_pending_dispatch_source,
-            on_intentionally_ignored_source=self._settle_ignored_dispatch_source,
+            on_dispatch_failure=self._journal_dispatcher.retry_turn_sources,
+            on_undelivered_source=self._journal_dispatcher.retry_turn_source,
+            on_intentionally_ignored_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
         )
         self._turn_ingress = TurnIngress(
             TurnIngressDeps(
@@ -945,20 +946,6 @@ class AgentBot:
             room_id,
             preview_event_id,
         )
-
-    async def _wait_until_coalesced_dispatch_allowed(self, key: CoalescingKey) -> None:
-        """Hold active follow-up dispatch until the response lock for its target is idle."""
-        if not is_active_follow_up_coalescing_key(key):
-            return
-        await self._response_runner.wait_for_thread_response_idle(key.room_id, key.thread_id)
-
-    def _coalesced_dispatch_allowed_now(self, key: CoalescingKey) -> bool:
-        """Return whether one coalescing key's target has no active response right now."""
-        return key.thread_id not in self._response_runner.active_thread_ids_for_room(key.room_id)
-
-    def _room_scope_is_single_conversation(self, room_id: str) -> bool:
-        """Return whether this agent treats the whole room as one conversation."""
-        return self._conversation_resolver.room_is_one_conversation(room_id)
 
     def _approval_ended(self, ended: ApprovalEnded) -> None:
         """Let the ended approval's conversation answer its waiting messages, and settle what its reply owes."""
@@ -2464,21 +2451,6 @@ class AgentBot:
         if client is not None and room_id in client.rooms:
             return client.rooms[room_id]
         return nio.MatrixRoom(room_id, self.matrix_id.full_id)
-
-    def _retry_failed_coalesced_dispatch(self, pending_events: tuple[PendingEvent, ...]) -> None:
-        """Return failed gate sources to their exact durable callback owner."""
-        for pending_event in pending_events:
-            self._retry_pending_dispatch_source(pending_event.room.room_id, pending_event.event.event_id)
-
-    def _retry_pending_dispatch_source(self, room_id: str, source_event_id: str) -> None:
-        """Return one undelivered source to its exact durable callback owner."""
-        self._journal_dispatcher.retry_turn_source(room_id, source_event_id)
-
-    async def _settle_ignored_dispatch_source(self, source_event_id: str) -> None:
-        """Settle one asynchronously normalized source that produced no dispatch payload."""
-        await self._journal_dispatcher.settle_intentionally_ignored_turn_sources(
-            (source_event_id,),
-        )
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
         """Delegate one inbound text event to the turn engine.

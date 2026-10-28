@@ -132,11 +132,9 @@ async def _respond(
 def _journal_wakes(bot: AgentBot) -> Iterator[list[tuple[str, ...]]]:
     """Collect the sources the reply records hand back to the journal, which these tests do not run."""
     wakes: list[tuple[str, ...]] = []
-    with patch.object(
-        bot._journal_dispatcher,
-        "retry_turn_sources",
-        side_effect=lambda _room_id, sources: wakes.append(sources),
-    ):
+    replies = unwrap_extracted_collaborator(bot._response_runner).deps.replies
+    assert replies is not None
+    with patch.object(replies, "retry_sources", side_effect=lambda _room_id, sources: wakes.append(sources)):
         yield wakes
 
 

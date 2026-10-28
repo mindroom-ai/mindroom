@@ -274,6 +274,33 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         with pytest.raises(RuntimeError, match="The event-journal store is closed"):
             await store_before_login.existing_generation()
 
+    def test_a_rebuild_wires_each_collaborator_to_the_owners_of_its_own_build(self, bot: AgentBot) -> None:
+        """Collaborators built after the owners they hand work to hold those owners, never ones from an earlier build."""
+        identity_before_login = bot.matrix_id
+        first_dispatcher = bot._journal_dispatcher
+
+        bot.agent_user.user_id = "@mindroom_general_2:localhost"
+        bot._rebuild_runtime_components_after_login_if_identity_changed(identity_before_login)
+
+        dispatcher, runner, gate = bot._journal_dispatcher, bot._response_runner, bot._coalescing_gate
+        assert dispatcher is not first_dispatcher
+        assert bot._turn_store.deps.retry_dispatch_sources == dispatcher.retry_turn_sources
+        assert bot._reply_runtime.retry_sources == dispatcher.retry_turn_sources
+        assert bot._delivery_gateway.deps.turn_handoff.released == dispatcher.release_delivered_turn_sources
+        assert (
+            bot._ingress_validator.deps.settle_ignored_sources == dispatcher.settle_intentionally_ignored_turn_sources
+        )
+        assert gate._dispatch_turn == bot._turn_dispatcher.handle_prepared_turn
+        assert gate._on_dispatch_failure == dispatcher.retry_turn_sources
+        assert gate._on_undelivered_source == dispatcher.retry_turn_source
+        assert gate._on_intentionally_ignored_sources == dispatcher.settle_intentionally_ignored_turn_sources
+        assert gate._wait_for_thread_response_idle == runner.wait_for_thread_response_idle
+        assert gate._active_thread_ids_for_room == runner.active_thread_ids_for_room
+        assert gate._room_scope_is_single_conversation == bot._conversation_resolver.room_is_one_conversation
+        # The journal's schedule trigger trusts exactly the senders the entity registry manages.
+        assert dispatcher.schedule_trigger_sender_is_managed(identity_before_login.full_id)
+        assert not dispatcher.schedule_trigger_sender_is_managed("@user:localhost")
+
     @pytest.mark.asyncio
     async def test_live_redaction_callback_only_runs_what_its_admission_ended(self, bot: AgentBot) -> None:
         """Admission already recorded and applied the redaction, so the callback owes only the ended replies' effects."""

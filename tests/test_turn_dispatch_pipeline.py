@@ -1583,9 +1583,10 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.conversation_resolver.ConversationResolver.build_envelope",
                 return_value=envelope,
             ),
+            # The gate reads which conversations have a response running from the runner it was built with.
             patch.object(
-                bot._response_runner,
-                "active_thread_ids_for_room",
+                bot._coalescing_gate,
+                "_active_thread_ids_for_room",
                 return_value=frozenset({"$thread_root"}),
             ) as mock_active_thread_ids,
             patch.object(
@@ -1870,9 +1871,10 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                 ),
             ),
+            # The gate reads which conversations have a response running from the runner it was built with.
             patch.object(
-                bot._response_runner,
-                "active_thread_ids_for_room",
+                bot._coalescing_gate,
+                "_active_thread_ids_for_room",
                 return_value=frozenset({"$thread_root"}),
             ),
             patch.object(
@@ -2086,9 +2088,10 @@ class TestAgentBot(AgentBotTestBase):
                 "coalescing_thread_id",
                 new=AsyncMock(return_value="$thread_root"),
             ),
+            # The gate reads which conversations have a response running from the runner it was built with.
             patch.object(
-                bot._response_runner,
-                "active_thread_ids_for_room",
+                bot._coalescing_gate,
+                "_active_thread_ids_for_room",
                 return_value=frozenset({"$thread_root"}),
             ),
             patch.object(

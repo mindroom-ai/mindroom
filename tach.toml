@@ -4816,6 +4816,7 @@ depends_on = [
     "mindroom.desktop.pairing_receiver",
     "mindroom.dispatch_callback_outcome",
     "mindroom.edit_regenerator",
+    "mindroom.entity_resolution",
     "mindroom.event_journal",
     "mindroom.event_journal.opening",
     "mindroom.hooks",

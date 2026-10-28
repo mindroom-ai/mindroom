@@ -651,13 +651,6 @@ def _build_harness(
     def _retry_dispatch_sources(_room_id: str, source_event_ids: tuple[str, ...]) -> None:
         retried_dispatch_sources.append(source_event_ids)
 
-    def _retry_failed_coalesced_dispatch(
-        pending_events: tuple[PendingEvent, ...],
-    ) -> None:
-        retried_dispatch_sources.append(
-            tuple(pending_event.event.event_id for pending_event in pending_events),
-        )
-
     async def _recover_config_confirmation_setup(_room_id: str, _preview_event_id: str) -> bool:
         return False
 
@@ -787,7 +780,7 @@ def _build_harness(
         dispatch_turn=_dispatch_batch,
         debounce_seconds=lambda: debounce_seconds,
         is_shutting_down=lambda: False,
-        on_dispatch_failure=_retry_failed_coalesced_dispatch,
+        on_dispatch_failure=_retry_dispatch_sources,
     )
     ingress = TurnIngress(
         TurnIngressDeps(
@@ -2346,8 +2339,8 @@ async def test_managed_follow_up_cannot_settle_human_source_queued_before_it(
     key = active_follow_up_coalescing_key(room.room_id, "$unavailable-root:localhost")
     retried_batches: list[tuple[str, ...]] = []
 
-    def record_failed_batch(failed_events: tuple[PendingEvent, ...]) -> None:
-        retried_batches.append(tuple(pending.event.event_id for pending in failed_events))
+    def record_failed_batch(_room_id: str, source_event_ids: tuple[str, ...]) -> None:
+        retried_batches.append(source_event_ids)
 
     gate = CoalescingGate(
         dispatch_turn=harness.dispatcher.handle_prepared_turn,
@@ -6428,7 +6421,7 @@ async def test_opted_in_active_backlog_preserves_idle_dispatch_and_requesters(
     batches: list[PreparedTurn] = []
     key = active_follow_up_coalescing_key(_ROOM_ID, _THREAD_ROOT)
 
-    async def wait_until_idle(_key: CoalescingKey) -> None:
+    async def wait_until_idle(_room_id: str, _thread_id: str | None) -> None:
         await idle.wait()
 
     async def dispatch_batch(batch: PreparedTurn) -> None:
@@ -6442,7 +6435,7 @@ async def test_opted_in_active_backlog_preserves_idle_dispatch_and_requesters(
         dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 30.0,
         is_shutting_down=lambda: False,
-        wait_until_dispatch_allowed=wait_until_idle,
+        wait_for_thread_response_idle=wait_until_idle,
     )
     try:
         for event_id, sender, body in (

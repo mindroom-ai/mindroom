@@ -374,18 +374,18 @@ class TestAgentBot(AgentBotTestBase):
         ingress.precheck_event.return_value = True
         resolver = MagicMock(wraps=bot._conversation_resolver)
         resolver.coalescing_thread_id = AsyncMock()
-        replace_turn_deps(bot, ingress=ingress, resolver=resolver)
+        retry_turn_sources = MagicMock()
+        replace_turn_deps(bot, ingress=ingress, resolver=resolver, retry_dispatch_sources=retry_turn_sources)
         active_claim = await bot._turn_ingress.deps.turn_store.claim(
             TurnRecord.create([event.event_id], completed=False),
         )
         assert isinstance(active_claim, TurnClaim)
 
-        with patch.object(bot._journal_dispatcher, "retry_turn_sources") as retry_turn_sources:
-            assert await bot._turn_ingress.handle_media_event(room, event) is TurnDispatchOutcome.DEFERRED
-            resolver.coalescing_thread_id.assert_not_awaited()
-            assert bot._turn_ingress.deps.turn_store.has_live_turn_claim(event.event_id)
-            retry_turn_sources.assert_not_called()
-            active_claim.release()
+        assert await bot._turn_ingress.handle_media_event(room, event) is TurnDispatchOutcome.DEFERRED
+        resolver.coalescing_thread_id.assert_not_awaited()
+        assert bot._turn_ingress.deps.turn_store.has_live_turn_claim(event.event_id)
+        retry_turn_sources.assert_not_called()
+        active_claim.release()
 
         retry_turn_sources.assert_called_once_with(room.room_id, (event.event_id,))
         assert not bot._turn_ingress.deps.turn_store.has_live_turn_claim(event.event_id)

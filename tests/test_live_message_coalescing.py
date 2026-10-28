@@ -1554,14 +1554,15 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
             "_dispatch_text_turn",
             new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
         ),
+        # The gate reads which conversations have a response running from the runner it was built with.
         patch.object(
-            bot._response_runner,
-            "wait_for_thread_response_idle",
+            bot._coalescing_gate,
+            "_wait_for_thread_response_idle",
             new=AsyncMock(side_effect=wait_for_thread_response_idle),
         ),
         patch.object(
-            bot._response_runner,
-            "active_thread_ids_for_room",
+            bot._coalescing_gate,
+            "_active_thread_ids_for_room",
             new=lambda _room_id: frozenset(active_threads),
         ),
     ):
@@ -1615,14 +1616,15 @@ async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: P
 
     with (
         patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock(side_effect=record_dispatch)),
+        # The gate reads which conversations have a response running from the runner it was built with.
         patch.object(
-            bot._response_runner,
-            "wait_for_thread_response_idle",
+            bot._coalescing_gate,
+            "_wait_for_thread_response_idle",
             new=AsyncMock(side_effect=wait_for_thread_response_idle),
         ),
         patch.object(
-            bot._response_runner,
-            "active_thread_ids_for_room",
+            bot._coalescing_gate,
+            "_active_thread_ids_for_room",
             new=lambda _room_id: frozenset(active_threads),
         ),
         patch.object(bot._response_runner, "reserve_waiting_human_message", return_value=MagicMock()),
@@ -4430,7 +4432,7 @@ async def test_timer_flush_logs_dispatch_failure_without_unhandled_task() -> Non
 async def test_shutdown_admission_refusal_does_not_format_coalescing_traceback() -> None:
     """A fenced dispatch during shutdown is expected recovery work, not an exception storm."""
     room = _make_room()
-    failure_handoffs: list[tuple[PendingEvent, ...]] = []
+    failure_handoffs: list[tuple[str, ...]] = []
 
     async def refused_dispatch_turn(_turn: object) -> None:
         raise ResponseAdmissionRefusedError
@@ -4439,7 +4441,7 @@ async def test_shutdown_admission_refusal_does_not_format_coalescing_traceback()
         dispatch_turn=refused_dispatch_turn,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: True,
-        on_dispatch_failure=failure_handoffs.append,
+        on_dispatch_failure=lambda _room_id, source_event_ids: failure_handoffs.append(source_event_ids),
     )
 
     with patch("mindroom.coalescing.gate.logger.exception") as mock_exception:
@@ -4455,7 +4457,7 @@ async def test_shutdown_admission_refusal_does_not_format_coalescing_traceback()
         await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
     mock_exception.assert_not_called()
-    assert [[event.event.event_id for event in handoff] for handoff in failure_handoffs] == [["$m1"]]
+    assert failure_handoffs == [("$m1",)]
     assert not gate.has_pending_source_event("$m1")
 
 
@@ -4463,7 +4465,7 @@ async def test_shutdown_admission_refusal_does_not_format_coalescing_traceback()
 async def test_dispatch_failure_handoff_runs_after_gate_releases_exact_sources() -> None:
     """Failed deferred sources must reach durable retry ownership after gate cleanup."""
     room = _make_room()
-    failure_handoffs: list[tuple[PendingEvent, ...]] = []
+    failure_handoffs: list[tuple[str, tuple[str, ...]]] = []
     source_owned_during_handoff: list[bool] = []
     handoff_complete = asyncio.Event()
 
@@ -4471,11 +4473,9 @@ async def test_dispatch_failure_handoff_runs_after_gate_releases_exact_sources()
         msg = "boom"
         raise RuntimeError(msg)
 
-    def on_dispatch_failure(pending_events: tuple[PendingEvent, ...]) -> None:
-        failure_handoffs.append(pending_events)
-        source_owned_during_handoff.extend(
-            gate.has_pending_source_event(pending_event.event.event_id) for pending_event in pending_events
-        )
+    def on_dispatch_failure(room_id: str, source_event_ids: tuple[str, ...]) -> None:
+        failure_handoffs.append((room_id, source_event_ids))
+        source_owned_during_handoff.extend(gate.has_pending_source_event(event_id) for event_id in source_event_ids)
         handoff_complete.set()
 
     gate = CoalescingGate(
@@ -4496,7 +4496,7 @@ async def test_dispatch_failure_handoff_runs_after_gate_releases_exact_sources()
     )
     await asyncio.wait_for(handoff_complete.wait(), timeout=1)
 
-    assert [[pending.event.event_id for pending in handoff] for handoff in failure_handoffs] == [["$m1"]]
+    assert failure_handoffs == [("!room:localhost", ("$m1",))]
     assert source_owned_during_handoff == [False]
 
 
@@ -7709,11 +7709,8 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
     retry_pending_source = MagicMock()
 
     with (
-        patch.object(
-            bot._journal_dispatcher,
-            "retry_turn_source",
-            new=retry_pending_source,
-        ),
+        # The gate hands a failed batch's sources back to the journal, which retries their callbacks.
+        patch.object(bot._coalescing_gate, "_on_dispatch_failure", new=retry_pending_source),
         patch.object(
             bot._inbound_turn_normalizer,
             "prepare_file_sidecar_text_event",
@@ -7736,7 +7733,7 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
 
     assert outcome is _IngressAdmissionOutcome.DEFERRED
     assert drain_result.dispatch_failure_count == 1
-    retry_pending_source.assert_called_once_with(room.room_id, sidecar.event_id)
+    retry_pending_source.assert_called_once_with(room.room_id, (sidecar.event_id,))
 
 
 @pytest.mark.asyncio

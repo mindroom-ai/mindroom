@@ -52,7 +52,7 @@ from .policy import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Collection, Mapping
 
     from mindroom.turn_store import TurnClaim
 
@@ -75,10 +75,6 @@ _MAX_ROOT_PREPARATIONS = 8
 # the batch would otherwise sit admitted and undispatched with nothing logged.
 _LANE_WAIT_STALL_SECONDS = 60.0
 logger = get_logger(__name__)
-
-
-async def _allow_dispatch(_key: CoalescingKey) -> None:
-    return
 
 
 class _GatePhase(enum.Enum):
@@ -222,24 +218,31 @@ class CoalescingGate:
         dispatch_turn: Callable[[PreparedTurn], Awaitable[None]],
         debounce_seconds: Callable[[], float],
         is_shutting_down: Callable[[], bool],
-        wait_until_dispatch_allowed: Callable[[CoalescingKey], Awaitable[None]] | None = None,
+        wait_for_thread_response_idle: Callable[[str, str | None], Awaitable[None]] | None = None,
         room_scope_is_single_conversation: Callable[[str], bool] | None = None,
-        dispatch_allowed_now: Callable[[CoalescingKey], bool] | None = None,
+        active_thread_ids_for_room: Callable[[str], Collection[str | None]] | None = None,
         timestamp_formatter: TimestampFormatter | None = None,
-        on_dispatch_failure: Callable[[tuple[PendingEvent, ...]], None] | None = None,
+        on_dispatch_failure: Callable[[str, tuple[str, ...]], None] | None = None,
         on_undelivered_source: Callable[[str, str], None] | None = None,
-        on_intentionally_ignored_source: Callable[[str], Awaitable[None]] | None = None,
+        on_intentionally_ignored_sources: Callable[[tuple[str, ...]], Awaitable[None]] | None = None,
     ) -> None:
+        """Build the gate on the response owner's conversation state and the journal's source handoffs.
+
+        ``wait_for_thread_response_idle`` and ``active_thread_ids_for_room`` read
+        which conversations have a response running; ``on_dispatch_failure``,
+        ``on_undelivered_source``, and ``on_intentionally_ignored_sources`` hand
+        sources the gate no longer owns back to the journal.
+        """
         self._dispatch_turn = dispatch_turn
         self._debounce_seconds = debounce_seconds
         self._is_shutting_down = is_shutting_down
-        self._wait_until_dispatch_allowed = wait_until_dispatch_allowed or _allow_dispatch
+        self._wait_for_thread_response_idle = wait_for_thread_response_idle
         self._room_scope_is_single_conversation = room_scope_is_single_conversation
-        self._dispatch_allowed_now = dispatch_allowed_now
+        self._active_thread_ids_for_room = active_thread_ids_for_room
         self._timestamp_formatter = timestamp_formatter
         self._on_dispatch_failure = on_dispatch_failure
         self._on_undelivered_source = on_undelivered_source
-        self._on_intentionally_ignored_source = on_intentionally_ignored_source
+        self._on_intentionally_ignored_sources = on_intentionally_ignored_sources
         self._gates: dict[CoalescingKey, _GateEntry] = {}
         self._root_dispatches: dict[asyncio.Task[None], tuple[CoalescingKey, _GateEntry]] = {}
         self._lanes = IngressLanes(
@@ -379,11 +382,14 @@ class CoalescingGate:
         """Settle a source whose asynchronous readiness completed with no payload."""
         if self._gate_owns_source_event(source_event_id):
             return
-        if self._on_intentionally_ignored_source is not None:
-            await self._on_intentionally_ignored_source(source_event_id)
+        if self._on_intentionally_ignored_sources is not None:
+            await self._on_intentionally_ignored_sources((source_event_id,))
 
     def _conversation_is_busy(self, key: CoalescingKey) -> bool:
-        return self._dispatch_allowed_now is not None and not self._dispatch_allowed_now(key)
+        """Return whether a response is running in this key's conversation right now."""
+        return self._active_thread_ids_for_room is not None and key.thread_id in self._active_thread_ids_for_room(
+            key.room_id,
+        )
 
     async def _admit_from_lane(
         self,
@@ -1135,7 +1141,7 @@ class CoalescingGate:
         finally:
             self._clear_claimed_admissions(gate, admissions)
         if not dispatched and self._on_dispatch_failure is not None:
-            self._on_dispatch_failure(tuple(pending_events))
+            self._on_dispatch_failure(key.room_id, tuple(pending.event.event_id for pending in pending_events))
 
     async def _dispatch_front_barrier(
         self,
@@ -1279,8 +1285,13 @@ class CoalescingGate:
 
     async def _drain_gate_iteration(self, key: CoalescingKey, gate: _GateEntry) -> None:
         drain_context = self._current_drain_context(gate)
-        if not (self._is_shutting_down() or self._is_bounded_drain(drain_context)):
-            await self._wait_until_dispatch_allowed(key)
+        if (
+            self._wait_for_thread_response_idle is not None
+            # Only a follow-up backlog waits: it was queued behind the response that holds its conversation.
+            and is_active_follow_up_coalescing_key(key)
+            and not (self._is_shutting_down() or self._is_bounded_drain(drain_context))
+        ):
+            await self._wait_for_thread_response_idle(key.room_id, key.thread_id)
         if not gate.queue:
             return
 

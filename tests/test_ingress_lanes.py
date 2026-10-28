@@ -108,31 +108,30 @@ def _gate(
     *,
     debounce_seconds: float = 0.02,
     room_scope_is_single_conversation: bool | None = None,
-    dispatch_allowed_now: Callable[[CoalescingKey], bool] | bool | None = None,
-    wait_until_dispatch_allowed: Callable[[CoalescingKey], Awaitable[None]] | None = None,
+    thread_busy: Callable[[], bool] | None = None,
+    wait_for_thread_response_idle: Callable[[str, str | None], Awaitable[None]] | None = None,
     on_undelivered_source: Callable[[str, str], None] | None = None,
-    on_intentionally_ignored_source: Callable[[str], Awaitable[None]] | None = None,
+    on_intentionally_ignored_sources: Callable[[tuple[str, ...]], Awaitable[None]] | None = None,
 ) -> tuple[CoalescingGate, list[PreparedTurn]]:
+    """Return a gate and the turns it dispatches; ``thread_busy`` says whether a response runs in ``$thread``."""
     batches: list[PreparedTurn] = []
 
     async def record(batch: PreparedTurn) -> None:
         batches.append(batch)
 
-    if isinstance(dispatch_allowed_now, bool):
-        allowed = dispatch_allowed_now
-        dispatch_allowed_now = lambda _key: allowed  # noqa: E731
-
     gate = CoalescingGate(
         dispatch_turn=dispatch_batch or record,
         debounce_seconds=lambda: debounce_seconds,
         is_shutting_down=lambda: False,
-        wait_until_dispatch_allowed=wait_until_dispatch_allowed,
+        wait_for_thread_response_idle=wait_for_thread_response_idle,
         room_scope_is_single_conversation=(
             None if room_scope_is_single_conversation is None else lambda _room_id: room_scope_is_single_conversation
         ),
-        dispatch_allowed_now=dispatch_allowed_now,
+        active_thread_ids_for_room=(
+            None if thread_busy is None else lambda _room_id: frozenset({"$thread"}) if thread_busy() else frozenset()
+        ),
         on_undelivered_source=on_undelivered_source,
-        on_intentionally_ignored_source=on_intentionally_ignored_source,
+        on_intentionally_ignored_sources=on_intentionally_ignored_sources,
     )
     return gate, batches
 
@@ -258,7 +257,7 @@ async def test_room_mode_text_burst_coalesces_into_one_turn() -> None:
 async def test_straggler_follow_up_logs_missed_combined_turn() -> None:
     """A late-resolving follow-up that misses its busy window is logged as a missed merge."""
     busy = {"value": True}
-    gate, batches = _gate(debounce_seconds=0.0, dispatch_allowed_now=lambda _key: not busy["value"])
+    gate, batches = _gate(debounce_seconds=0.0, thread_busy=lambda: busy["value"])
     key = CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost"))
     release_ready = asyncio.Event()
 
@@ -297,13 +296,13 @@ async def test_follow_up_delivered_while_still_busy_is_not_logged_as_missed() ->
     busy = {"value": True}
     idle = asyncio.Event()
 
-    async def wait_until_idle(_key: CoalescingKey) -> None:
+    async def wait_until_idle(_room_id: str, _thread_id: str | None) -> None:
         await idle.wait()
 
     gate, batches = _gate(
         debounce_seconds=0.0,
-        dispatch_allowed_now=lambda _key: not busy["value"],
-        wait_until_dispatch_allowed=wait_until_idle,
+        thread_busy=lambda: busy["value"],
+        wait_for_thread_response_idle=wait_until_idle,
     )
     key = CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost"))
 
@@ -334,13 +333,13 @@ async def test_busy_conversation_queues_any_sender_into_one_combined_follow_up()
     busy = {"value": True}
     idle = asyncio.Event()
 
-    async def wait_until_idle(_key: CoalescingKey) -> None:
+    async def wait_until_idle(_room_id: str, _thread_id: str | None) -> None:
         await idle.wait()
 
     gate, batches = _gate(
         debounce_seconds=0.0,
-        dispatch_allowed_now=lambda _key: not busy["value"],
-        wait_until_dispatch_allowed=wait_until_idle,
+        thread_busy=lambda: busy["value"],
+        wait_for_thread_response_idle=wait_until_idle,
     )
 
     await gate.admit(
@@ -371,13 +370,13 @@ async def test_machine_fire_queues_while_conversation_busy() -> None:
     busy = {"value": True}
     idle = asyncio.Event()
 
-    async def wait_until_idle(_key: CoalescingKey) -> None:
+    async def wait_until_idle(_room_id: str, _thread_id: str | None) -> None:
         await idle.wait()
 
     gate, batches = _gate(
         debounce_seconds=0.0,
-        dispatch_allowed_now=lambda _key: not busy["value"],
-        wait_until_dispatch_allowed=wait_until_idle,
+        thread_busy=lambda: busy["value"],
+        wait_for_thread_response_idle=wait_until_idle,
     )
 
     await gate.admit(
@@ -726,13 +725,13 @@ async def test_ignored_source_remains_owned_during_durable_settlement(
     settlement_started = asyncio.Event()
     release_settlement = asyncio.Event()
 
-    async def settle_source(_event_id: str) -> None:
+    async def settle_source(_event_ids: tuple[str, ...]) -> None:
         settlement_started.set()
         await release_settlement.wait()
 
     gate, _batches = _gate(
         debounce_seconds=0.0,
-        on_intentionally_ignored_source=settle_source,
+        on_intentionally_ignored_sources=settle_source,
     )
 
     async def ignored_ready() -> None:
@@ -792,14 +791,14 @@ async def test_failed_ignored_source_settlement_returns_source_to_retry_owner() 
     """A failed terminal write must not suppress its own durable retry handoff."""
     undelivered_sources: list[tuple[str, str]] = []
 
-    async def fail_settlement(_event_id: str) -> None:
+    async def fail_settlement(_event_ids: tuple[str, ...]) -> None:
         msg = "tracking store unavailable"
         raise RuntimeError(msg)
 
     gate, _batches = _gate(
         debounce_seconds=0.0,
         on_undelivered_source=lambda room_id, source_id: undelivered_sources.append((room_id, source_id)),
-        on_intentionally_ignored_source=fail_settlement,
+        on_intentionally_ignored_sources=fail_settlement,
     )
 
     async def ignored_ready() -> None:
@@ -1465,13 +1464,13 @@ async def test_machine_and_human_follow_ups_split_solo_batch() -> None:
     busy = {"value": True}
     idle = asyncio.Event()
 
-    async def wait_until_idle(_key: CoalescingKey) -> None:
+    async def wait_until_idle(_room_id: str, _thread_id: str | None) -> None:
         await idle.wait()
 
     gate, batches = _gate(
         debounce_seconds=0.0,
-        dispatch_allowed_now=lambda _key: not busy["value"],
-        wait_until_dispatch_allowed=wait_until_idle,
+        thread_busy=lambda: busy["value"],
+        wait_for_thread_response_idle=wait_until_idle,
     )
 
     await gate.admit(
@@ -1644,7 +1643,7 @@ async def test_readiness_that_delivers_nothing_releases_its_claim_before_the_sou
     def retry(_room_id: str, _source_event_id: str) -> None:
         claim_live_at_return.append(turn_claim_is_live(claim))
 
-    async def settle_ignored(_source_event_id: str) -> None:
+    async def settle_ignored(_source_event_ids: tuple[str, ...]) -> None:
         claim_live_at_return.append(turn_claim_is_live(claim))
 
     async def ready() -> ReadyPendingEvent | None:
@@ -1654,7 +1653,7 @@ async def test_readiness_that_delivers_nothing_releases_its_claim_before_the_sou
             raise IngressRetryError
         return None
 
-    gate, batches = _gate(on_undelivered_source=retry, on_intentionally_ignored_source=settle_ignored)
+    gate, batches = _gate(on_undelivered_source=retry, on_intentionally_ignored_sources=settle_ignored)
     slot = gate.enter_lane(_VOICE_LANE)
     gate.submit_lane_slot(
         slot,

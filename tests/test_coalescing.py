@@ -1161,7 +1161,7 @@ async def test_one_agents_messages_for_different_requesters_dispatch_as_separate
         dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 1.0,
         is_shutting_down=lambda: False,
-        on_dispatch_failure=lambda failed: failures.append([pending.event.event_id for pending in failed]),
+        on_dispatch_failure=lambda _room_id, failed: failures.append(list(failed)),
     )
     agent = "@mindroom_research:localhost"
     key = CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner(agent))
@@ -1275,6 +1275,56 @@ async def test_trailing_caption_closes_media_batch_immediately() -> None:
 
 
 @pytest.mark.asyncio
+async def test_only_a_follow_up_backlog_waits_for_its_conversation_to_idle() -> None:
+    """A message for a conversation dispatches at once; only follow-ups queued behind its response wait for it."""
+    dispatched: list[list[str]] = []
+    waited: list[tuple[str, str | None]] = []
+    never_idle = asyncio.Event()
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        dispatched.append(list(batch.handled_turn.source_event_ids))
+
+    async def wait_for_thread_response_idle(room_id: str, thread_id: str | None) -> None:
+        waited.append((room_id, thread_id))
+        await never_idle.wait()
+
+    gate = CoalescingGate(
+        dispatch_turn=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+        wait_for_thread_response_idle=wait_for_thread_response_idle,
+    )
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+    await _admit_ready(
+        gate,
+        CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@alice:localhost")),
+        make_pending_event(
+            _text_event("$message:localhost", "hello", 1_000_000),
+            room,
+            source_kind=MESSAGE_SOURCE_KIND,
+        ),
+    )
+    await _wait_for(lambda: dispatched == [["$message:localhost"]])
+    assert waited == []
+
+    await _admit_ready(
+        gate,
+        active_follow_up_coalescing_key("!room:localhost", "$thread:localhost"),
+        make_pending_event(
+            _text_event("$follow-up:localhost", "more", 1_000_001),
+            room,
+            source_kind=MESSAGE_SOURCE_KIND,
+            active_follow_up=True,
+        ),
+    )
+    await _wait_for(lambda: waited == [("!room:localhost", "$thread:localhost")])
+    assert dispatched == [["$message:localhost"]]
+    never_idle.set()
+    await gate.drain_all()
+    assert dispatched == [["$message:localhost"], ["$follow-up:localhost"]]
+
+
+@pytest.mark.asyncio
 async def test_active_follow_up_backlog_ignores_debounce_gaps_after_idle() -> None:
     """Same-target follow-ups flush in order as one turn per consecutive requester run."""
     calls: list[tuple[list[str], str, str]] = []
@@ -1284,15 +1334,15 @@ async def test_active_follow_up_backlog_ignores_debounce_gaps_after_idle() -> No
     async def dispatch_batch(batch: PreparedTurn) -> None:
         calls.append((list(batch.handled_turn.source_event_ids), batch.facts.run_requester_id, batch.event.body))
 
-    async def wait_until_dispatch_allowed(wait_key: CoalescingKey) -> None:
-        if wait_key == key:
+    async def wait_for_thread_response_idle(room_id: str, thread_id: str | None) -> None:
+        if (room_id, thread_id) == (key.room_id, key.thread_id):
             await idle.wait()
 
     gate = CoalescingGate(
         dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.01,
         is_shutting_down=lambda: False,
-        wait_until_dispatch_allowed=wait_until_dispatch_allowed,
+        wait_for_thread_response_idle=wait_for_thread_response_idle,
     )
 
     for event_id, body, requester_user_id in (
@@ -1663,15 +1713,15 @@ async def test_media_tailed_follow_up_backlog_flushes_immediately_at_idle() -> N
     async def dispatch_batch(batch: PreparedTurn) -> None:
         calls.append(list(batch.handled_turn.source_event_ids))
 
-    async def wait_until_dispatch_allowed(wait_key: CoalescingKey) -> None:
-        if wait_key == key:
+    async def wait_for_thread_response_idle(room_id: str, thread_id: str | None) -> None:
+        if (room_id, thread_id) == (key.room_id, key.thread_id):
             await idle.wait()
 
     gate = CoalescingGate(
         dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 60.0,
         is_shutting_down=lambda: False,
-        wait_until_dispatch_allowed=wait_until_dispatch_allowed,
+        wait_for_thread_response_idle=wait_for_thread_response_idle,
     )
 
     await _admit_ready(
@@ -1705,8 +1755,8 @@ async def test_different_thread_normal_gate_does_not_wait_behind_older_active_ba
     async def dispatch_batch(batch: PreparedTurn) -> None:
         batches.append(list(batch.handled_turn.source_event_ids))
 
-    async def wait_until_dispatch_allowed(wait_key: CoalescingKey) -> None:
-        if wait_key == active_key:
+    async def wait_for_thread_response_idle(room_id: str, thread_id: str | None) -> None:
+        if (room_id, thread_id) == (active_key.room_id, active_key.thread_id):
             active_wait_started.set()
             await release_active_wait.wait()
 
@@ -1714,7 +1764,7 @@ async def test_different_thread_normal_gate_does_not_wait_behind_older_active_ba
         dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
-        wait_until_dispatch_allowed=wait_until_dispatch_allowed,
+        wait_for_thread_response_idle=wait_for_thread_response_idle,
     )
 
     await _admit_ready(
@@ -2045,8 +2095,8 @@ async def test_bounded_drain_does_not_wait_forever_on_external_dispatch_gate() -
     release_dispatch_wait = asyncio.Event()
     key = active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
 
-    async def wait_until_dispatch_allowed(wait_key: CoalescingKey) -> None:
-        if wait_key == key:
+    async def wait_for_thread_response_idle(room_id: str, thread_id: str | None) -> None:
+        if (room_id, thread_id) == (key.room_id, key.thread_id):
             dispatch_wait_started.set()
             await release_dispatch_wait.wait()
 
@@ -2057,7 +2107,7 @@ async def test_bounded_drain_does_not_wait_forever_on_external_dispatch_gate() -
         dispatch_turn=dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
-        wait_until_dispatch_allowed=wait_until_dispatch_allowed,
+        wait_for_thread_response_idle=wait_for_thread_response_idle,
     )
     await _admit_ready(
         gate,

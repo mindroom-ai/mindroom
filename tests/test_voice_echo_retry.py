@@ -63,9 +63,9 @@ def _wire_dispatcher(harness: _Harness, room: nio.MatrixRoom, tmp_path: Path) ->
         room=room,
     )
 
-    async def settle_ignored(source_event_id: str) -> None:
-        harness.ignored_dispatch_sources.append((source_event_id,))
-        await dispatcher.settle_intentionally_ignored_turn_sources((source_event_id,))
+    async def settle_ignored(source_event_ids: tuple[str, ...]) -> None:
+        harness.ignored_dispatch_sources.append(source_event_ids)
+        await dispatcher.settle_intentionally_ignored_turn_sources(source_event_ids)
 
     def retry(room_id: str, source_event_id: str) -> None:
         harness.retried_dispatch_sources.append((source_event_id,))
@@ -76,7 +76,7 @@ def _wire_dispatcher(harness: _Harness, room: nio.MatrixRoom, tmp_path: Path) ->
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
         on_undelivered_source=retry,
-        on_intentionally_ignored_source=settle_ignored,
+        on_intentionally_ignored_sources=settle_ignored,
     )
     harness.gate = gate
     _replace_harness_deps(
