@@ -6,8 +6,10 @@ import {
   offersSeparateAccount,
   ruleFormFrom,
   serializeService,
+  signsInAfterSave,
   splitHostInput,
   suggestedName,
+  toolsAccountUse,
   usesMoreOptions,
   type EditorOptions,
   type EgressServiceForm,
@@ -23,6 +25,8 @@ import {
   problemsFor,
   errorsFor,
   basicAuth,
+  credentialService,
+  oauthStatus,
   validRule,
 } from "@/test/egressServiceTestKit";
 import { validateService } from "./egressServiceValidation";
@@ -598,6 +602,17 @@ describe("knowing when the form uses more than the basic fields", () => {
     );
   });
 
+  it("is false for a preset with its own account, whose choice is in the basic fields", () => {
+    expect(
+      usesMoreOptions(
+        formFromService("svc", {
+          preset: "google_gmail",
+          oauth_separate_account: true,
+        }),
+      ),
+    ).toBe(false);
+  });
+
   it.each<[string, Partial<EgressServiceForm>]>([
     ["a display name", { displayName: "Mine" }],
     ["a description", { description: "Mine" }],
@@ -807,5 +822,89 @@ describe("a service that only limits paths", () => {
         personal,
       ),
     ).not.toHaveProperty("restrict_only");
+  });
+});
+
+describe("which account a service of one's own uses", () => {
+  const gmail = credentialService({
+    name: "google_gmail",
+    display_name: "Gmail",
+    oauth: oauthStatus({
+      provider: "google_gmail",
+      display_name: "Gmail",
+      connected: true,
+      account_label: "alex@example.com",
+    }),
+  });
+
+  it("names the service that uses the tools' account, with its address", () => {
+    expect(toolsAccountUse("google_gmail", [gmail], undefined)).toEqual({
+      usedBy: "Gmail",
+      address: "alex@example.com",
+    });
+  });
+
+  it("ignores services with their own account, limits, the service being edited, and other logins", () => {
+    for (const services of [
+      [{ ...gmail, separate_account: true }],
+      [{ ...gmail, restrict_only: true }],
+      [credentialService({ oauth: oauthStatus() })],
+      [credentialService()],
+      [],
+    ])
+      expect(toolsAccountUse("google_gmail", services, undefined)).toEqual({
+        usedBy: null,
+        address: null,
+      });
+    expect(toolsAccountUse("google_gmail", [gmail], "google_gmail")).toEqual({
+      usedBy: null,
+      address: null,
+    });
+  });
+
+  it("signs in after the save only for a new own account", () => {
+    const own = formFromService("svc", {
+      preset: "google_gmail",
+      oauth_separate_account: true,
+    });
+    const tools = formFromService("svc", { preset: "google_gmail" });
+    expect(signsInAfterSave(own, null, presets)).toBe(true);
+    expect(signsInAfterSave(own, { preset: "google_gmail" }, presets)).toBe(
+      true,
+    );
+    expect(
+      signsInAfterSave(
+        own,
+        { preset: "google_gmail", oauth_separate_account: true },
+        presets,
+      ),
+    ).toBe(false);
+    expect(signsInAfterSave(tools, null, presets)).toBe(false);
+    // Another login has none of its own yet: the saved one goes with the old login.
+    expect(
+      signsInAfterSave(
+        formFromService("svc", {
+          preset: "google_calendar",
+          oauth_separate_account: true,
+        }),
+        { preset: "google_gmail", oauth_separate_account: true },
+        presets,
+      ),
+    ).toBe(true);
+    expect(
+      signsInAfterSave(
+        formFromService("svc", {
+          rules: [bearerRule],
+          oauth_provider: "google_drive",
+          oauth_separate_account: true,
+        }),
+        {
+          rules: [bearerRule],
+          oauth_provider: "google_gmail",
+          oauth_separate_account: true,
+        },
+        presets,
+      ),
+    ).toBe(true);
   });
 });
