@@ -9,7 +9,7 @@ security-sensitive precedence is now testable in isolation.
 from __future__ import annotations
 
 import inspect
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -19,6 +19,9 @@ from mindroom.api.sandbox_exec import WorkspaceEnvHookError
 from mindroom.api.sandbox_worker_prep import PreparedWorkerRequest
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.models import WorkerHandle
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _write_hook(workspace: Path, body: str) -> None:
@@ -128,20 +131,3 @@ def test_hook_failure_raises_workspace_env_hook_error(tmp_path: Path) -> None:
             prepared=None,
             execution_env={},
         )
-
-
-def test_protected_execution_env_names_variants() -> None:
-    """Protected-name set depends on whether a workspace home or worker is present."""
-    assert assembly._protected_execution_env_names(workspace_home=None, prepared=None) == frozenset()
-    assert (
-        assembly._protected_execution_env_names(workspace_home=Path("/ws"), prepared=None)
-        == constants.WORKSPACE_HOME_CONTRACT_ENV_NAMES
-    )
-
-
-def test_trusted_overlay_filters_protected_names() -> None:
-    """Protected names are stripped from the overlay; an empty set is a pass-through."""
-    overlay = {"A": "1", "HOME": "/x", "B": "2"}
-    assert assembly._trusted_workspace_overlay(overlay, {"HOME"}) == {"A": "1", "B": "2"}
-    # An empty protected set returns the overlay unchanged.
-    assert assembly._trusted_workspace_overlay(overlay, frozenset()) == overlay

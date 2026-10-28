@@ -115,7 +115,6 @@ from mindroom.workers.protocol import (
     CancelResponse,
     ExecuteRequest,
     ExecuteResponse,
-    FailureKind,
     LeaseRequest,
     LeaseResponse,
     SaveAttachmentRequest,
@@ -392,10 +391,10 @@ def _filter_runtime_tool_init_overrides(tool_name: str, runtime_overrides: dict[
     return sanitize_tool_init_overrides(tool_name, safe_overrides) or {}
 
 
-def _request_runtime_overrides(call: _ExecuteCall) -> dict[str, object] | None:
+def _request_runtime_overrides(call: _ExecuteCall) -> dict[str, object]:
     """Return runtime overrides for one runner-side tool rebuild: the route's workspace and shell pass-through."""
     request, route = call.request, call.route
-    runtime_overrides: dict[str, object] | None = {"base_dir": route.workspace} if route.workspace is not None else None
+    runtime_overrides: dict[str, object] = {"base_dir": str(route.workspace)} if route.workspace is not None else {}
     if request.tool_name != "shell" or request.extra_env_passthrough is None:
         return runtime_overrides
 
@@ -413,7 +412,7 @@ def _request_runtime_overrides(call: _ExecuteCall) -> dict[str, object] | None:
     )
     if not resolved:
         return runtime_overrides
-    return {**(runtime_overrides or {}), "extra_env_passthrough": ",".join(resolved)}
+    return {**runtime_overrides, "extra_env_passthrough": ",".join(resolved)}
 
 
 def _subprocess_credential_overrides(call: _ExecuteCall) -> dict[str, Any]:
@@ -454,7 +453,6 @@ class PreparedSandboxRunnerExecuteRequest(BaseModel):
     function_name: str
     args: list[Any] = Field(default_factory=list)
     kwargs: dict[str, Any] = Field(default_factory=dict)
-    worker_key: str | None = None
     worker_scope: WorkerScope | None = None
     routing_agent_name: str | None = None
     execution_identity: dict[str, Any] | None = None
@@ -462,7 +460,6 @@ class PreparedSandboxRunnerExecuteRequest(BaseModel):
     credential_overrides: dict[str, Any] = Field(default_factory=dict)
     tool_config_overrides: dict[str, Any] = Field(default_factory=dict)
     tool_init_overrides: dict[str, Any] = Field(default_factory=dict)
-    execution_env: dict[str, str] = Field(default_factory=dict)
     # The call's own values (None for a removal), which its shell applies over the worker's environment, and the
     # directories it puts first on the command's PATH.
     call_environment: dict[str, str | None] = Field(default_factory=dict)
@@ -509,10 +506,8 @@ class _SandboxRunnerContext:
 class _PreparedSandboxRequestContext:
     request: PreparedSandboxRunnerExecuteRequest
     runtime_paths: RuntimePaths
-    config: Config
     execution_env: dict[str, str]
-    prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None
-    workspace: Path | None
+    route: _PreparedRoute
 
 
 @dataclass(frozen=True)
@@ -627,7 +622,7 @@ def _prepare_route_with_config(
                 runner_token=runner_token,
             )
         except sandbox_worker_prep.WorkerRequestPreparationError as exc:
-            return WorkerFailure(error=str(exc), failure_kind=_preparation_failure_kind(exc))
+            return WorkerFailure(error=str(exc), failure_kind=exc.failure_kind)
     elif (
         route.base_dir is not None
         and route.routing_agent_name is None
@@ -686,10 +681,6 @@ def _route_workspace(
         return None
     workspace.mkdir(parents=True, exist_ok=True)
     return workspace
-
-
-def _preparation_failure_kind(exc: sandbox_worker_prep.WorkerRequestPreparationError) -> FailureKind:
-    return "worker" if exc.failure_kind == "worker" else "tool"
 
 
 def resolve_script_state_workspace(
@@ -759,7 +750,7 @@ def _worker_failure(error: Exception) -> WorkerFailure:
     if isinstance(error, HTTPException) and error.status_code < 500:
         return WorkerFailure(error=str(error.detail), failure_kind="tool")
     if isinstance(error, sandbox_worker_prep.WorkerRequestPreparationError):
-        return WorkerFailure(error=str(error), failure_kind=_preparation_failure_kind(error))
+        return WorkerFailure(error=str(error), failure_kind=error.failure_kind)
     logger.exception("sandbox_execute_failed")
     return WorkerFailure(error=f"Sandbox execution failed: {type(error).__name__}: {error}", failure_kind="worker")
 
@@ -928,26 +919,6 @@ def _prepared_shell_execution_env(
     return worker_execution_env
 
 
-def _prepared_tool_init_overrides(
-    tool_name: str,
-    tool_init_overrides: dict[str, object],
-    runtime_overrides: dict[str, object] | None,
-) -> dict[str, object]:
-    """Merge explicit and runtime-derived init overrides for one prepared request."""
-    prepared_tool_init_overrides = dict(tool_init_overrides)
-    serialized_runtime_overrides = to_json_compatible(runtime_overrides)
-    if not isinstance(serialized_runtime_overrides, dict):
-        return prepared_tool_init_overrides
-
-    runtime_override_payload: dict[str, object] = {
-        name: value for name, value in serialized_runtime_overrides.items() if isinstance(name, str)
-    }
-    prepared_tool_init_overrides.update(
-        _filter_runtime_tool_init_overrides(tool_name, runtime_override_payload),
-    )
-    return prepared_tool_init_overrides
-
-
 def _prepare_execute_request(call: _ExecuteCall) -> _PreparedSandboxRequestContext:
     request, route = call.request, call.route
     runtime_paths, prepared = route.runtime_paths, route.worker
@@ -975,7 +946,7 @@ def _prepare_execute_request(call: _ExecuteCall) -> _PreparedSandboxRequestConte
             execution_env=execution_env,
         )
     except sandbox_exec.WorkspaceEnvHookError as exc:
-        raise sandbox_worker_prep.WorkerRequestPreparationError(str(exc), failure_kind="request") from exc
+        raise sandbox_worker_prep.WorkerRequestPreparationError(str(exc)) from exc
     runtime_overrides = _request_runtime_overrides(call)
     effective_runtime_paths = sandbox_exec.tool_runtime_paths_with_request_env(
         runtime_paths,
@@ -987,14 +958,12 @@ def _prepare_execute_request(call: _ExecuteCall) -> _PreparedSandboxRequestConte
     kwargs = dict(request.kwargs)
     if output_path is None:
         kwargs.pop(OUTPUT_PATH_ARGUMENT, None)
-    serialized_runtime_overrides = to_json_compatible(runtime_overrides)
     prepared_request = PreparedSandboxRunnerExecuteRequest(
         tool_name=request.tool_name,
         function_name=request.function_name,
         run_as_job=request.run_as_job,
         args=list(request.args),
         kwargs=kwargs,
-        worker_key=route.worker_key,
         worker_scope=request.worker_scope,
         routing_agent_name=request.routing_agent_name,
         execution_identity=(
@@ -1003,40 +972,33 @@ def _prepare_execute_request(call: _ExecuteCall) -> _PreparedSandboxRequestConte
         private_agent_names=list(request.private_agent_names) if request.private_agent_names is not None else None,
         credential_overrides=dict(_subprocess_credential_overrides(call)),
         tool_config_overrides=dict(request.tool_config_overrides),
-        tool_init_overrides=_prepared_tool_init_overrides(
-            request.tool_name,
-            request.tool_init_overrides,
-            runtime_overrides,
-        ),
-        execution_env=dict(execution_env),
+        tool_init_overrides={
+            **request.tool_init_overrides,
+            **_filter_runtime_tool_init_overrides(request.tool_name, runtime_overrides),
+        },
         call_environment=call_environment,
         call_path_prepend=list(request.environment.path_prepend),
-        runtime_overrides=(
-            {name: value for name, value in serialized_runtime_overrides.items() if isinstance(name, str)}
-            if isinstance(serialized_runtime_overrides, dict)
-            else {}
-        ),
+        runtime_overrides=runtime_overrides,
         tool_output_workspace_root=str(route.workspace) if route.workspace is not None else None,
     )
     return _PreparedSandboxRequestContext(
         request=prepared_request,
         runtime_paths=effective_runtime_paths,
-        config=route.config,
         execution_env=execution_env,
-        prepared_worker=prepared,
-        workspace=route.workspace,
+        route=route,
     )
 
 
 def _prepare_subprocess_context(
     prepared_request: _PreparedSandboxRequestContext,
 ) -> _PreparedSandboxSubprocessContext:
+    route = prepared_request.route
     python_executable, template_env, subprocess_cwd = sandbox_exec.resolve_subprocess_worker_context(
-        prepared_request.prepared_worker.paths if prepared_request.prepared_worker is not None else None,
+        route.worker.paths if route.worker is not None else None,
     )
     subprocess_env = sandbox_exec.subprocess_env_for_request(template_env, prepared_request.execution_env)
-    if prepared_request.workspace is not None:
-        subprocess_cwd = str(prepared_request.workspace.resolve())
+    if route.workspace is not None:
+        subprocess_cwd = str(route.workspace.resolve())
     return _PreparedSandboxSubprocessContext(
         python_executable=python_executable,
         subprocess_env=subprocess_env,
@@ -1129,7 +1091,7 @@ async def _execute_request_inprocess(call: _ExecuteCall) -> ExecuteResponse:
     return await _execute_prepared_request_inprocess(
         prepared_request.request,
         prepared_request.runtime_paths,
-        prepared_request.config,
+        call.route.config,
         credentials_manager=get_runtime_credentials_manager(call.route.runtime_paths),
     )
 
@@ -1257,7 +1219,7 @@ def _execute_request_subprocess_sync(call: _ExecuteCall) -> ExecuteResponse:
     envelope = sandbox_protocol.serialize_subprocess_envelope(
         request=prepared_request.request.model_dump(mode="json"),
         runtime_paths=constants.serialize_runtime_paths(prepared_request.runtime_paths),
-        config_yaml=_subprocess_config_yaml(prepared_request.config, prepared_request.request.tool_name),
+        config_yaml=_subprocess_config_yaml(call.route.config, prepared_request.request.tool_name),
     )
     # A job's call runs as long as its tool does; any other call keeps the runner's limit.
     timeout_seconds = (
@@ -1708,8 +1670,7 @@ async def _execute_worker_browser(
             detail="Worker computer requires an unambiguous dedicated user_agent worker.",
         )
     workspace = route.workspace
-    if workspace is None:
-        raise HTTPException(status_code=400, detail="Worker browser requires a workspace.")
+    assert workspace is not None, "a request with a prepared worker always acts in a workspace"
     provider = select_browser_provider(
         payload.tool_name,
         payload.function_name,

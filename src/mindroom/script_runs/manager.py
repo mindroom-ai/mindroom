@@ -62,7 +62,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
-from mindroom.workers.models import ScriptResourceProfileName, WorkerHandle, WorkerLaunchConfig, WorkerSpec
+from mindroom.workers.models import ScriptResourceProfileName, WorkerHandle, WorkerSpec
 from mindroom.workers.runtime import current_worker_launch_config
 from mindroom.workers.worker_retirement import remove_directory_tree_at
 
@@ -436,7 +436,10 @@ class ScriptRunManager:
         for admitted launches and fences new ones until it is published, and any other reload leaves it unchanged.
         """
         # Deriving the launch can build the tool validation snapshot, so it stays off the event loop.
-        launch = await asyncio.to_thread(_script_worker_launch, context.runtime_paths)
+        try:
+            launch = await asyncio.to_thread(current_worker_launch_config, context.runtime_paths)
+        except WorkerBackendError as exc:
+            raise ScriptRunManagerError(str(exc)) from exc
         backend = _require_script_launch_backend(self._worker_backend_for(None), context.runtime_paths)
         profile, requests, limits = _resolve_script_resource_profile(backend, requested_profile)
         return (
@@ -1465,13 +1468,6 @@ def _require_script_worker_backend(
         msg = "Background script worker backend does not support exact worker retirement."
         raise ScriptRunManagerError(msg)
     return backend
-
-
-def _script_worker_launch(runtime_paths: RuntimePaths) -> WorkerLaunchConfig:
-    try:
-        return current_worker_launch_config(runtime_paths)
-    except WorkerBackendError as exc:
-        raise ScriptRunManagerError(str(exc)) from exc
 
 
 def _require_script_launch_backend(

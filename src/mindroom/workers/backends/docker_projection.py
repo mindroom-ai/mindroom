@@ -250,9 +250,9 @@ class DockerProjectionManager:
         paths: LocalWorkerStatePaths,
         *,
         launch: WorkerLaunchConfig,
-        worker_key: str | None = None,
-        materialize_projection: bool = True,
-        storage_mounts: Sequence[tuple[Path, str, bool]] = (),
+        worker_key: str,
+        materialize_projection: bool,
+        storage_mounts: Sequence[tuple[Path, str, bool]],
     ) -> tuple[list[tuple[Path, str, bool]], _DockerProjectedConfig | None]:
         """Return projected config mount specs plus the selected projection, if any."""
         if self.config.host_config_path is None:
@@ -278,10 +278,6 @@ class DockerProjectionManager:
         storage_mounts: Sequence[tuple[Path, str, bool]] = (),
     ) -> _DockerProjectedConfig:
         """Return the projected config snapshot for one worker root."""
-        if self.config.host_config_path is None:
-            msg = "Projected Docker worker config requires a host config path."
-            raise WorkerBackendError(msg)
-
         # The launch's mapping is shared by every worker, and projection rewrites it in place.
         config_data = cast("dict[str, object]", copy.deepcopy(launch.config_data))
         resolved_agent_policies = launch.agent_policies

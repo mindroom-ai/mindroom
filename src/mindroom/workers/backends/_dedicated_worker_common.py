@@ -155,7 +155,7 @@ def _scoped_workspaces(
     worker_key: str,
     storage_root: Path,
     private_agent_names: frozenset[str] | None,
-    resolved_agent_policies: Mapping[str, ResolvedAgentPolicy] | None,
+    resolved_agent_policies: Mapping[str, ResolvedAgentPolicy],
 ) -> tuple[Path, ...]:
     scope = resolved_worker_key_scope(worker_key)
     if scope is None:
@@ -165,16 +165,15 @@ def _scoped_workspaces(
     if scope == "user_agent" and private_agent_names is None:
         msg = f"user_agent workers require explicit private-agent visibility: {worker_log_id(worker_key)}"
         raise WorkerBackendError(msg)
-    if resolved_agent_policies is not None:
-        validate_private_user_agent_visibility(
-            worker_key=worker_key,
-            private_agent_names=private_agent_names,
-            resolved_agent_policies=resolved_agent_policies,
-        )
+    validate_private_user_agent_visibility(
+        worker_key=worker_key,
+        private_agent_names=private_agent_names,
+        resolved_agent_policies=resolved_agent_policies,
+    )
     workspaces = visible_workspace_roots(
         storage_root,
         worker_key,
-        resolved_agent_policies or {},
+        resolved_agent_policies,
         private_agent_names=private_agent_names or frozenset(),
     )
     if not workspaces and scope != "user":
@@ -189,7 +188,7 @@ def plan_scoped_workspace_mounts(
     local_shared_storage_root: Path,
     worker_visible_shared_storage_root: Path,
     private_agent_names: frozenset[str] | None,
-    resolved_agent_policies: Mapping[str, ResolvedAgentPolicy] | None = None,
+    resolved_agent_policies: Mapping[str, ResolvedAgentPolicy],
     create_shared: bool = False,
 ) -> tuple[ScopedWorkspaceMount, ...]:
     """Return the workspaces one dedicated worker mounts writable, at their canonical paths.

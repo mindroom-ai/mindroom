@@ -605,12 +605,14 @@ class KubernetesWorkerBackend:
             annotations_override=final_deployment_annotations,
         )
         self._store_ready_worker(
-            spec,
-            handle,
-            launch_digest=launch.digest,
-            validated_at=timestamp,
-            workspace_mounts=workspace_mounts,
-            shared_directory_mounts=shared_directory_mounts,
+            _ReadyWorkerCacheEntry(
+                spec=spec,
+                launch_digest=launch.digest,
+                handle=handle,
+                validated_at=timestamp,
+                workspace_mounts=workspace_mounts,
+                shared_directory_mounts=shared_directory_mounts,
+            ),
         )
         return handle
 
@@ -1032,26 +1034,9 @@ class KubernetesWorkerBackend:
             raise WorkerBackendError(str(exc)) from exc
         return handle
 
-    def _store_ready_worker(
-        self,
-        spec: WorkerSpec,
-        handle: WorkerHandle,
-        *,
-        launch_digest: str,
-        validated_at: float,
-        workspace_mounts: tuple[ScopedWorkspaceMount, ...],
-        shared_directory_mounts: tuple[SharedDirectoryMount, ...],
-    ) -> None:
-        entry = _ReadyWorkerCacheEntry(
-            spec=spec,
-            launch_digest=launch_digest,
-            handle=handle,
-            validated_at=validated_at,
-            workspace_mounts=workspace_mounts,
-            shared_directory_mounts=shared_directory_mounts,
-        )
+    def _store_ready_worker(self, entry: _ReadyWorkerCacheEntry) -> None:
         with self._ready_workers_lock:
-            self._ready_workers[spec.worker_key] = entry
+            self._ready_workers[entry.spec.worker_key] = entry
 
     def _invalidate_ready_worker(self, worker_key: str) -> None:
         with self._ready_workers_lock:
@@ -1100,14 +1085,7 @@ class KubernetesWorkerBackend:
         if not exists:
             self._invalidate_ready_worker(entry.spec.worker_key)
             return None
-        self._store_ready_worker(
-            entry.spec,
-            handle,
-            launch_digest=entry.launch_digest,
-            validated_at=entry.validated_at,
-            workspace_mounts=entry.workspace_mounts,
-            shared_directory_mounts=entry.shared_directory_mounts,
-        )
+        self._store_ready_worker(replace(entry, handle=handle))
         return handle
 
     def _record_startup_failure_or_cleanup_secret(

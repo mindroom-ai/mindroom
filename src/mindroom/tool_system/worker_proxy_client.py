@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 import httpx
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from mindroom.credentials.manager import load_scoped_credentials
 from mindroom.credentials.policy import is_egress_broker_service
@@ -47,8 +47,6 @@ if TYPE_CHECKING:
 
 _SANDBOX_PROXY_EXECUTE_PATH = "/api/sandbox-runner/execute"
 _SANDBOX_PROXY_LEASE_PATH = "/api/sandbox-runner/leases"
-SANDBOX_PROXY_SAVE_ATTACHMENT_PATH = "/api/sandbox-runner/save-attachment"
-SANDBOX_PROXY_VIEW_FILE_PATH = "/api/sandbox-runner/view-file"
 _SANDBOX_PROXY_TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
 _EXECUTE_CANCEL_TIMEOUT_SECONDS = 10.0
 # The runner streams at least one line this often while a call runs; a longer silence means the runner is gone.
@@ -236,23 +234,21 @@ def record_proxy_response_failure_for_worker(
     worker_manager.record_failure(worker_handle.worker_key, error, startup_count=worker_handle.startup_count)
 
 
-class _FailedWorkerAnswer(Protocol):
-    ok: bool
-    error: str | None
-    failure_kind: FailureKind | None
-
-
-def _parsed_worker_answer[Answer: BaseModel](
+def _checked_worker_answer[Answer: ExecuteResponse | SaveAttachmentResponse | ViewFileResponse](
     data: object,
     response_model: type[Answer],
     *,
     worker_handle: WorkerHandle | None,
     worker_manager: WorkerBackend,
     operation: str,
+    failure: str,
 ) -> Answer:
-    """Parse one worker answer, recording a malformed one against the worker."""
+    """Return one successful worker answer, recording a malformed or failed one against the worker.
+
+    A failed answer that blames the tool does not count against the worker.
+    """
     try:
-        return response_model.model_validate(data)
+        answer = response_model.model_validate(data)
     except ValidationError as exc:
         error = f"Sandbox {operation} returned a malformed response: {exc.error_count()} invalid field(s)."
         record_proxy_response_failure_for_worker(
@@ -262,16 +258,6 @@ def _parsed_worker_answer[Answer: BaseModel](
             failure_kind=None,
         )
         raise RuntimeError(error) from exc
-
-
-def _require_ok[Answer: _FailedWorkerAnswer](
-    answer: Answer,
-    *,
-    worker_handle: WorkerHandle | None,
-    worker_manager: WorkerBackend,
-    failure: str,
-) -> Answer:
-    """Return a successful answer, recording a failed one against the worker unless it blames the tool."""
     if answer.ok:
         return answer
     error = answer.error or failure
@@ -291,7 +277,6 @@ def post_worker_proxy_request[Answer: SaveAttachmentResponse | ViewFileResponse]
     response_model: type[Answer],
     worker_handle: WorkerHandle | None,
     worker_manager: WorkerBackend,
-    proxy_path: str,
     worker_operation: Literal["save-attachment", "view-file"],
     failure: str,
     client_factory: _WorkerProxyClientFactory = httpx.Client,
@@ -306,7 +291,7 @@ def post_worker_proxy_request[Answer: SaveAttachmentResponse | ViewFileResponse]
         request_url = (
             worker_api_endpoint(worker_handle, worker_operation)
             if worker_handle is not None
-            else f"{config.proxy_url}{proxy_path}"
+            else f"{config.proxy_url}/api/sandbox-runner/{worker_operation}"
         )
         with client_factory(timeout=config.proxy_timeout_seconds) as client:
             response = client.post(request_url, json=request.model_dump(mode="json"), headers=headers)
@@ -319,14 +304,14 @@ def post_worker_proxy_request[Answer: SaveAttachmentResponse | ViewFileResponse]
             worker_manager=worker_manager,
         )
         raise
-    answer = _parsed_worker_answer(
+    return _checked_worker_answer(
         data,
         response_model,
         worker_handle=worker_handle,
         worker_manager=worker_manager,
         operation=worker_operation,
+        failure=failure,
     )
-    return _require_ok(answer, worker_handle=worker_handle, worker_manager=worker_manager, failure=failure)
 
 
 class WorkerCallCancellation:
@@ -518,16 +503,12 @@ def execute_worker_proxy_request(
         )
         raise
 
-    answer = _require_ok(
-        _parsed_worker_answer(
-            data,
-            ExecuteResponse,
-            worker_handle=worker_handle,
-            worker_manager=worker_manager,
-            operation="execute",
-        ),
+    answer = _checked_worker_answer(
+        data,
+        ExecuteResponse,
         worker_handle=worker_handle,
         worker_manager=worker_manager,
+        operation="execute",
         failure="Sandbox execution failed.",
     )
     if worker_handle is not None:

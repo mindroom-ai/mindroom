@@ -81,7 +81,7 @@ class WorkerRequestPreparationError(ValueError):
         self,
         message: str,
         *,
-        failure_kind: Literal["request", "worker"] = "request",
+        failure_kind: Literal["tool", "worker"] = "tool",
     ) -> None:
         super().__init__(message)
         self.failure_kind = failure_kind
@@ -269,7 +269,7 @@ def _explicit_private_agent_names(
 
 def prepare_worker_request(
     *,
-    worker_key: str | None,
+    worker_key: str,
     base_dir: str | None,
     runtime_paths: RuntimePaths,
     agent_policies: Mapping[str, ResolvedAgentPolicy],
@@ -277,18 +277,14 @@ def prepare_worker_request(
     runner_token: str | None = None,
 ) -> PreparedWorkerRequest:
     """Prepare one worker-backed request for execution, confining its ``base_dir``."""
-    if worker_key is None:
-        msg = "worker_key is required for worker-backed sandbox execution."
-        raise WorkerRequestPreparationError(msg, failure_kind="request")
-
     try:
         worker_handle = _prepare_worker(worker_key, runtime_paths, runner_token=runner_token)
     except WorkerBackendError as exc:
         logger.warning("sandbox_worker_initialization_failed", worker=worker_log_id(worker_key), exc_info=True)
         dedicated_worker_key = sandbox_exec.runner_dedicated_worker_key(runtime_paths)
-        failure_kind: Literal["request", "worker"] = "worker"
+        failure_kind: Literal["tool", "worker"] = "worker"
         if dedicated_worker_key is not None and worker_key != dedicated_worker_key:
-            failure_kind = "request"
+            failure_kind = "tool"
         raise WorkerRequestPreparationError(str(exc), failure_kind=failure_kind) from exc
 
     try:
@@ -307,7 +303,7 @@ def prepare_worker_request(
             ),
         )
     except (FileNotFoundError, TypeError, ValueError) as exc:
-        raise WorkerRequestPreparationError(str(exc), failure_kind="request") from exc
+        raise WorkerRequestPreparationError(str(exc)) from exc
 
     return PreparedWorkerRequest(handle=worker_handle, paths=paths, base_dir=confined_base_dir)
 

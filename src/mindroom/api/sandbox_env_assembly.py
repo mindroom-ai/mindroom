@@ -20,7 +20,7 @@ from mindroom import constants
 from mindroom.api import sandbox_exec
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Mapping
+    from collections.abc import Mapping
     from pathlib import Path
 
     from mindroom.api import sandbox_worker_prep
@@ -41,62 +41,25 @@ def build_request_execution_env(
     Raises :class:`sandbox_exec.WorkspaceEnvHookError` when the workspace hook
     exists but fails to source.
     """
-    workspace_home = (
-        _apply_workspace_home_contract(request_workspace, execution_env, prepared=prepared)
-        if request_workspace is not None
-        else None
-    )
-    protected_names = _protected_execution_env_names(workspace_home=workspace_home, prepared=prepared)
-    protected_env = _protected_execution_env(
-        workspace_home=workspace_home,
-        prepared=prepared,
-        execution_env=execution_env,
-    )
+    if request_workspace is None:
+        execution_env.update(_worker_owned_env(prepared))
+        return {}
+    protected_env = _workspace_home_contract_env(workspace=request_workspace.expanduser().resolve(), prepared=prepared)
+    # The hook is sourced with MindRoom's workspace-home defaults already in place.
+    execution_env.update(protected_env)
+    if prepared is None:
+        protected_env |= _existing_worker_runtime_env(execution_env)
     overlay = _workspace_env_overlay(
         request_workspace=request_workspace,
         prepared=prepared,
         execution_env=execution_env,
     )
-    trusted_overlay = _trusted_workspace_overlay(overlay, protected_names)
-    if trusted_overlay:
-        execution_env.update(trusted_overlay)
+    trusted_overlay = {
+        name: value for name, value in overlay.items() if name not in constants.WORKSPACE_HOME_CONTRACT_ENV_NAMES
+    }
+    execution_env.update(trusted_overlay)
     execution_env.update(protected_env)
     return trusted_overlay
-
-
-def _protected_execution_env_names(
-    *,
-    workspace_home: Path | None,
-    prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
-) -> frozenset[str]:
-    """Return env names that workspace hooks must not override."""
-    if workspace_home is not None:
-        return constants.WORKSPACE_HOME_CONTRACT_ENV_NAMES
-    if prepared is not None:
-        return constants.WORKER_RUNTIME_PATH_ENV_NAMES
-    return frozenset()
-
-
-def _trusted_workspace_overlay(
-    overlay: dict[str, str],
-    protected_names: Collection[str],
-) -> dict[str, str]:
-    """Return hook overlay values that may influence runtime path reconstruction."""
-    if not protected_names:
-        return overlay
-    return {name: value for name, value in overlay.items() if name not in protected_names}
-
-
-def _apply_workspace_home_contract(
-    request_workspace: Path,
-    execution_env: dict[str, str],
-    *,
-    prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
-) -> Path:
-    """Overlay MindRoom's workspace-home defaults and return the resolved workspace."""
-    resolved_workspace = request_workspace.expanduser().resolve()
-    execution_env.update(_workspace_home_contract_env(workspace=resolved_workspace, prepared=prepared))
-    return resolved_workspace
 
 
 def _workspace_home_contract_env(
@@ -132,35 +95,17 @@ def _existing_worker_runtime_env(
     return {name: execution_env[name] for name in constants.WORKER_RUNTIME_PATH_ENV_NAMES if name in execution_env}
 
 
-def _protected_execution_env(
-    *,
-    workspace_home: Path | None,
-    prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
-    execution_env: Mapping[str, str],
-) -> dict[str, str]:
-    """Return env names owned by MindRoom for this request."""
-    if workspace_home is not None:
-        protected_env = _workspace_home_contract_env(workspace=workspace_home, prepared=prepared)
-        if prepared is None:
-            protected_env.update(_existing_worker_runtime_env(execution_env))
-        return protected_env
-    return _worker_owned_env(prepared)
-
-
 def _workspace_env_overlay(
     *,
-    request_workspace: Path | None,
+    request_workspace: Path,
     prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
     execution_env: dict[str, str],
 ) -> dict[str, str]:
     """Source ``.mindroom/worker-env.sh`` for one request.
 
-    Returns the hook overlay, empty when the hook is absent or ``request_workspace``
-    is ``None``. Raises :class:`sandbox_exec.WorkspaceEnvHookError` when the hook
-    exists but fails to source.
+    Returns the hook overlay, empty when the hook is absent. Raises
+    :class:`sandbox_exec.WorkspaceEnvHookError` when the hook exists but fails to source.
     """
-    if request_workspace is None:
-        return {}
     hook_path = sandbox_exec.resolve_workspace_env_hook_path(request_workspace)
     if hook_path is None:
         return {}

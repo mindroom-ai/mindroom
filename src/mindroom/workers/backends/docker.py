@@ -1089,15 +1089,8 @@ class DockerWorkerBackend:
             return None
 
         launch = launch_config.launch
-        storage_mounts = self._scoped_storage_mount_specs(spec, launch)
-        config_mount_specs, projection = self._projection_manager.config_mount_specs(
-            paths.state,
-            launch=launch,
-            worker_key=metadata.worker_key,
-            materialize_projection=False,
-            storage_mounts=storage_mounts,
-        )
-        if projection is not None and not projection.ready:
+        mounts = self._worker_mounts(paths, spec=spec, launch=launch, materialize_projection=False)
+        if mounts is None:
             return None
 
         if not self._container_env_matches(
@@ -1106,10 +1099,7 @@ class DockerWorkerBackend:
         ) or metadata.startup_manifest_hash != self._startup_manifest_hash(spec, launch):
             return None
 
-        mount_checks = list(self._worker_root_mount_specs(paths.state))
-        mount_checks.extend(storage_mounts)
-        mount_checks.extend(config_mount_specs)
-        return mount_checks if self._container_mount_layout_matches(container, expected_mounts=mount_checks) else None
+        return mounts if self._container_mount_layout_matches(container, expected_mounts=mounts) else None
 
     def _container_runtime_security_matches(self, container: _DockerContainer) -> bool:
         host_config = container.attrs.get("HostConfig")
@@ -1159,8 +1149,9 @@ class DockerWorkerBackend:
 
         if container is None:
             metadata.startup_manifest_hash = self._write_startup_manifest(paths, spec=spec, launch=launch_config.launch)
-            volumes = self._container_volumes(paths, spec=spec, launch=launch_config.launch)
-            self._prepare_nested_storage_mount_targets(paths, (volume.rsplit(":", 2)[1] for volume in volumes))
+            mounts = self._worker_mounts(paths, spec=spec, launch=launch_config.launch, materialize_projection=True)
+            assert mounts is not None, "a materialized config projection is ready"
+            self._prepare_nested_storage_mount_targets(paths, (mount[1] for mount in mounts))
             security_kwargs = (
                 {"cap_drop": ["ALL"], "security_opt": docker_worker_security_options()}
                 if self.config.security_policy == "computer"
@@ -1172,7 +1163,10 @@ class DockerWorkerBackend:
                 name=container_name,
                 detach=True,
                 environment=self._container_env(metadata.worker_key),
-                volumes=volumes,
+                volumes=[
+                    f"{host_path}:{container_path}:{'ro' if read_only else 'rw'}"
+                    for host_path, container_path, read_only in mounts
+                ],
                 ports={f"{self.config.worker_port}/tcp": (self.config.publish_host, None)},
                 labels=self._container_labels(
                     container_name,
@@ -1410,28 +1404,26 @@ class DockerWorkerBackend:
             ),
         ]
 
-    def _container_volumes(
+    def _worker_mounts(
         self,
         paths: _DockerWorkerPaths,
         *,
         spec: WorkerSpec,
         launch: WorkerLaunchConfig,
-    ) -> list[str]:
+        materialize_projection: bool,
+    ) -> list[tuple[Path, str, bool]] | None:
+        """Return a worker's bind mounts in container order, or None while its config projection is not written."""
         storage_mounts = self._scoped_storage_mount_specs(spec, launch)
-        config_mounts, _projection = self._projection_manager.config_mount_specs(
+        config_mounts, projection = self._projection_manager.config_mount_specs(
             paths.state,
             launch=launch,
             worker_key=spec.worker_key,
+            materialize_projection=materialize_projection,
             storage_mounts=storage_mounts,
         )
-        return [
-            f"{host_path}:{container_path}:{'ro' if read_only else 'rw'}"
-            for host_path, container_path, read_only in (
-                *self._worker_root_mount_specs(paths.state),
-                *storage_mounts,
-                *config_mounts,
-            )
-        ]
+        if projection is not None and not projection.ready:
+            return None
+        return [*self._worker_root_mount_specs(paths.state), *storage_mounts, *config_mounts]
 
     def _prepare_nested_storage_mount_targets(
         self,
@@ -1600,15 +1592,11 @@ class DockerWorkerBackend:
             return compatible_hashes
 
         if not launch_config.image_resolved:
-            compatible_hashes.add(
-                self._compute_launch_config_hash(image_identity=container_image_identity),
-            )
+            compatible_hashes.add(self._compute_launch_config_hash(image_identity=container_image_identity))
             return compatible_hashes
 
         if container_image_identity == current_image_identity:
-            compatible_hashes.add(
-                self._compute_launch_config_hash(image_identity=self.config.image),
-            )
+            compatible_hashes.add(self._compute_launch_config_hash(image_identity=self.config.image))
         return compatible_hashes
 
     def _container_mount_layout_matches(

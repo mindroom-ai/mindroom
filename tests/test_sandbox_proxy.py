@@ -233,21 +233,14 @@ def test_github_oauth_tool_stays_primary_when_worker_routing_is_requested(tmp_pa
     )
 
 
-def test_attachment_save_protocol_payload_fields_round_trip() -> None:
-    """Attachment save payload helpers should preserve the current wire fields."""
+def test_attachment_save_protocol_decode_round_trip() -> None:
+    """A save-attachment payload decodes back to the bytes it carries."""
     payload_bytes = b"attachment-bytes"
-    fields = sandbox_proxy_module._attachment_save_payload_fields(payload_bytes)
-
-    assert fields == {
-        "bytes_b64": base64.b64encode(payload_bytes).decode("ascii"),
-        "sha256": hashlib.sha256(payload_bytes).hexdigest(),
-        "size_bytes": len(payload_bytes),
-    }
     assert (
         sandbox_proxy_module.decode_attachment_save_bytes(
-            bytes_b64=fields["bytes_b64"],
-            sha256=fields["sha256"],
-            size_bytes=fields["size_bytes"],
+            bytes_b64=base64.b64encode(payload_bytes).decode("ascii"),
+            sha256=hashlib.sha256(payload_bytes).hexdigest(),
+            size_bytes=len(payload_bytes),
         )
         == payload_bytes
     )
@@ -257,7 +250,7 @@ def test_attachment_save_protocol_payload_fields_round_trip() -> None:
     ("bytes_b64", "sha256", "size_bytes", "expected_error"),
     [
         ("abc", "0" * 64, True, "Attachment size_bytes must be a non-negative integer."),
-        ("not valid base64", "0" * 64, None, "Attachment bytes are not valid base64."),
+        ("not valid base64", "0" * 64, 3, "Attachment bytes are not valid base64."),
         (
             base64.b64encode(b"payload").decode("ascii"),
             hashlib.sha256(b"payload").hexdigest(),

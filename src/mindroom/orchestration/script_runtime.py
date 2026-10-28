@@ -556,19 +556,16 @@ class ScriptRuntimeLifecycle:
     async def finish_reload(self) -> None:
         """Release the reload launch fence once the reload's config is published as applied, or the reload failed."""
         # Cancellation while waiting for the lock must not leave launches fenced.
-        await run_coroutine_until_complete(self._finish_reload_locked())
-
-    async def _finish_reload_locked(self) -> None:
-        async with self._worker_refresh_lock:
-            await self._end_reload_launch_fence()
+        await run_coroutine_until_complete(self._end_reload_launch_fence())
 
     async def _end_reload_launch_fence(self) -> None:
         """Finish the accepted fence release before reopening broker admission."""
-        if not self._reload_launch_fence_started:
-            return
-        await self.manager.end_startup_reconciliation()
-        self._reload_launch_fence_started = False
-        self._open_call_admission_when_ready()
+        async with self._worker_refresh_lock:
+            if not self._reload_launch_fence_started:
+                return
+            await self.manager.end_startup_reconciliation()
+            self._reload_launch_fence_started = False
+            self._open_call_admission_when_ready()
 
     def _open_call_admission_when_ready(self) -> None:
         if self.api_enabled and self._api_ready.is_set() and not self._startup_cleanup_pending:
@@ -658,8 +655,7 @@ class ScriptRuntimeLifecycle:
             )
         except BaseException as exc:
             if launch_fence_started:
-                async with self._worker_refresh_lock:
-                    await run_coroutine_until_complete(self._end_reload_launch_fence())
+                await self.finish_reload()
             if isinstance(exc, TimeoutError):
                 msg = "Background script reload did not durably revoke every active run before the reload deadline."
                 raise _ScriptRuntimeLifecycleError(msg) from None
@@ -926,9 +922,8 @@ class ScriptRuntimeLifecycle:
             except WorkerBackendError:
                 logger.warning("script_worker_backend_refresh_pending", exc_info=True)
         await self.manager.end_startup_reconciliation()
-        if self.api_enabled and self._api_ready.is_set():
-            self.broker.open_call_admission()
         self._startup_cleanup_pending = False
+        self._open_call_admission_when_ready()
 
     async def active_runs(self) -> list[ActiveScriptRunInfo]:
         """Read unfinished runs and whether this runtime's restart startup would adopt each process.

@@ -20,7 +20,7 @@ from mindroom.approval import manager as approval_manager
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, resolve_tool_approval_approver
 from mindroom.json_utils import has_only_finite_numbers, object_with_unique_keys
 from mindroom.tool_approval_grants import ANY_ARGUMENTS, canonical_arguments
-from mindroom.tool_system.invocation import CallResult, run_tool_call
+from mindroom.tool_system.invocation import run_tool_call
 from mindroom.tool_system.tool_access import validate_tool_arguments
 from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.tool_hooks import owned_sync_tool_completion
@@ -209,12 +209,18 @@ async def run_scheduled_call(  # noqa: PLR0911 - one refusal per broken conditio
             return _refused(task_id, f"{_REFUSALS[claimed]}; it runs when its task fires")
         return _refused(task_id, _REFUSALS[claimed])
     # The approval is spent; a call interrupted from here leaves its outcome unknown and is never retried.
-    result = await _execute(live, function, json.loads(arguments_text), call_id=f"scheduled-{task_id}")
+    # The run's tool-call policy owns a synchronous body until it finishes.
+    async with owned_sync_tool_completion():
+        result = await run_tool_call(
+            function,
+            json.loads(arguments_text),
+            replace(live.context, call_id=f"scheduled-{task_id}"),
+            middleware=live.middleware,
+        )
+    await manager.record_scheduled_call_outcome(task_id, "completed" if result.succeeded else "failed")
     if result.error is not None:
-        await manager.record_scheduled_call_outcome(task_id, "failed")
         return ToolOutcome(content=f"❌ Scheduled call `{task_id}` failed: {result.failure_text}", is_error=True)
     # A call the policy refused, or one its tool answered as failed, fails this runner's own call with that outcome.
-    await manager.record_scheduled_call_outcome(task_id, "completed" if result.succeeded else "failed")
     return result.value
 
 
@@ -266,23 +272,6 @@ def _invalid_arguments(function: ToolFunction, arguments: dict[str, object]) -> 
     if unknown and schema.get("additionalProperties") is not True:
         return "the arguments do not match the tool's current parameters"
     return None
-
-
-async def _execute(
-    live: _LiveTools,
-    function: ToolFunction,
-    arguments: dict[str, object],
-    *,
-    call_id: str,
-) -> CallResult:
-    """Run one live function under the run's tool-call policy, owning a synchronous body until it finishes."""
-    async with owned_sync_tool_completion():
-        return await run_tool_call(
-            function,
-            arguments,
-            replace(live.context, call_id=call_id),
-            middleware=live.middleware,
-        )
 
 
 def _refused(task_id: str, reason: str, *, advice: str = "") -> ToolOutcome:

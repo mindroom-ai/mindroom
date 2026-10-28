@@ -14,7 +14,7 @@ import secrets
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypedDict, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 
@@ -34,8 +34,6 @@ from mindroom.tool_system.runtime_context import (
 from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_proxy_client import (
-    SANDBOX_PROXY_SAVE_ATTACHMENT_PATH,
-    SANDBOX_PROXY_VIEW_FILE_PATH,
     WorkerCallCancellation,
     WorkerProxyClientConfig,
     execute_worker_proxy_request,
@@ -87,12 +85,6 @@ _SANDBOX_SELECTIVE_EXECUTION_MODES = frozenset({"selective", "sandbox_selective"
 _UNSAFE_LOCAL_EXECUTION_MODES = frozenset({"off", "local", "disabled"})
 
 
-class _AttachmentSavePayloadFields(TypedDict):
-    bytes_b64: str
-    sha256: str
-    size_bytes: int
-
-
 @dataclass(frozen=True)
 class WorkerAttachmentSaveReceipt:
     """Receipt returned after writing attachment bytes into a worker workspace."""
@@ -102,24 +94,15 @@ class WorkerAttachmentSaveReceipt:
     sha256: str
 
 
-def _attachment_save_payload_fields(payload_bytes: bytes) -> _AttachmentSavePayloadFields:
-    """Return the byte-integrity fields for one save-attachment request."""
-    return {
-        "bytes_b64": base64.b64encode(payload_bytes).decode("ascii"),
-        "sha256": hashlib.sha256(payload_bytes).hexdigest(),
-        "size_bytes": len(payload_bytes),
-    }
-
-
-def decode_attachment_save_bytes(*, bytes_b64: str, sha256: str, size_bytes: int | None) -> bytes | str:
+def decode_attachment_save_bytes(*, bytes_b64: str, sha256: str, size_bytes: int) -> bytes | str:
     """Decode and integrity-check one save-attachment payload."""
-    if size_bytes is not None and (type(size_bytes) is not int or size_bytes < 0):
+    if type(size_bytes) is not int or size_bytes < 0:
         return "Attachment size_bytes must be a non-negative integer."
     try:
         payload_bytes = base64.b64decode(bytes_b64.encode("ascii"), validate=True)
     except (UnicodeEncodeError, binascii.Error):
         return "Attachment bytes are not valid base64."
-    if size_bytes is not None and len(payload_bytes) != size_bytes:
+    if len(payload_bytes) != size_bytes:
         return "Attachment byte length does not match the request receipt."
     actual_sha256 = hashlib.sha256(payload_bytes).hexdigest()
     if not secrets.compare_digest(actual_sha256, sha256):
@@ -490,21 +473,20 @@ def save_attachment_to_worker(
             worker_manager=worker_manager,
             base_dir=str(workspace_root) if workspace_root is not None else None,
         )
-        attachment_fields = _attachment_save_payload_fields(payload_bytes)
+        sha256 = hashlib.sha256(payload_bytes).hexdigest()
         response = post_worker_proxy_request(
             config=_worker_proxy_client_config(proxy_config, runtime_paths),
             request=SaveAttachmentRequest(
                 **dict(route),
                 attachment_id=attachment_id,
                 mindroom_output_path=mindroom_output_path,
-                bytes_b64=attachment_fields["bytes_b64"],
-                sha256=attachment_fields["sha256"],
-                size_bytes=attachment_fields["size_bytes"],
+                bytes_b64=base64.b64encode(payload_bytes).decode("ascii"),
+                sha256=sha256,
+                size_bytes=byte_count,
             ),
             response_model=SaveAttachmentResponse,
             worker_handle=worker_handle,
             worker_manager=worker_manager,
-            proxy_path=SANDBOX_PROXY_SAVE_ATTACHMENT_PATH,
             worker_operation="save-attachment",
             failure="Sandbox attachment save failed.",
             client_factory=httpx.Client,
@@ -513,7 +495,7 @@ def save_attachment_to_worker(
             response,
             requested_path=mindroom_output_path,
             byte_count=byte_count,
-            sha256=attachment_fields["sha256"],
+            sha256=sha256,
         )
         if isinstance(receipt, str):
             record_proxy_response_failure_for_worker(
@@ -559,7 +541,6 @@ def view_file_from_worker(
             response_model=ViewFileResponse,
             worker_handle=worker_handle,
             worker_manager=worker_manager,
-            proxy_path=SANDBOX_PROXY_VIEW_FILE_PATH,
             worker_operation="view-file",
             failure="Sandbox file view failed.",
             client_factory=httpx.Client,

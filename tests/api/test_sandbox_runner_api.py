@@ -5657,7 +5657,6 @@ def test_dedicated_worker_mode_uses_mounted_root(
         request_envelope = json.loads(request_input)
         request_payload = request_envelope["request"]
         runtime_payload = request_envelope["runtime_paths"]
-        assert request_payload["worker_key"] == "worker-a"
         assert runtime_payload["process_env"]["MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"] == "worker-a"
         assert runtime_payload["process_env"]["MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"] == str(worker_root)
         note_path = worker_root / "workspace" / request_payload["args"][1]
@@ -5716,7 +5715,10 @@ def test_dedicated_worker_mode_defaults_missing_worker_key_to_pinned_worker(
     ) -> subprocess.CompletedProcess[str]:
         request_envelope = json.loads(str(run_kwargs["input"]))
         request_payload = request_envelope["request"]
-        assert request_payload["worker_key"] == "worker-a"
+        # The call runs in the pinned worker's own venv and workspace.
+        assert cmd[0] == str(worker_root / "venv" / "bin" / "python")
+        assert run_kwargs["cwd"] == str(worker_root / "workspace")
+        assert request_envelope["runtime_paths"]["process_env"]["MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"] == "worker-a"
 
         note_path = worker_root / "workspace" / request_payload["args"][1]
         note_path.parent.mkdir(parents=True, exist_ok=True)
@@ -6325,7 +6327,7 @@ def test_workspace_home_contract_protects_owned_names_after_hook_overlay(tmp_pat
         prepared=prepared,
     )
     execution_env.update(protected_env)
-    trusted_overlay = sandbox_env_assembly_module._trusted_workspace_overlay(overlay, protected_env)
+    trusted_overlay = {name: value for name, value in overlay.items() if name not in protected_env}
     effective_runtime_paths = sandbox_exec_module.tool_runtime_paths_with_request_env(
         runtime_paths,
         execution_env,
@@ -6502,6 +6504,7 @@ def test_worker_routed_python_subprocess_cwd_is_agent_workspace(
         **kwargs: object,
     ) -> subprocess.CompletedProcess[str]:
         captured["cwd"] = kwargs["cwd"]
+        captured["env"] = kwargs["env"]
         input_payload = kwargs["input"]
         assert isinstance(input_payload, str)
         captured["payload"] = sandbox_protocol_module.parse_subprocess_envelope(input_payload)
@@ -6529,10 +6532,10 @@ def test_worker_routed_python_subprocess_cwd_is_agent_workspace(
 
     assert response.ok is True
     assert captured["cwd"] == str(workspace.resolve())
-    envelope = captured["payload"]
-    assert isinstance(envelope, sandbox_protocol_module.SandboxSubprocessEnvelope)
-    assert envelope.request["execution_env"]["HOME"] == str(workspace.resolve())
-    assert envelope.request["execution_env"]["MINDROOM_AGENT_WORKSPACE"] == str(workspace.resolve())
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env["HOME"] == str(workspace.resolve())
+    assert env["MINDROOM_AGENT_WORKSPACE"] == str(workspace.resolve())
 
 
 def test_worker_routed_python_subprocess_creates_missing_workspace_cwd(
@@ -7009,7 +7012,7 @@ def test_python_subprocess_child_ignores_code_planted_in_workspace(
 @pytest.mark.parametrize(
     ("error", "failure_kind"),
     [
-        (sandbox_worker_prep_module.WorkerRequestPreparationError("bad hook", failure_kind="request"), "tool"),
+        (sandbox_worker_prep_module.WorkerRequestPreparationError("bad hook"), "tool"),
         (sandbox_worker_prep_module.WorkerRequestPreparationError("bad hook", failure_kind="worker"), "worker"),
         (HTTPException(status_code=400, detail="bad hook"), "tool"),
         (HTTPException(status_code=503, detail="bad hook"), "worker"),
@@ -7133,7 +7136,6 @@ def test_workspace_env_hook_subprocess_serializes_overlay_execution_env(
     assert response.ok is True
     envelope = captured_envelope["payload"]
     assert isinstance(envelope, sandbox_protocol_module.SandboxSubprocessEnvelope)
-    assert envelope.request["execution_env"]["PATH"] == "/hook/bin:/usr/bin:/bin"
     env = captured_envelope["env"]
     assert isinstance(env, dict)
     assert env["PATH"] == "/hook/bin:/usr/bin:/bin"

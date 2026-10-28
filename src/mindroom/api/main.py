@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from contextlib import ExitStack, asynccontextmanager, suppress
+from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import asdict, dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, Literal
@@ -562,14 +562,13 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:  # noqa: PLR0915
     knowledge_refresh_scheduler = app_state.orchestrator_knowledge_refresh_scheduler
     # `mindroom run` binds its scheduler before it serves this app, so without one the API runs on its own.
     standalone = knowledge_refresh_scheduler is None
-    worker_launch_binding = ExitStack()
-    try:
+    # An API running on its own owns the applied config dedicated workers launch from, until its worker manager has
+    # shut down; an edit that fails to load keeps the last config that loaded.
+    worker_launch_binding = (
+        bind_worker_launch_config_source(lambda: _app_context(_app).runtime_config) if standalone else nullcontext()
+    )
+    with worker_launch_binding:
         if standalone:
-            # An API running on its own owns the applied config dedicated workers launch from, until its worker manager
-            # has shut down; an edit that fails to load keeps the last config that loaded.
-            worker_launch_binding.enter_context(
-                bind_worker_launch_config_source(lambda: _app_context(_app).runtime_config),
-            )
             api_owned_knowledge_refresh_scheduler = KnowledgeRefreshScheduler.from_runtime(runtime_paths)
             knowledge_refresh_scheduler = api_owned_knowledge_refresh_scheduler
             standalone_knowledge_source_watcher = KnowledgeSourceWatcher(knowledge_refresh_scheduler)
@@ -606,8 +605,6 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:  # noqa: PLR0915
             # `mindroom run` stops the worker manager itself once its bots have stopped.
             # An API running on its own must stop it here, or its Docker worker containers outlive the process.
             await run_blocking_until_complete(shutdown_primary_worker_manager)
-    finally:
-        worker_launch_binding.close()
 
 
 def bind_orchestrator_knowledge_refresh_scheduler(

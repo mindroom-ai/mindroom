@@ -68,7 +68,7 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.resources import ExecutionResourceReference, ExecutionResources
     from mindroom.tool_jobs.runtime import ToolJobRuntime
     from mindroom.tool_system.agno_toolkits import Toolkit
-    from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
+    from mindroom.tool_system.invocation import CallResult, ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -457,9 +457,10 @@ async def _run_operation(
         with tool_execution_identity(owner), authorized_tool_call(owner, call):
             job_checkpoint()
             check_current_execution_authority()
-            value, failure = await _run_job_call(inner, function, call)
+            async with owned_sync_tool_completion(JOB_CALL_EXECUTOR):
+                result = await run_tool_call(function, call.arguments, call.context, middleware=inner)
             encoding = asyncio.create_task(
-                asyncio.to_thread(_saved_outcome, value, failure, baseline, call.context.session_state),
+                asyncio.to_thread(_saved_outcome, result, baseline, call.context.session_state),
             )
             try:
                 return await wait_for_future_until_complete(encoding)
@@ -477,29 +478,13 @@ async def _run_operation(
             logger.exception("Tool execution resource cleanup failed", tool_name=function.name)
 
 
-async def _run_job_call(
-    inner: Sequence[ToolMiddleware],
-    function: ToolFunction,
-    call: JobCall,
-) -> tuple[object, str | None]:
-    """Run the job's call through the actor's tool-call policy: what it returned, or the text of why it failed.
+def _saved_outcome(result: CallResult, baseline: dict[str, Any], state: dict[str, Any]) -> BackgroundOutcome:
+    """Encode a finished call's outcome with the session-state changes it made, off the event loop.
 
     It fails when it raised, or when the policy answered it with a failed outcome, as for a call a plugin hook declined.
     """
-    async with owned_sync_tool_completion(JOB_CALL_EXECUTOR):
-        result = await run_tool_call(function, call.arguments, call.context, middleware=inner)
-    if not result.succeeded:
-        return None, result.failure_text
-    return result.value, None
-
-
-def _saved_outcome(
-    value: object,
-    failure: str | None,
-    baseline: dict[str, Any],
-    state: dict[str, Any],
-) -> BackgroundOutcome:
-    """Encode a finished call's outcome with the session-state changes it made, off the event loop."""
+    failure = None if result.succeeded else result.failure_text
+    value = result.value if failure is None else None
     try:
         payload = ToolResultPayload(value=value, state_delta=session_state_delta(baseline, state), error=failure)
         encoded = encode_result_payload(payload)
