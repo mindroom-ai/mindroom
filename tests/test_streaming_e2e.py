@@ -309,56 +309,54 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     orchestrator_runtime = orchestrator_runtime_paths(tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime)
 
-    # Patch the config loading to assign rooms
-    with patch("mindroom.orchestrator.load_config") as mock_config:
-        mock_cfg = Config(
-            agents={
-                "helper": AgentConfig(display_name="HelperAgent", rooms=[test_room_id]),
-                "calculator": AgentConfig(display_name="CalculatorAgent", rooms=[test_room_id]),
-            },
-            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
-            defaults=DefaultsConfig(thread_summary_first_threshold=100),
-            memory={"backend": "none"},
-            router=RouterConfig(model="default"),
-        )
-        mock_config.return_value = mock_cfg
+    # The config startup loaded, with rooms assigned
+    mock_cfg = Config(
+        agents={
+            "helper": AgentConfig(display_name="HelperAgent", rooms=[test_room_id]),
+            "calculator": AgentConfig(display_name="CalculatorAgent", rooms=[test_room_id]),
+        },
+        models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
+        defaults=DefaultsConfig(thread_summary_first_threshold=100),
+        memory={"backend": "none"},
+        router=RouterConfig(model="default"),
+    )
 
-        # Patch create_bot_for_entity to create bots with proper user_ids
-        with (
-            patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
-            patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
-        ):
+    # Patch create_bot_for_entity to create bots with proper user_ids
+    with (
+        patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
+        patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
+    ):
 
-            def create_bot_side_effect(
-                entity_name: str,
-                agent_user: object,
-                config: object,
-                runtime_paths: object,
-                storage_path: Path,
-                *,
-                config_path: Path | None = None,
-            ) -> object:
-                del config_path
-                # Update the agent_user with proper user_id
-                if entity_name == "helper":
-                    agent_user.user_id = "@mindroom_helper:localhost"
-                elif entity_name == "calculator":
-                    agent_user.user_id = "@mindroom_calculator:localhost"
-                elif entity_name == "router":
-                    agent_user.user_id = "@mindroom_router:localhost"
+        def create_bot_side_effect(
+            entity_name: str,
+            agent_user: object,
+            config: object,
+            runtime_paths: object,
+            storage_path: Path,
+            *,
+            config_path: Path | None = None,
+        ) -> object:
+            del config_path
+            # Update the agent_user with proper user_id
+            if entity_name == "helper":
+                agent_user.user_id = "@mindroom_helper:localhost"
+            elif entity_name == "calculator":
+                agent_user.user_id = "@mindroom_calculator:localhost"
+            elif entity_name == "router":
+                agent_user.user_id = "@mindroom_router:localhost"
 
-                # Create the actual bot with config
-                runtime_config = bind_runtime_paths(config, runtime_paths)
-                return make_test_agent_bot(
-                    agent_user,
-                    storage_path,
-                    runtime_config,
-                    runtime_paths_for(runtime_config),
-                    rooms=[test_room_id],
-                )
+            # Create the actual bot with config
+            runtime_config = bind_runtime_paths(config, runtime_paths)
+            return make_test_agent_bot(
+                agent_user,
+                storage_path,
+                runtime_config,
+                runtime_paths_for(runtime_config),
+                rooms=[test_room_id],
+            )
 
-            mock_create_bot.side_effect = create_bot_side_effect
-            await orchestrator.initialize()
+        mock_create_bot.side_effect = create_bot_side_effect
+        await orchestrator.initialize(mock_cfg)
 
     # Start the orchestrator (in background). This test uses a deliberately small
     # MagicMock config, so keep unrelated runtime services stubbed.
@@ -368,7 +366,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     room_setup_patch.start()
     wait_for_homeserver_patch = patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock())
     wait_for_homeserver_patch.start()
-    start_task = asyncio.create_task(orchestrator.start())
+    start_task = asyncio.create_task(orchestrator.start(mock_cfg))
 
     try:
         # Give the bots time to start

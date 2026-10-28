@@ -8,7 +8,8 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from mindroom.config.main import failed_config_source_fingerprint, load_config
+from mindroom.config.load_attempt import PublishedConfigLoad, load_config_attempt
+from mindroom.config.main import failed_config_source_fingerprint
 from mindroom.config.reload_status import ConfigReloadStatus
 from mindroom.config.yaml_includes import partial_source_files, source_files_fingerprint
 from mindroom.event_journal.opening import describe_event_journal, pending_event_journal_restart
@@ -82,6 +83,36 @@ class _ReplacementDrainState:
         return self.wait_started_at is not None and self.wait_seconds(now) >= force_after_seconds
 
 
+def load_published_config(runtime_paths: RuntimePaths, *, api_enabled: bool) -> PublishedConfigLoad:
+    """Load the config once, publishing it to the embedded dashboard API when one runs.
+
+    With the API embedded, this load is the dashboard's only one, so the runtime
+    and the dashboard always see the same validated config.
+    """
+    if not api_enabled:
+        return PublishedConfigLoad(load_config_attempt(runtime_paths))
+    from mindroom.api import main as api_main  # noqa: PLC0415
+
+    return api_main.config_lifecycle.load_config_into_app(runtime_paths, api_main.app)
+
+
+async def load_startup_config(runtime_paths: RuntimePaths, *, api_enabled: bool) -> Config:
+    """Bind the embedded API to this runtime and load the config startup applies.
+
+    The API serves only after this returns, so no request sees it without config,
+    and the dashboard keeps that config while the homeserver is unreachable.
+    A failed load fails startup.
+    """
+    if api_enabled:
+        from mindroom.api import main as api_main  # noqa: PLC0415
+
+        api_main.initialize_api_app(api_main.app, runtime_paths)
+    # Config validation executes plugin modules and walks the filesystem;
+    # keep it off the event loop (#1260).
+    published = await asyncio.to_thread(load_published_config, runtime_paths, api_enabled=api_enabled)
+    return published.attempt.loaded_config()
+
+
 @dataclass
 class ConfigReloadLifecycle:
     """Own debounced config reloads and serialized replacement admission.
@@ -97,6 +128,7 @@ class ConfigReloadLifecycle:
     # Reloads run only once startup published its config, so a config always exists here.
     current_config: Callable[[], Config]
     agent_bots: Callable[[], Mapping[str, AgentBot | TeamBot]]
+    load_config: Callable[[], PublishedConfigLoad]
     apply_update_plan: Callable[[Config, ConfigUpdatePlan], Awaitable[bool]]
     response_admission_gate: ResponseAdmissionGate
     before_runtime_replacement: Callable[[], Awaitable[None]]
@@ -171,13 +203,16 @@ class ConfigReloadLifecycle:
         async with self._response_admission_apply_lock:
             # Config validation executes plugin modules and walks the filesystem;
             # keep it off the event loop (#1260). Admission stays open because
-            # nothing is published until loading and planning both succeed.
+            # the runtime adopts nothing until loading and planning both succeed;
+            # the embedded dashboard sees the load as soon as it finishes.
             async with self.config_update_lock:
-                new_config = await asyncio.to_thread(
-                    load_config,
-                    self.runtime_paths,
-                    tolerate_plugin_load_errors=True,
-                )
+                published = await asyncio.to_thread(self.load_config)
+            if published.superseded:
+                # A dashboard save or runtime swap committed during the load and
+                # already changed the files, so the watcher queues the reload
+                # that applies it; this stale read is never adopted.
+                return None
+            new_config = published.attempt.loaded_config()
             self.loaded_source_files = new_config.source_files
             self.status = ConfigReloadStatus(status="pending", fingerprint=new_config.source_fingerprint)
             runtime_config = self.current_config()

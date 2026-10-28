@@ -27,7 +27,12 @@ from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.approval.transport import ApprovalMatrixTransport
 from mindroom.attachments.storage import wait_for_attachment_cleanup_tasks
 from mindroom.automations.runner import AutomationRunner
-from mindroom.background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
+from mindroom.background_tasks import (
+    SupervisedLoop,
+    create_background_task,
+    run_blocking_until_complete,
+    wait_for_background_tasks,
+)
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.constants import ROUTER_AGENT_NAME, ROUTER_DISPLAY_NAME, tracking_dir
 from mindroom.credentials.legacy_tool_credentials import migrate_tool_credential_defaults
@@ -76,7 +81,7 @@ from mindroom.matrix_rtc.call_manager import preload_matrix_call_dependencies
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
-from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
+from mindroom.memory import MemoryAutoFlushService
 from mindroom.private_storage.legacy_private_storage import migrate_private_storage
 from mindroom.providers.model_http_client import aclose_model_http_client
 from mindroom.response_activity import ResponseIdentity
@@ -114,12 +119,11 @@ from mindroom.workers.runtime import (
 
 from . import file_watcher
 from .bot import AgentBot, TeamBot, create_bot_for_entity
-from .config.main import Config, load_config
 from .credentials.sync import sync_env_to_credentials
 from .event_journal.opening import OpenEventJournal, bind_event_journal, open_event_journal
 from .logging_config import get_logger, setup_logging
 from .orchestration.computer_runtime import ComputerRuntimeCoordinator
-from .orchestration.config_lifecycle import ConfigReloadLifecycle
+from .orchestration.config_lifecycle import ConfigReloadLifecycle, load_published_config, load_startup_config
 from .orchestration.config_updates import (
     catalog_change_restarts,
     catalog_refresh_restarts,
@@ -135,7 +139,6 @@ from .orchestration.runtime import (
     is_permanent_startup_error,
     log_startup_phase_finished,
     log_startup_phase_started,
-    retry_delay_seconds,
     run_shutdown_step,
     run_with_retry,
     wait_for_matrix_homeserver,
@@ -158,14 +161,14 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalContinuation, ApprovalDeliveryView
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
 
+    from .config.main import Config
     from .constants import RuntimePaths
     from .event_journal import EventJournalStore
     from .orchestration.config_updates import ConfigUpdatePlan
+    from .orchestration.services import RuntimeService
 logger = get_logger(__name__)
 
 
-_AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0
-_AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
 _EMBEDDED_API_SHUTDOWN_GRACE_SECONDS = 5.0
 _EVENT_JOURNAL_HOLD_CHECK_SECONDS = 30.0
 
@@ -279,7 +282,9 @@ class _MultiAgentOrchestrator:
     _journal_held: bool = field(default=False, init=False, repr=False)
     running: bool = field(default=False, init=False)
     config: Config | None = field(default=None, init=False)
-    _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
+    _memory_auto_flush: MemoryAutoFlushService = field(init=False, repr=False)
+    # Services whose lifecycle follows the active config, in start order; they stop in reverse.
+    _services: tuple[RuntimeService, ...] = field(init=False, repr=False)
     _skill_reviews: SkillReviewRunner = field(init=False, repr=False)
     _automations: AutomationRunner = field(init=False, repr=False)
     _budgets: BudgetMonitor = field(init=False, repr=False)
@@ -342,7 +347,7 @@ class _MultiAgentOrchestrator:
             ),
         )
         self._knowledge_refresh_scheduler = KnowledgeRefreshScheduler.from_runtime(self.runtime_paths)
-        self._knowledge_source_watcher = KnowledgeSourceWatcher(self._knowledge_refresh_scheduler)
+        self._knowledge_source_watcher = KnowledgeSourceWatcher(self._knowledge_refresh_scheduler, self.runtime_paths)
         self.agent_reply_membership_sync = AgentReplyMembershipSync(self.agent_reply_memberships)
         self.plugin_watch = PluginWatchState(runtime_paths=self.runtime_paths)
         self._computer_runtime = ComputerRuntimeCoordinator(
@@ -351,7 +356,6 @@ class _MultiAgentOrchestrator:
             agent_reply_memberships=self.agent_reply_memberships,
         )
         self._external_trigger_runtime = ExternalTriggerRuntimeCoordinator(
-            runtime_paths=self.runtime_paths,
             api_enabled=self.api_enabled,
             agent_reply_memberships=self.agent_reply_memberships,
         )
@@ -391,6 +395,20 @@ class _MultiAgentOrchestrator:
                 agent_reply_memberships=self.agent_reply_memberships,
             ),
         )
+        self._memory_auto_flush = MemoryAutoFlushService(
+            runtime_paths=self.runtime_paths,
+            config_provider=lambda: self.config,
+            redacted_event_ids=self.redacted_event_ids,
+        )
+        self._services = (
+            self._memory_auto_flush,
+            self._knowledge_source_watcher,
+            self._knowledge_graph,
+            self._todo_poke_runtime,
+            self._automations,
+            self._budgets,
+            self._thread_export_runner,
+        )
         self._script_runtime = build_script_runtime(
             self.runtime_paths,
             config_provider=lambda: self.config,
@@ -407,6 +425,7 @@ class _MultiAgentOrchestrator:
             is_running=lambda: self.running,
             current_config=self._require_config,
             agent_bots=lambda: self.agent_bots,
+            load_config=partial(load_published_config, self.runtime_paths, api_enabled=self.api_enabled),
             apply_update_plan=self._apply_config_update_plan,
             response_admission_gate=self._response_admission_gate,
             before_runtime_replacement=self._thread_export_runner.prepare_runtime_replacement,
@@ -438,7 +457,7 @@ class _MultiAgentOrchestrator:
         )
         self._startup_maintenance = StartupMaintenanceController(
             setup_rooms_and_memberships=self._setup_startup_rooms_and_memberships,
-            sync_runtime_support=lambda config: self._sync_runtime_support_services(config, start_watcher=True),
+            sync_runtime_support=lambda config: self._sync_runtime_support_services(config),
             mark_runtime_support_ready=lambda: self._approval_recovery.mark_startup_runtime_support_ready(),
         )
 
@@ -503,34 +522,6 @@ class _MultiAgentOrchestrator:
             entity_name,
             self.agent_bots.get(entity_name),
         )
-
-    async def _stop_memory_auto_flush_worker(self) -> None:
-        """Stop the background memory auto-flush worker if running."""
-        task = self._memory_auto_flush_task
-        self._memory_auto_flush_task = None
-        if task is not None:
-            # A pass saves each conversation's progress and a retried note is never written twice, so cancelling loses
-            # nothing.
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-
-    async def _sync_memory_auto_flush_worker(self) -> None:
-        """Start or stop background memory auto-flush worker based on current config."""
-        config = self.config
-        if config is None or not auto_flush_enabled(config):
-            await self._stop_memory_auto_flush_worker()
-            return
-
-        task = self._memory_auto_flush_task
-        if task is not None and not task.done():
-            return
-
-        worker = MemoryAutoFlushWorker(
-            runtime_paths=self.runtime_paths,
-            config_provider=lambda: self.config,
-            redacted_event_ids=self.redacted_event_ids,
-        )
-        self._memory_auto_flush_task = asyncio.create_task(worker.run(), name="memory_auto_flush_worker")
 
     def _reset_runtime_shutdown_event(self) -> asyncio.Event:
         """Create the shutdown event for the current orchestrator run."""
@@ -835,14 +826,8 @@ class _MultiAgentOrchestrator:
             if self._dispatch_recovery_task is current_task:
                 self._dispatch_recovery_task = None
 
-    async def _sync_runtime_support_services(
-        self,
-        config: Config,
-        *,
-        start_watcher: bool,
-        previous_config: Config | None = None,
-    ) -> None:
-        """Refresh runtime support services that depend on the active config."""
+    async def _sync_runtime_support_services(self, config: Config, *, previous_config: Config | None = None) -> None:
+        """Bring every runtime service in line with the active config."""
         if previous_config is not None:
             await asyncio.to_thread(
                 reconcile_knowledge_mode_transition_states,
@@ -850,23 +835,11 @@ class _MultiAgentOrchestrator:
                 config,
                 self.runtime_paths,
             )
-        await self._knowledge_source_watcher.sync(
-            config=config if start_watcher else None,
-            runtime_paths=self.runtime_paths,
-        )
         ensure_default_agent_workspaces(config, self.storage_path)
         self._configure_approval_store_transport()
-        await self._sync_memory_auto_flush_worker()
-        await self._knowledge_graph.sync()
-        await self._todo_poke_runtime.sync()
+        for service in self._services:
+            await service.sync(config)
         await self._tool_job_runtime.sync()
-        self._automations.start()
-        self._budgets.sync()
-        self._thread_export_runner.start()
-        if self.running:
-            # Startup queues its own pass once the bots are up; a reload
-            # reconciles every workspace against the new config right away.
-            self._thread_export_runner.queue_full_pass()
 
     async def _stop_mcp_manager(self) -> None:
         """Stop the MCP manager and clear the active runtime binding."""
@@ -1186,12 +1159,11 @@ class _MultiAgentOrchestrator:
 
         return commit
 
-    async def initialize(self) -> None:
-        """Initialize all managed bots from configuration."""
-        set_runtime_starting("Loading config and preparing agents")
+    async def initialize(self, config: Config) -> None:
+        """Initialize all managed bots from the config startup loaded."""
+        set_runtime_starting("Preparing agents")
         logger.info("Initializing multi-agent system...")
 
-        config = await asyncio.to_thread(load_config, self.runtime_paths, tolerate_plugin_load_errors=True)
         await preload_matrix_call_dependencies(config)
         freeze_startup_heap()
         hook_registry = await asyncio.to_thread(self._build_hook_registry, config)
@@ -1212,10 +1184,10 @@ class _MultiAgentOrchestrator:
 
         logger.info("Initialized agent bots", count=len(self.agent_bots))
 
-    async def start(self) -> None:
-        """Start all agent bots and publish readiness state."""
+    async def start(self, config: Config) -> None:
+        """Start all agent bots from the config startup loaded and publish readiness state."""
         try:
-            await self._start_runtime()
+            await self._start_runtime(config)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1373,7 +1345,7 @@ class _MultiAgentOrchestrator:
             now_ns=time.time_ns(),
         )
 
-    async def _start_runtime(self) -> None:
+    async def _start_runtime(self, config: Config) -> None:
         """Run the startup sequence before handing off to the sync loops."""
         runtime_shutdown_event = self._reset_runtime_shutdown_event()
         self._runtime_ready_event.clear()
@@ -1385,7 +1357,7 @@ class _MultiAgentOrchestrator:
 
         if not self.agent_bots:
             phase_started = log_startup_phase_started("initialize_runtime")
-            await self.initialize()
+            await self.initialize(config)
             log_startup_phase_finished("initialize_runtime", phase_started)
 
         phase_started = log_startup_phase_started("start_router_bot")
@@ -1653,11 +1625,7 @@ class _MultiAgentOrchestrator:
     ) -> None:
         """Publish post-reload runtime services and external trigger delivery binding."""
         handle_embedder_config_reload(current_config, new_config, self.runtime_paths)
-        await self._sync_runtime_support_services(
-            new_config,
-            start_watcher=self.running,
-            previous_config=current_config,
-        )
+        await self._sync_runtime_support_services(new_config, previous_config=current_config)
         await self._approval_recovery.mark_startup_runtime_support_ready()
         self._bind_trigger_runtimes()
         await self._emit_config_reloaded(
@@ -1689,7 +1657,6 @@ class _MultiAgentOrchestrator:
                 )
                 warn_about_config_risks(new_config, self.runtime_paths)
                 self._computer_runtime.unbind()
-                await self._external_trigger_runtime.sync_api_config_snapshot(new_config)
                 catalog_restarts, deferred_catalog_servers = catalog_refresh_restarts(
                     plan,
                     catalog_changed,
@@ -1799,7 +1766,7 @@ class _MultiAgentOrchestrator:
             )
         return self._open_journal.store
 
-    async def stop(self) -> None:  # noqa: PLR0915 - the service steps become one loop in the next commit
+    async def stop(self) -> None:
         """Stop all agent bots."""
         self.running = False
         self._runtime_ready_event.clear()
@@ -1835,14 +1802,9 @@ class _MultiAgentOrchestrator:
             ),
         )
         await run_shutdown_step("startup_maintenance", self._startup_maintenance.cancel())
-        await run_shutdown_step("todo_poke", self._todo_poke_runtime.stop())
-        await run_shutdown_step("thread_exports", self._thread_export_runner.stop())
-        await run_shutdown_step("memory_auto_flush", self._stop_memory_auto_flush_worker())
-        await run_shutdown_step("knowledge_graph", self._knowledge_graph.stop())
+        for service in reversed(self._services):
+            await run_shutdown_step(service.name, service.stop())
         await run_shutdown_step("skill_reviews", self._skill_reviews.stop())
-        await run_shutdown_step("automations", self._automations.stop())
-        await run_shutdown_step("budgets", self._budgets.stop())
-        await run_shutdown_step("knowledge_source_watchers", self._knowledge_source_watcher.shutdown())
         await run_shutdown_step("knowledge_refresh", self._knowledge_refresh_scheduler.shutdown())
         await run_shutdown_step("bot_start_tasks", self.fleet.cancel_retries())
         await run_shutdown_step("mcp_manager", self._stop_mcp_manager())
@@ -1963,7 +1925,6 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and its worker-fac
     from mindroom.egress_broker.service import serve_egress_broker  # noqa: PLC0415
 
     api_server = _EmbeddedApiServerContext(host=host, port=port)
-    api_main.initialize_api_app(api_main.app, runtime_paths)
     bind_agent_cli_registry(api_main.app, agent_cli_registry)
     api_state = api_main.config_lifecycle.app_state(api_main.app)
     api_state.thread_export_runner = thread_export_runner
@@ -2021,6 +1982,7 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and its worker-fac
             _raise_embedded_api_server_exit(api_server, reason="server.serve() raised SystemExit", cause=exc)
     finally:
         bind_agent_cli_registry(api_main.app, None)
+        api_state.orchestrator_knowledge_refresh_scheduler = None
         api_state.thread_export_runner = None
         api_state.leave_matrix_room = None
         api_state.response_admission_gate = None
@@ -2049,43 +2011,14 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and its worker-fac
         )
 
 
-async def _run_auxiliary_task_forever(
-    task_name: str,
-    operation: Callable[[], Awaitable[None]],
-    *,
-    should_restart: Callable[[], bool] | None = None,
-) -> None:
-    """Restart a non-critical background task whenever it exits or crashes."""
-    restart_allowed = (lambda: True) if should_restart is None else should_restart
-    restart_count = 0
-    while restart_allowed():
-        started_at = time.monotonic()
-        try:
-            await operation()
-            if not restart_allowed():
-                return
-            logger.warning("Auxiliary task exited; restarting", task_name=task_name)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            if not restart_allowed():
-                return
-            logger.exception(
-                "Auxiliary task crashed; restarting",
-                task_name=task_name,
-            )
-        if not restart_allowed():
-            return
-        if time.monotonic() - started_at >= _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS:
-            restart_count = 0
-        restart_count += 1
-        await asyncio.sleep(
-            retry_delay_seconds(
-                restart_count,
-                initial_delay_seconds=_AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS,
-                max_delay_seconds=_AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS,
-            ),
-        )
+async def _run_auxiliary_task_forever(task_name: str, operation: Callable[[], Awaitable[None]]) -> None:
+    """Run one non-critical background task, restarting it whenever it exits or crashes, until cancelled."""
+    loop = SupervisedLoop(task_name, operation)
+    loop.start()
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await loop.stop()
 
 
 async def _wait_for_runtime_completion(
@@ -2355,11 +2288,7 @@ def _start_auxiliary_tasks(
     ]
     tasks = [
         asyncio.create_task(
-            _run_auxiliary_task_forever(
-                task_name,
-                operation,
-                should_restart=lambda: not shutdown_requested.is_set(),
-            ),
+            _run_auxiliary_task_forever(task_name, operation),
             name=supervisor_name,
         )
         for task_name, operation, supervisor_name in auxiliary_specs
@@ -2443,6 +2372,8 @@ async def _run_runtime(  # noqa: PLR0915
         probes = serve_startup_probes(api_host, api_port, detail="Converting conversation storage") if api else None
         with probes or nullcontext():
             await migrate_conversation_storage(runtime_paths)
+            # Before the API serves and before the homeserver answers, so the dashboard has this one load meanwhile.
+            startup_config = await load_startup_config(runtime_paths, api_enabled=api)
 
         logger.info("Starting orchestrator...")
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=api)
@@ -2478,7 +2409,7 @@ async def _run_runtime(  # noqa: PLR0915
                 reason="the egress broker runs with the embedded API server, which is disabled",
             )
 
-        orchestrator_task = asyncio.create_task(orchestrator.start(), name="orchestrator")
+        orchestrator_task = asyncio.create_task(orchestrator.start(startup_config), name="orchestrator")
         shutdown_wait_task = asyncio.create_task(shutdown_requested.wait(), name="application_shutdown_wait")
         await _wait_for_runtime_completion(
             orchestrator_task=orchestrator_task,

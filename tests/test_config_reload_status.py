@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+from functools import partial
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -11,7 +12,7 @@ import pytest
 
 from mindroom.config.main import Config, load_config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle
+from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle, load_published_config
 from mindroom.response_admission import ResponseAdmissionGate
 
 if TYPE_CHECKING:
@@ -47,11 +48,13 @@ def test_loaded_fingerprint_covers_includes_and_survives_disk_changes(tmp_path: 
 
 
 def _lifecycle(tmp_path: Path) -> ConfigReloadLifecycle:
+    runtime_paths = _paths(tmp_path)
     return ConfigReloadLifecycle(
-        runtime_paths=_paths(tmp_path),
+        runtime_paths=runtime_paths,
         is_running=lambda: True,
         current_config=Config,
         agent_bots=dict,
+        load_config=partial(load_published_config, runtime_paths, api_enabled=False),
         apply_update_plan=AsyncMock(return_value=True),
         response_admission_gate=ResponseAdmissionGate(),
         before_runtime_replacement=AsyncMock(),

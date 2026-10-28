@@ -331,7 +331,7 @@ def test_load_config_uses_dynamic_runtime_config_path(
 
     app = FastAPI()
     initialize_api_app(app, runtime_paths)
-    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is True
+    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app).loaded
     request = Request({"type": "http", "app": app})
 
     config, resolved_runtime_paths = openai_compat._load_config(request)
@@ -381,7 +381,7 @@ def test_list_models_uses_committed_snapshot_until_reload(tmp_path: Path) -> Non
         process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
     )
     initialize_api_app(app, runtime_paths)
-    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is True
+    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app).loaded
     config_path.write_text(
         "models:\n"
         "  default:\n"
@@ -685,7 +685,7 @@ def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap(tmp_path:
     )
     runtime_b.config_path.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
     initialize_api_app(app, runtime_a)
-    assert openai_compat.config_lifecycle.load_config_into_app(runtime_a, app) is True
+    assert openai_compat.config_lifecycle.load_config_into_app(runtime_a, app).loaded
     captured_runtime_paths: list[RuntimePaths | None] = []
 
     def _authenticate_and_swap(
@@ -754,7 +754,7 @@ def test_list_models_tolerate_missing_plugin_path(tmp_path: Path) -> None:
         process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
     )
     initialize_api_app(app, runtime_paths)
-    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is True
+    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app).loaded
 
     with TestClient(app, base_url="http://localhost") as client:
         response = client.get("/v1/models")
@@ -778,7 +778,7 @@ def test_list_models_returns_malformed_yaml_errors(tmp_path: Path) -> None:
         process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
     )
     initialize_api_app(app, runtime_paths)
-    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is False
+    assert not openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app).loaded
 
     with TestClient(app, base_url="http://localhost") as client:
         response = client.get("/v1/models")
@@ -817,7 +817,7 @@ def test_chat_completions_tolerate_missing_plugin_path_during_model_validation(t
         process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
     )
     initialize_api_app(app, runtime_paths)
-    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is True
+    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app).loaded
 
     with TestClient(app, base_url="http://localhost") as client:
         response = client.post(
@@ -844,7 +844,7 @@ def test_chat_completions_returns_malformed_yaml_errors(tmp_path: Path) -> None:
         process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
     )
     initialize_api_app(app, runtime_paths)
-    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is False
+    assert not openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app).loaded
 
     with TestClient(app, base_url="http://localhost") as client:
         response = client.post(

@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom import requester_identity
+from mindroom import background_tasks, requester_identity
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.automations import automation
 from mindroom.automations import runner as runner_module
@@ -181,6 +181,37 @@ async def test_the_internal_user_is_the_prompts_requester(tmp_path: Path) -> Non
         ORIGINAL_SENDER_KEY: "@mindroom_user:example.test",
         PER_FIRE_THREAD_ROOT_KEY: True,
     }
+
+
+@pytest.mark.asyncio
+async def test_a_tick_that_raises_is_logged_and_the_loop_runs_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crashed pass is logged and the schedule loop restarts instead of staying dead until the next reload."""
+    config, _paths, runner, _bot = _setup(tmp_path)
+    monkeypatch.setattr(background_tasks, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+    logger = MagicMock()
+    monkeypatch.setattr(background_tasks, "logger", logger)
+    ticks: list[datetime] = []
+    ticked_again = asyncio.Event()
+
+    async def tick(now: datetime) -> None:
+        ticks.append(now)
+        if len(ticks) == 1:
+            msg = "tick failed"
+            raise RuntimeError(msg)
+        ticked_again.set()
+
+    monkeypatch.setattr(runner, "_tick", tick)
+    await runner.sync(config)
+    try:
+        await asyncio.wait_for(ticked_again.wait(), SETTLE_TIMEOUT_SECONDS)
+    finally:
+        await runner.stop()
+
+    logger.exception.assert_called_once()
+    assert logger.exception.call_args.kwargs == {"task_name": "automation_runner"}
 
 
 @pytest.mark.asyncio

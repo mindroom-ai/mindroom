@@ -233,9 +233,9 @@ async def test_unreadable_session_database_does_not_stop_startup(
     if entrypoint == "api":
         monkeypatch.setattr(module, "migrate_tool_credential_defaults", Mock(side_effect=_NextStartupStepError))
     else:
-        # The orchestrator converts after it sets up logging and retires old workers, right before it builds itself.
+        # The orchestrator converts after it sets up logging and retires old workers, right before it loads its config.
         monkeypatch.setattr(module, "setup_logging", Mock())
-        monkeypatch.setattr(module, "_MultiAgentOrchestrator", Mock(side_effect=_NextStartupStepError))
+        monkeypatch.setattr(module, "load_startup_config", Mock(side_effect=_NextStartupStepError))
     with capture_logs() as logs:
         if entrypoint == "api":
             monkeypatch.setattr(module, "_app_runtime_paths", lambda _app: paths)

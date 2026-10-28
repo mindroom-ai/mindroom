@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from mindroom.background_tasks import retry_delay_seconds
 from mindroom.logging_config import get_logger
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
@@ -29,7 +30,6 @@ from .runtime import (
     STARTUP_RETRY_MAX_DELAY_SECONDS,
     cancel_task,
     create_logged_task,
-    retry_delay_seconds,
     run_shutdown_step,
     sync_forever_with_restart,
 )

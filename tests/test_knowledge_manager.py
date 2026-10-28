@@ -1351,11 +1351,11 @@ async def test_shared_local_watch_file_event_marks_stale_and_schedules_refresh(
 
     monkeypatch.setattr("mindroom.knowledge.watch.awatch", _fake_awatch)
     refresh_scheduler = MagicMock()
-    source_watcher = KnowledgeSourceWatcher(refresh_scheduler)
+    source_watcher = KnowledgeSourceWatcher(refresh_scheduler, runtime_paths)
 
-    await source_watcher.sync(config=config, runtime_paths=runtime_paths)
+    await source_watcher.sync(config)
     await asyncio.wait_for(event_delivered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
-    await source_watcher.shutdown()
+    await source_watcher.stop()
 
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     state = load_published_index_state(published_index_metadata_path(key))
@@ -1410,14 +1410,14 @@ async def test_knowledge_polling_waits_before_startup_refresh(tmp_path: Path, gi
     config = _polled_docs_config(tmp_path, tmp_path / "docs", git=git)
     runtime_paths = runtime_paths_for(config)
     refresh_scheduler = MagicMock()
-    source_watcher = KnowledgeSourceWatcher(refresh_scheduler)
+    source_watcher = KnowledgeSourceWatcher(refresh_scheduler, runtime_paths)
 
     with capture_logs() as logs:
-        await source_watcher.sync(config=config, runtime_paths=runtime_paths)
+        await source_watcher.sync(config)
         try:
             await asyncio.sleep(0)
         finally:
-            await source_watcher.shutdown()
+            await source_watcher.stop()
 
     refresh_scheduler.schedule_refresh.assert_not_called()
     _assert_poller_lifecycle_logged(logs, base_id="docs", poll_interval_seconds=5.0, git=git)
@@ -1458,13 +1458,13 @@ async def test_knowledge_polling_repeats_after_poll_interval(
         return await awaitable
 
     monkeypatch.setattr("mindroom.knowledge.watch.asyncio.wait_for", _fake_wait_for)
-    source_watcher = KnowledgeSourceWatcher(refresh_scheduler)
+    source_watcher = KnowledgeSourceWatcher(refresh_scheduler, runtime_paths)
 
-    await source_watcher.sync(config=config, runtime_paths=runtime_paths)
+    await source_watcher.sync(config)
     try:
         await _wait_until(second_schedule.is_set, "Poller did not schedule refresh after interval")
     finally:
-        await source_watcher.shutdown()
+        await source_watcher.stop()
 
     assert refresh_scheduler.schedule_refresh.call_count == 2
     assert wait_calls >= 2
@@ -1487,11 +1487,11 @@ async def test_source_watcher_skips_bases_whose_folder_was_replaced(tmp_path: Pa
         poll_intervals={"linked": 5},
         watch=True,
     )
-    source_watcher = KnowledgeSourceWatcher(MagicMock())
+    source_watcher = KnowledgeSourceWatcher(MagicMock(), runtime_paths_for(config))
 
     with capture_logs() as logs:
-        await source_watcher.sync(config=config, runtime_paths=runtime_paths_for(config))
-        await source_watcher.shutdown()
+        await source_watcher.sync(config)
+        await source_watcher.stop()
 
     started = [entry["base_ids"] for entry in logs if entry["event"] == "Knowledge filesystem watcher started"]
     skipped = [
@@ -1567,15 +1567,15 @@ async def test_source_watcher_sync_converts_chroma_era_bases_once(
 
     monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
     scheduler = KnowledgeRefreshScheduler()
-    source_watcher = KnowledgeSourceWatcher(scheduler)
+    source_watcher = KnowledgeSourceWatcher(scheduler, runtime_paths)
 
-    await source_watcher.sync(config=config, runtime_paths=runtime_paths)
+    await source_watcher.sync(config)
     await _wait_until(lambda: bool(refreshed), "the Chroma-era base was not refreshed")
     # A config reload syncs again while the conversion runs; that must not queue a second conversion.
-    await source_watcher.sync(config=config, runtime_paths=runtime_paths)
+    await source_watcher.sync(config)
     release.set()
     await _wait_until(lambda: not scheduler._tasks, "the conversion did not finish")
-    await source_watcher.shutdown()
+    await source_watcher.stop()
     await scheduler.shutdown()
 
     assert refreshed == ["legacy"]

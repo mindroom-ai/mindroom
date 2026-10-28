@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -22,7 +23,7 @@ from mindroom.cli.main import app
 from mindroom.config.main import Config, iter_config_validation_messages, load_config
 from mindroom.config.yaml_includes import ConfigIncludeError, load_yaml_config_source, partial_source_files
 from mindroom.constants import resolve_runtime_paths
-from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle
+from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle, load_published_config
 from mindroom.orchestrator import _watch_config_task
 from mindroom.response_admission import ResponseAdmissionGate
 
@@ -854,18 +855,15 @@ class TestWatchPaths:
 
 
 def _reload_lifecycle(config_path: Path) -> ConfigReloadLifecycle:
-    """Build one reload lifecycle that loads fresh configs and accepts every plan."""
-
-    async def _apply_plan(config: Config, plan: object) -> bool:
-        del config, plan
-        return True
-
+    """Build one reload lifecycle that loads fresh configs and stubs out applying their plans."""
+    runtime_paths = resolve_runtime_paths(config_path=config_path)
     return ConfigReloadLifecycle(
-        runtime_paths=resolve_runtime_paths(config_path=config_path),
+        runtime_paths=runtime_paths,
         is_running=lambda: True,
         current_config=Config,
         agent_bots=dict,
-        apply_update_plan=_apply_plan,
+        load_config=partial(load_published_config, runtime_paths, api_enabled=False),
+        apply_update_plan=AsyncMock(return_value=False),
         response_admission_gate=ResponseAdmissionGate(),
         before_runtime_replacement=AsyncMock(),
     )

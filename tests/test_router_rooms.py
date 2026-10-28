@@ -27,6 +27,7 @@ from tests.conftest import (
     bind_runtime_paths,
     install_runtime_journal_support,
     orchestrator_runtime_paths,
+    published_config_load,
     runtime_paths_for,
 )
 from tests.identity_helpers import persist_entity_accounts
@@ -304,12 +305,6 @@ async def test_orchestrator_creates_router_with_all_rooms(
         return list(aliases)
 
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
-
-    # Mock load_config to return our test config
-    def mock_load_config(_runtime_paths: object | None = None, **_kwargs: object) -> Config:
-        return config_with_rooms
-
-    monkeypatch.setattr("mindroom.orchestrator.load_config", mock_load_config)
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
     monkeypatch.setattr("mindroom.orchestration.rooms.RoomSetup.setup", AsyncMock())
 
@@ -318,7 +313,7 @@ async def test_orchestrator_creates_router_with_all_rooms(
 
     try:
         # Initialize (creates all bots)
-        await orchestrator.initialize()
+        await orchestrator.initialize(config_with_rooms)
 
         # Check that router exists and has all rooms
         assert ROUTER_AGENT_NAME in orchestrator.agent_bots
@@ -333,7 +328,7 @@ async def test_orchestrator_creates_router_with_all_rooms(
 @pytest.mark.asyncio
 @pytest.mark.requires_matrix  # Requires real Matrix server for router room updates
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-async def test_router_updates_rooms_on_config_change(  # noqa: PLR0915
+async def test_router_updates_rooms_on_config_change(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -373,18 +368,6 @@ async def test_router_updates_rooms_on_config_change(  # noqa: PLR0915
         return list(aliases)
 
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
-
-    # Mock load_config to return different configs on different calls
-    load_config_returns = [initial_config, updated_config]
-    load_config_counter = [0]
-
-    def mock_load_config(_runtime_paths: object | None = None, **_kwargs: object) -> Config:
-        result = load_config_returns[min(load_config_counter[0], len(load_config_returns) - 1)]
-        load_config_counter[0] += 1
-        return result
-
-    monkeypatch.setattr("mindroom.orchestrator.load_config", mock_load_config)
-    monkeypatch.setattr("mindroom.orchestration.config_lifecycle.load_config", mock_load_config)
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
     setup_rooms = AsyncMock()
     monkeypatch.setattr("mindroom.orchestration.rooms.RoomSetup.setup", setup_rooms)
@@ -401,9 +384,10 @@ async def test_router_updates_rooms_on_config_change(  # noqa: PLR0915
     monkeypatch.setattr("mindroom.bot.TeamBot.leave_unconfigured_rooms", AsyncMock())
 
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    monkeypatch.setattr(orchestrator.config_reload, "load_config", lambda: published_config_load(updated_config))
 
     try:
-        await orchestrator.initialize()
+        await orchestrator.initialize(initial_config)
 
         # Check initial router rooms
         router_bot = orchestrator.agent_bots[ROUTER_AGENT_NAME]

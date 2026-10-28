@@ -26,7 +26,7 @@ from croniter import croniter
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, Ask, AutomationContext, Done
 from mindroom.automations.threads import automations_tracking_root, record_automation_thread
-from mindroom.background_tasks import create_background_task
+from mindroom.background_tasks import SupervisedLoop, create_background_task
 from mindroom.config.automations import PluginAutomation
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
@@ -190,6 +190,7 @@ def _check(
 class AutomationRunner:
     """Own the automation schedule loop, the prompts it posts, and the steps that follow their runs."""
 
+    name = "automations"
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
     bot_provider: Callable[[str], AgentBot | TeamBot | None]
@@ -203,20 +204,20 @@ class AutomationRunner:
     # never overlap, because each one's run can change the memory files the other measures or applies to.
     _active: set[_Instance] = field(default_factory=set, init=False)
     _pending: dict[str, _PendingRun] = field(default_factory=dict, init=False)
-    _task: asyncio.Task[None] | None = field(default=None, init=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    _loop: SupervisedLoop = field(init=False)
 
-    def start(self) -> None:
+    def __post_init__(self) -> None:
+        """Create the supervised schedule loop."""
+        self._loop = SupervisedLoop("automation_runner", self._run)
+
+    async def sync(self, config: Config) -> None:  # noqa: ARG002 - each tick reads the active config
         """Start the schedule loop once."""
-        if self._task is None or self._task.done():
-            self._task = asyncio.create_task(self._run(), name="automation_runner")
+        self._loop.start()
 
     async def stop(self) -> None:
         """Stop the schedule loop; prompts already posted keep their state until the process exits."""
-        task, self._task = self._task, None
-        if task is not None:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        await self._loop.stop()
 
     def response_finished(self, source_event_ids: Sequence[str]) -> None:
         """Continue an automation once the response its prompt started is final."""

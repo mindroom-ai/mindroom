@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 
+import mindroom.orchestration.config_lifecycle as lifecycle_module
 from mindroom.api import config_lifecycle
 from mindroom.api import main as api_main
 from mindroom.background_tasks import wait_for_background_tasks
@@ -21,7 +22,7 @@ from mindroom.mcp.manager import MCPServerManager
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan, configured_entity_names
 from mindroom.orchestration.entity_fleet import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from tests.conftest import install_bots, swap_fleet_bot
+from tests.conftest import install_bots, published_config_load, swap_fleet_bot
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -321,7 +322,7 @@ async def test_external_trigger_readiness_uses_matrix_joined_rooms(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_external_trigger_api_sync_skips_when_embedded_api_disabled(tmp_path: Path) -> None:
+async def test_external_trigger_binding_skips_when_embedded_api_disabled(tmp_path: Path) -> None:
     """No-API runs should not touch the bundled API app for trigger delivery."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path), api_enabled=False)
     config = _config_with_code_agent(tmp_path)
@@ -332,14 +333,9 @@ async def test_external_trigger_api_sync_skips_when_embedded_api_disabled(tmp_pa
     router_bot.client = object()
     install_bots(orchestrator, {ROUTER_AGENT_NAME: router_bot})
 
-    with (
-        patch("mindroom.api.config_lifecycle._publish_runtime_config_into_app") as mock_publish,
-        patch("mindroom.api.main.bind_external_trigger_runtime") as mock_bind,
-    ):
-        await orchestrator._external_trigger_runtime.sync_api_config_snapshot(config)
+    with patch("mindroom.api.main.bind_external_trigger_runtime") as mock_bind:
         orchestrator._external_trigger_runtime.bind_if_ready(orchestrator.config, orchestrator.agent_bots)
 
-    mock_publish.assert_not_called()
     mock_bind.assert_not_called()
 
 
@@ -397,7 +393,6 @@ async def test_trigger_support_only_reload_rebinds_external_trigger_runtime(tmp_
         patch.object(orchestrator.plugin_watch, "sync_roots"),
         patch.object(orchestrator, "_activate_hook_registry"),
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-        patch("mindroom.api.config_lifecycle._publish_runtime_config_into_app", return_value=True),
         patch.object(orchestrator, "_update_unchanged_bots", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         patch.object(orchestrator._approval_recovery, "mark_startup_runtime_support_ready", new=AsyncMock()),
@@ -413,23 +408,31 @@ async def test_trigger_support_only_reload_rebinds_external_trigger_runtime(tmp_
 
 
 @pytest.mark.asyncio
-async def test_trigger_support_only_reload_publishes_api_config_before_binding_runtime(tmp_path: Path) -> None:
-    """Runtime binding should use the API generation for the config being applied."""
+async def test_one_reload_loads_once_and_binds_triggers_to_that_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under `mindroom run` one edit is read once, and that read is what the dashboard and trigger runtime see."""
     runtime_paths = _runtime_paths(tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     current_config = _config_with_code_agent(tmp_path)
+    runtime_paths.config_path.write_text(yaml.dump(current_config.authored_model_dump()), encoding="utf-8")
+    real_load_attempt = config_lifecycle.load_config_attempt
+    load_attempts: list[object] = []
+
+    def counted_load_attempt(paths: object) -> object:
+        load_attempts.append(paths)
+        return real_load_attempt(paths)
+
+    monkeypatch.setattr(config_lifecycle, "load_config_attempt", counted_load_attempt)
+    monkeypatch.setattr(lifecycle_module, "load_config_attempt", counted_load_attempt)
+    current_config = await lifecycle_module.load_startup_config(runtime_paths, api_enabled=True)
+    assert len(load_attempts) == 1
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     new_config = _config_with_code_agent(
         tmp_path,
         external_trigger_policy={"default_max_body_bytes": 4096, "max_body_bytes": 4096},
     )
-    runtime_paths.config_path.write_text(yaml.dump(current_config.authored_model_dump()), encoding="utf-8")
-    api_main.initialize_api_app(api_main.app, runtime_paths)
-    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True
-    file_race_config = _config_with_code_agent(
-        tmp_path,
-        external_trigger_policy={"default_max_body_bytes": 8192, "max_body_bytes": 8192},
-    )
-    runtime_paths.config_path.write_text(yaml.dump(file_race_config.authored_model_dump()), encoding="utf-8")
+    runtime_paths.config_path.write_text(yaml.dump(new_config.authored_model_dump()), encoding="utf-8")
     orchestrator.config = current_config
     router_bot = MagicMock(spec=AgentBot)
     router_bot.agent_name = ROUTER_AGENT_NAME
@@ -446,11 +449,6 @@ async def test_trigger_support_only_reload_publishes_api_config_before_binding_r
             "code": target_bot,
         },
     )
-    plan = build_config_update_plan(
-        current_config=current_config,
-        new_config=new_config,
-        bots=orchestrator.agent_bots,
-    )
 
     with (
         patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
@@ -463,80 +461,15 @@ async def test_trigger_support_only_reload_publishes_api_config_before_binding_r
         patch.object(orchestrator._approval_recovery, "mark_startup_runtime_support_ready", new=AsyncMock()),
         patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
     ):
-        await orchestrator._apply_config_update_plan(current_config, plan)
+        assert await orchestrator.config_reload._update_config() is False
 
+    assert len(load_attempts) == 2
     snapshot = config_lifecycle.require_api_state(api_main.app).snapshot
     runtime = config_lifecycle.app_state(api_main.app).external_trigger_runtime
-    assert snapshot.runtime_config is not None
-    assert snapshot.runtime_config.external_trigger_policy.default_max_body_bytes == 4096
+    assert snapshot.runtime_config is orchestrator.config
+    assert orchestrator.config.external_trigger_policy.default_max_body_bytes == 4096
     assert runtime is not None
     assert runtime.config_generation == snapshot.generation
-
-
-@pytest.mark.asyncio
-async def test_trigger_support_api_publish_runs_off_event_loop(tmp_path: Path) -> None:
-    """Publishing trigger API snapshots does config IO off the orchestrator event loop."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
-    current_config = _config_with_code_agent(tmp_path)
-    new_config = _config_with_code_agent(
-        tmp_path,
-        external_trigger_policy={"default_max_body_bytes": 4096, "max_body_bytes": 4096},
-    )
-    orchestrator.config = current_config
-
-    with patch(
-        "mindroom.orchestration.external_trigger_runtime.asyncio.to_thread",
-        new=AsyncMock(return_value=True),
-    ) as mock_to_thread:
-        await orchestrator._external_trigger_runtime.sync_api_config_snapshot(new_config)
-
-    mock_to_thread.assert_awaited_once()
-    assert mock_to_thread.await_args.args == (
-        api_main.config_lifecycle._publish_runtime_config_into_app,
-        new_config,
-        orchestrator.runtime_paths,
-        api_main.app,
-    )
-
-
-@pytest.mark.asyncio
-async def test_trigger_support_only_reload_unbinds_and_raises_when_api_publish_fails(tmp_path: Path) -> None:
-    """Failed API snapshot publish must not leave trigger runtime bound to stale config."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
-    current_config = _config_with_code_agent(tmp_path)
-    new_config = _config_with_code_agent(
-        tmp_path,
-        external_trigger_policy={"default_max_body_bytes": 4096, "max_body_bytes": 4096},
-    )
-    orchestrator.config = current_config
-    install_bots(
-        orchestrator,
-        {
-            ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
-            "code": MagicMock(spec=AgentBot),
-        },
-    )
-    plan = build_config_update_plan(
-        current_config=current_config,
-        new_config=new_config,
-        bots=orchestrator.agent_bots,
-    )
-
-    with (
-        patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
-        patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
-        patch.object(orchestrator.plugin_watch, "sync_roots"),
-        patch.object(orchestrator, "_activate_hook_registry"),
-        patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-        patch("mindroom.api.config_lifecycle._publish_runtime_config_into_app", return_value=False),
-        patch.object(orchestrator._external_trigger_runtime, "unbind") as mock_unbind_runtime,
-        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready") as mock_bind_runtime,
-        pytest.raises(RuntimeError, match="Failed to publish external trigger API config snapshot"),
-    ):
-        await orchestrator._apply_config_update_plan(current_config, plan)
-
-    mock_unbind_runtime.assert_called_once_with()
-    mock_bind_runtime.assert_not_called()
 
 
 def test_log_mcp_degraded_entities_warns_per_failed_optional_server(tmp_path: Path) -> None:
@@ -832,13 +765,7 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
     async def reconcile_rooms(_plan: ConfigUpdatePlan, _changed_entities: set[str]) -> None:
         call_order.append("rooms")
 
-    async def sync_support_services(
-        _config: Config,
-        *,
-        start_watcher: bool,
-        previous_config: Config | None = None,
-    ) -> None:
-        assert start_watcher is False
+    async def sync_support_services(_config: Config, *, previous_config: Config | None = None) -> None:
         assert previous_config is current_config
         call_order.append("support")
 
@@ -852,7 +779,6 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
         patch.object(orchestrator.plugin_watch, "sync_roots"),
         patch.object(orchestrator, "_activate_hook_registry"),
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-        patch("mindroom.api.config_lifecycle._publish_runtime_config_into_app", return_value=True),
         patch.object(orchestrator, "_update_unchanged_bots", new=AsyncMock()),
         patch.object(orchestrator._external_trigger_runtime, "unbind"),
         patch.object(orchestrator.fleet, "stop", new=AsyncMock()),
@@ -1075,7 +1001,7 @@ async def test_update_config_removes_and_stops_entities_before_publishing_and_sy
         return set()
 
     with (
-        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
+        patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(updated_config)),
         patch.object(orchestrator.fleet, "remove", side_effect=remove),
         patch.object(orchestrator.fleet, "stop", side_effect=stop),
         patch.object(orchestrator, "_sync_mcp_manager", side_effect=sync_mcp_manager),

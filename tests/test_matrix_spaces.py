@@ -24,6 +24,7 @@ from tests.conftest import (
     bind_runtime_paths,
     load_config_yaml,
     orchestrator_runtime_paths,
+    published_config_load,
     runtime_paths_for,
 )
 
@@ -852,7 +853,7 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
     orchestrator.fleet.add(ROUTER_AGENT_NAME, router_bot)
 
     with (
-        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
+        patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(updated_config)),
         patch.object(orchestrator._rooms, "setup", new=AsyncMock()) as mock_setup,
         patch.object(
             orchestrator._rooms,

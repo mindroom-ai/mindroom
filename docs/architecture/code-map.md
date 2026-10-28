@@ -35,7 +35,8 @@ Matrix sync callback
 | `atomic_file.py` | Shared atomic byte publication and cleanup relative to an opened directory |
 | `orchestrator.py` | MultiAgentOrchestrator - composition root: wires the fleet, services, and reload lifecycle, and applies reload plans |
 | `orchestration/` | Extracted orchestrator helpers (config update plans, plugin watch, rooms, runtime) |
-| `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: queueing, response drain, and update-plan dispatch |
+| `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: the process's one config load (published to the embedded API), queueing, response drain, and update-plan dispatch |
+| `config/load_attempt.py` | The config-file load attempt that reloads and the dashboard API share: validated config, payload, and source identity, or the failure |
 | `orchestration/config_updates.py` | The config update plan: the one decision of what a reload restarts, starts, removes, and re-authorizes |
 | `orchestration/entity_fleet.py` | The one owner of every managed bot's lifecycle: start, background retry, restart stop, removal, and process shutdown |
 | `orchestration/rooms.py` | Managed room setup through the router: room creation, policy, invitations, root Space, and bot memberships |
@@ -164,6 +165,7 @@ Matrix sync callback
 | `tool_system/filters.py` | Shared include/exclude function policy |
 | `custom_tools/job.py` | Reserved job discovery and control tool |
 | `orchestration/server_state.py` | Each entity's runtime origin and worker computer, published per room as state so MindRoom Chat finds its server |
+| `orchestration/services.py` | `RuntimeService`, the sync-and-stop shape of the long-running services that follow the active config |
 | `orchestration/tool_job_runtime.py` | Managed job lifecycle: recovery, revocation, published jobs state, card denial, follow-ups, and retention |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
 | `worker_computer/worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
@@ -199,7 +201,7 @@ Matrix sync callback
 | `tool_system/tool_access.py` | Shared qualified tool identities, discovery, schemas, and local argument validation |
 | `memory/` | Mem0 memory: agent and team-scoped |
 | `memory/_entrypoint_snapshots.py` | In-process copy of each conversation's inlined `MEMORY.md`, reused while that copy only gains lines (not when a capped file drops its oldest kept entry) and that conversation's prompt cache may still be warm |
-| `memory/auto_flush.py` | Background passes that turn file-memory agents' new finished turns into daily notes, with per-conversation progress below `tracking/` |
+| `memory/auto_flush.py` | Background passes that turn file-memory agents' new finished turns into daily notes, with per-conversation progress below `tracking/`, and the service that runs them while auto-flush is enabled |
 | `knowledge/file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |
 | `memory_scope_ids.py` | Cycle-free canonical agent memory scope identifiers |
 | `history/conversation_text.py` | What stored turns said, for background model calls and compaction hooks: which turns and messages count and who said each |
@@ -378,7 +380,7 @@ Matrix sync callback
 | `custom_tools/calculator.py` | Agno calculator with bounded `factorial()` and `is_prime()` arguments |
 | `custom_tools/sleep.py` | Agno sleep toolkit with pauses capped at 300 seconds |
 | `thread_export/workspace_sync.py` | Always-on debounced runner that keeps `<workspace>/thread_exports/` current through the live bots' clients and journal principals |
-| `background_tasks.py` | Background task management for non-blocking operations |
+| `background_tasks.py` | Background task management for non-blocking operations, and `SupervisedLoop`, which restarts a crashed long-running loop with backoff |
 | `desktop/session.py` | Owns the desktop device's durable NIO session and storage binding |
 | `desktop/transport.py` | Polls owned to-device work and acknowledges only after durable command admission |
 | `desktop/command_journal.py` | Persists command admission, execution outcomes, and pending responses |
