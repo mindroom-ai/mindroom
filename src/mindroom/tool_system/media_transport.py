@@ -24,7 +24,7 @@ _KEY = "mindroom_tool_result"
 _MEDIA_MODELS = {"images": AgnoImage, "audios": AgnoAudio, "videos": AgnoVideo, "files": AgnoFile}
 _RESOURCE_FIELDS = {"content", "url", "filepath", "media_reference", "external"}
 type _Media = AgnoImage | AgnoAudio | AgnoVideo | AgnoFile
-MEDIA_MIME_FAMILIES: dict[type[_Media], str] = {AgnoImage: "image/", AgnoAudio: "audio/", AgnoVideo: "video/"}
+_MEDIA_MIME_FAMILIES: dict[type[_Media], str] = {AgnoImage: "image/", AgnoAudio: "audio/", AgnoVideo: "video/"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,7 +123,7 @@ def _validate_media_entry(entry: object, model: type[_Media]) -> tuple[dict[str,
         raise _invalid()
     mime = attributes.get("mime_type")
     if mime is not None:
-        family = MEDIA_MIME_FAMILIES.get(model)
+        family = _MEDIA_MIME_FAMILIES.get(model)
         if (
             not isinstance(mime, str)
             or "/" not in mime

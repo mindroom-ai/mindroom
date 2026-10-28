@@ -236,6 +236,26 @@ def test_unknown_file_type_remains_unset(monkeypatch: pytest.MonkeyPatch) -> Non
     assert decoded.files[0].filename == "download"
 
 
+def test_a_declared_type_files_cannot_take_leaves_the_file_name_to_type_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A header naming a type outside the File types the transport accepts gives way to the URL's name."""
+
+    def respond(_transport: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=httpx.ByteStream(b"notes"),
+            headers={"Content-Type": "image/png"},
+            request=request,
+        )
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", respond)
+    result = ToolResult(content="Document", files=[File(url="https://8.8.8.8/export/notes.txt")])
+    decoded = decode_media_result(serialize_worker_tool_result(result))
+
+    assert isinstance(decoded, ToolResult)
+    assert decoded.files
+    assert (decoded.files[0].filename, decoded.files[0].mime_type) == ("notes.txt", "text/plain")
+
+
 def test_worker_file_result_rejects_nonregular_file(tmp_path: Path) -> None:
     """Directories and devices cannot become media artifacts."""
     result = ToolResult(content="Invalid image", images=[Image(filepath=tmp_path, mime_type="image/png")])

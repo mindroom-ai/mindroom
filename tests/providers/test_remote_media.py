@@ -170,7 +170,7 @@ async def test_chat_fetches_image_urls_and_receives_downloaded_files_and_audio(
 ) -> None:
     """Chat Completions sends an image URL for the provider to fetch; file and audio URLs are downloaded.
 
-    A downloaded file is typed as its server declared, else by its URL's name.
+    A downloaded file is typed as its server declared, else by its URL's name, which also names a file without one.
     """
     downloaded = _media_server(
         monkeypatch,
@@ -192,7 +192,7 @@ async def test_chat_fetches_image_urls_and_receives_downloaded_files_and_audio(
     await complete(_provider("openai_chat", tmp_path, wire), ModelRequest(messages=[message]))
 
     assert wire.body()["messages"][-1]["content"] == [
-        {"type": "file", "file": {"filename": "file", "file_data": f"data:text/csv;base64,{_b64(b'a,b')}"}},
+        {"type": "file", "file": {"filename": "table.csv", "file_data": f"data:text/csv;base64,{_b64(b'a,b')}"}},
         {"type": "file", "file": {"filename": "notes.txt", "file_data": f"data:text/plain;base64,{_b64(b'notes')}"}},
         {"type": "text", "text": "Use these"},
         {"type": "image_url", "image_url": {"url": "https://media.test/photo.png"}},
@@ -359,7 +359,29 @@ async def test_downloaded_audio_without_a_format_keeps_the_type_its_server_or_ur
     gemini_parts = gemini_wire.body()["contents"][0]["parts"][1:]
     assert [part["inlineData"]["mimeType"] for part in gemini_parts] == [
         "audio/mpeg",
-        "audio/mpeg",
-        "audio/mpeg",
+        "audio/mp3",
+        "audio/mp3",
         "audio/wav",
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_downloaded_file_the_server_calls_octet_stream_is_typed_and_named_by_its_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``application/octet-stream`` names no type, so a file's URL name types and names it, as worker media does."""
+    untyped = {"content-type": "application/octet-stream"}
+    _media_server(
+        monkeypatch,
+        {"https://media.test/files/report.pdf": httpx.Response(200, content=_PDF, headers=untyped)},
+    )
+    wire = Wire(FAMILIES["openai_chat"].reply())
+    message = Message(role="user", content="Read", files=[File(url="https://media.test/files/report.pdf")])
+
+    await complete(_provider("openai_chat", tmp_path, wire), ModelRequest(messages=[message]))
+
+    assert wire.body()["messages"][-1]["content"][0] == {
+        "type": "file",
+        "file": {"filename": "report.pdf", "file_data": f"data:application/pdf;base64,{_b64(_PDF)}"},
+    }

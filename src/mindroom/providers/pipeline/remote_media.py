@@ -8,7 +8,6 @@ media fallback replaces the request's media with its note instead of the model a
 
 from __future__ import annotations
 
-import mimetypes
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -16,7 +15,7 @@ import httpx
 
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.llm.errors import InvalidRequest
-from mindroom.llm.media import Audio, File, Image, Video, audio_format, canonical_mime_type
+from mindroom.llm.media import Audio, File, Image, Video, canonical_mime_type, downloaded_media_fields, url_file_name
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
@@ -72,29 +71,20 @@ async def _downloaded_all[T: (Image, Audio, Video, File)](
 
 
 async def _downloaded[T: (Image, Audio, Video, File)](item: T, kind: MediaKind, provider: str) -> T:
-    """Return ``item`` with the bytes at its URL in place of the URL, keeping the type the URL gave it.
-
-    Every wire reads an image's type from its bytes. The bytes of a file, audio clip, or video name no type, so one
-    the item does not set comes from the type the server declared, else from the URL's name; a clip without a format
-    also takes the one that type means, such as ``mp3``.
-    """
+    """Return ``item`` with the bytes at its URL in place of the URL, keeping the type the URL named for it."""
     url = item.url
     if url is None:
         return item
     data, declared = await _download(url, kind, provider)
-    if isinstance(item, Image):
-        return replace(item, url=None, content=data)
-    if isinstance(item, File):
-        mime_type = item.mime_type or declared or mimetypes.guess_type(url)[0]
-        return replace(item, url=None, content=data, mime_type=mime_type)
-    if item.mime_type is not None or item.format is not None:
-        return replace(item, url=None, content=data)
-    family = f"{kind}/"
-    named = (mime for mime in (declared, mimetypes.guess_type(url)[0]) if mime and mime.startswith(family))
-    mime_type = next(named, None)
-    if isinstance(item, Audio):
-        return replace(item, url=None, content=data, mime_type=mime_type, format=audio_format(mime_type))
-    return replace(item, url=None, content=data, mime_type=mime_type)
+    kept = downloaded_media_fields(
+        kind,
+        url_file_name(url),
+        declared,
+        mime_type=item.mime_type,
+        media_format=item.format,
+        filename=(item.filename or item.name) if isinstance(item, File) else None,
+    )
+    return replace(item, url=None, content=data, **kept)
 
 
 def _http_client() -> httpx.AsyncClient:

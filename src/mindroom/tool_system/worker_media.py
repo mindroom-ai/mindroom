@@ -2,23 +2,22 @@
 
 from __future__ import annotations
 
-import mimetypes
 import os
 import stat
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlsplit
 
 import httpx
 from httpx._utils import get_environment_proxies
 
-from mindroom.llm.media import audio_format, canonical_mime_type
+from mindroom.llm.media import canonical_mime_type, downloaded_media_fields, url_file_name
 from mindroom.server_fetch_url import ServerFetchHTTPTransport, ServerFetchUrlError, validate_server_fetch_url
 from mindroom.tool_system import media_transport
 from mindroom.tool_system.agno_toolkits import AgnoAudio, AgnoFile, AgnoImage, AgnoVideo, ToolResult
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
 
 type _Media = AgnoImage | AgnoAudio | AgnoVideo | AgnoFile
+_MEDIA_KINDS: dict[type[_Media], str] = {AgnoImage: "image", AgnoAudio: "audio", AgnoVideo: "video", AgnoFile: "file"}
 
 
 class _WorkerMediaProxyTransport(httpx.HTTPTransport):
@@ -89,32 +88,24 @@ def _read_url(url: str, limit: int) -> tuple[bytes, str | None]:
 def _resource_name(media: _Media) -> str:
     if media.filepath is not None:
         return Path(media.filepath).name
-    return Path(unquote(urlsplit(media.url or "").path)).name
+    return url_file_name(media.url or "")
 
 
 def _inline_metadata(media: _Media, declared_mime: str | None) -> dict[str, Any]:
-    """Retain provider-relevant resource identity before dropping its location."""
-    name = _resource_name(media)
-    if isinstance(media, AgnoFile):
-        filename = media.filename or media.name or name or None
-        candidates = (declared_mime, mimetypes.guess_type(filename or "")[0], mimetypes.guess_type(name)[0])
-        mime = media.mime_type or next((value for value in candidates if value in AgnoFile.valid_mime_types()), None)
-        return {"filename": filename, "mime_type": mime}
-    updates: dict[str, Any] = {}
-    if media.mime_type is None and media.format is None:
-        family = media_transport.MEDIA_MIME_FAMILIES[type(media)]
-        inferred_mime = mimetypes.guess_type(name)[0] if isinstance(media, AgnoImage) else None
-        candidates = (declared_mime, inferred_mime)
-        updates["mime_type"] = next((value for value in candidates if value and value.startswith(family)), None)
-    if isinstance(media, (AgnoAudio, AgnoVideo)) and media.format is None and name:
-        updates["format"] = Path(name).suffix.removeprefix(".").lower() or None
-    if isinstance(media, AgnoAudio) and media.format is None:
-        suffix_mime = mimetypes.guess_type(name)[0] or ""
-        if updates.get("format") not in {"mp3", "wav", "ogg", "webm"} and not suffix_mime.startswith("audio/"):
-            mime = media.mime_type or updates.get("mime_type")
-            if named_format := audio_format(mime):
-                updates["format"] = named_format
-    return updates
+    """Retain provider-relevant resource identity before dropping its location.
+
+    A file's type stays within the types the primary's transport accepts for a file.
+    """
+    file = media if isinstance(media, AgnoFile) else None
+    return downloaded_media_fields(
+        _MEDIA_KINDS[type(media)],
+        _resource_name(media),
+        declared_mime,
+        mime_type=media.mime_type,
+        media_format=media.format,
+        filename=None if file is None else file.filename or file.name,
+        file_types=None if file is None else AgnoFile.valid_mime_types(),
+    )
 
 
 def _materialize_media(media: _Media, limit: int) -> tuple[_Media, int]:

@@ -11,11 +11,13 @@ from __future__ import annotations
 import base64
 import mimetypes
 from dataclasses import dataclass, field, fields
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Container, Mapping
 
 # Images that ``get_attachment(view=True)`` produced carry ids with this prefix, so a route that rejects image
 # input can mark their tool receipts as unsupported.
@@ -213,6 +215,62 @@ _AUDIO_FORMATS = {
     "audio/wave": "wav",
     "audio/x-wav": "wav",
 }
+# Audio formats a file name's suffix names as they are.
+_AUDIO_SUFFIX_FORMATS = frozenset({"mp3", "wav", "ogg", "webm"})
+# A declared type that names none.
+_UNTYPED = "application/octet-stream"
+
+
+def url_file_name(url: str) -> str:
+    """Return the file name a URL's path ends in, decoded, or ``""`` when it ends in none."""
+    return PurePosixPath(unquote(urlsplit(url).path)).name
+
+
+def downloaded_media_fields(
+    kind: str,
+    name: str,
+    declared: str | None,
+    *,
+    mime_type: str | None,
+    media_format: str | None,
+    filename: str | None = None,
+    file_types: Container[str] | None = None,
+) -> dict[str, str | None]:
+    """Return the fields a media item read from its URL or file keeps of the type that source named.
+
+    ``kind`` is ``image``, ``audio``, ``video``, or ``file``; ``name`` is the source's file name, ``declared`` the
+    type a server declared for it, and ``mime_type``, ``media_format``, and ``filename`` the item's own, which stand.
+    A file gets the name as its filename when it has none, and a type from the declared type, its filename, or the
+    name, the first that names one (within ``file_types`` when given). Other media without a type or format gets the
+    declared type when it is of its kind, an image also its name's; audio and video get the name's suffix as their
+    format, and audio whose suffix names no audio format the format its type means, such as ``mp3``.
+    """
+    if kind == "file":
+        filename = filename or name or None
+        candidates = (declared, mimetypes.guess_type(filename or "")[0], mimetypes.guess_type(name)[0])
+        named = (
+            candidate
+            for candidate in candidates
+            if candidate and candidate != _UNTYPED and (file_types is None or candidate in file_types)
+        )
+        return {"filename": filename, "mime_type": mime_type or next(named, None)}
+    kept: dict[str, str | None] = {}
+    if mime_type is None and media_format is None:
+        inferred = mimetypes.guess_type(name)[0] if kind == "image" else None
+        family = f"{kind}/"
+        kept["mime_type"] = next((value for value in (declared, inferred) if value and value.startswith(family)), None)
+    if kind in {"audio", "video"} and media_format is None and name:
+        kept["format"] = PurePosixPath(name).suffix.removeprefix(".").lower() or None
+    suffix_type = mimetypes.guess_type(name)[0] or ""
+    if (
+        kind == "audio"
+        and media_format is None
+        and kept.get("format") not in _AUDIO_SUFFIX_FORMATS
+        and not suffix_type.startswith("audio/")
+        and (named_format := audio_format(mime_type or kept.get("mime_type")))
+    ):
+        kept["format"] = named_format
+    return kept
 
 
 def audio_format(mime_type: str | None) -> str | None:
@@ -306,6 +364,8 @@ __all__ = [
     "Video",
     "audio_format",
     "canonical_mime_type",
+    "downloaded_media_fields",
     "image_format",
     "image_mime_type",
+    "url_file_name",
 ]
