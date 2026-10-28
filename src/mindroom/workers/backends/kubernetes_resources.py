@@ -1636,7 +1636,7 @@ class KubernetesResourceManager:
         state_scope_worker_key: str | None = None,
         include_agent_vault: bool,
     ) -> list[dict[str, object]]:
-        agent_policies = launch.config.get_agent_policies()
+        agent_policies = launch.agent_policies
         mounts = self._scoped_storage_mounts(
             worker_key,
             state_subpath,
@@ -1790,7 +1790,7 @@ class KubernetesResourceManager:
         state_subpath: str,
         *,
         private_agent_names: frozenset[str] | None,
-        agent_policies: dict[str, ResolvedAgentPolicy],
+        agent_policies: Mapping[str, ResolvedAgentPolicy],
         state_scope_worker_key: str | None = None,
     ) -> list[dict[str, object]]:
         mounts = self._workspace_storage_mounts(
@@ -1834,7 +1834,7 @@ class KubernetesResourceManager:
         worker_key: str,
         *,
         state_scope_worker_key: str | None,
-        agent_policies: dict[str, ResolvedAgentPolicy],
+        agent_policies: Mapping[str, ResolvedAgentPolicy],
     ) -> tuple[SharedDirectoryMount, ...]:
         """Return the shared directories one worker mounts from the storage volume."""
         return plan_shared_directory_mounts(
@@ -1849,7 +1849,7 @@ class KubernetesResourceManager:
         worker_key: str,
         *,
         private_agent_names: frozenset[str] | None,
-        agent_policies: dict[str, ResolvedAgentPolicy],
+        agent_policies: Mapping[str, ResolvedAgentPolicy],
         state_scope_worker_key: str | None,
     ) -> list[dict[str, object]]:
         return [
@@ -1872,7 +1872,7 @@ class KubernetesResourceManager:
         worker_key: str,
         *,
         config: Config,
-        agent_policies: dict[str, ResolvedAgentPolicy],
+        agent_policies: Mapping[str, ResolvedAgentPolicy],
         mounted_storage_root: Path,
         existing_mounts: tuple[dict[str, object], ...],
     ) -> list[dict[str, object]]:
@@ -1898,7 +1898,7 @@ class KubernetesResourceManager:
         worker_key: str,
         *,
         config: Config,
-        agent_policies: dict[str, ResolvedAgentPolicy],
+        agent_policies: Mapping[str, ResolvedAgentPolicy],
     ) -> tuple[Path, ...]:
         base_ids: set[str] = set()
         for agent_name in agent_names_addressed_by_worker_key(worker_key, agent_policies):

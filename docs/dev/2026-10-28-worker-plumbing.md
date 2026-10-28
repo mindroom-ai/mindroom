@@ -16,7 +16,9 @@ Rejected alternatives, in the order design review rejected them:
 - Capturing the launch at the call and keeping a per-manager "newest launch wins" floor with launch generations: a late ensure could still take the floor before the worker's lock and restore an older launch, and the floor did not keep script recovery authority honest.
   Reading the launch inside the worker's lock removes the race instead of guarding it.
 
-Background script runs are the one caller that pins its launch, because a run's recovery signature names the authority its worker launched with; a pinned launch that is no longer the applied one is refused, and script launches are already fenced during reloads.
+A background script run's recovery signature names the authority its worker launches with, so a reload that changes any script agent's authority keeps new script launches fenced until the lifecycle has published the new config as applied, or the reload failed; running scripts' tool calls reopen earlier, once the runtime update has run, because the rest of a reload (MCP sync, entity restarts) can take seconds.
+A run reads its launch once admitted, and nothing pins it: an admitted launch finishes before an authority-changing reload proceeds, and any other reload leaves every script agent's authority as it was.
+Rejected: pinning the launch a run read and refusing it at ensure when the applied launch had moved on, which failed runs on reloads that did not touch their authority; and ending the fence where the orchestrator published the config to its bots, which let a run start with the authority the reload had just revoked.
 
 Accepted limit: the tool validation snapshot reflects the tool registry loaded when a launch is derived, so a launch derived while a plugin reload is in flight can carry the new registry with the previously applied config; the next derivation after the reload, or after its recovery, corrects it at the cost of one more Docker restart.
 The snapshot is validation metadata the trusted primary sends and grants a worker nothing.

@@ -96,7 +96,7 @@ def validate_private_user_agent_visibility(
     *,
     worker_key: str,
     private_agent_names: frozenset[str] | None,
-    resolved_agent_policies: dict[str, ResolvedAgentPolicy],
+    resolved_agent_policies: Mapping[str, ResolvedAgentPolicy],
 ) -> None:
     """Reject stale user-agent visibility snapshots for currently private agents."""
     if resolved_worker_key_scope(worker_key) != "user_agent":
@@ -155,7 +155,7 @@ def _scoped_workspaces(
     worker_key: str,
     storage_root: Path,
     private_agent_names: frozenset[str] | None,
-    resolved_agent_policies: dict[str, ResolvedAgentPolicy] | None,
+    resolved_agent_policies: Mapping[str, ResolvedAgentPolicy] | None,
 ) -> tuple[Path, ...]:
     scope = resolved_worker_key_scope(worker_key)
     if scope is None:
@@ -189,7 +189,7 @@ def plan_scoped_workspace_mounts(
     local_shared_storage_root: Path,
     worker_visible_shared_storage_root: Path,
     private_agent_names: frozenset[str] | None,
-    resolved_agent_policies: dict[str, ResolvedAgentPolicy] | None = None,
+    resolved_agent_policies: Mapping[str, ResolvedAgentPolicy] | None = None,
     create_shared: bool = False,
 ) -> tuple[ScopedWorkspaceMount, ...]:
     """Return the workspaces one dedicated worker mounts writable, at their canonical paths.

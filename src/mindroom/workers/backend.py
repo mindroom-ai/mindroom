@@ -24,14 +24,10 @@ def resolve_launch(
     """Return ``spec`` carrying the launch its worker is provisioned with, the applied one read now, and that launch.
 
     A dedicated backend calls this once inside the worker's lock and provisions from the result, so a request
-    that waited for the lock never restores an older launch. A spec that pins a launch, as a background script
-    does to bind its recovery authority, is refused when that launch is no longer the applied one.
+    that waited for the lock never restores an older launch.
     """
     launch = current_launch()
-    if spec.launch is not None and spec.launch != launch:
-        msg = "The applied config changed while this worker was requested; retry."
-        raise WorkerBackendError(msg)
-    return (spec if spec.launch is launch else replace(spec, launch=launch)), launch
+    return replace(spec, launch=launch), launch
 
 
 def required_launch(spec: WorkerSpec) -> WorkerLaunchConfig:

@@ -4774,11 +4774,11 @@ class TestMultiAgentOrchestrator:
         assert runtime._current_worker_lease is lease
 
     @pytest.mark.asyncio
-    async def test_config_update_aborts_the_worker_handoff_when_startup_maintenance_cancellation_fails(
+    async def test_config_update_reopens_script_calls_when_startup_maintenance_cancellation_fails(
         self,
         tmp_path: Path,
     ) -> None:
-        """A post-boundary reload failure must reopen worker admission before it escapes."""
+        """A post-boundary reload failure reopens running scripts' calls before it escapes."""
         current_config = _runtime_bound_config(Config(), tmp_path)
         new_config = _runtime_bound_config(Config(), tmp_path)
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(current_config))
@@ -4798,7 +4798,7 @@ class TestMultiAgentOrchestrator:
         runtime = orchestrator.script_runtime
         completed_configs: list[Config] = []
 
-        async def finish_reload(_runtime: object) -> None:
+        async def reopen_script_calls(_runtime: object) -> None:
             completed_configs.append(orchestrator.config)
 
         with (
@@ -4808,12 +4808,7 @@ class TestMultiAgentOrchestrator:
                 "cancel",
                 new=AsyncMock(side_effect=RuntimeError("maintenance cancellation failed")),
             ),
-            patch.object(
-                type(runtime),
-                "finish_reload",
-                new=finish_reload,
-                create=True,
-            ),
+            patch.object(type(runtime), "reopen_script_calls", new=reopen_script_calls),
             pytest.raises(RuntimeError, match="maintenance cancellation failed"),
         ):
             await orchestrator._apply_config_update_plan(current_config, plan, ())
@@ -4821,11 +4816,11 @@ class TestMultiAgentOrchestrator:
         assert completed_configs == [current_config]
 
     @pytest.mark.asyncio
-    async def test_config_update_completes_the_worker_handoff_with_new_config_after_commit_failure(
+    async def test_config_update_reopens_script_calls_with_new_config_after_commit_failure(
         self,
         tmp_path: Path,
     ) -> None:
-        """A failure after commit must never reopen worker admission against the old config."""
+        """A failure after commit reopens running scripts' calls only once the new config is published to bots."""
         current_config = _runtime_bound_config(Config(), tmp_path)
         new_config = _runtime_bound_config(Config(), tmp_path)
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(current_config))
@@ -4845,7 +4840,7 @@ class TestMultiAgentOrchestrator:
         runtime = orchestrator.script_runtime
         completed_configs: list[Config] = []
 
-        async def finish_reload(_runtime: object) -> None:
+        async def reopen_script_calls(_runtime: object) -> None:
             completed_configs.append(orchestrator.config)
 
         with (
@@ -4853,12 +4848,7 @@ class TestMultiAgentOrchestrator:
             patch.object(type(runtime), "apply_update_plan", new=AsyncMock()),
             patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
             patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
-            patch.object(
-                type(runtime),
-                "finish_reload",
-                new=finish_reload,
-                create=True,
-            ),
+            patch.object(type(runtime), "reopen_script_calls", new=reopen_script_calls),
             patch.object(
                 orchestrator,
                 "_sync_mcp_manager",
@@ -5232,11 +5222,16 @@ class TestMultiAgentOrchestrator:
             only_support_service_changes=True,
             requires_response_drain=True,
         )
-        generation_refreshes: list[Config] = []
+        reload_steps: list[str] = []
 
-        async def finish_reload(_runtime: object) -> None:
+        async def reopen_script_calls(_runtime: object) -> None:
             assert orchestrator.config is new_config
-            generation_refreshes.append(new_config)
+            reload_steps.append("reopen calls")
+
+        async def finish_reload() -> None:
+            # New script launches read the applied config, so the fence ends only once the reload is published.
+            assert orchestrator.config_reload.fully_applied_config is new_config
+            reload_steps.append("end launch fence")
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config) as mock_load_config,
@@ -5247,12 +5242,8 @@ class TestMultiAgentOrchestrator:
             ) as mock_build_plan,
             patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()) as mock_sync_support,
-            patch.object(
-                type(orchestrator.script_runtime),
-                "finish_reload",
-                new=finish_reload,
-                create=True,
-            ),
+            patch.object(type(orchestrator.script_runtime), "reopen_script_calls", new=reopen_script_calls),
+            patch.object(orchestrator.config_reload, "finish_reload", new=finish_reload),
         ):
             updated = await orchestrator.config_reload._update_config()
 
@@ -5264,7 +5255,7 @@ class TestMultiAgentOrchestrator:
         # without the planner or the support sync ever being reached.
         mock_build_plan.assert_called_once()
         mock_sync_support.assert_awaited_once()
-        assert generation_refreshes == [new_config, new_config]
+        assert reload_steps == ["reopen calls", "reopen calls", "end launch fence"]
 
     @pytest.mark.asyncio
     async def test_update_config_adopts_a_journal_edit_and_warns_that_it_waits_for_a_restart(

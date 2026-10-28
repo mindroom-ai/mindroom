@@ -613,7 +613,7 @@ class DockerWorkerBackend:
                 local_shared_storage_root=self._storage_path,
                 worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
                 private_agent_names=spec.private_agent_names,
-                resolved_agent_policies=launch.config.get_agent_policies(),
+                resolved_agent_policies=launch.agent_policies,
                 create_shared=True,
             )
             launch_config = self._resolve_launch_config(launch)
@@ -1454,7 +1454,7 @@ class DockerWorkerBackend:
                 raise WorkerBackendError(msg) from exc
 
     def _scoped_storage_mount_specs(self, spec: WorkerSpec) -> list[tuple[Path, str, bool]]:
-        resolved_agent_policies = required_launch(spec).config.get_agent_policies()
+        resolved_agent_policies = required_launch(spec).agent_policies
         state_scope_key = resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key)
         mount_specs = [
             (workspace_mount.local_path, str(workspace_mount.worker_visible_path), False)

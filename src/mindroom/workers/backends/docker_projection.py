@@ -35,7 +35,7 @@ from mindroom.workspaces import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.constants import RuntimePaths
@@ -284,7 +284,7 @@ class DockerProjectionManager:
 
         # The launch's mapping is shared by every worker, and projection rewrites it in place.
         config_data = cast("dict[str, object]", copy.deepcopy(launch.config_data))
-        resolved_agent_policies = launch.config.get_agent_policies()
+        resolved_agent_policies = launch.agent_policies
         asset_paths_by_host: dict[Path, PurePosixPath] = {}
         host_paths_by_relative_asset_path: dict[PurePosixPath, Path] = {}
         assets: list[_DockerProjectedConfigAsset] = []
@@ -501,7 +501,7 @@ class DockerProjectionManager:
         self,
         *,
         worker_key: str | None,
-        resolved_agent_policies: dict[str, ResolvedAgentPolicy],
+        resolved_agent_policies: Mapping[str, ResolvedAgentPolicy],
     ) -> tuple[str, ...] | None:
         if worker_key is None:
             return None
@@ -547,7 +547,7 @@ class DockerProjectionManager:
         config_data: dict[str, object],
         *,
         agent_names: tuple[str, ...] | None,
-        resolved_agent_policies: dict[str, ResolvedAgentPolicy],
+        resolved_agent_policies: Mapping[str, ResolvedAgentPolicy],
     ) -> tuple[str, ...] | None:
         if agent_names is None:
             return None

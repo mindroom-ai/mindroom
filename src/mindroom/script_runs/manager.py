@@ -432,7 +432,8 @@ class ScriptRunManager:
     ) -> tuple[ScriptRunRecord, WorkerSpec]:
         """Bind persisted quantities to the same refreshed backend that creates the worker.
 
-        The launch is read once admitted, so no reload changes the applied config before the worker is created.
+        Read once admitted, the launch names the authority the worker launches with: a reload that changes it waits
+        for admitted launches and fences new ones until it is published, and any other reload leaves it unchanged.
         """
         backend = _require_script_launch_backend(self._worker_backend_for(None), context.runtime_paths)
         profile, requests, limits = _resolve_script_resource_profile(backend, requested_profile)
@@ -453,7 +454,7 @@ class ScriptRunManager:
                 resource_requests=requests,
                 resource_limits=limits,
             ),
-            replace(worker_spec, resource_profile=profile, launch=launch),
+            replace(worker_spec, resource_profile=profile),
         )
 
     async def _create_and_launch(

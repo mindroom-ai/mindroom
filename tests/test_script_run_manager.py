@@ -43,7 +43,7 @@ from mindroom.tool_system.sandbox_proxy import runner_config_snapshot
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, worker_root_path
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import ScriptResourceProfileName, WorkerHandle, WorkerSpec
-from mindroom.workers.runtime import build_worker_launch_config, current_worker_launch_config
+from mindroom.workers.runtime import build_worker_launch_config
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
@@ -489,7 +489,6 @@ async def test_launch_uses_derived_supervisor_handle_from_the_run_id(tmp_path: P
         WorkerSpec(
             run.worker_key,
             private_agent_names=frozenset(),
-            launch=current_worker_launch_config(backend.runtime_paths),
             mirror_grantable_credentials=False,
             state_scope_worker_key="v1:default:user_agent:~@alice:example.test:watcher",
         ),
@@ -785,7 +784,6 @@ async def test_kubernetes_worker_accepts_scripts_with_an_explicit_isolated_gatew
         WorkerSpec(
             run.worker_key or "",
             private_agent_names=frozenset(),
-            launch=current_worker_launch_config(backend.runtime_paths),
             mirror_grantable_credentials=False,
             state_scope_worker_key="v1:default:user_agent:~@alice:example.test:watcher",
         ),
@@ -825,7 +823,6 @@ async def test_kubernetes_worker_accepts_scripts_when_agent_vault_is_enabled(tmp
         WorkerSpec(
             run.worker_key or "",
             private_agent_names=frozenset(),
-            launch=current_worker_launch_config(backend.runtime_paths),
             mirror_grantable_credentials=False,
             state_scope_worker_key="v1:default:user_agent:~@alice:example.test:watcher",
         ),
@@ -1209,7 +1206,6 @@ async def test_script_process_target_preserves_private_agent_visibility(tmp_path
         WorkerSpec(
             run.worker_key,
             private_agent_names=frozenset({"watcher"}),
-            launch=current_worker_launch_config(backend.runtime_paths),
             mirror_grantable_credentials=False,
             state_scope_worker_key="v1:default:user_agent:~@alice:example.test:watcher",
         ),

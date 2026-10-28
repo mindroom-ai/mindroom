@@ -967,7 +967,7 @@ class KubernetesWorkerBackend:
             local_shared_storage_root=self._resources.storage_root,
             worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
             private_agent_names=spec.private_agent_names,
-            resolved_agent_policies=required_launch(spec).config.get_agent_policies(),
+            resolved_agent_policies=required_launch(spec).agent_policies,
             create_shared=create_shared,
         )
 
@@ -975,7 +975,7 @@ class KubernetesWorkerBackend:
         return self._resources.plan_shared_directory_mounts(
             spec.worker_key,
             state_scope_worker_key=spec.state_scope_worker_key,
-            agent_policies=required_launch(spec).config.get_agent_policies(),
+            agent_policies=required_launch(spec).agent_policies,
         )
 
     def _reuse_cached_ready_worker(self, spec: WorkerSpec, *, now: float) -> WorkerHandle | None:

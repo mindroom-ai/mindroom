@@ -538,6 +538,7 @@ class _MultiAgentOrchestrator:
             apply_update_plan=self._apply_config_update_plan,
             response_admission_gate=self._response_admission_gate,
             before_runtime_replacement=self._thread_export_runner.prepare_runtime_replacement,
+            finish_reload=self._script_runtime.finish_reload,
             config_update_lock=self._config_update_lock,
         )
         self._approval_transport = ApprovalMatrixTransport(
@@ -2162,7 +2163,7 @@ class _MultiAgentOrchestrator:
                 self.plugin_watch.sync_roots(new_config)
                 self._activate_hook_registry(self.hook_registry)
                 clear_worker_validation_snapshot_cache()
-            await self._script_runtime.finish_reload()
+            await self._script_runtime.reopen_script_calls()
             changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
             logger.info(
                 "updating_config_authorization",
@@ -2219,7 +2220,7 @@ class _MultiAgentOrchestrator:
             )
             return True
         finally:
-            await self._script_runtime.finish_reload()
+            await self._script_runtime.reopen_script_calls()
             if replay_startup_maintenance and self.running and self.config is not None:
                 self._startup_maintenance.restart_after_runtime_replacement(
                     config=self.config,

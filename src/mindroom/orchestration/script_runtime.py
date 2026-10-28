@@ -547,10 +547,24 @@ class ScriptRuntimeLifecycle:
         self._pending_worker_lease = pending
         return pending
 
-    async def finish_reload(self) -> None:
-        """Release the reload launch fence after the replacement config generation is published."""
+    async def reopen_script_calls(self) -> None:
+        """Let running scripts call tools again once a reload's runtime update has run.
+
+        New launches stay fenced until ``finish_reload``: they launch from the applied config, which the reload
+        publishes only after its whole update returns.
+        """
         async with self._worker_refresh_lock:
-            await run_coroutine_until_complete(self._end_reload_launch_fence())
+            if self._reload_launch_fence_started:
+                self._open_call_admission_when_ready()
+
+    async def finish_reload(self) -> None:
+        """Release the reload launch fence once the reload's config is published as applied, or the reload failed."""
+        # Cancellation while waiting for the lock must not leave launches fenced.
+        await run_coroutine_until_complete(self._finish_reload_locked())
+
+    async def _finish_reload_locked(self) -> None:
+        async with self._worker_refresh_lock:
+            await self._end_reload_launch_fence()
 
     async def _end_reload_launch_fence(self) -> None:
         """Finish the accepted fence release before reopening broker admission."""
@@ -558,6 +572,9 @@ class ScriptRuntimeLifecycle:
             return
         await self.manager.end_startup_reconciliation()
         self._reload_launch_fence_started = False
+        self._open_call_admission_when_ready()
+
+    def _open_call_admission_when_ready(self) -> None:
         if self.api_enabled and self._api_ready.is_set() and not self._startup_cleanup_pending:
             self.broker.open_call_admission()
 

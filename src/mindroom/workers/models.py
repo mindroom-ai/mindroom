@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from uuid import UUID
 
+    from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.config.main import Config
 
 WorkerStatus = Literal["starting", "ready", "idle", "failed"]
@@ -27,6 +28,7 @@ class WorkerLaunchConfig:
 
     config: Config = field(compare=False, repr=False)
     config_data: Mapping[str, object] = field(compare=False, repr=False)
+    agent_policies: Mapping[str, ResolvedAgentPolicy] = field(compare=False, repr=False)
     tool_validation_snapshot: Mapping[str, Mapping[str, object]] = field(compare=False, repr=False)
     grantable_credentials: frozenset[str] = field(compare=False)
     tool_snapshot_digest: str = field(compare=False)
@@ -37,8 +39,8 @@ class WorkerLaunchConfig:
 class WorkerSpec:
     """Stable worker request resolved from worker-routing semantics.
 
-    A dedicated backend provisions from the applied launch it reads inside the worker's lock; ``launch`` pins one,
-    so the request fails instead when the applied launch has moved on. The shared runner ignores it.
+    A dedicated backend provisions from the applied launch it reads inside the worker's lock and records it in
+    ``launch``; callers leave it unset, and the shared runner ignores it.
     ``mirror_grantable_credentials`` mirrors the launch's grantable credentials into the worker; scripts mirror none.
     """
 

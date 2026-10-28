@@ -2024,22 +2024,19 @@ def test_docker_backend_refuses_to_launch_before_a_config_is_applied(
     assert not worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY).exists()
 
 
-def test_docker_backend_refuses_a_pinned_launch_that_is_no_longer_applied(
+def test_docker_backend_provisions_from_the_applied_launch_whatever_the_spec_carries(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A script pins the launch its recovery authority names, so a superseded pin fails before touching Docker."""
-    backend, fake_client, sync_calls = _backend(monkeypatch, tmp_path)
-    pinned = _applied_launch(backend)
+    """A launch a caller put on the spec never replaces the applied one the backend reads inside the worker's lock."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    superseded = _applied_launch(backend)
     _APPLIED_TOOL_SNAPSHOTS[backend] = {"shell": {"function_names": ["run_shell_command"]}}
 
-    with pytest.raises(WorkerBackendError, match="applied config changed"):
-        backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY, launch=pinned), now=10.0)
-
-    assert fake_client.containers.run_calls == []
-    assert sync_calls == []
-    current = _applied_launch(backend)
-    assert backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY, launch=current), now=20.0).status == "ready"
+    assert backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY, launch=superseded), now=10.0).status == "ready"
+    # Launched from the applied launch, so the next request finds the worker current and keeps it.
+    assert backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0).status == "ready"
+    assert len(fake_client.containers.run_calls) == 1
 
 
 def test_docker_backend_keeps_run_pinned_worker_roots_out_of_sibling_containers(

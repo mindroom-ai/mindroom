@@ -45,6 +45,7 @@ def _make_lifecycle(
         apply_update_plan=AsyncMock(return_value=True),
         response_admission_gate=gate,
         before_runtime_replacement=AsyncMock(),
+        finish_reload=AsyncMock(),
     )
 
 
@@ -171,6 +172,32 @@ async def test_reload_drains_active_responses_before_applying(
     await asyncio.wait_for(task, timeout=1)
     lifecycle.apply_update_plan.assert_awaited_once()
     assert gate.closed is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("apply_fails", [False, True])
+async def test_a_reload_ends_the_script_launch_fence_once_published_or_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    apply_fails: bool,
+) -> None:
+    """New script launches read the applied config, so a reload releases them only after publishing it or failing."""
+    current_config = Config()
+    new_config = Config(defaults={"enable_streaming": False})
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle.load_config", MagicMock(return_value=new_config))
+    lifecycle = _make_lifecycle(tmp_path, current_config=current_config)
+    applied_when_released: list[Config | None] = []
+    lifecycle.finish_reload = AsyncMock(
+        side_effect=lambda: applied_when_released.append(lifecycle.fully_applied_config),
+    )
+    if apply_fails:
+        lifecycle.apply_update_plan = AsyncMock(side_effect=RuntimeError("apply failed"))
+        with pytest.raises(RuntimeError, match="apply failed"):
+            await lifecycle._update_config()
+    else:
+        await lifecycle._update_config()
+
+    assert applied_when_released == [current_config if apply_fails else new_config]
 
 
 _AGENT1_YAML = "agents:\n  agent1:\n    display_name: Agent 1\n"

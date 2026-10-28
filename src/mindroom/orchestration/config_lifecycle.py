@@ -107,6 +107,8 @@ class ConfigReloadLifecycle:
     apply_update_plan: Callable[[Config, ConfigUpdatePlan, tuple[str, ...]], Awaitable[bool]]
     response_admission_gate: ResponseAdmissionGate
     before_runtime_replacement: Callable[[], Awaitable[None]]
+    # Releases the background script launch fence a reload took; launches read the applied config this publishes.
+    finish_reload: Callable[[], Awaitable[None]]
     # Shared with manual plugin reloads and MCP catalog-change handling so no
     # two publication flows can interleave their read-plan-apply sequences.
     config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -249,13 +251,17 @@ class ConfigReloadLifecycle:
 
             async def apply_update_steps() -> None:
                 nonlocal updated
-                updated = await self._apply_config_update_steps(
-                    fully_applied_config=current_config,
-                    requested_config=new_config,
-                    repair_config=repair_config,
-                    requested_transition=requested_transition,
-                )
-                self.record_applied(new_config)
+                try:
+                    updated = await self._apply_config_update_steps(
+                        fully_applied_config=current_config,
+                        requested_config=new_config,
+                        repair_config=repair_config,
+                        requested_transition=requested_transition,
+                    )
+                    self.record_applied(new_config)
+                finally:
+                    # Only now may a new script launch read the applied config, whether this reload published or failed.
+                    await self.finish_reload()
 
             applied = await self._apply_after_response_drain(
                 apply_update_steps,

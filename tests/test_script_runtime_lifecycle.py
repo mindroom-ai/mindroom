@@ -376,19 +376,6 @@ class _ApprovalSettlementResolver:
 
 
 @dataclass
-class _FailingApprovalSettlementResolver:
-    """Expose a broker-close failure after durable call ownership is retired."""
-
-    settlement_attempts: list[str] = field(default_factory=list)
-
-    async def settle_run_approvals(self, run_id: str, *, reason: str) -> None:
-        del reason
-        self.settlement_attempts.append(run_id)
-        msg = "approval settlement unavailable"
-        raise _ScriptRuntimeUnavailableError(msg)
-
-
-@dataclass
 class _HangingApprovalSettlementResolver:
     """Hold broker cleanup open until process reconciliation is observable."""
 
@@ -399,19 +386,6 @@ class _HangingApprovalSettlementResolver:
         del run_id, reason
         self.entered.set()
         await self.release.wait()
-
-
-@dataclass
-class _UnexpectedFailingApprovalSettlementResolver:
-    """Raise outside the lifecycle's historical broker exception allowlist."""
-
-    settlement_attempts: int = 0
-
-    async def settle_run_approvals(self, run_id: str, *, reason: str) -> None:
-        del run_id, reason
-        self.settlement_attempts += 1
-        msg = "unexpected approval settlement failure"
-        raise RuntimeError(msg)
 
 
 @dataclass
@@ -2362,6 +2336,77 @@ async def test_script_tool_removal_drains_a_launch_admitted_before_durable_creat
     assert durable.cancel_requested_at is not None
     assert durable.state is ScriptRunState.INTERRUPTED
     await runtime.finish_reload()
+
+
+def _fenced_reload_runtime(
+    tmp_path: Path,
+) -> tuple[ScriptRuntimeLifecycle, ScriptRunManager, MagicMock]:
+    """Return a script runtime whose reload took the launch fence and closed script calls."""
+    runtime_paths = _runtime_paths(tmp_path)
+    broker = MagicMock()
+    manager = ScriptRunManager(
+        store=ScriptRunStore(runtime_paths),
+        broker=broker,
+        worker_client=MagicMock(),
+        worker_backend=_Lease(_Backend([])).manager,
+        gateway_url="http://primary.test/api/script-gateway",
+    )
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=manager.store,
+        broker=broker,
+        manager=manager,
+        resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
+        config_provider=_config,
+        worker_lease_provider=lambda _locator: None,
+    )
+    runtime.bind_api("http://primary.test/api/script-gateway")
+    return runtime, manager, broker
+
+
+@pytest.mark.asyncio
+async def test_reopened_script_calls_keep_new_launches_fenced_until_the_reload_finishes(tmp_path: Path) -> None:
+    """Running scripts call tools again during a reload's tail, but a new launch waits for the published config."""
+    runtime, manager, broker = _fenced_reload_runtime(tmp_path)
+    await manager.begin_startup_reconciliation()
+    runtime._reload_launch_fence_started = True
+
+    await runtime.reopen_script_calls()
+
+    broker.open_call_admission.assert_called_once_with()
+    with pytest.raises(ScriptRunManagerError, match="reconciliation is in progress"):
+        await manager._admit_launch()
+
+    await runtime.finish_reload()
+
+    assert manager._startup_reconciliation_owners == 0
+    await manager._admit_launch()
+    await manager._release_launch_admission()
+
+
+@pytest.mark.asyncio
+async def test_finish_reload_cancelled_while_waiting_for_the_refresh_lock_still_ends_the_fence(
+    tmp_path: Path,
+) -> None:
+    """The reload's one final release cannot be lost to a cancellation that arrives before it holds the lock."""
+    runtime, manager, broker = _fenced_reload_runtime(tmp_path)
+    await manager.begin_startup_reconciliation()
+    runtime._reload_launch_fence_started = True
+    await runtime._worker_refresh_lock.acquire()
+
+    completion = asyncio.create_task(runtime.finish_reload())
+    for _ in range(3):
+        await asyncio.sleep(0)
+    completion.cancel()
+    for _ in range(3):
+        await asyncio.sleep(0)
+    runtime._worker_refresh_lock.release()
+    with pytest.raises(asyncio.CancelledError):
+        await completion
+
+    assert runtime._reload_launch_fence_started is False
+    assert manager._startup_reconciliation_owners == 0
+    broker.open_call_admission.assert_called_once_with()
 
 
 @pytest.mark.asyncio

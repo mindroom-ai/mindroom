@@ -223,7 +223,7 @@ Worker pods can reach the primary API over the pod network, so the runtime chart
 
 Run the same MindRoom release in the primary runtime and in every runner and worker image.
 MindRoom refuses dedicated Docker and Kubernetes worker images whose protocol does not match the primary runtime, and replaces the worker once before failing, so a worker left running under a mutable tag such as `:latest` from a release with another worker protocol is replaced on its next use.
-A Docker worker is recreated from a fresh pull of the configured image, while a Kubernetes worker gets a new pod, which pulls the tag again only under the [worker image pull policy](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings) `Always`.
+A Docker worker from an older release is recreated from a fresh pull of the configured image, and one from a newer release without a pull, while a Kubernetes worker gets a new pod, which pulls the tag again only under the [worker image pull policy](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings) `Always`.
 If the pull fails, as it does for a locally built tag such as `mindroom:dev`, or the image is still incompatible, rebuild the image from the checkout the primary runs from or select the published tag that matches your MindRoom version.
 A worker from a newer release is refused too, and its error reports a higher protocol than the expected one, for example a `:latest` worker that started after a release the primary does not run yet; upgrade the primary to that release, or pin one release tag for both.
 Restarting the primary picks up that release only when the primary runs the same mutable tag and pulls it on every start, as the runtime chart's default `latest` tag with pull policy `Always` does.
