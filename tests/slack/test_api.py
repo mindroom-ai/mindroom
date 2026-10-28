@@ -171,3 +171,37 @@ def test_slack_http_client_does_not_follow_redirects() -> None:
     client = slack_http_client()
     assert client.follow_redirects is False
     assert client.timeout == httpx.Timeout(10.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, text="<html>not json</html>"),
+        httpx.Response(200, json=["ok"]),
+        httpx.Response(200, json="ok"),
+    ],
+    ids=["not-json", "json-array", "json-string"],
+)
+async def test_slack_call_rejects_a_body_that_is_not_a_json_object(response: httpx.Response) -> None:
+    """A 2xx answer Slack never sends for a Web API method is an invalid response, not a crash."""
+    async with _client(lambda _request: response) as client:
+        with pytest.raises(SlackApiError) as invalid:
+            await slack_call(client, "auth.test", "xoxb-test")
+
+    assert invalid.value.error == "invalid_response"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("header", "retry_after"), [("abc", None), ("1.5", None), ("-1", None), (None, 1)])
+async def test_slack_call_keeps_a_rate_limit_without_an_integer_retry_after(
+    header: str | None,
+    retry_after: int | None,
+) -> None:
+    """A 429 stays ratelimited; only a whole-second Retry-After is reported, and a missing one waits one second."""
+    headers = {} if header is None else {"Retry-After": header}
+    async with _client(lambda _request: httpx.Response(429, headers=headers)) as client:
+        with pytest.raises(SlackApiError) as limited:
+            await slack_call(client, "auth.test", "xoxb-test")
+
+    assert (limited.value.error, limited.value.retry_after) == ("ratelimited", retry_after)

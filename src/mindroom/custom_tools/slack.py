@@ -105,8 +105,12 @@ def _error(message: str) -> str:
 
 
 def _api_error_text(exc: SlackApiError, *, personal: bool) -> str:
-    if exc.retry_after is not None:
-        return f"Slack rate limit, retry after {exc.retry_after}s"
+    if exc.error == "ratelimited":
+        return (
+            "Slack rate limit, retry later"
+            if exc.retry_after is None
+            else f"Slack rate limit, retry after {exc.retry_after}s"
+        )
     if exc.needed_scope:
         fix = "reconnect Slack to grant it" if personal else "add it to the MindRoom Slack app"
         return f"Slack needs the {exc.needed_scope} permission; {fix}"

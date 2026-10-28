@@ -58,6 +58,13 @@ def _form_value(value: object) -> str:
     return str(value)
 
 
+def _retry_after(header: str | None) -> int | None:
+    """Return the whole seconds a 429 asks to wait, one without the header, and None for any other value."""
+    if header is None:
+        return _DEFAULT_RETRY_AFTER_SECONDS
+    return int(header) if header.isascii() and header.isdigit() else None
+
+
 async def slack_call(client: httpx.AsyncClient, method: str, token: str, **params: object) -> dict[str, Any]:
     """Call one Slack Web API method with a bearer token and return its body."""
     response = await client.post(
@@ -66,13 +73,18 @@ async def slack_call(client: httpx.AsyncClient, method: str, token: str, **param
         data={key: _form_value(value) for key, value in params.items() if value is not None},
     )
     if response.status_code == httpx.codes.TOO_MANY_REQUESTS:
-        retry_after = int(response.headers.get("Retry-After", _DEFAULT_RETRY_AFTER_SECONDS))
         error = "ratelimited"
-        raise SlackApiError(error, retry_after=retry_after)
+        raise SlackApiError(error, retry_after=_retry_after(response.headers.get("Retry-After")))
     if not response.is_success:
         error = f"http_{response.status_code}"
         raise SlackApiError(error)
-    body: dict[str, Any] = response.json()
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        error = "invalid_response"
+        raise SlackApiError(error)
     if not body.get("ok"):
         error = str(body.get("error", "unknown_error"))
         raise SlackApiError(error, needed_scope=body.get("needed"))
