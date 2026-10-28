@@ -14,7 +14,7 @@ import nio
 import pytest
 
 from mindroom.budgets.monitor import BudgetMonitor
-from mindroom.cancellation import USER_STOP_CANCEL_MSG
+from mindroom.cancellation import USER_STOP_CANCEL_MSG, cancel_failure_reason, classify_cancel_source
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -808,11 +808,15 @@ async def _cancel_while_the_model_runs(
 
     async def fake_run_cancellable_response(**kwargs: object) -> str:
         response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
+        on_cancelled = cast("Callable[[str], None]", kwargs["on_cancelled"])
         task = asyncio.create_task(response_function("$thinking"))
         await started.wait()
         task.cancel()
-        with suppress(asyncio.CancelledError):
+        try:
             await task
+        except asyncio.CancelledError as cancelled:
+            # The attempt runner reports how its attempt was cancelled, as a Stop's reaction or a restart does.
+            on_cancelled(cancel_failure_reason(classify_cancel_source(cancelled)))
         return "$thinking"
 
     with (

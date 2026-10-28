@@ -13,7 +13,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.bot import AgentBot
-from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
+from mindroom.cancellation import (
+    cancel_failure_reason,
+    classify_cancel_source,
+    current_task_is_process_shutdown,
+    request_task_cancel,
+)
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -1126,11 +1131,15 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
 
     async def fake_run_cancellable_response(**kwargs: object) -> str:
         response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
+        on_cancelled = cast("Callable[[str], None]", kwargs["on_cancelled"])
         task = asyncio.create_task(response_function("$thinking"))
         await started.wait()
         task.cancel()
-        with suppress(asyncio.CancelledError):
+        try:
             await task
+        except asyncio.CancelledError as cancelled:
+            # The attempt runner reports how its attempt was cancelled, as a Stop's reaction or a restart does.
+            on_cancelled(cancel_failure_reason(classify_cancel_source(cancelled)))
         return "$thinking"
 
     with (
@@ -1590,11 +1599,12 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
 
     async def fake_run_cancellable_response(**kwargs: object) -> str:
         response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
-        on_cancelled = cast("Callable[[str], None] | None", kwargs.get("on_cancelled"))
-        with suppress(asyncio.CancelledError):
+        on_cancelled = cast("Callable[[str], None]", kwargs["on_cancelled"])
+        try:
             await response_function("$thinking")
-        if on_cancelled is not None:
-            on_cancelled("cancelled_by_user")
+        except asyncio.CancelledError as cancelled:
+            # The attempt runner reports how its attempt was cancelled, as a Stop's reaction or a restart does.
+            on_cancelled(cancel_failure_reason(classify_cancel_source(cancelled)))
         return "$thinking"
 
     with (
