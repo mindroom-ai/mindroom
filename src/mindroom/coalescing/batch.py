@@ -14,18 +14,15 @@ from mindroom.dispatch_handoff import (
     MediaDispatchEvent,
     PreparedIngress,
     dispatch_prompt_for_event,
-    event_content_dict,
     payload_metadata_from_source,
 )
 from mindroom.dispatch_source import (
-    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     IMAGE_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
-    MESSAGE_SOURCE_KIND,
     VOICE_SOURCE_KIND,
-    source_kind_from_content,
 )
 from mindroom.handled_turns import SourceEventMetadata, TurnRecord
+from mindroom.ingress_facts import command_for
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.timestamp_formatting import normalize_timestamp_ms
@@ -33,6 +30,8 @@ from mindroom.timestamp_formatting import normalize_timestamp_ms
 if TYPE_CHECKING:
     import nio
 
+    from mindroom.commands.parsing import Command
+    from mindroom.ingress_facts import IngressFacts
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.turn_controller import InteractiveSelectionDispatch
     from mindroom.turn_store import TurnClaim
@@ -88,15 +87,16 @@ def coalescing_owner_log_label(owner: CoalescingOwner) -> str:
 
 @dataclass
 class PendingEvent:
-    """One queued prepared ingress plus what the queue owns for it until it dispatches.
+    """One queued prepared ingress, its admission-time provenance, and what the queue owns for it until it dispatches.
 
-    All per-source evidence lives on the frozen ``PreparedIngress``; this
-    wrapper carries the queue's own state: enqueue timing, the turn claim and
-    queued notice ingress moved into it, and an interactive selection's work.
+    Besides the event and its facts, the wrapper carries the queue's own state:
+    enqueue timing, the turn claim and queued notice ingress moved into it, and
+    an interactive selection's work.
     """
 
     event: PreparedIngress
     room: nio.MatrixRoom
+    facts: IngressFacts
     enqueue_time: float = field(default_factory=time.time)
     text_debounce_seconds: float = 0.0
     claim: TurnClaim | None = None
@@ -117,7 +117,10 @@ class PreparedTurn:
 
     room: nio.MatrixRoom
     event: PreparedIngress
-    requester_user_id: str
+    # The batch's provenance: its latest event's sender and requester evidence with the batch source kind.
+    facts: IngressFacts
+    # The command the turn's text runs as; a turn of several sources has none.
+    command: Command | None
     handled_turn: TurnRecord
     ingress: DispatchIngressMetadata
     payload: DispatchPayloadMetadata
@@ -168,7 +171,7 @@ def _tagged_pending_message(
     member_display_names: Mapping[str, str],
 ) -> str:
     event = pending_event.event
-    sender = event.sender if event.acts_for_requester else event.requester_user_id or event.sender
+    sender = _source_sender(pending_event.facts)
     return render_msg_tag(
         sender=sender,
         body=dispatch_prompt_for_event(event),
@@ -261,12 +264,12 @@ class _CoalescedPromptRendering:
 def _render_coalesced_prompt(
     ordered_pending_events: list[PendingEvent],
     *,
-    dispatch_policy_source_kind: str | None,
+    active_follow_up: bool,
     timestamp_formatter: TimestampFormatter | None,
 ) -> _CoalescedPromptRendering:
     """Render the coalesced prompt and its structured-ness from one branch decision."""
     if len(ordered_pending_events) > 1:
-        if dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND:
+        if active_follow_up:
             return _CoalescedPromptRendering(
                 _active_follow_up_prompt(ordered_pending_events, timestamp_formatter=timestamp_formatter),
                 is_structured=True,
@@ -291,7 +294,7 @@ def _batch_payload_metadata(pending_events: list[PendingEvent]) -> DispatchPaylo
     event_metadata = [
         payload_metadata_from_source(
             pending_event.event.source,
-            trust_internal_metadata=pending_event.event.trust_internal_payload_metadata,
+            trust_internal_metadata=pending_event.event.payload_trusted,
         )
         for pending_event in pending_events
     ]
@@ -332,63 +335,19 @@ _SOURCE_KIND_PRIORITY: dict[str, int] = {
 }
 
 
-def _pending_event_source_kind(pending_event: PendingEvent) -> str:
-    """Resolve one pending event's ingress source kind from its stamped evidence.
-
-    Gate-admitted events always carry ``source_kind``; the fallbacks mirror the
-    content-based resolution used for unstamped prepared events.
-    """
-    event = pending_event.event
-    if event.source_kind is not None:
-        return event.source_kind
-    if event.source_kind_override is not None:
-        return event.source_kind_override
-    content = event_content_dict(event)
-    if content is not None and (source_kind := source_kind_from_content(content)) is not None:
-        return source_kind
-    return MESSAGE_SOURCE_KIND
+def _source_sender(facts: IngressFacts) -> str:
+    """Return whom one source speaks as: its author when an entity wrote it for the requester, else the requester."""
+    return facts.physical_sender if facts.acts_for_requester else facts.run_requester_id
 
 
-def _batch_source_kind(ordered_pending_events: list[PendingEvent]) -> str:
-    resolved_source_kinds = [_pending_event_source_kind(pending_event) for pending_event in ordered_pending_events]
-    return min(resolved_source_kinds, key=lambda sk: _SOURCE_KIND_PRIORITY.get(sk, 999))
-
-
-def _batch_dispatch_policy_source_kind(ordered_pending_events: list[PendingEvent]) -> str | None:
-    resolved_policy_kinds = {
-        pending_event.event.dispatch_policy_source_kind
-        for pending_event in ordered_pending_events
-        if pending_event.event.dispatch_policy_source_kind is not None
-    }
-    if not resolved_policy_kinds:
-        return None
-    if len(resolved_policy_kinds) == 1:
-        return next(iter(resolved_policy_kinds))
-    msg = "Coalesced batch carried multiple dispatch policy source kinds"
-    raise ValueError(msg)
-
-
-def _pending_event_requester_user_id(key: CoalescingKey, pending_event: PendingEvent) -> str:
-    """Resolve one event's effective requester, falling back to a requester owner.
-
-    A follow-up owner carries no requester, so a requester-less event falls
-    back to the event sender, matching the per-message sender fallback.
-    """
-    if pending_event.event.requester_user_id:
-        return pending_event.event.requester_user_id
-    if isinstance(key.owner, RequesterCoalescingOwner):
-        return key.owner.requester_user_id
-    return pending_event.event.sender
-
-
-def pending_event_run_identity(key: CoalescingKey, pending_event: PendingEvent) -> tuple[str, str | None]:
+def pending_event_run_identity(pending_event: PendingEvent) -> tuple[str, str | None]:
     """Return who one queued event runs as, plus its author when an entity wrote it for that requester.
 
     A batch runs as one requester and takes its origin from its latest event, so a
     reply an entity wrote for a human never shares a batch with that human's messages.
     """
-    event = pending_event.event
-    return _pending_event_requester_user_id(key, pending_event), event.sender if event.acts_for_requester else None
+    facts = pending_event.facts
+    return facts.run_requester_id, facts.physical_sender if facts.acts_for_requester else None
 
 
 def pending_event_addressing(pending_event: PendingEvent) -> bool | None:
@@ -403,38 +362,34 @@ def pending_event_addressing(pending_event: PendingEvent) -> bool | None:
     return event.for_another_participant
 
 
-def _batch_requester_user_id(key: CoalescingKey, ordered_pending_events: list[PendingEvent]) -> str:
-    """Resolve the one requester every event in the batch executes as.
+def _batch_facts(ordered_pending_events: list[PendingEvent]) -> IngressFacts:
+    """Reduce the batch's per-event facts to the facts the whole turn dispatches with.
 
-    The turn runs with this requester's authorization, credentials, and
-    approvals, so a batch mixing requesters would run one sender's messages
-    under another sender's identity.
+    Sender, requester evidence, and target come from the latest event; the source
+    kind is the highest-priority modality (voice, then image, then media); the
+    first relayed original sender applies; the deepest hook chain counts. A batch
+    runs as one requester and one hook, so a mix of either is a gate bug.
     """
-    requester_user_ids = {
-        _pending_event_requester_user_id(key, pending_event) for pending_event in ordered_pending_events
-    }
-    if len(requester_user_ids) == 1:
-        return next(iter(requester_user_ids))
-    msg = "Coalesced batch carried multiple requesters"
-    raise ValueError(msg)
-
-
-def _batch_hook_source(ordered_pending_events: list[PendingEvent]) -> str | None:
-    hook_sources = {
-        pending_event.event.hook_source
-        for pending_event in ordered_pending_events
-        if pending_event.event.hook_source is not None
-    }
-    if not hook_sources:
-        return None
-    if len(hook_sources) == 1:
-        return next(iter(hook_sources))
-    msg = "Coalesced batch carried multiple hook sources"
-    raise ValueError(msg)
-
-
-def _batch_message_received_depth(ordered_pending_events: list[PendingEvent]) -> int:
-    return max((pending_event.event.message_received_depth for pending_event in ordered_pending_events), default=0)
+    latest = ordered_pending_events[-1].facts
+    if len({pending_event_run_identity(pending_event) for pending_event in ordered_pending_events}) != 1:
+        msg = "Coalesced batch carried multiple requesters"
+        raise ValueError(msg)
+    hook_sources = {event.facts.hook_source for event in ordered_pending_events if event.facts.hook_source is not None}
+    if len(hook_sources) > 1:
+        msg = "Coalesced batch carried multiple hook sources"
+        raise ValueError(msg)
+    relayed = next((event.facts for event in ordered_pending_events if event.facts.original_sender is not None), latest)
+    return replace(
+        latest,
+        source_kind=min(
+            (event.facts.source_kind for event in ordered_pending_events),
+            key=lambda source_kind: _SOURCE_KIND_PRIORITY.get(source_kind, 999),
+        ),
+        original_sender=relayed.original_sender,
+        original_sender_is_human=relayed.original_sender_is_human,
+        hook_source=next(iter(hook_sources), None),
+        message_received_depth=max(event.facts.message_received_depth for event in ordered_pending_events),
+    )
 
 
 def _batch_source_event_prompts(ordered_pending_events: list[PendingEvent]) -> dict[str, str]:
@@ -447,10 +402,10 @@ def _batch_source_event_prompts(ordered_pending_events: list[PendingEvent]) -> d
 def _batch_source_event_metadata(ordered_pending_events: list[PendingEvent]) -> dict[str, SourceEventMetadata]:
     return {
         pending_event.event.event_id: SourceEventMetadata(
-            sender=pending_event.event.requester_user_id or pending_event.event.sender,
+            sender=pending_event.facts.run_requester_id,
             timestamp_ms=normalize_timestamp_ms(pending_event.event.server_timestamp),
-            discovery_event_id=pending_event.event.discovery_event_id,
-            speaker=pending_event.event.sender if pending_event.event.acts_for_requester else None,
+            discovery_event_id=pending_event.facts.discovery_event_id,
+            speaker=pending_event.facts.physical_sender if pending_event.facts.acts_for_requester else None,
         )
         for pending_event in ordered_pending_events
     }
@@ -465,39 +420,35 @@ def build_prepared_turn(
     """Build the logical turn represented by one coalescing-gate flush."""
     ordered_pending_events = list(pending_events)
     primary_pending_event = ordered_pending_events[-1]
-    dispatch_policy_source_kind = _batch_dispatch_policy_source_kind(ordered_pending_events)
+    active_follow_up = any(pending_event.event.active_follow_up for pending_event in ordered_pending_events)
     prompt_rendering = _render_coalesced_prompt(
         ordered_pending_events,
-        dispatch_policy_source_kind=dispatch_policy_source_kind,
+        active_follow_up=active_follow_up,
         timestamp_formatter=timestamp_formatter,
     )
     source_event_ids = tuple(pending_event.event.event_id for pending_event in ordered_pending_events)
     source_event_prompts = _batch_source_event_prompts(ordered_pending_events)
     source_event_metadata = _batch_source_event_metadata(ordered_pending_events)
     routed_aliases = tuple(filter(None, (item.discovery_event_id for item in source_event_metadata.values())))
-    requester_user_id = _batch_requester_user_id(key, ordered_pending_events)
+    facts = _batch_facts(ordered_pending_events)
     return PreparedTurn(
         room=primary_pending_event.room,
         event=replace(primary_pending_event.event, body=prompt_rendering.prompt),
-        requester_user_id=requester_user_id,
+        facts=facts,
+        # One source's prompt is its own ``dispatch_prompt_for_event``, the command's canonical text.
+        command=command_for(facts, prompt_rendering.prompt, len(source_event_ids)),
         handled_turn=TurnRecord.create(
             source_event_ids,
             discovery_event_ids=routed_aliases,
             source_event_prompts=source_event_prompts,
             source_event_metadata=(
                 source_event_metadata
-                if len(source_event_ids) > 1 or routed_aliases or primary_pending_event.event.acts_for_requester
+                if len(source_event_ids) > 1 or routed_aliases or facts.acts_for_requester
                 else None
             ),
-            requester_id=requester_user_id,
+            requester_id=facts.run_requester_id,
         ),
-        ingress=DispatchIngressMetadata(
-            source_kind=_batch_source_kind(ordered_pending_events),
-            coalescing_key=key,
-            dispatch_policy_source_kind=dispatch_policy_source_kind,
-            hook_source=_batch_hook_source(ordered_pending_events),
-            message_received_depth=_batch_message_received_depth(ordered_pending_events),
-        ),
+        ingress=DispatchIngressMetadata(coalescing_key=key, active_follow_up=active_follow_up),
         payload=_batch_payload_metadata(ordered_pending_events),
         current_prompt_is_structured=prompt_rendering.is_structured,
         media_events=tuple(

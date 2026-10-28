@@ -5,19 +5,20 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, cast
 
-from mindroom.commands.parsing import command_parser
-from mindroom.dispatch_source import is_voice_event
+from mindroom.ingress_facts import command_for, is_router_voice_echo
+from mindroom.tool_system.events import body_without_tool_markers
 
 if TYPE_CHECKING:
     import structlog
 
     from mindroom.dispatch_handoff import PreparedIngress
     from mindroom.event_journal import JournalEvent, PendingTurnView
+    from mindroom.ingress_facts import IngressFacts
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
-type _RequesterResolver = Callable[[str, object], str]
+# Classify a stored item from its sender and Matrix source the way ingress classifies a live event.
+type _Classify = Callable[[str, Mapping[str, object]], IngressFacts]
 type _HandledLookup = Callable[[str], bool]
-type _VisibleRouterVoiceEchoLookup = Callable[[str, object], bool]
 
 
 def has_newer_unresponded_in_thread(
@@ -26,9 +27,7 @@ def has_newer_unresponded_in_thread(
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
     may_be_superseded_by_newer_requester_turn: bool,
-    requester_user_id_for_event: _RequesterResolver,
-    is_visible_router_voice_echo: _VisibleRouterVoiceEchoLookup,
-    sender_is_trusted_for_ingress_metadata: Callable[[str], bool],
+    classify: _Classify,
     is_handled: _HandledLookup,
     logger: structlog.stdlib.BoundLogger,
 ) -> bool:
@@ -48,9 +47,7 @@ def has_newer_unresponded_in_thread(
             source={"content": message.content},
             body=message.body,
             requester_user_id=requester_user_id,
-            requester_user_id_for_event=requester_user_id_for_event,
-            is_visible_router_voice_echo=is_visible_router_voice_echo,
-            sender_is_trusted_for_ingress_metadata=sender_is_trusted_for_ingress_metadata,
+            classify=classify,
             is_handled=is_handled,
         ):
             continue
@@ -69,9 +66,7 @@ def _is_unresponded_requester_event(
     source: Mapping[str, object],
     body: object,
     requester_user_id: str,
-    requester_user_id_for_event: _RequesterResolver,
-    is_visible_router_voice_echo: _VisibleRouterVoiceEchoLookup,
-    sender_is_trusted_for_ingress_metadata: Callable[[str], bool],
+    classify: _Classify,
     is_handled: _HandledLookup,
 ) -> bool:
     """Return whether a normalized candidate is an unanswered requester turn.
@@ -89,20 +84,18 @@ def _is_unresponded_requester_event(
     before a crash replays as a pending row afterwards. Trusting pending alone
     would let an already-answered message suppress an older one forever.
     """
-    sender = event.sender
+    facts = classify(event.sender, source)
     content = source.get("content")
-    if (
-        is_visible_router_voice_echo(sender, content)
-        or requester_user_id_for_event(sender, source) != requester_user_id
-    ):
+    if is_router_voice_echo(facts, content) or facts.lane_requester_id != requester_user_id:
         return False
     if is_handled(event.event_id):
         return False
-    return not (
-        isinstance(body, str)
-        and not is_voice_event(event, sender_is_trusted=sender_is_trusted_for_ingress_metadata)
-        and command_parser.parse(body.strip()) is not None
+    if not isinstance(body, str):
+        return True
+    command_text = (
+        body_without_tool_markers(body, cast("Mapping[str, object]", content)) if isinstance(content, Mapping) else body
     )
+    return command_for(facts, command_text) is None
 
 
 async def has_newer_unresponded_journal_thread_event(
@@ -113,9 +106,7 @@ async def has_newer_unresponded_journal_thread_event(
     thread_id: str | None,
     may_be_superseded_by_newer_requester_turn: bool,
     pending_turns: PendingTurnView,
-    requester_user_id_for_event: _RequesterResolver,
-    is_visible_router_voice_echo: _VisibleRouterVoiceEchoLookup,
-    sender_is_trusted_for_ingress_metadata: Callable[[str], bool],
+    classify: _Classify,
     is_handled: _HandledLookup,
     logger: structlog.stdlib.BoundLogger,
 ) -> bool:
@@ -153,9 +144,7 @@ async def has_newer_unresponded_journal_thread_event(
             source=candidate.source,
             body=body,
             requester_user_id=requester_user_id,
-            requester_user_id_for_event=requester_user_id_for_event,
-            is_visible_router_voice_echo=is_visible_router_voice_echo,
-            sender_is_trusted_for_ingress_metadata=sender_is_trusted_for_ingress_metadata,
+            classify=classify,
             is_handled=is_handled,
         ):
             logger.info(

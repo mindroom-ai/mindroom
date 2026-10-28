@@ -83,7 +83,7 @@ from mindroom.dispatch_handoff import (
     PreparedIngress,
     prepare_media_ingress,
 )
-from mindroom.dispatch_source import ScheduledHistoryBudget
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, ScheduledHistoryBudget
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.embeddings.openai_embedder import OpenAIEmbedder
 from mindroom.event_journal import (
@@ -131,6 +131,7 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
+from mindroom.ingress_facts import IngressFacts
 from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata
 from mindroom.interactive_models import InteractivePrompt, interactive_prompt_content
@@ -899,26 +900,56 @@ def turn_claim_is_live(claim: TurnClaim) -> bool:
     return any(claim._registry.owns(event_id) for event_id in claim.source_event_ids)
 
 
+def make_ingress_facts(
+    sender: str,
+    *,
+    source_kind: str = MESSAGE_SOURCE_KIND,
+    requester_user_id: str | None = None,
+    acting_requester_id: str | None = None,
+    original_sender: str | None = None,
+    original_sender_is_human: bool = False,
+    hook_source: str | None = None,
+    message_received_depth: int = 0,
+    discovery_event_id: str | None = None,
+    sender_entity_name: str | None = None,
+    requester_entity_name: str | None = None,
+) -> IngressFacts:
+    """Build the provenance ingress classifies for one event; the lane requester defaults to its sender."""
+    return IngressFacts(
+        physical_sender=sender,
+        source_kind=source_kind,
+        lane_requester_id=requester_user_id or sender,
+        original_sender=original_sender,
+        original_sender_is_human=original_sender_is_human,
+        acting_requester_id=acting_requester_id,
+        hook_source=hook_source,
+        message_received_depth=message_received_depth,
+        discovery_event_id=discovery_event_id,
+        sender_entity_name=sender_entity_name,
+        requester_entity_name=requester_entity_name,
+    )
+
+
 def make_pending_event(
     event: PreparedIngress | nio.RoomMessageFormatted | MediaDispatchEvent,
     room: nio.MatrixRoom,
     *,
     source_kind: str,
-    dispatch_policy_source_kind: str | None = None,
+    active_follow_up: bool = False,
     hook_source: str | None = None,
     message_received_depth: int = 0,
-    trust_internal_payload_metadata: bool = False,
+    payload_trusted: bool = False,
     requester_user_id: str | None = None,
     discovery_event_id: str | None = None,
     turn_dispatch_recovery: bool = False,
     enqueue_time: float | None = None,
     notice: QueuedHumanNoticeReservation | None = None,
+    facts: IngressFacts | None = None,
 ) -> PendingEvent:
-    """Build one PendingEvent with per-source evidence stamped on its PreparedIngress.
+    """Build one PendingEvent with its admission facts beside its PreparedIngress.
 
-    Mirrors the pre-refactor PendingEvent constructor: raw nio text events are
-    normalized into PreparedIngress form and raw nio media events are wrapped
-    with their caption and retained protocol reference.
+    Raw nio text events are normalized into PreparedIngress form and raw nio
+    media events are wrapped with their caption and retained protocol reference.
     """
     if isinstance(event, PreparedIngress):
         prepared = event
@@ -937,18 +968,21 @@ def make_pending_event(
         raise TypeError(msg)
     prepared = replace(
         prepared,
+        active_follow_up=active_follow_up or prepared.active_follow_up,
+        payload_trusted=payload_trusted or prepared.payload_trusted,
+        turn_dispatch_recovery=turn_dispatch_recovery or prepared.turn_dispatch_recovery,
+    )
+    facts = facts or make_ingress_facts(
+        prepared.sender,
         source_kind=source_kind,
-        dispatch_policy_source_kind=dispatch_policy_source_kind,
+        requester_user_id=requester_user_id,
         hook_source=hook_source,
         message_received_depth=message_received_depth,
-        trust_internal_payload_metadata=trust_internal_payload_metadata,
-        requester_user_id=requester_user_id,
         discovery_event_id=discovery_event_id,
-        turn_dispatch_recovery=turn_dispatch_recovery,
     )
     if enqueue_time is None:
-        return PendingEvent(event=prepared, room=room, notice=notice)
-    return PendingEvent(event=prepared, room=room, enqueue_time=enqueue_time, notice=notice)
+        return PendingEvent(event=prepared, room=room, facts=facts, notice=notice)
+    return PendingEvent(event=prepared, room=room, facts=facts, enqueue_time=enqueue_time, notice=notice)
 
 
 def requires_linux(

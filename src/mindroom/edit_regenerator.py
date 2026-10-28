@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.coalescing.batch import coalesced_prompt, tagged_coalesced_prompt
 from mindroom.conversation_resolver import MessageContext
-from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.entity_resolution import persisted_bot_user_ids
 from mindroom.hooks import hook_ingress_policy
 from mindroom.logging_config import get_logger
@@ -34,6 +33,7 @@ if TYPE_CHECKING:
     from mindroom.handled_turns import SourceEventRevision, TurnRecord
     from mindroom.hooks import MessageEnvelope
     from mindroom.hooks.ingress import IngressHookRunner
+    from mindroom.ingress_facts import IngressFacts
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.event_info import EventInfo
     from mindroom.message_target import MessageTarget
@@ -166,7 +166,7 @@ class EditRegenerator:
         room: nio.MatrixRoom,
         event: nio.RoomMessageFormatted,
         event_info: EventInfo,
-        requester_user_id: str,
+        facts: IngressFacts,
     ) -> bool | None:
         """Regenerate the reply an edit's message got; True when its regeneration owns the edit.
 
@@ -177,6 +177,7 @@ class EditRegenerator:
         if not event_info.original_event_id:
             return None
         original_event_id = event_info.original_event_id
+        requester_user_id = facts.lane_requester_id
 
         # Every decision below is taken from the record's own conversation target, never from the thread the
         # edit names.
@@ -240,13 +241,12 @@ class EditRegenerator:
             room,
             conversation_target=turn_record.conversation_target,
         )
-        envelope = self.deps.resolver.build_message_envelope(
+        envelope = self.deps.resolver.build_envelope(
             event=event,
-            requester_user_id=requester_user_id,
-            context=context,
+            facts=facts,
             target=turn_record.conversation_target,
+            mentioned_agents=context.mentioned_agents,
             body=edited_content,
-            source_kind=EDIT_SOURCE_KIND,
         )
         if revision != committed and await self.deps.ingress_hook_runner.emit_message_received_hooks(
             envelope=envelope,

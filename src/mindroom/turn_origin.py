@@ -175,13 +175,12 @@ def requester_id_from_trusted_original_sender(
     original_sender_entity_name: str | None,
     original_sender_is_access_checked: bool,
     source_kind: str | None,
-    sender_trusts_original_sender: bool,
 ) -> str | None:
-    """Return original-sender metadata that may act as the dispatch requester.
+    """Return trusted original-sender metadata that may act as the dispatch requester.
 
     A relayed human or configured bot account stays the requester, so access applies to it, not the relaying entity.
     """
-    if not sender_trusts_original_sender or not original_sender:
+    if not original_sender:
         return None
     if original_sender_is_access_checked:
         return original_sender

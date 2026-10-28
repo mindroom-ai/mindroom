@@ -268,7 +268,7 @@ def _threaded_prepared_text_event(
             "content": content,
         },
         server_timestamp=server_timestamp,
-        source_kind_override=source_kind,
+        payload_trusted=source_kind == VOICE_SOURCE_KIND,
     )
 
 
@@ -299,7 +299,7 @@ def _normalized_voice_result(
                 "content": content,
             },
             server_timestamp=event.server_timestamp,
-            source_kind_override=VOICE_SOURCE_KIND,
+            payload_trusted=True,
         ),
     )
 
@@ -658,7 +658,7 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
             body="🎤 continue",
             source={"content": {"body": "🎤 continue", SOURCE_KIND_KEY: "voice"}},
             server_timestamp=voice_event.server_timestamp,
-            source_kind_override="voice",
+            payload_trusted=True,
         ),
     )
 
@@ -766,7 +766,7 @@ async def test_voice_message_uses_canonical_target_for_queued_notice_before_stt(
         body="🎤 continue somewhere else",
         source={"content": {"body": "🎤 continue somewhere else", SOURCE_KIND_KEY: "voice"}},
         server_timestamp=voice_event.server_timestamp,
-        source_kind_override="voice",
+        payload_trusted=True,
     )
     normalized_voice = inbound_turn_normalizer._VoiceNormalizationResult(
         event=normalized_event,
@@ -866,7 +866,7 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
             body="🎤 room mode follow-up",
             source={"content": {"body": "🎤 room mode follow-up", SOURCE_KIND_KEY: "voice"}},
             server_timestamp=voice_event.server_timestamp,
-            source_kind_override="voice",
+            payload_trusted=True,
         ),
     )
     target = bot._turn_controller.deps.resolver.build_message_target(
@@ -1013,8 +1013,7 @@ async def test_voice_and_text_followups_during_streaming_coalesce_in_receive_ord
             await bot._turn_controller._enqueue_for_dispatch(
                 streaming_event,
                 room,
-                source_kind="message",
-                requester_user_id="@user:example.com",
+                facts=bot._ingress_validator.classify(streaming_event),
                 ticket=ticket,
                 coalescing_key=CoalescingKey(
                     room.room_id,
@@ -1450,7 +1449,7 @@ async def test_trusted_router_visible_voice_echo_is_display_only(mock_home_bot: 
         await bot._turn_controller._dispatch_prepared_text_like_ingress(
             room=room,
             prepared_event=echo_event,
-            requester_user_id="@user:example.com",
+            facts=bot._ingress_validator.classify(echo_event),
             ticket=ticket,
             coalescing_thread_id="$thread_root",
         )
@@ -1488,7 +1487,7 @@ async def test_forged_visible_voice_echo_marker_still_dispatches(mock_home_bot: 
         await bot._turn_controller._dispatch_prepared_text_like_ingress(
             room=room,
             prepared_event=forged_event,
-            requester_user_id="@user:example.com",
+            facts=bot._ingress_validator.classify(forged_event),
             ticket=ticket,
             coalescing_thread_id="$thread_root",
         )

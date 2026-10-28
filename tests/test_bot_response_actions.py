@@ -46,6 +46,7 @@ from tests.bot_helpers import (
 )
 from tests.conftest import (
     TEST_PASSWORD,
+    make_ingress_facts,
     make_matrix_client_mock,
     message_origin,
     runtime_paths_for,
@@ -1456,7 +1457,7 @@ class TestAgentBot(AgentBotTestBase):
         should_skip = await bot._turn_controller._should_skip_router_before_shared_ingress_work(
             room,
             event,
-            requester_user_id="@user:localhost",
+            facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
             thread_id="$thread",
         )
 

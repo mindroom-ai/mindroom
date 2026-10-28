@@ -1224,10 +1224,10 @@ class TestRoutingRegression:
             content_with_metadata: dict[str, object] = {ORIGINAL_SENDER_KEY: original_sender, **content}
             if source_kind is not None:
                 content_with_metadata[SOURCE_KIND_KEY] = source_kind
-            return router_bot._ingress_validator.requester_user_id(
-                sender=router_sender,
-                source={"content": content_with_metadata},
-            )
+            return router_bot._ingress_validator.classify_source(
+                router_sender,
+                {"content": content_with_metadata},
+            ).lane_requester_id
 
         untrusted_contents: list[dict[str, object]] = [
             {"body": "@alice Sorry, I could not route this request."},

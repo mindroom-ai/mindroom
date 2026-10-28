@@ -5907,10 +5907,8 @@ depends_on = [
     "mindroom.response_admission",
     "mindroom.attachments.storage",
     "mindroom.command_turn_executor",
-    "mindroom.commands.parsing",
     "mindroom.constants",
     "mindroom.dispatch_handoff",
-    "mindroom.dispatch_source",
     "mindroom.handled_turns",
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.media",
@@ -6026,7 +6024,6 @@ depends_on = [
     "mindroom.matrix.conversation_reads",
     "mindroom.response_admission",
     "mindroom.command_turn_executor",
-    "mindroom.commands.parsing",
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.dispatch_callback_outcome",
@@ -6034,7 +6031,6 @@ depends_on = [
     "mindroom.dispatch_replay_guard",
     "mindroom.dispatch_source",
     "mindroom.dispatch_thread_context",
-    "mindroom.entity_resolution",
     "mindroom.hooks",
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.thread_history_result",
@@ -6063,8 +6059,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.dispatch_replay_guard"
 depends_on = [
-    "mindroom.commands.parsing",
-    "mindroom.dispatch_source",
+    "mindroom.tool_system.events",
 ]
 visibility = [
     "mindroom.turn_controller",

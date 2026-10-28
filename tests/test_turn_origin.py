@@ -146,7 +146,6 @@ def test_requester_id_from_trusted_original_sender_accepts_access_checked_metada
             original_sender_entity_name=None,
             original_sender_is_access_checked=True,
             source_kind=HOOK_DISPATCH_SOURCE_KIND,
-            sender_trusts_original_sender=True,
         )
         == "@human:localhost"
     )
@@ -160,7 +159,6 @@ def test_requester_id_from_trusted_original_sender_rejects_internal_user_metadat
             original_sender_entity_name=None,
             original_sender_is_access_checked=False,
             source_kind=HOOK_DISPATCH_SOURCE_KIND,
-            sender_trusts_original_sender=True,
         )
         is None
     )
@@ -175,7 +173,6 @@ def test_requester_id_from_trusted_original_sender_accepts_managed_scheduled_fir
             original_sender_entity_name="router",
             original_sender_is_access_checked=False,
             source_kind=source_kind,
-            sender_trusts_original_sender=True,
         )
         == "@mindroom_router:localhost"
     )
@@ -189,7 +186,6 @@ def test_requester_id_from_trusted_original_sender_rejects_managed_plain_hooks()
             original_sender_entity_name="router",
             original_sender_is_access_checked=False,
             source_kind=HOOK_SOURCE_KIND,
-            sender_trusts_original_sender=True,
         )
         is None
     )
@@ -203,7 +199,6 @@ def test_requester_id_from_trusted_original_sender_requires_original_sender() ->
             original_sender_entity_name=None,
             original_sender_is_access_checked=False,
             source_kind=HOOK_DISPATCH_SOURCE_KIND,
-            sender_trusts_original_sender=True,
         )
         is None
     )

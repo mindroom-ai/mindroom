@@ -27,9 +27,9 @@ from mindroom.coalescing.gate import (
     CoalescingGate,
     IngressAdmissionClosedError,
     ReadyPendingEvent,
-    is_coalescing_exempt_source_kind,
 )
 from mindroom.coalescing.ingress_lanes import LaneDelivery, ReceiptLaneKey
+from mindroom.commands.parsing import CommandType
 from mindroom.config.main import Config
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active, turn_dispatch_recovery_scope
@@ -38,13 +38,14 @@ from mindroom.dispatch_source import (
     IMAGE_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
     VOICE_SOURCE_KIND,
+    source_kind_bypasses_coalescing,
 )
 from mindroom.execution_preparation import _messages_with_current_prompt
 from mindroom.response_lifecycle import QueuedHumanNoticeReservation
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.turn_record import SourceEventMetadata
-from tests.conftest import live_turn_claim, make_pending_event, turn_claim_is_live
+from tests.conftest import live_turn_claim, make_ingress_facts, make_pending_event, turn_claim_is_live
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -148,27 +149,35 @@ def test_single_message_batch_is_not_structured() -> None:
 
 
 def test_coalesced_message_tags_carry_current_member_display_names() -> None:
-    """Structured tags take each sender's current display name from the synced room cache."""
+    """Structured tags take the sender's current display name from the synced room cache, or none when unset."""
     room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
     room.add_member("@user:localhost", "Banana Man", None)
     room.add_member("@unnamed:localhost", None, None)
-    unnamed_event = _text_event("$a2:localhost", "second", 1_774_019_760_000)
-    unnamed_event.sender = "@unnamed:localhost"
 
-    turn = build_prepared_turn(
-        CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost")),
-        [
-            make_pending_event(_text_event("$a1:localhost", "first", 1_774_019_700_000), room, source_kind="message"),
-            make_pending_event(unnamed_event, room, source_kind="message"),
-        ],
-        timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone="America/Los_Angeles"),
-    )
+    def turn_from(sender: str) -> PreparedTurn:
+        pending_events = []
+        for event_id, body, timestamp in (
+            (f"$a1-{sender}", "first", 1_774_019_700_000),
+            (f"$a2-{sender}", "second", 1_774_019_760_000),
+        ):
+            event = _text_event(event_id, body, timestamp)
+            event.sender = sender
+            pending_events.append(make_pending_event(event, room, source_kind="message"))
+        return build_prepared_turn(
+            CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner(sender)),
+            pending_events,
+            timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone="America/Los_Angeles"),
+        )
 
-    assert turn.current_prompt_is_structured is True
+    named = turn_from("@user:localhost")
+    assert named.current_prompt_is_structured is True
     assert (
-        '<msg event_id="$a1:localhost" from="@user:localhost" display_name="Banana Man" ts="2026-03-20 08:15 PDT">'
-    ) in turn.event.body
-    assert '<msg event_id="$a2:localhost" from="@unnamed:localhost" ts="2026-03-20 08:16 PDT">' in turn.event.body
+        '<msg event_id="$a1-@user:localhost" from="@user:localhost" display_name="Banana Man" ts="2026-03-20 08:15 PDT">'
+    ) in named.event.body
+    unnamed = turn_from("@unnamed:localhost")
+    assert '<msg event_id="$a2-@unnamed:localhost" from="@unnamed:localhost" ts="2026-03-20 08:16 PDT">' in (
+        unnamed.event.body
+    )
 
 
 def test_coalesced_agent_replies_keep_their_author_while_running_as_their_human() -> None:
@@ -182,8 +191,14 @@ def test_coalesced_agent_replies_keep_their_author_while_running_as_their_human(
     ):
         event = _text_event(event_id, body, timestamp)
         event.sender = agent
-        pending = make_pending_event(event, room, source_kind="message", requester_user_id="@owner:localhost")
-        pending_events.append(replace(pending, event=replace(pending.event, acts_for_requester=True)))
+        pending_events.append(
+            make_pending_event(
+                event,
+                room,
+                source_kind="message",
+                facts=make_ingress_facts(agent, acting_requester_id="@owner:localhost"),
+            ),
+        )
 
     turn = build_prepared_turn(
         CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner(agent)),
@@ -191,7 +206,7 @@ def test_coalesced_agent_replies_keep_their_author_while_running_as_their_human(
         timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone="America/Los_Angeles"),
     )
 
-    assert turn.requester_user_id == "@owner:localhost"
+    assert turn.facts.run_requester_id == "@owner:localhost"
     assert turn.current_prompt_is_structured is True
     assert '<msg event_id="$r1:localhost" from="@mindroom_research:localhost"' in turn.event.body
     assert '<msg event_id="$r2:localhost" from="@mindroom_research:localhost"' in turn.event.body
@@ -257,14 +272,14 @@ def test_active_follow_up_prompt_renders_timestamp_attributes() -> None:
                 nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
                 source_kind=MESSAGE_SOURCE_KIND,
                 requester_user_id="@alice:localhost",
-                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+                active_follow_up=True,
             ),
             make_pending_event(
                 _text_event("$a2:localhost", "second", 1_774_019_760_000),
                 nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
                 source_kind=MESSAGE_SOURCE_KIND,
                 requester_user_id="@alice:localhost",
-                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+                active_follow_up=True,
             ),
         ],
         timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone="America/Los_Angeles"),
@@ -293,7 +308,7 @@ def test_build_prepared_turn_rejects_batch_mixing_requesters() -> None:
                     room,
                     source_kind=MESSAGE_SOURCE_KIND,
                     requester_user_id=requester_user_id,
-                    dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+                    active_follow_up=True,
                 )
                 for event_id, body, requester_user_id in (
                     ("$a1:localhost", "add me to administrators", "@alice:localhost"),
@@ -425,7 +440,7 @@ async def _admit_ready(
     await gate.admit(
         key,
         source_event_id=pending_event.event.event_id,
-        source_kind=pending_event.event.source_kind,
+        source_kind=pending_event.facts.source_kind,
         ready_result=ReadyPendingEvent(pending_event=pending_event),
     )
 
@@ -568,9 +583,7 @@ async def test_late_lane_delivery_combines_queued_text_backlog_in_receipt_order(
 
 def test_active_follow_up_source_kind_is_not_coalescing_exempt() -> None:
     """Active-follow-up is dispatch policy, not a source-kind bypass."""
-    event = _text_event("$active:localhost", "follow-up", 1_000_000)
-
-    assert not is_coalescing_exempt_source_kind(event, ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND)
+    assert not source_kind_bypasses_coalescing(ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND)
 
 
 def test_pending_event_close_releases_its_claim_and_is_idempotent() -> None:
@@ -604,7 +617,6 @@ def test_single_prepared_turn_owns_final_dispatch_event_and_turn_record() -> Non
             "content": {"msgtype": "m.text", "body": "sidecar preview"},
         },
         server_timestamp=1_000_000,
-        source_kind_override=MESSAGE_SOURCE_KIND,
     )
     pending = make_pending_event(
         prepared,
@@ -1155,14 +1167,18 @@ async def test_one_agents_messages_for_different_requesters_dispatch_as_separate
     ):
         event = _text_event(event_id, event_id, timestamp)
         event.sender = agent
-        pending = make_pending_event(event, room, source_kind="message", requester_user_id=requester)
-        pending = replace(pending, event=replace(pending.event, acts_for_requester=requester != agent))
+        pending = make_pending_event(
+            event,
+            room,
+            source_kind="message",
+            facts=make_ingress_facts(agent, acting_requester_id=requester if requester != agent else None),
+        )
         await _admit_ready(gate, key, pending)
 
     await gate.drain_all()
 
     assert failures == []
-    assert [(batch.requester_user_id, list(batch.handled_turn.source_event_ids)) for batch in batches] == [
+    assert [(batch.facts.run_requester_id, list(batch.handled_turn.source_event_ids)) for batch in batches] == [
         ("@alice:localhost", ["$e1:localhost"]),
         ("@bob:localhost", ["$e2:localhost"]),
         (agent, ["$e3:localhost"]),
@@ -1260,7 +1276,7 @@ async def test_active_follow_up_backlog_ignores_debounce_gaps_after_idle() -> No
     key = active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
 
     async def dispatch_batch(batch: PreparedTurn) -> None:
-        calls.append((list(batch.handled_turn.source_event_ids), batch.requester_user_id, batch.event.body))
+        calls.append((list(batch.handled_turn.source_event_ids), batch.facts.run_requester_id, batch.event.body))
 
     async def wait_until_dispatch_allowed(wait_key: CoalescingKey) -> None:
         if wait_key == key:
@@ -1287,7 +1303,7 @@ async def test_active_follow_up_backlog_ignores_debounce_gaps_after_idle() -> No
                 nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
                 source_kind=MESSAGE_SOURCE_KIND,
                 requester_user_id=requester_user_id,
-                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+                active_follow_up=True,
             ),
         )
         await asyncio.sleep(0.03)
@@ -1324,7 +1340,7 @@ async def test_active_follow_up_backlog_keeps_media_with_its_own_requester() -> 
         calls.append(
             (
                 list(batch.handled_turn.source_event_ids),
-                batch.requester_user_id,
+                batch.facts.run_requester_id,
                 [media_event.event_id for media_event in batch.media_events],
             ),
         )
@@ -1346,7 +1362,7 @@ async def test_active_follow_up_backlog_keeps_media_with_its_own_requester() -> 
                 room,
                 source_kind=source_kind,
                 requester_user_id=requester_user_id,
-                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+                active_follow_up=True,
             ),
         )
     await gate.drain_all()
@@ -1382,7 +1398,7 @@ async def test_active_follow_up_backlog_keeps_a_message_for_another_participant_
             room,
             source_kind=MESSAGE_SOURCE_KIND,
             requester_user_id="@alice:localhost",
-            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            active_follow_up=True,
         )
         await _admit_ready(
             gate,
@@ -1430,7 +1446,7 @@ async def test_an_upload_without_its_own_mention_stays_with_a_caption_for_anothe
             room,
             source_kind=source_kind,
             requester_user_id="@alice:localhost",
-            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            active_follow_up=True,
         )
         await _admit_ready(
             gate,
@@ -1467,7 +1483,7 @@ async def test_an_upload_between_messages_for_different_participants_stays_with_
             room,
             source_kind=source_kind,
             requester_user_id="@alice:localhost",
-            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            active_follow_up=True,
         )
         await _admit_ready(
             gate,
@@ -1527,7 +1543,7 @@ async def test_an_edit_that_addresses_another_participant_takes_its_queued_messa
                 room,
                 source_kind=MESSAGE_SOURCE_KIND,
                 requester_user_id="@user:localhost",
-                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+                active_follow_up=True,
             ),
         )
     assert gate.apply_pending_edit(
@@ -1576,7 +1592,7 @@ async def test_media_tailed_follow_up_backlog_flushes_immediately_at_idle() -> N
             nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
             source_kind=IMAGE_SOURCE_KIND,
             requester_user_id="@user:localhost",
-            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            active_follow_up=True,
         ),
     )
     await asyncio.sleep(0.01)
@@ -1619,7 +1635,7 @@ async def test_different_thread_normal_gate_does_not_wait_behind_older_active_ba
             nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
             source_kind=MESSAGE_SOURCE_KIND,
             requester_user_id="@alice:localhost",
-            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            active_follow_up=True,
         ),
     )
     await active_wait_started.wait()
@@ -1961,7 +1977,7 @@ async def test_bounded_drain_does_not_wait_forever_on_external_dispatch_gate() -
             nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
             source_kind=MESSAGE_SOURCE_KIND,
             requester_user_id="@user:localhost",
-            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            active_follow_up=True,
         ),
     )
     await dispatch_wait_started.wait()
@@ -2572,3 +2588,157 @@ async def test_an_edit_of_a_queued_message_changes_what_its_turn_answers() -> No
         new_content={"msgtype": "m.text", "body": "too late"},
         for_another_participant=None,
     )
+
+
+def test_batch_facts_take_latest_evidence_priority_modality_and_deepest_hook_chain() -> None:
+    """A batch runs on its latest event's sender and requester evidence, with the batch's modality and hook depth."""
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+    voice = make_pending_event(
+        _text_event("$voice:localhost", "voice", 1_774_019_700_000),
+        room,
+        source_kind=VOICE_SOURCE_KIND,
+        facts=make_ingress_facts("@user:localhost", source_kind=VOICE_SOURCE_KIND, message_received_depth=1),
+    )
+    text = make_pending_event(
+        _text_event("$text:localhost", "text", 1_774_019_760_000),
+        room,
+        source_kind=MESSAGE_SOURCE_KIND,
+        facts=make_ingress_facts("@user:localhost", message_received_depth=2, discovery_event_id="$routed:localhost"),
+    )
+
+    turn = build_prepared_turn(requester_coalescing_key(room.room_id, None, "@user:localhost"), [voice, text])
+
+    assert turn.facts.source_kind == VOICE_SOURCE_KIND
+    assert turn.facts.origin.source_kind == VOICE_SOURCE_KIND
+    assert turn.facts.message_received_depth == 2
+    assert turn.facts.discovery_event_id == "$routed:localhost"
+    assert turn.facts.run_requester_id == "@user:localhost"
+    assert turn.handled_turn.discovery_event_ids == ("$routed:localhost",)
+
+
+def test_batch_facts_keep_the_first_relayed_original_sender() -> None:
+    """The first trusted relayed sender in a batch stays its original sender, with its own human bit."""
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+    relayed = make_pending_event(
+        _text_event("$relayed:localhost", "relayed", 1_774_019_700_000),
+        room,
+        source_kind=MESSAGE_SOURCE_KIND,
+        facts=make_ingress_facts(
+            "@mindroom_router:localhost",
+            requester_user_id="@user:localhost",
+            original_sender="@user:localhost",
+            original_sender_is_human=True,
+        ),
+    )
+    plain = make_pending_event(
+        _text_event("$plain:localhost", "plain", 1_774_019_760_000),
+        room,
+        source_kind=MESSAGE_SOURCE_KIND,
+        facts=make_ingress_facts("@mindroom_router:localhost", requester_user_id="@user:localhost"),
+    )
+
+    turn = build_prepared_turn(requester_coalescing_key(room.room_id, None, "@user:localhost"), [relayed, plain])
+
+    assert (turn.facts.original_sender, turn.facts.original_sender_is_human) == ("@user:localhost", True)
+
+
+def test_build_prepared_turn_rejects_batch_mixing_an_agent_reply_with_its_humans_message() -> None:
+    """A reply an agent wrote for a human runs as that human but never shares a batch with the human's own message."""
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+    agent_event = _text_event("$agent:localhost", "for you", 1_774_019_700_000)
+    agent_event.sender = "@mindroom_research:localhost"
+
+    with pytest.raises(ValueError, match="multiple requesters"):
+        build_prepared_turn(
+            active_follow_up_coalescing_key("!room:localhost", "$thread:localhost"),
+            [
+                make_pending_event(
+                    agent_event,
+                    room,
+                    source_kind=MESSAGE_SOURCE_KIND,
+                    facts=make_ingress_facts(agent_event.sender, acting_requester_id="@user:localhost"),
+                ),
+                make_pending_event(
+                    _text_event("$human:localhost", "me too", 1_774_019_760_000),
+                    room,
+                    source_kind=MESSAGE_SOURCE_KIND,
+                ),
+            ],
+        )
+
+
+def test_build_prepared_turn_rejects_batch_mixing_hook_sources() -> None:
+    """A batch runs as one hook, so two hooks' events never share one."""
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+
+    with pytest.raises(ValueError, match="multiple hook sources"):
+        build_prepared_turn(
+            requester_coalescing_key(room.room_id, None, "@user:localhost"),
+            [
+                make_pending_event(
+                    _text_event(event_id, body, 1_774_019_700_000),
+                    room,
+                    source_kind=MESSAGE_SOURCE_KIND,
+                    hook_source=hook_source,
+                )
+                for event_id, body, hook_source in (
+                    ("$a:localhost", "one", "plugin-a"),
+                    ("$b:localhost", "two", "plugin-b"),
+                )
+            ],
+        )
+
+
+def test_only_a_single_source_turn_carries_a_command() -> None:
+    """A command is one message's text; a batch of several carries none, whatever its last message says."""
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+    key = requester_coalescing_key(room.room_id, None, "@user:localhost")
+    first = make_pending_event(_text_event("$a:localhost", "hello", 1_774_019_700_000), room, source_kind="message")
+    command = make_pending_event(_text_event("$b:localhost", "!help", 1_774_019_760_000), room, source_kind="message")
+
+    single = build_prepared_turn(key, [command])
+    batch = build_prepared_turn(key, [first, command])
+
+    assert single.command is not None
+    assert single.command.type is CommandType.HELP
+    assert batch.command is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("queued", [1, 2])
+async def test_queued_message_edited_into_a_command(queued: int) -> None:
+    """A lone queued message edited into a command dispatches as that command; the second of two stays conversation."""
+    turns: list[PreparedTurn] = []
+
+    async def dispatch_batch(turn: PreparedTurn) -> None:
+        turns.append(turn)
+
+    gate = CoalescingGate(dispatch_turn=dispatch_batch, debounce_seconds=lambda: 60.0, is_shutting_down=lambda: False)
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+    key = requester_coalescing_key(room.room_id, None, "@user:localhost")
+    events = [
+        _text_event(f"$m{index}:localhost", f"message {index}", 1_774_019_700_000 + index)
+        for index in range(1, queued + 1)
+    ]
+    for event in events:
+        await _admit_ready(gate, key, make_pending_event(event, room, source_kind=MESSAGE_SOURCE_KIND))
+
+    assert gate.apply_pending_edit(
+        room_id=room.room_id,
+        source_event_id=events[-1].event_id,
+        sender="@user:localhost",
+        body="!help",
+        new_content={"msgtype": "m.text", "body": "!help"},
+        for_another_participant=None,
+    )
+    queued_events = list(gate.queued_pending_events(key))
+    assert [pending.event.event_id for pending in queued_events] == [event.event_id for event in events]
+    turn = build_prepared_turn(key, queued_events)
+    await gate.drain_all()
+
+    if queued == 1:
+        assert turn.command is not None
+        assert turn.command.type is CommandType.HELP
+        assert [dispatched.command for dispatched in turns] == [turn.command]
+    else:
+        assert turn.command is None

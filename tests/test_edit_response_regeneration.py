@@ -23,6 +23,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.delivery_gateway import FinalDeliveryRequest, ResponseIdentity
+from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import SourceEventMetadata, TurnRecord, TurnRecordCodec
@@ -50,6 +51,7 @@ from tests.conftest import (
     finish_edit_regenerations,
     install_generate_response_mock,
     install_runtime_journal_support,
+    make_ingress_facts,
     make_matrix_client_mock,
     patch_response_runner_module,
     record_turn_answered,
@@ -803,7 +805,7 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
             room,
             edit_event,
             EventInfo.from_event(edit_event.source),
-            requester_user_id="@user:example.com",
+            make_ingress_facts(edit_event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id="@user:example.com"),
         )
         await finish_edit_regenerations(bot)
 
@@ -1371,7 +1373,7 @@ async def test_handle_message_edit_ignores_edits_of_replies_an_agent_wrote_for_t
             room,
             edit_event,
             EventInfo.from_event(edit_event.source),
-            requester_user_id=edit_event.sender,
+            make_ingress_facts(edit_event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id=edit_event.sender),
         )
         await finish_edit_regenerations(bot)
 
@@ -1484,7 +1486,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
             room,
             edit_event,
             EventInfo.from_event(edit_event.source),
-            requester_user_id=edit_event.sender,
+            make_ingress_facts(edit_event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id=edit_event.sender),
         )
         await finish_edit_regenerations(bot)
 
@@ -1631,7 +1633,7 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
             room,
             edit_event,
             EventInfo.from_event(edit_event.source),
-            requester_user_id="@user:example.com",
+            make_ingress_facts(edit_event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id="@user:example.com"),
         )
         await finish_edit_regenerations(bot)
 
@@ -1747,7 +1749,7 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
             room,
             edit_event,
             EventInfo.from_event(edit_event.source),
-            requester_user_id=edit_event.sender,
+            make_ingress_facts(edit_event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id=edit_event.sender),
         )
         await finish_edit_regenerations(bot)
 
@@ -1923,7 +1925,7 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
             room,
             edit_event,
             EventInfo.from_event(edit_event.source),
-            requester_user_id=edit_event.sender,
+            make_ingress_facts(edit_event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id=edit_event.sender),
         )
         await finish_edit_regenerations(bot)
 
@@ -2072,7 +2074,7 @@ async def test_handle_message_edit_does_not_backfill_existing_coalesced_prompt_f
             room,
             edit_event,
             EventInfo.from_event(edit_event.source),
-            requester_user_id=edit_event.sender,
+            make_ingress_facts(edit_event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id=edit_event.sender),
         )
         await finish_edit_regenerations(bot)
 
@@ -2203,7 +2205,7 @@ async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp
             room,
             edit_event,
             EventInfo.from_event(edit_event.source),
-            requester_user_id=edit_event.sender,
+            make_ingress_facts(edit_event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id=edit_event.sender),
         )
         await finish_edit_regenerations(bot)
 
@@ -2342,7 +2344,7 @@ async def test_suppressed_interactive_regeneration_keeps_ledger_anchor(
             room,
             edit_event,
             EventInfo.from_event(edit_event.source),
-            requester_user_id=edit_event.sender,
+            make_ingress_facts(edit_event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id=edit_event.sender),
         )
         await finish_edit_regenerations(bot)
 
@@ -2453,7 +2455,7 @@ async def test_handle_message_edit_skips_when_turn_context_was_not_recorded(
             room,
             edit_event,
             EventInfo.from_event(edit_event.source),
-            requester_user_id=edit_event.sender,
+            make_ingress_facts(edit_event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id=edit_event.sender),
         )
         await finish_edit_regenerations(bot)
 

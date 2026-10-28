@@ -140,7 +140,7 @@ def _voice_event(config: Config) -> tuple[nio.RoomMessageAudio, PreparedIngress]
             },
         },
         server_timestamp=event.server_timestamp,
-        source_kind_override=VOICE_SOURCE_KIND,
+        payload_trusted=True,
     )
     return event, normalized
 
@@ -463,7 +463,7 @@ async def test_voice_metadata_failure_retries_without_retranscription(
     event, normalized = _voice_event(config)
     normalize = AsyncMock(return_value=_VoiceNormalizationResult(event=normalized))
     monkeypatch.setattr(InboundTurnNormalizer, "prepare_voice_event", normalize)
-    build_envelope = ConversationResolver.build_ingress_envelope
+    build_envelope = ConversationResolver.build_envelope
     fail_metadata = True
 
     def build_or_fail(self: ConversationResolver, **kwargs: Any) -> MessageEnvelope:  # noqa: ANN401
@@ -472,7 +472,7 @@ async def test_voice_metadata_failure_retries_without_retranscription(
             raise RuntimeError(msg)
         return build_envelope(self, **kwargs)
 
-    monkeypatch.setattr(ConversationResolver, "build_ingress_envelope", build_or_fail)
+    monkeypatch.setattr(ConversationResolver, "build_envelope", build_or_fail)
     dispatcher = _wire_dispatcher(harness, room, tmp_path)
     await admit_dispatch_event(dispatcher, room, event, EventKind.MEDIA, EventClass.ACTIONABLE)
     try:

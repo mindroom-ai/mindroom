@@ -409,10 +409,14 @@ async def test_poke_applies_assignee_access_policy_to_human_requester(tmp_path: 
         "@mallory:localhost",
         mindroom_user_id(config, runtime_paths),
     ]
-    assert await validator.precheck_event(room, authorized_event) == "@alice:localhost"
+    authorized_facts = validator.classify(authorized_event)
+    assert authorized_facts.lane_requester_id == "@alice:localhost"
+    assert await validator.precheck_event(room, authorized_event, authorized_facts)
     # A human who may not address the assignee gets no turn from the poke.
-    assert await validator.precheck_event(room, unauthorized_event) is None
-    assert await validator.precheck_event(room, internal_event) == secret_id
+    assert not await validator.precheck_event(room, unauthorized_event, validator.classify(unauthorized_event))
+    internal_facts = validator.classify(internal_event)
+    assert internal_facts.lane_requester_id == secret_id
+    assert await validator.precheck_event(room, internal_event, internal_facts)
     turn_store.record_turn.assert_awaited_once_with(TurnRecord.create([unauthorized_event.event_id]))
 
 

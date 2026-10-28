@@ -65,7 +65,7 @@ def _text_only_fallback(event: AudioMessageEvent, *, thread_id: str | None) -> P
         body=body,
         source=source,
         server_timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
-        source_kind_override=VOICE_SOURCE_KIND,
+        payload_trusted=True,
     )
 
 
@@ -114,7 +114,7 @@ class VoiceReadiness:
                     body=checkpoint.body,
                     source={**event.source, "content": checkpoint.to_content()},
                     server_timestamp=event.server_timestamp,
-                    source_kind_override=VOICE_SOURCE_KIND,
+                    payload_trusted=True,
                 )
             else:
                 if dispatch_timing is not None:

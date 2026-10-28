@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from mindroom.attachments.storage import parse_attachment_ids_from_event_source
-from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
@@ -17,13 +16,7 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
 )
-from mindroom.dispatch_source import (
-    SCHEDULED_SOURCE_KIND,
-    SILENT_SCHEDULE_SOURCE_KIND,
-    VOICE_SOURCE_KIND,
-    is_voice_event,
-)
-from mindroom.matrix.media import is_audio_message_event, is_matrix_media_dispatch_event
+from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.response_admission import ResponseAdmissionRefusedError, admitted_response_decision
 from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.timing import (
@@ -46,7 +39,6 @@ if TYPE_CHECKING:
     from mindroom.commands.parsing import Command
     from mindroom.dispatch_handoff import (
         DispatchEvent,
-        DispatchIngressMetadata,
         MediaDispatchEvent,
         PreparedIngress,
     )
@@ -122,7 +114,7 @@ async def dispatch_text_message(
             controller.deps.response_runner.wait_for_admission_or_shutdown,
         ):
             if not controller.deps.turn_policy.can_reply_to_sender_in_room(
-                turn.requester_user_id,
+                turn.facts.run_requester_id,
                 turn.room.room_id,
             ):
                 await controller.deps.visible_responses.settle_source_events_ignored(prepared.handled_turn)
@@ -136,7 +128,7 @@ async def dispatch_text_message(
             message_attachment_ids, trusted_attachment_ids, router_extra_content = _attachment_parts(
                 prepared,
                 media_events=list(turn.media_events) or None,
-                requester_user_id=turn.requester_user_id,
+                requester_user_id=turn.facts.run_requester_id,
             )
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_plan_start")
@@ -182,42 +174,26 @@ async def _prepare_text_dispatch(
         dispatch_timing.mark("dispatch_start")
     dispatch_started_at = time.monotonic()
 
+    # The turn record already carries each source's discovery alias, such as the human message a router
+    # relayed, so edits and redactions of that message reach this responder's persisted runs.
     handled_turn = turn.handled_turn
-    routed_original_event_id = controller.deps.ingress.router_relay_original_event_id(event)
-    if routed_original_event_id is not None:
-        # Keep the routed turn discoverable by the human message the router
-        # relayed, so edits and redactions of that message reach this
-        # responder's persisted runs.
-        handled_turn = canonicalize_turn_record(
-            handled_turn,
-            discovery_event_ids=(*handled_turn.discovery_event_ids, routed_original_event_id),
-        )
-
-    command = _parsed_command_for_event(
-        controller,
-        event,
-        media_events=list(turn.media_events) or None,
-        ingress_metadata=turn.ingress,
-    )
     if dispatch_timing is not None:
         dispatch_timing.mark("dispatch_prepare_start")
     prepared = await controller._prepare_dispatch(
         turn.room,
         event,
-        turn.requester_user_id,
+        turn.facts,
         event_label="message",
         handled_turn=handled_turn,
         ingress_metadata=turn.ingress,
         payload_metadata=turn.payload,
-        use_command_context=command is not None,
+        use_command_context=turn.command is not None,
         current_prompt_is_structured=turn.current_prompt_is_structured,
     )
     if dispatch_timing is not None:
         dispatch_timing.mark("dispatch_prepare_ready")
     if prepared is None:
         return None
-    if command is not None and prepared.dispatch.envelope.source_kind == VOICE_SOURCE_KIND:
-        command = None
     return _PreparedTextDispatch(
         turn=turn,
         event=event,
@@ -225,35 +201,11 @@ async def _prepare_text_dispatch(
             handled_turn,
             requester_id=prepared.dispatch.requester_user_id,
         ),
-        command=command,
+        command=turn.command,
         dispatch=prepared.dispatch,
         replay_guard=prepared.replay_guard,
         dispatch_started_at=dispatch_started_at,
     )
-
-
-def _parsed_command_for_event(
-    controller: TurnController,
-    event: PreparedIngress,
-    *,
-    media_events: list[MediaDispatchEvent] | None,
-    ingress_metadata: DispatchIngressMetadata | None,
-) -> Command | None:
-    if media_events:
-        return None
-    # Scheduled fires carry their creator as requester, but an agent can write their text.
-    if ingress_metadata is not None and ingress_metadata.source_kind in {
-        VOICE_SOURCE_KIND,
-        SCHEDULED_SOURCE_KIND,
-        SILENT_SCHEDULE_SOURCE_KIND,
-    }:
-        return None
-    if is_audio_message_event(event) or is_voice_event(
-        event,
-        sender_is_trusted=controller.deps.ingress.sender_is_trusted_for_ingress_metadata,
-    ):
-        return None
-    return command_parser.parse(event.body)
 
 
 async def _blocked_before_plan(
@@ -261,13 +213,14 @@ async def _blocked_before_plan(
     room: nio.MatrixRoom,
     prepared: _PreparedTextDispatch,
 ) -> bool:
-    requester_user_id = prepared.turn.requester_user_id
+    requester_user_id = prepared.turn.facts.run_requester_id
     visible_responses = controller.deps.visible_responses
     if prepared.command is not None:
         command_owned = await controller.deps.command_executor.execute_if_owned(
             room=room,
             event=prepared.event,
             requester_user_id=requester_user_id,
+            acts_for_requester=prepared.turn.facts.acts_for_requester,
             command=prepared.command,
             target=prepared.dispatch.target,
             handled_turn=prepared.handled_turn,

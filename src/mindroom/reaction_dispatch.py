@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from mindroom.coalescing.ingress_ticket import IngressTicket
     from mindroom.commands.config_confirmation import ConfigConfirmationContext
     from mindroom.constants import RuntimePaths
+    from mindroom.ingress_facts import IngressFacts
     from mindroom.ingress_validation import IngressValidator
     from mindroom.journal_dispatch import JournalDispatcher
     from mindroom.runtime_protocols import SupportsClientConfigOrchestrator
@@ -144,7 +145,7 @@ class ReactionDispatcher:
         event: nio.ReactionEvent,
         consumer: SemanticConsumer | None,
         ticket: IngressTicket,
-        requester_user_id: str,
+        facts: IngressFacts,
     ) -> TurnDispatchOutcome | None:
         """Route an interactive choice only through its source-owned selection."""
         interactive_claimed = consumer is SemanticConsumer.INTERACTIVE_REACTION
@@ -163,8 +164,7 @@ class ReactionDispatcher:
             ticket,
             room,
             selection=selection,
-            requester_user_id=requester_user_id,
-            user_id=event.sender,
+            facts=facts,
             source_event_id=event.event_id,
         )
         return TurnDispatchOutcome.DEFERRED
@@ -175,9 +175,10 @@ class ReactionDispatcher:
         event: nio.ReactionEvent,
         consumer: SemanticConsumer | None,
         ticket: IngressTicket,
-        requester_user_id: str,
+        facts: IngressFacts,
     ) -> TurnDispatchOutcome | None:
         """Route one authorized reaction among the non-config consumers."""
+        requester_user_id = facts.lane_requester_id
         if await self._maybe_handle_approval_reaction(room, event, consumer):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         if consumer is None:
@@ -199,7 +200,7 @@ class ReactionDispatcher:
                     event,
                     consumer,
                     ticket,
-                    requester_user_id,
+                    facts,
                 )
                 if outcome is not None:
                     return outcome
@@ -219,7 +220,7 @@ class ReactionDispatcher:
             event,
             consumer,
             ticket,
-            requester_user_id,
+            facts,
         )
 
     async def _route_reaction(
@@ -254,10 +255,8 @@ class ReactionDispatcher:
             )
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
-        requester_user_id = self.deps.ingress.requester_user_id(
-            sender=event.sender,
-            source=event.source,
-        )
+        facts = self.deps.ingress.classify(event)
+        requester_user_id = facts.lane_requester_id
         ticket = self.deps.reserve_prompt_ingress_order(
             room,
             requester_user_id,
@@ -293,7 +292,7 @@ class ReactionDispatcher:
                     event,
                     semantic_consumer,
                     ticket,
-                    requester_user_id,
+                    facts,
                 )
             ) is not None:
                 return outcome
@@ -334,10 +333,7 @@ class ReactionDispatcher:
         """Route one reaction to its sole durable semantic consumer."""
         semantic_consumer = self.deps.journal_dispatcher.semantic_consumer()
         if semantic_consumer is SemanticConsumer.REACTION_HOOKS:
-            requester_user_id = self.deps.ingress.requester_user_id(
-                sender=event.sender,
-                source=event.source,
-            )
+            requester_user_id = self.deps.ingress.classify(event).lane_requester_id
             await self._emit_authorized_reaction_hooks(room, event, requester_user_id)
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         return await self._route_reaction(room, event, semantic_consumer)

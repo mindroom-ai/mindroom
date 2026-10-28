@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -20,7 +21,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SOURCE_KIND_KEY, VOICE_PREFIX
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import DispatchIngressMetadata
-from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SCHEDULED_SOURCE_KIND, VOICE_SOURCE_KIND
+from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.thread_history_result import thread_history_result
@@ -42,6 +43,7 @@ from tests.conftest import (
     install_generate_response_mock,
     install_runtime_journal_support,
     install_send_response_mock,
+    make_ingress_facts,
     make_matrix_client_mock,
     replace_turn_controller_deps,
     replace_turn_policy_deps,
@@ -1232,10 +1234,9 @@ class TestCommandHandling:
             result = await bot._turn_controller._prepare_dispatch(
                 room,
                 event,
-                "@mindroom_router:localhost",
+                replace(bot._ingress_validator.classify(event), source_kind=SCHEDULED_SOURCE_KIND),
                 event_label="message",
                 handled_turn=TurnRecord.create([event.event_id]),
-                ingress_metadata=DispatchIngressMetadata(source_kind=SCHEDULED_SOURCE_KIND),
             )
 
         assert result is not None
@@ -1297,7 +1298,7 @@ class TestCommandHandling:
             result = await bot._turn_controller._precheck_dispatch_event(room, event)
 
         assert result is not None
-        assert result.requester_user_id == "@mindroom_router:localhost"
+        assert result.facts.lane_requester_id == "@mindroom_router:localhost"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -2016,9 +2017,11 @@ class TestRouterSkipsSingleAgent:
             await dispatch_test_turn(
                 bot._turn_controller,
                 room,
-                _PrecheckedEvent(event=event, requester_user_id="@alice:localhost"),
+                _PrecheckedEvent(
+                    event=event,
+                    facts=make_ingress_facts(event.sender, requester_user_id="@alice:localhost"),
+                ),
                 ingress_metadata=DispatchIngressMetadata(
-                    source_kind=MESSAGE_SOURCE_KIND,
                     coalescing_key=CoalescingKey(
                         room.room_id,
                         "$thread1",

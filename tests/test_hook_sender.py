@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -23,7 +24,7 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
 )
 from mindroom.conversation_resolver import MessageContext
-from mindroom.dispatch_handoff import DispatchIngressMetadata, PreparedIngress
+from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.handled_turns import TurnRecord
@@ -644,7 +645,7 @@ async def test_prepare_dispatch_skips_hook_reemission_but_keeps_hook_dispatch(tm
     dispatch = await bot._turn_controller._prepare_dispatch(
         room,
         event,
-        "@mindroom_router:localhost",
+        bot._ingress_validator.classify(event),
         event_label="message",
         handled_turn=TurnRecord.create([event.event_id]),
     )
@@ -704,7 +705,7 @@ async def test_prepare_dispatch_builds_target_via_conversation_resolver(tmp_path
         dispatch = await bot._turn_controller._prepare_dispatch(
             room,
             event,
-            "@user:localhost",
+            bot._ingress_validator.classify(event),
             event_label="message",
             handled_turn=TurnRecord.create([event.event_id]),
         )
@@ -760,10 +761,9 @@ async def test_prepare_dispatch_uses_trusted_router_context_for_router_relays(tm
     dispatch = await bot._turn_controller._prepare_dispatch(
         room,
         event,
-        "@user:localhost",
+        replace(bot._ingress_validator.classify(event), source_kind="trusted_internal_relay"),
         event_label="message",
         handled_turn=TurnRecord.create([event.event_id]),
-        ingress_metadata=DispatchIngressMetadata(source_kind="trusted_internal_relay"),
     )
 
     assert dispatch is not None
@@ -834,10 +834,9 @@ async def test_prepare_dispatch_keeps_standard_context_for_non_router_internal_r
     dispatch = await bot._turn_controller._prepare_dispatch(
         room,
         event,
-        "@user:localhost",
+        replace(bot._ingress_validator.classify(event), source_kind="trusted_internal_relay"),
         event_label="message",
         handled_turn=TurnRecord.create([event.event_id]),
-        ingress_metadata=DispatchIngressMetadata(source_kind="trusted_internal_relay"),
     )
 
     assert dispatch is not None
@@ -885,11 +884,9 @@ async def test_dispatch_text_message_continues_for_hook_originated_mentions(tmp_
     await dispatch_test_turn(
         bot._turn_controller,
         room,
-        _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
-        ingress_metadata=DispatchIngressMetadata(
-            source_kind="hook",
-            hook_source="hook-plugin:message:received",
-            message_received_depth=1,
+        _PrecheckedEvent(
+            event=event,
+            facts=bot._ingress_validator.classify(event),
         ),
     )
 
@@ -1086,7 +1083,7 @@ async def test_user_message_cannot_spoof_hook_origin_to_bypass_message_received_
     await dispatch_test_turn(
         bot._turn_controller,
         room,
-        _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+        _PrecheckedEvent(event=event, facts=bot._ingress_validator.classify(event)),
     )
 
     assert hook_calls == ["called"]
@@ -1167,7 +1164,7 @@ async def test_dispatch_text_message_runs_message_received_before_command_parsin
     await dispatch_test_turn(
         bot._turn_controller,
         room,
-        _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+        _PrecheckedEvent(event=event, facts=bot._ingress_validator.classify(event)),
     )
 
     assert hook_calls == ["called"]
@@ -1214,7 +1211,7 @@ async def test_message_received_hook_waits_for_reload_and_rechecks_reply_authori
         bot._turn_controller._prepare_dispatch(
             room,
             event,
-            sender_id,
+            bot._ingress_validator.classify(event),
             event_label="message",
             handled_turn=TurnRecord.create([event.event_id]),
         ),
@@ -1268,7 +1265,7 @@ async def test_prepare_dispatch_compacts_all_source_events_when_hooks_suppress_b
     dispatch = await bot._turn_controller._prepare_dispatch(
         room,
         event,
-        "@user:localhost",
+        bot._ingress_validator.classify(event),
         event_label="message",
         handled_turn=TurnRecord.create(["$m1", "$m2"]),
     )
@@ -1458,7 +1455,7 @@ async def test_prepare_dispatch_allows_hook_dispatch_without_mention(tmp_path: P
     dispatch = await bot._turn_controller._prepare_dispatch(
         room,
         event,
-        "@mindroom_router:localhost",
+        bot._ingress_validator.classify(event),
         event_label="message",
         handled_turn=TurnRecord.create([event.event_id]),
     )
@@ -1512,7 +1509,7 @@ async def test_prepare_dispatch_reruns_message_received_for_hook_dispatch_from_n
     dispatch = await bot._turn_controller._prepare_dispatch(
         room,
         event,
-        "@mindroom_router:localhost",
+        bot._ingress_validator.classify(event),
         event_label="message",
         handled_turn=TurnRecord.create([event.event_id]),
     )
@@ -1573,7 +1570,7 @@ async def test_hook_dispatch_from_message_received_reenters_once_and_skips_origi
     dispatch = await bot._turn_controller._prepare_dispatch(
         room,
         event,
-        "@mindroom_router:localhost",
+        bot._ingress_validator.classify(event),
         event_label="message",
         handled_turn=TurnRecord.create([event.event_id]),
     )
@@ -1636,7 +1633,7 @@ async def test_hook_dispatch_from_message_received_stops_reentry_after_first_syn
     dispatch = await bot._turn_controller._prepare_dispatch(
         room,
         event,
-        "@mindroom_router:localhost",
+        bot._ingress_validator.classify(event),
         event_label="message",
         handled_turn=TurnRecord.create([event.event_id]),
     )
@@ -1676,11 +1673,9 @@ async def test_deep_hook_dispatch_stops_before_command_or_response_dispatch(tmp_
     await dispatch_test_turn(
         bot._turn_controller,
         room,
-        _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
-        ingress_metadata=DispatchIngressMetadata(
-            source_kind="hook_dispatch",
-            hook_source="origin-plugin:message:before_response",
-            message_received_depth=2,
+        _PrecheckedEvent(
+            event=event,
+            facts=bot._ingress_validator.classify(event),
         ),
     )
 
@@ -1715,13 +1710,7 @@ async def test_hook_dispatch_command_reply_preserves_original_envelope_metadata(
     await dispatch_test_turn(
         bot._turn_controller,
         room,
-        event,
-        "@mindroom_router:localhost",
-        ingress_metadata=DispatchIngressMetadata(
-            source_kind="hook_dispatch",
-            hook_source="origin-plugin:message:received",
-            message_received_depth=1,
-        ),
+        _PrecheckedEvent(event=event, facts=bot._ingress_validator.classify(event)),
     )
 
     request = bot._delivery_gateway.send_text.await_args.args[0]
@@ -1752,7 +1741,10 @@ async def test_deep_hook_dispatch_does_not_consume_interactive_answer_on_message
     interactive_questions.claim_interactive_text = AsyncMock()
     replace_turn_controller_deps(bot, interactive_questions=interactive_questions)
     bot._turn_controller._precheck_dispatch_event = AsyncMock(
-        return_value=_PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
+        return_value=_PrecheckedEvent(
+            event=event,
+            facts=bot._ingress_validator.classify(event),
+        ),
     )
     bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=_prepared_text_event(event))
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
@@ -1788,7 +1780,10 @@ async def test_first_hop_hook_dispatch_does_not_consume_interactive_answer_on_me
     interactive_questions.claim_interactive_text = AsyncMock()
     replace_turn_controller_deps(bot, interactive_questions=interactive_questions)
     bot._turn_controller._precheck_dispatch_event = AsyncMock(
-        return_value=_PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
+        return_value=_PrecheckedEvent(
+            event=event,
+            facts=bot._ingress_validator.classify(event),
+        ),
     )
     bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=_prepared_text_event(event))
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
@@ -1837,11 +1832,9 @@ async def test_first_hop_plain_hook_from_non_message_hook_still_dispatches(tmp_p
     await dispatch_test_turn(
         bot._turn_controller,
         room,
-        _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
-        ingress_metadata=DispatchIngressMetadata(
-            source_kind="hook",
-            hook_source="restart-notify:bot:ready",
-            message_received_depth=1,
+        _PrecheckedEvent(
+            event=event,
+            facts=bot._ingress_validator.classify(event),
         ),
     )
 
@@ -1871,6 +1864,10 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
                     "encoding": "matrix_event_content_json",
                 },
                 "url": "mxc://server/inbound-sidecar",
+                # A long text's preview carries its classification keys; the sidecar holds the full text.
+                SOURCE_KIND_KEY: "hook_dispatch",
+                "com.mindroom.hook_source": "origin-plugin:bot:ready",
+                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
             },
         },
     )
@@ -1905,7 +1902,7 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
             room,
             _PrecheckedEvent(
                 event=sidecar_event,
-                requester_user_id="@mindroom_router:localhost",
+                facts=bot._ingress_validator.classify(sidecar_event),
             ),
             ticket=ticket,
             coalescing_thread_id=None,
@@ -1938,6 +1935,10 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
                     "encoding": "matrix_event_content_json",
                 },
                 "url": "mxc://server/inbound-sidecar",
+                # A long text's preview carries its classification keys; the sidecar holds the full text.
+                SOURCE_KIND_KEY: "hook_dispatch",
+                "com.mindroom.hook_source": "origin-plugin:message:before_response",
+                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 2,
             },
         },
     )
@@ -1972,7 +1973,7 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
             room,
             _PrecheckedEvent(
                 event=sidecar_event,
-                requester_user_id="@mindroom_router:localhost",
+                facts=bot._ingress_validator.classify(sidecar_event),
             ),
             ticket=ticket,
             coalescing_thread_id=None,
@@ -2011,11 +2012,9 @@ async def test_first_hop_prepared_text_hook_dispatch_still_reaches_dispatch(tmp_
     await dispatch_test_turn(
         bot._turn_controller,
         room,
-        _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
-        ingress_metadata=DispatchIngressMetadata(
-            source_kind="hook_dispatch",
-            hook_source="origin-plugin:bot:ready",
-            message_received_depth=1,
+        _PrecheckedEvent(
+            event=event,
+            facts=bot._ingress_validator.classify(event),
         ),
     )
 
@@ -2052,11 +2051,9 @@ async def test_deep_prepared_text_hook_dispatch_stops_before_dispatch(tmp_path: 
     await dispatch_test_turn(
         bot._turn_controller,
         room,
-        _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
-        ingress_metadata=DispatchIngressMetadata(
-            source_kind="hook_dispatch",
-            hook_source="origin-plugin:message:before_response",
-            message_received_depth=2,
+        _PrecheckedEvent(
+            event=event,
+            facts=bot._ingress_validator.classify(event),
         ),
     )
 
@@ -2097,7 +2094,7 @@ async def test_prepare_dispatch_still_filters_plain_hook_without_mention(tmp_pat
     dispatch = await bot._turn_controller._prepare_dispatch(
         room,
         event,
-        "@mindroom_router:localhost",
+        bot._ingress_validator.classify(event),
         event_label="message",
         handled_turn=TurnRecord.create(
             [event.event_id],
@@ -2144,12 +2141,12 @@ async def test_router_precheck_allows_self_authored_hook_dispatch_without_reques
     prechecked = await bot._turn_controller._precheck_dispatch_event(room, event)
 
     assert prechecked is not None
-    assert prechecked.requester_user_id == "@mindroom_router:localhost"
+    assert prechecked.facts.lane_requester_id == "@mindroom_router:localhost"
 
     dispatch = await bot._turn_controller._prepare_dispatch(
         room,
         prechecked.event,
-        prechecked.requester_user_id,
+        prechecked.facts,
         event_label="message",
         handled_turn=TurnRecord.create([event.event_id]),
     )

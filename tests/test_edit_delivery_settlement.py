@@ -13,6 +13,7 @@ import pytest
 
 from mindroom.cancellation import request_task_cancel
 from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.history.turn_recorder import TurnRecorder
@@ -22,6 +23,7 @@ from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
 from tests.conftest import (
+    make_ingress_facts,
     patch_response_runner_module,
     unwrap_extracted_collaborator,
 )
@@ -169,7 +171,7 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
             nio.MatrixRoom(room_id, bot.matrix_id.full_id),
             event,
             EventInfo.from_event(event.source),
-            "@user:localhost",
+            make_ingress_facts(event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id="@user:localhost"),
         )
         (task,) = runner._inbox_response_tasks
         try:

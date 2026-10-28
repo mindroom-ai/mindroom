@@ -96,6 +96,7 @@ from tests.conftest import (
     install_model_providers,
     install_runtime_journal_support,
     make_conversation_reader_mock,
+    make_ingress_facts,
     make_matrix_client_mock,
     make_membership_stub,
     make_pending_event,
@@ -527,7 +528,7 @@ def test_active_follow_up_batch_prompt_uses_queued_receive_order() -> None:
             room,
             requester_user_id="@alice:localhost",
             source_kind=MESSAGE_SOURCE_KIND,
-            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            active_follow_up=True,
         ),
         make_pending_event(
             PreparedIngress(
@@ -540,7 +541,7 @@ def test_active_follow_up_batch_prompt_uses_queued_receive_order() -> None:
             room,
             requester_user_id="@alice:localhost",
             source_kind=MESSAGE_SOURCE_KIND,
-            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            active_follow_up=True,
         ),
         make_pending_event(
             PreparedIngress(
@@ -553,7 +554,7 @@ def test_active_follow_up_batch_prompt_uses_queued_receive_order() -> None:
             room,
             requester_user_id="@alice:localhost",
             source_kind=MESSAGE_SOURCE_KIND,
-            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            active_follow_up=True,
         ),
     ]
 
@@ -563,7 +564,7 @@ def test_active_follow_up_batch_prompt_uses_queued_receive_order() -> None:
     )
 
     assert batch.handled_turn.source_event_ids == ("$a1", "$a2", "$a3")
-    assert batch.requester_user_id == "@alice:localhost"
+    assert batch.facts.run_requester_id == "@alice:localhost"
     assert batch.handled_turn.source_event_prompts == {
         "$a1": "A first",
         "$a2": "A <context> & more",
@@ -2417,7 +2418,10 @@ async def test_reserved_command_follow_up_cleanup_when_dispatch_returns(tmp_path
             await dispatch_test_turn(
                 bot._turn_controller,
                 room,
-                _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+                _PrecheckedEvent(
+                    event=event,
+                    facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
+                ),
                 queued_notice_reservation=reservation,
             )
     finally:
@@ -2479,7 +2483,10 @@ async def test_reserved_superseded_follow_up_cleanup_when_dispatch_returns(tmp_p
             await dispatch_test_turn(
                 bot._turn_controller,
                 room,
-                _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+                _PrecheckedEvent(
+                    event=event,
+                    facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
+                ),
                 queued_notice_reservation=reservation,
             )
     finally:
@@ -2504,7 +2511,10 @@ async def test_reserved_follow_up_cleanup_when_hook_suppression_returns_before_d
             await dispatch_test_turn(
                 bot._turn_controller,
                 room,
-                _PrecheckedEvent(event=case.event, requester_user_id="@user:localhost"),
+                _PrecheckedEvent(
+                    event=case.event,
+                    facts=make_ingress_facts(case.event.sender, requester_user_id="@user:localhost"),
+                ),
                 queued_notice_reservation=case.reservation,
             )
     finally:
@@ -2536,7 +2546,10 @@ async def test_reserved_follow_up_cleanup_when_plan_ignores_before_response(tmp_
             await dispatch_test_turn(
                 bot._turn_controller,
                 room,
-                _PrecheckedEvent(event=case.event, requester_user_id="@user:localhost"),
+                _PrecheckedEvent(
+                    event=case.event,
+                    facts=make_ingress_facts(case.event.sender, requester_user_id="@user:localhost"),
+                ),
                 queued_notice_reservation=case.reservation,
             )
     finally:
@@ -2568,7 +2581,10 @@ async def test_reserved_follow_up_cleanup_when_route_returns_before_response(tmp
             await dispatch_test_turn(
                 bot._turn_controller,
                 room,
-                _PrecheckedEvent(event=case.event, requester_user_id="@user:localhost"),
+                _PrecheckedEvent(
+                    event=case.event,
+                    facts=make_ingress_facts(case.event.sender, requester_user_id="@user:localhost"),
+                ),
                 queued_notice_reservation=case.reservation,
             )
     finally:
@@ -2611,7 +2627,10 @@ async def test_reserved_follow_up_cleanup_when_dispatch_raises_before_lifecycle(
             await dispatch_test_turn(
                 bot._turn_controller,
                 room,
-                _PrecheckedEvent(event=case.event, requester_user_id="@user:localhost"),
+                _PrecheckedEvent(
+                    event=case.event,
+                    facts=make_ingress_facts(case.event.sender, requester_user_id="@user:localhost"),
+                ),
                 queued_notice_reservation=case.reservation,
             )
     finally:
@@ -2652,7 +2671,10 @@ async def test_reserved_follow_up_cleanup_when_dispatch_cancelled_before_lifecyc
             await dispatch_test_turn(
                 bot._turn_controller,
                 room,
-                _PrecheckedEvent(event=case.event, requester_user_id="@user:localhost"),
+                _PrecheckedEvent(
+                    event=case.event,
+                    facts=make_ingress_facts(case.event.sender, requester_user_id="@user:localhost"),
+                ),
                 queued_notice_reservation=case.reservation,
             )
     finally:
@@ -2731,7 +2753,7 @@ async def test_reserved_follow_up_cleanup_when_handle_prepared_turn_fails_before
                     event,
                     room,
                     source_kind=MESSAGE_SOURCE_KIND,
-                    dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+                    active_follow_up=True,
                     notice=reservation,
                 ),
             ],
@@ -2776,7 +2798,7 @@ async def test_coalesced_batch_consumes_queued_notice_for_batch_thread(tmp_path:
     voice_event = replace(
         _prepared_text_event(event_id="$voice"),
         body="🎤 voice transcript",
-        source_kind_override=VOICE_SOURCE_KIND,
+        payload_trusted=True,
     )
     captured_dispatches: list[str] = []
 
@@ -2800,14 +2822,14 @@ async def test_coalesced_batch_consumes_queued_notice_for_batch_thread(tmp_path:
                     typed_event,
                     room,
                     source_kind=MESSAGE_SOURCE_KIND,
-                    dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+                    active_follow_up=True,
                     notice=pre_reservation,
                 ),
                 make_pending_event(
                     voice_event,
                     room,
                     source_kind=VOICE_SOURCE_KIND,
-                    dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+                    active_follow_up=True,
                     notice=post_reservation,
                 ),
             ],
@@ -2836,7 +2858,7 @@ async def test_room_scoped_root_voice_consumes_final_target_queued_notice(tmp_pa
     voice_event = replace(
         _prepared_text_event(event_id="$voice-root"),
         body="🎤 voice follow-up",
-        source_kind_override=VOICE_SOURCE_KIND,
+        payload_trusted=True,
     )
     target = bot._turn_controller.deps.resolver.build_message_target(
         room_id=room.room_id,
@@ -2872,7 +2894,7 @@ async def test_room_scoped_root_voice_consumes_final_target_queued_notice(tmp_pa
                     voice_event,
                     room,
                     source_kind=VOICE_SOURCE_KIND,
-                    dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+                    active_follow_up=True,
                     notice=voice_reservation,
                 ),
             ],
@@ -2920,9 +2942,9 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
                 await bot._turn_controller._enqueue_prepared_text_for_dispatch(
                     room=room,
                     prepared_event=event,
+                    facts=make_ingress_facts(event.sender),
                     envelope=envelope,
                     coalescing_thread_id="$thread",
-                    requester_user_id="@user:localhost",
                     ticket=ticket,
                 )
         finally:
@@ -3080,7 +3102,7 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
         await dispatch_test_turn(
             bot._turn_controller,
             room,
-            _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+            _PrecheckedEvent(event=event, facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost")),
         )
 
     assert not bot._turn_store.is_handled("$older")

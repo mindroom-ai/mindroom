@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -23,8 +23,9 @@ from mindroom.coalescing.batch import (
     RequesterCoalescingOwner,
     active_follow_up_coalescing_key,
     build_prepared_turn,
+    requester_coalescing_key,
 )
-from mindroom.coalescing.gate import CoalescingGate, ReadyPendingEvent, is_coalescing_exempt_source_kind
+from mindroom.coalescing.gate import CoalescingGate, ReadyPendingEvent
 from mindroom.coalescing.ingress_lanes import ReceiptLaneKey
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -50,6 +51,7 @@ from mindroom.dispatch_handoff import (
     DispatchIngressMetadata,
     DispatchPayloadMetadata,
     PreparedIngress,
+    prepare_media_ingress,
 )
 from mindroom.dispatch_replay_guard import has_newer_unresponded_in_thread
 from mindroom.dispatch_source import (
@@ -58,6 +60,7 @@ from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
+    source_kind_bypasses_coalescing,
 )
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import (
@@ -79,6 +82,7 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.journal_ingress import _inbound_event
+from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.room_membership import cached_joined_member_ids, room_membership_is_complete
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
@@ -102,6 +106,7 @@ from tests.conftest import (
     dispatch_context_result,
     install_generate_response_mock,
     install_send_response_mock,
+    make_ingress_facts,
     make_matrix_client_mock,
     make_pending_event,
     make_visible_message,
@@ -124,6 +129,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+    from mindroom.ingress_facts import IngressFacts
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -255,13 +261,13 @@ async def _enqueue_for_dispatch(
     *,
     source_kind: str,
     requester_user_id: str,
-    dispatch_policy_source_kind: str | None = None,
+    active_follow_up: bool = False,
     hook_source: str | None = None,
     message_received_depth: int = 0,
     coalescing_key: CoalescingKey | None = None,
-    trust_internal_payload_metadata: bool | None = None,
+    payload_trusted: bool = False,
 ) -> _IngressAdmissionOutcome:
-    """Test helper for the reserved Matrix-ingress enqueue path."""
+    """Test helper for the reserved Matrix-ingress enqueue path, classified as ingress classifies it."""
     if isinstance(event, nio.RoomMessageText):
         event = PreparedIngress(
             sender=event.sender,
@@ -270,6 +276,20 @@ async def _enqueue_for_dispatch(
             source=event.source,
             server_timestamp=event.server_timestamp,
         )
+    if is_matrix_media_dispatch_event(event):
+        event = prepare_media_ingress(event)
+    event = replace(event, active_follow_up=active_follow_up, payload_trusted=payload_trusted)
+    facts = bot._ingress_validator.classify(event)
+    facts = replace(
+        facts,
+        source_kind=source_kind,
+        lane_requester_id=requester_user_id,
+        requester_entity_name=bot._ingress_validator.managed_entity_name_for_sender(
+            facts.acting_requester_id or requester_user_id,
+        ),
+        hook_source=hook_source or facts.hook_source,
+        message_received_depth=message_received_depth or facts.message_received_depth,
+    )
     ticket = bot._turn_controller.reserve_prompt_ingress_order(room, requester_user_id)
     try:
         # Ingress claims a source before it reaches the gate.
@@ -277,14 +297,14 @@ async def _enqueue_for_dispatch(
         return await bot._turn_controller._enqueue_for_dispatch(
             event,
             room,
+            facts=facts,
             ticket=ticket,
-            source_kind=source_kind,
-            requester_user_id=requester_user_id,
-            dispatch_policy_source_kind=dispatch_policy_source_kind,
-            hook_source=hook_source,
-            message_received_depth=message_received_depth,
-            coalescing_key=coalescing_key,
-            trust_internal_payload_metadata=trust_internal_payload_metadata,
+            coalescing_key=coalescing_key
+            or requester_coalescing_key(
+                room.room_id,
+                await bot._conversation_resolver.coalescing_thread_id(room, event),
+                requester_user_id,
+            ),
         )
     finally:
         ticket.close()
@@ -299,7 +319,7 @@ async def _admit_ready(
     await gate.admit(
         key,
         source_event_id=pending_event.event.event_id,
-        source_kind=pending_event.event.source_kind,
+        source_kind=pending_event.facts.source_kind,
         ready_result=ReadyPendingEvent(pending_event=pending_event),
     )
 
@@ -1206,7 +1226,7 @@ def test_build_prepared_turn_prefers_media_source_kind_over_text_primary() -> No
 
     assert batch.event.event_id == text_pending.event.event_id
     assert batch.event.source is text_pending.event.source
-    assert batch.ingress.source_kind == "image"
+    assert batch.facts.source_kind == "image"
 
 
 def test_build_prepared_turn_prefers_voice_source_kind_over_media_and_text() -> None:
@@ -1233,7 +1253,7 @@ def test_build_prepared_turn_prefers_voice_source_kind_over_media_and_text() -> 
 
     assert batch.event.event_id == text_pending.event.event_id
     assert batch.event.source is text_pending.event.source
-    assert batch.ingress.source_kind == "voice"
+    assert batch.facts.source_kind == "voice"
 
 
 @pytest.mark.asyncio
@@ -1606,8 +1626,8 @@ async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: P
         idle.set()
         await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in calls] == [["$a"], ["$b"]])
 
-    assert all(batch.ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND for batch in calls)
-    assert [(batch.requester_user_id, batch.handled_turn.requester_id) for batch in calls] == [
+    assert all(batch.ingress.active_follow_up for batch in calls)
+    assert [(batch.facts.run_requester_id, batch.handled_turn.requester_id) for batch in calls] == [
         ("@alice:localhost", "@alice:localhost"),
         ("@bob:localhost", "@bob:localhost"),
     ]
@@ -2107,12 +2127,12 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
     async def fake_prepare_dispatch(
         _room: nio.MatrixRoom,
         event: DispatchEvent,
-        requester_user_id: str,
+        facts: IngressFacts,
         **_kwargs: object,
     ) -> object:
         dispatch = _prepared_dispatch(
             event_id=event.event_id,
-            requester_user_id=requester_user_id,
+            requester_user_id=facts.run_requester_id,
             body=event.body,
             thread_id="$thread",
             dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -3138,13 +3158,13 @@ async def test_enqueue_for_dispatch_returns_while_drain_dispatch_blocks(tmp_path
 
 def test_automation_source_kinds_are_coalescing_exempt() -> None:
     """Dispatch automation source kinds as FIFO barriers."""
-    scheduled = _text_event(event_id="$scheduled", body="scheduled", source_kind="scheduled")
-    hook = _text_event(event_id="$hook", body="hook", source_kind="hook")
-    hook_dispatch = _text_event(event_id="$hook_dispatch", body="hook dispatch", source_kind="hook_dispatch")
+    _text_event(event_id="$scheduled", body="scheduled", source_kind="scheduled")
+    _text_event(event_id="$hook", body="hook", source_kind="hook")
+    _text_event(event_id="$hook_dispatch", body="hook dispatch", source_kind="hook_dispatch")
 
-    assert is_coalescing_exempt_source_kind(scheduled, "scheduled") is True
-    assert is_coalescing_exempt_source_kind(hook, "hook") is True
-    assert is_coalescing_exempt_source_kind(hook_dispatch, "hook_dispatch") is True
+    assert source_kind_bypasses_coalescing("scheduled") is True
+    assert source_kind_bypasses_coalescing("hook") is True
+    assert source_kind_bypasses_coalescing("hook_dispatch") is True
 
 
 @pytest.mark.asyncio
@@ -3194,7 +3214,7 @@ async def test_pending_dispatch_policy_preserves_active_followup_without_bypassi
         body="voice follow-up",
         source={"content": {"body": "voice follow-up", SOURCE_KIND_KEY: "voice"}},
         server_timestamp=1000,
-        source_kind_override="voice",
+        payload_trusted=True,
     )
     calls: list[PreparedTurn] = []
 
@@ -3214,14 +3234,14 @@ async def test_pending_dispatch_policy_preserves_active_followup_without_bypassi
             event,
             room,
             source_kind="voice",
-            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            active_follow_up=True,
         ),
     )
     await gate.drain_all()
 
-    assert calls[0].ingress.source_kind == "voice"
-    assert calls[0].ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-    assert calls[0].event.source_kind_override == "voice"
+    assert calls[0].facts.source_kind == "voice"
+    assert calls[0].ingress.active_follow_up
+    assert calls[0].event.payload_trusted
 
 
 @pytest.mark.asyncio
@@ -3240,26 +3260,14 @@ async def test_untrusted_source_kind_content_does_not_bypass_or_promote(
         event_id=f"$spoof_{spoofed_source_kind}",
         source_kind=spoofed_source_kind,
     )
-    calls: list[tuple[PreparedIngress, DispatchIngressMetadata]] = []
+    calls: list[PreparedTurn] = []
 
-    async def record_dispatch(
-        _room: nio.MatrixRoom,
-        dispatched_event: nio.RoomMessageImage | PreparedIngress,
-        _requester_user_id: str,
-        *,
-        media_events: list[object] | None = None,
-        handled_turn: TurnRecord | None = None,
-        queued_notice_reservation: object | None = None,
-        ingress_metadata: DispatchIngressMetadata,
-        **_metadata: object,
-    ) -> None:
-        _ = media_events, handled_turn, queued_notice_reservation
-        assert isinstance(dispatched_event, PreparedIngress)
-        calls.append((dispatched_event, ingress_metadata))
+    async def record_dispatch(_controller: object, turn: PreparedTurn) -> None:
+        calls.append(turn)
 
     with patch(
         "mindroom.turn_controller.dispatch_text_message",
-        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+        new=AsyncMock(side_effect=record_dispatch),
     ):
         await _enqueue_for_dispatch(
             bot,
@@ -3274,9 +3282,8 @@ async def test_untrusted_source_kind_content_does_not_bypass_or_promote(
         await bot.prepare_for_sync_shutdown()
 
     assert len(calls) == 1
-    dispatched, ingress = calls[0]
-    assert dispatched.event_id == f"$spoof_{spoofed_source_kind}"
-    assert ingress.source_kind == IMAGE_SOURCE_KIND
+    assert calls[0].event.event_id == f"$spoof_{spoofed_source_kind}"
+    assert calls[0].facts.source_kind == IMAGE_SOURCE_KIND
 
 
 @pytest.mark.asyncio
@@ -5396,9 +5403,7 @@ def test_replay_guard_does_not_supersede_non_interactive_origin_turns() -> None:
         "@mindroom_general:localhost",
         [newer_msg],
         may_be_superseded_by_newer_requester_turn=False,
-        requester_user_id_for_event=lambda sender, _source: sender,
-        is_visible_router_voice_echo=lambda _sender, _content: False,
-        sender_is_trusted_for_ingress_metadata=lambda _sender: True,
+        classify=lambda sender, _source: make_ingress_facts(sender, sender_entity_name="general"),
         is_handled=lambda _event_id: False,
         logger=MagicMock(),
     )
@@ -5436,15 +5441,14 @@ def test_full_history_replay_guard_ignores_visible_router_voice_echo() -> None:
         "@user:localhost",
         [visible_echo],
         may_be_superseded_by_newer_requester_turn=True,
-        requester_user_id_for_event=lambda sender, source: (
-            source["content"].get(ORIGINAL_SENDER_KEY) if sender == "@mindroom_router:localhost" else sender
+        classify=lambda sender, source: make_ingress_facts(
+            sender,
+            source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            requester_user_id=source["content"][ORIGINAL_SENDER_KEY],
+            original_sender=source["content"][ORIGINAL_SENDER_KEY],
+            original_sender_is_human=True,
+            sender_entity_name="router",
         ),
-        is_visible_router_voice_echo=lambda sender, content: (
-            sender == "@mindroom_router:localhost"
-            and isinstance(content, dict)
-            and content.get(VISIBLE_ROUTER_VOICE_ECHO_KEY) is True
-        ),
-        sender_is_trusted_for_ingress_metadata=lambda sender: sender == "@mindroom_router:localhost",
         is_handled=lambda _event_id: False,
         logger=MagicMock(),
     )
@@ -5482,12 +5486,13 @@ def test_full_history_replay_guard_counts_non_router_visible_echo_marker() -> No
         "@user:localhost",
         [marked_helper_relay],
         may_be_superseded_by_newer_requester_turn=True,
-        requester_user_id_for_event=lambda sender, _source: (
-            "@user:localhost" if sender == "@mindroom_helper:localhost" else sender
-        ),
-        is_visible_router_voice_echo=lambda sender, _content: sender == "@mindroom_router:localhost",
-        sender_is_trusted_for_ingress_metadata=lambda sender: (
-            sender in {"@mindroom_helper:localhost", "@mindroom_router:localhost"}
+        classify=lambda sender, _source: make_ingress_facts(
+            sender,
+            source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            requester_user_id="@user:localhost",
+            original_sender="@user:localhost",
+            original_sender_is_human=True,
+            sender_entity_name="helper",
         ),
         is_handled=lambda _event_id: False,
         logger=MagicMock(),
@@ -6047,7 +6052,7 @@ def test_prepared_turn_preserves_voice_fallback_metadata() -> None:
                 voice_event,
                 room,
                 source_kind="voice",
-                trust_internal_payload_metadata=True,
+                payload_trusted=True,
             ),
             make_pending_event(text_event, room, source_kind="message"),
         ],
@@ -6073,13 +6078,12 @@ def test_single_prepared_turn_preserves_source_kind() -> None:
                 event,
                 room,
                 source_kind="message",
-                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+                active_follow_up=True,
             ),
         ],
     )
-    assert batch.ingress.source_kind == "message"
-    assert batch.ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-    assert batch.event.source_kind_override is None
+    assert batch.facts.source_kind == "message"
+    assert batch.ingress.active_follow_up
 
 
 def test_single_text_turn_preserves_dispatch_policy_source_kind() -> None:
@@ -6097,14 +6101,14 @@ def test_single_text_turn_preserves_dispatch_policy_source_kind() -> None:
         event,
         room,
         source_kind="message",
-        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        active_follow_up=True,
     )
     batch = build_prepared_turn(
         CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
         [pending],
     )
-    assert batch.ingress.source_kind == "message"
-    assert batch.ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+    assert batch.facts.source_kind == "message"
+    assert batch.ingress.active_follow_up
     assert batch.event.event_id == pending.event.event_id
     assert batch.event.source is pending.event.source
 
@@ -6138,7 +6142,7 @@ def test_prepared_turn_preserves_original_sender() -> None:
                 relay_event,
                 room,
                 source_kind="message",
-                trust_internal_payload_metadata=True,
+                payload_trusted=True,
             ),
             make_pending_event(followup, room, source_kind="message"),
         ],
@@ -6181,13 +6185,13 @@ def test_prepared_turn_preserves_attachment_ids() -> None:
                 event_with_attachment,
                 room,
                 source_kind="message",
-                trust_internal_payload_metadata=True,
+                payload_trusted=True,
             ),
             make_pending_event(
                 event_with_another,
                 room,
                 source_kind="message",
-                trust_internal_payload_metadata=True,
+                payload_trusted=True,
             ),
         ],
     )
@@ -6317,7 +6321,6 @@ async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
             "content": {"msgtype": "m.text", "body": "scheduled task output", SOURCE_KIND_KEY: "scheduled"},
         },
         server_timestamp=1000,
-        source_kind_override="scheduled",
     )
     dispatch = _prepared_dispatch(event_id="$s1", body="scheduled task output", source_kind="scheduled")
 
@@ -6368,7 +6371,6 @@ async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
         body="hook result",
         source={"content": {"msgtype": "m.text", "body": "hook result", SOURCE_KIND_KEY: "hook"}},
         server_timestamp=1000,
-        source_kind_override="hook",
     )
     dispatch = _prepared_dispatch(event_id="$h1", body="hook result", source_kind="hook")
 
@@ -6419,7 +6421,6 @@ async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
         body="scheduled fire 1",
         source={"content": {"msgtype": "m.text", "body": "scheduled fire 1", SOURCE_KIND_KEY: "scheduled"}},
         server_timestamp=1000,
-        source_kind_override="scheduled",
     )
     dispatch = _prepared_dispatch(event_id="$s1", body="scheduled fire 1", source_kind="scheduled")
 
@@ -6476,7 +6477,6 @@ async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -
         body="batched message",
         source={"content": {"msgtype": "m.text", "body": "batched message"}},
         server_timestamp=1000,
-        source_kind_override="user",
     )
     dispatch = _prepared_dispatch(event_id="$m1", body="batched message")
 
@@ -6519,7 +6519,6 @@ async def test_coalesced_media_batch_suppressed_by_replay_snapshot(tmp_path: Pat
         body="[Attached image]",
         source={"content": {"msgtype": "m.text", "body": "[Attached image]"}},
         server_timestamp=1000,
-        source_kind_override="image",
     )
     dispatch = _prepared_dispatch(event_id="$img1", body="[Attached image]")
 
@@ -6576,16 +6575,15 @@ async def test_normal_text_command_still_dispatches_as_command(tmp_path: Path) -
     dispatch = _prepared_dispatch(event_id="$c1", body="!schedule tomorrow at 9am turn off the lights")
 
     handle_cmd_mock = AsyncMock(return_value=True)
+    prepare_dispatch_mock = AsyncMock(return_value=prepared_dispatch_result(dispatch))
     with (
-        patch.object(
-            bot._turn_controller,
-            "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
-        ),
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=prepare_dispatch_mock),
         patch.object(bot._command_turn_executor, "execute_if_owned", new=handle_cmd_mock),
     ):
         await dispatch_test_turn(bot._turn_controller, room, command_event, "@user:localhost")
 
+    # A command reads only the conversation it can without waiting on thread history.
+    assert prepare_dispatch_mock.await_args.kwargs["use_command_context"] is True
     handle_cmd_mock.assert_awaited_once()
 
 
@@ -6606,8 +6604,7 @@ async def test_active_voice_follow_up_preserves_voice_command_policy(tmp_path: P
             },
         },
         server_timestamp=1000,
-        source_kind="voice",
-        source_kind_override="voice",
+        payload_trusted=True,
     )
     dispatch = _prepared_dispatch(
         event_id="$voice_command",
@@ -6631,7 +6628,13 @@ async def test_active_voice_follow_up_preserves_voice_command_policy(tmp_path: P
         patch.object(bot._command_turn_executor, "execute_if_owned", new=execute_command_mock),
         patch.object(bot._turn_controller, "_execute_response_action", new=execute_response_mock),
     ):
-        await dispatch_test_turn(bot._turn_controller, room, voice_command_event, "@user:localhost")
+        await dispatch_test_turn(
+            bot._turn_controller,
+            room,
+            voice_command_event,
+            "@user:localhost",
+            facts=make_ingress_facts("@user:localhost", source_kind="voice"),
+        )
 
     prepare_dispatch_mock.assert_awaited_once()
     assert prepare_dispatch_mock.await_args.kwargs["use_command_context"] is False
@@ -6850,14 +6853,11 @@ async def _capture_gate_dispatches(
                 cast("nio.RoomMessageText | PreparedIngress", event),
                 room,
                 source_kind=source_kind,
-                dispatch_policy_source_kind=dispatch_policy_source_kind,
+                active_follow_up=dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
                 hook_source=cast("str | None", metadata.get("hook_source")),
                 message_received_depth=cast("int", metadata.get("message_received_depth", 0)),
                 requester_user_id=cast("str", metadata.get("requester_user_id", "@user:localhost")),
-                trust_internal_payload_metadata=cast(
-                    "bool | None",
-                    metadata.get("trust_internal_payload_metadata"),
-                ),
+                payload_trusted=cast("bool", metadata.get("payload_trusted", False)),
             )
         await bot._coalescing_gate.drain_all()
 
@@ -6876,7 +6876,7 @@ async def test_gate_final_envelope_preserves_active_voice_source_and_policy(tmp_
         body="!help",
         source={"content": {"msgtype": "m.text", "body": "!help", SOURCE_KIND_KEY: "voice"}},
         server_timestamp=1000,
-        source_kind_override="voice",
+        payload_trusted=True,
     )
 
     envelopes, media_batches, _payload_requests = await _capture_gate_dispatches(
@@ -6909,7 +6909,7 @@ async def test_gate_final_envelope_preserves_non_active_voice_command_policy(tmp
         body="!help",
         source={"content": {"msgtype": "m.text", "body": "!help", SOURCE_KIND_KEY: "voice"}},
         server_timestamp=1000,
-        source_kind_override="voice",
+        payload_trusted=True,
     )
 
     envelopes, _media_batches, _payload_requests = await _capture_gate_dispatches(
@@ -7007,6 +7007,7 @@ async def test_trusted_router_relay_context_uses_handoff_ingress_metadata(tmp_pa
         event_id="$router-relay",
         body="router relay",
         sender="@mindroom_router:localhost",
+        source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         original_sender="@external:example.org",
     )
     trusted_context = MessageContext(
@@ -7173,13 +7174,13 @@ async def test_coalesced_attachment_ids_reach_envelope_and_model_payload(tmp_pat
                 first,
                 "message",
                 None,
-                {"coalescing_thread_id": "$thread", "trust_internal_payload_metadata": True},
+                {"coalescing_thread_id": "$thread", "payload_trusted": True},
             ),
             (
                 second,
                 "message",
                 None,
-                {"coalescing_thread_id": "$thread", "trust_internal_payload_metadata": True},
+                {"coalescing_thread_id": "$thread", "payload_trusted": True},
             ),
         ],
     )
@@ -7339,7 +7340,7 @@ async def test_untrusted_synthetic_voice_payload_metadata_spoofing_is_not_truste
             },
         },
         server_timestamp=1000,
-        source_kind_override="voice",
+        payload_trusted=True,
     )
     captured_extra_content: list[object] = []
 
@@ -7378,14 +7379,14 @@ async def test_trusted_voice_normalized_payload_metadata_reaches_envelope_and_pa
             },
         },
         server_timestamp=1000,
-        source_kind_override="voice",
+        payload_trusted=True,
     )
     captured_extra_content: list[object] = []
 
     envelopes, _media_batches, payload_requests = await _capture_gate_dispatches(
         bot,
         room,
-        [(voice_event, "voice", None, {"trust_internal_payload_metadata": True})],
+        [(voice_event, "voice", None, {"payload_trusted": True})],
         captured_plan_extra_content=captured_extra_content,
     )
 
@@ -7424,14 +7425,14 @@ async def test_trusted_voice_transcript_metadata_reaches_envelope_and_payload(
             },
         },
         server_timestamp=1000,
-        source_kind_override="voice",
+        payload_trusted=True,
     )
     captured_extra_content: list[object] = []
 
     envelopes, _media_batches, payload_requests = await _capture_gate_dispatches(
         bot,
         room,
-        [(voice_event, "voice", None, {"trust_internal_payload_metadata": True})],
+        [(voice_event, "voice", None, {"payload_trusted": True})],
         captured_plan_extra_content=captured_extra_content,
     )
 
@@ -7467,7 +7468,7 @@ async def test_coalesced_root_voice_attachment_is_trusted_when_later_text_is_pri
             },
         },
         server_timestamp=1000,
-        source_kind_override="voice",
+        payload_trusted=True,
     )
     text_event = _text_event(event_id="$typed-root", body="typed follow-up", server_timestamp=1001)
 
@@ -7479,7 +7480,7 @@ async def test_coalesced_root_voice_attachment_is_trusted_when_later_text_is_pri
                 voice_event,
                 "voice",
                 None,
-                {"coalescing_thread_id": None, "trust_internal_payload_metadata": True},
+                {"coalescing_thread_id": None, "payload_trusted": True},
             ),
             (text_event, "message", None, {"coalescing_thread_id": None}),
         ],
@@ -7578,7 +7579,10 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
         ticket = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
         handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
             room,
-            _PrecheckedEvent(event=sidecar_event, requester_user_id="@user:localhost"),
+            _PrecheckedEvent(
+                event=sidecar_event,
+                facts=make_ingress_facts(sidecar_event.sender, requester_user_id="@user:localhost"),
+            ),
             ticket=ticket,
             coalescing_thread_id="$thread",
         )
@@ -7641,7 +7645,11 @@ async def test_sidecar_hydration_preserves_trusted_attachment_metadata(tmp_path:
             room,
             hydrated,
             "@requester:localhost",
-            ingress_metadata=DispatchIngressMetadata(source_kind="scheduled"),
+            facts=replace(
+                bot._ingress_validator.classify(hydrated),
+                source_kind="scheduled",
+                lane_requester_id="@requester:localhost",
+            ),
             payload_metadata=DispatchPayloadMetadata(attachment_ids=None),
         )
 
@@ -7739,7 +7747,7 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
         ticket = bot._turn_controller.reserve_prompt_ingress_order(room, sidecar.sender)
         outcome = await bot._turn_controller._dispatch_file_sidecar_text_preview(
             room,
-            _PrecheckedEvent(event=sidecar, requester_user_id=sidecar.sender),
+            _PrecheckedEvent(event=sidecar, facts=make_ingress_facts(sidecar.sender, requester_user_id=sidecar.sender)),
             ticket=ticket,
             coalescing_thread_id=None,
         )
@@ -7804,7 +7812,7 @@ async def test_router_early_skip_keeps_sidecar_preview_for_hydration(tmp_path: P
     should_skip = await bot._turn_controller._should_skip_router_before_shared_ingress_work(
         room,
         sidecar_preview,
-        requester_user_id="@user:localhost",
+        facts=make_ingress_facts(sidecar_preview.sender, requester_user_id="@user:localhost"),
         thread_id="$thread",
     )
 
@@ -7848,7 +7856,7 @@ async def test_router_early_skip_only_honors_joined_non_agent_mentions(
     should_skip = await bot._turn_controller._should_skip_router_before_shared_ingress_work(
         room,
         event,
-        requester_user_id="@user:localhost",
+        facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
         thread_id=None,
     )
 
@@ -7939,7 +7947,7 @@ async def test_router_early_skip_labels_thread_snapshot_refresh(tmp_path: Path) 
     should_skip = await bot._turn_controller._should_skip_router_before_shared_ingress_work(
         room,
         event,
-        requester_user_id="@user:localhost",
+        facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
         thread_id="$thread",
     )
 
@@ -7977,7 +7985,7 @@ async def test_router_early_skip_fails_open_for_thread_snapshot_failure(tmp_path
     should_skip = await bot._turn_controller._should_skip_router_before_shared_ingress_work(
         room,
         event,
-        requester_user_id="@user:localhost",
+        facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
         thread_id="$maybe-root",
     )
 

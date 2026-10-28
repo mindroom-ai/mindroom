@@ -1495,7 +1495,7 @@ async def test_private_welcome_requester_reaches_existing_ingress(
     await target.personal_rooms.owner_membership_event("!personal1:localhost", "@alice:localhost", "join")
     content = next(iter(server.messages.values()))["content"]
     assert (
-        target._ingress_validator.requester_user_id(sender=server.user_id, source={"content": content})
+        target._ingress_validator.classify_source(server.user_id, {"content": content}).lane_requester_id
         == "@alice:localhost"
     )
 
@@ -2842,12 +2842,13 @@ async def test_dispatched_welcome_selects_target_through_real_turn_policy(
             "content": content,
         },
     )
-    requester = await target._ingress_validator.precheck_event(room, event)
-    assert requester == "@alice:localhost"
+    facts = target._ingress_validator.classify(event)
+    assert await target._ingress_validator.precheck_event(room, event, facts)
+    assert facts.lane_requester_id == "@alice:localhost"
     prepared = await target._turn_controller._prepare_dispatch(
         room,
         event,
-        requester,
+        facts,
         event_label="message",
         handled_turn=TurnRecord.create([event.event_id]),
     )

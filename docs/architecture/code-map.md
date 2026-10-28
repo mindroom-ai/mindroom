@@ -13,7 +13,7 @@ Matrix sync callback
   -> bot.py (AgentBot/TeamBot runtime shell)
   -> journal_dispatch.py + pending_event_worker.py         (fan admitted events out to callbacks; unsettled work is woken again)
   -> turn_controller.py (owns one turn: precheck -> normalize -> resolve -> coalesce -> decide -> execute -> record)
-       -> ingress_validation.py                                  (trust, dedup, echo drop; commands exit before batching)
+       -> ingress_validation.py                                  (classify provenance once, dedup, echo drop; commands exit before batching)
        -> inbound_turn_normalizer.py + conversation_resolver.py  (canonical turn input, conversation identity)
        -> coalescing/ingress_lanes.py                            (per-(room, sender) receipt-order FIFO; STT readiness waits here)
        -> coalescing/gate.py                                     (ordinary text dispatches immediately; adaptive text and media debounce)
@@ -43,9 +43,10 @@ Matrix sync callback
 | `runtime_resolution.py` | Authoritative runtime resolution for one agent materialization |
 | `bot.py` | AgentBot and TeamBot runtime shells for Matrix lifecycle, sync callbacks, and room behavior |
 | `turn_controller.py` | TurnController - owns one inbound turn from ingress to recorded outcome |
-| `ingress_validation.py` | Ingress boundary validation: trust, effective requester, handled-id dedup, router-echo drop, command detection |
+| `ingress_validation.py` | Ingress boundary validation: classify each event's provenance once against the entity registry, handled-id dedup, reply access |
+| `ingress_facts.py` | One inbound event's classified provenance (`IngressFacts`), the turn origin derived from it, and the one command rule |
 | `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |
-| `conversation_resolver.py` | Conversation identity, thread history, and ingress envelope assembly |
+| `conversation_resolver.py` | Conversation identity, thread history, and envelope assembly from classified provenance |
 | `coalescing/ingress_lanes.py` | Per-(room, sender) receipt-order FIFO delivering resolving ingress (voice/STT readiness) to conversations |
 | `coalescing/gate.py` | Live message coalescing gate; ordinary text dispatches immediately, adaptive text waits for its quiet window, and media waits for attachments and a trailing caption |
 | `coalescing/batch.py` | Coalesced dispatch batch construction |

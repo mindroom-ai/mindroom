@@ -20,6 +20,7 @@ from tests.conftest import (
     bind_runtime_paths,
     install_generate_response_mock,
     install_runtime_journal_support,
+    make_ingress_facts,
     replace_turn_controller_deps,
     wrap_extracted_collaborators,
 )
@@ -130,7 +131,10 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
         patch.object(
             bot._turn_controller,
             "_precheck_dispatch_event",
-            return_value=_PrecheckedEvent(event=edit_event, requester_user_id="@user:example.com"),
+            return_value=_PrecheckedEvent(
+                event=edit_event,
+                facts=make_ingress_facts(edit_event.sender, requester_user_id="@user:example.com"),
+            ),
         ),
         patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
         patch.object(bot._edit_regenerator, "handle_message_edit", new_callable=AsyncMock) as mock_handle_edit,
@@ -206,7 +210,10 @@ async def test_edit_event_reserves_prompt_order_while_regenerating(tmp_path: Pat
         patch.object(
             bot._turn_controller,
             "_precheck_dispatch_event",
-            return_value=_PrecheckedEvent(event=edit_event, requester_user_id="@user:example.com"),
+            return_value=_PrecheckedEvent(
+                event=edit_event,
+                facts=make_ingress_facts(edit_event.sender, requester_user_id="@user:example.com"),
+            ),
         ),
         patch.object(bot._edit_regenerator, "handle_message_edit", side_effect=handle_edit),
     ):
@@ -280,7 +287,10 @@ async def test_edit_waits_for_reload_and_rechecks_authorization(tmp_path: Path) 
         patch.object(
             bot._turn_controller,
             "_precheck_dispatch_event",
-            return_value=_PrecheckedEvent(event=edit_event, requester_user_id=sender_id),
+            return_value=_PrecheckedEvent(
+                event=edit_event,
+                facts=make_ingress_facts(edit_event.sender, requester_user_id=sender_id),
+            ),
         ),
         patch.object(bot._response_runner, "wait_for_admission_or_shutdown", side_effect=wait_for_replacement),
         patch.object(bot._edit_regenerator, "handle_message_edit", new_callable=AsyncMock) as handle_edit,
@@ -377,7 +387,11 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
             bot._turn_controller,
             "_precheck_dispatch_event",
             side_effect=[
-                _PrecheckedEvent(event=edit_event, requester_user_id="@user:example.com") for edit_event in edit_events
+                _PrecheckedEvent(
+                    event=edit_event,
+                    facts=make_ingress_facts(edit_event.sender, requester_user_id="@user:example.com"),
+                )
+                for edit_event in edit_events
             ],
         ),
         patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,

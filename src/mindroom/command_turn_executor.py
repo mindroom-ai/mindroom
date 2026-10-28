@@ -88,8 +88,12 @@ class CommandTurnExecutor:
         *,
         target: MessageTarget,
         handled_turn: TurnRecord,
+        acts_for_requester: bool = False,
     ) -> None:
-        """Run one explicit command under its durable turn journal."""
+        """Run one explicit command under its durable turn journal.
+
+        ``acts_for_requester`` says an entity wrote the command for ``requester_user_id``.
+        """
         if command.type is CommandType.MODEL and model_selection_targets_other_runtime(
             event.source.get("content", {}),
             self._client().user_id,
@@ -105,9 +109,25 @@ class CommandTurnExecutor:
             # Keep a strong local reference while waiting. Text and structured
             # model commands share the same order across requester ingress lanes.
             async with lock:
-                await self._execute(room, event, requester_user_id, command, target=target, handled_turn=handled_turn)
+                await self._execute(
+                    room,
+                    event,
+                    requester_user_id,
+                    command,
+                    target=target,
+                    handled_turn=handled_turn,
+                    acts_for_requester=acts_for_requester,
+                )
         else:
-            await self._execute(room, event, requester_user_id, command, target=target, handled_turn=handled_turn)
+            await self._execute(
+                room,
+                event,
+                requester_user_id,
+                command,
+                target=target,
+                handled_turn=handled_turn,
+                acts_for_requester=acts_for_requester,
+            )
 
     async def _execute(
         self,
@@ -118,6 +138,7 @@ class CommandTurnExecutor:
         *,
         target: MessageTarget,
         handled_turn: TurnRecord,
+        acts_for_requester: bool,
     ) -> None:
         """Execute after target ownership and any model command ordering barrier."""
         event = await self.deps.normalizer.resolve_text_event(
@@ -204,7 +225,7 @@ class CommandTurnExecutor:
             event=event,
             command=command,
             requester_user_id=requester_user_id,
-            acts_for_requester=event.acts_for_requester,
+            acts_for_requester=acts_for_requester,
         )
 
     def _matrix_admin(self) -> HookMatrixAdmin | None:
@@ -325,6 +346,7 @@ class CommandTurnExecutor:
         *,
         target: MessageTarget,
         handled_turn: TurnRecord,
+        acts_for_requester: bool = False,
     ) -> bool:
         """Execute only on the bot that owns this command response."""
         if command.type is CommandType.MODEL and model_selection_targets_other_runtime(
@@ -348,5 +370,6 @@ class CommandTurnExecutor:
             command=command,
             target=target,
             handled_turn=handled_turn,
+            acts_for_requester=acts_for_requester,
         )
         return True

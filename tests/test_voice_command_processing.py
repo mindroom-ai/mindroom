@@ -37,6 +37,7 @@ from mindroom.llm.media import Audio
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
+from mindroom.turn_policy import _DispatchPlan
 from mindroom.voice.handler import prepare_voice_message
 from mindroom.voice.visible_voice_echo import VisibleVoiceEchoRequest
 from tests.access_schema_support import with_current_room_member_access
@@ -196,37 +197,42 @@ def _make_visible_router_echo_scenario(
 
 
 @pytest.mark.asyncio
-async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # noqa: ANN001
-    """Router should still handle voice-derived commands it sent on behalf of users."""
+async def test_router_voice_text_for_a_user_is_conversation_not_a_command(tmp_path) -> None:  # noqa: ANN001
+    """Voice-kind text the router sent for a user runs as that user's conversation, never as a command."""
     agent_user = MagicMock()
-    agent_user.user_id = "@mindroom_router:example.com"
+    agent_user.user_id = "@mindroom_router:localhost"
     agent_user.agent_name = ROUTER_AGENT_NAME
-    agent_user.matrix_id = MatrixID.parse("@mindroom_router:example.com")
+    agent_user.matrix_id = MatrixID.parse("@mindroom_router:localhost")
 
     bot = _agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=_attach_runtime_paths(with_current_room_member_access(Config(authorization={})), tmp_path),
-        rooms=["!test:example.com"],
+        rooms=["!test:localhost"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = MagicMock(return_value=False)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
 
-    room = _make_room("@mindroom_router:example.com", "@alice:example.com")
-    event = MagicMock(spec=nio.RoomMessageText)
-    event.sender = "@mindroom_router:example.com"
-    event.body = "🎤 !schedule daily"
-    event.event_id = "test_event"
-    event.server_timestamp = 1234567890
-    event.source = {
-        "content": {
-            "body": "🎤 !schedule daily",
-            ORIGINAL_SENDER_KEY: "@alice:example.com",
-            SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+    room = _make_room("@mindroom_router:localhost", "@alice:localhost")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$router-voice-text",
+            "sender": "@mindroom_router:localhost",
+            "origin_server_ts": 1234567890,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.text",
+                "body": "🎤 !schedule daily",
+                ORIGINAL_SENDER_KEY: "@alice:localhost",
+                SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+            },
         },
-    }
+    )
+    facts = bot._ingress_validator.classify(event)
+    assert facts.source_kind == VOICE_SOURCE_KIND
+    assert facts.lane_requester_id == "@alice:localhost"
 
     with (
         patch.object(
@@ -234,14 +240,13 @@ async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # n
             "execute_if_owned",
             new=AsyncMock(return_value=True),
         ) as mock_handle,
+        patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_DispatchPlan(kind="ignore"))),
     ):
         bot.client = MagicMock()
         await bot._on_message(room, event)
         await drain_coalescing(bot)
 
-    mock_handle.assert_called_once()
-    command = mock_handle.await_args.kwargs["command"]
-    assert command.type.value == "schedule"
+    mock_handle.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -285,12 +290,15 @@ async def test_router_ignores_non_voice_self_messages(tmp_path) -> None:  # noqa
 
 
 @pytest.mark.asyncio
-async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_path) -> None:  # noqa: ANN001
-    """Self-sent sidecar previews should still use ORIGINAL_SENDER for dispatch prechecks."""
+async def test_router_processes_own_sidecar_relay_commands_using_original_sender(tmp_path) -> None:  # noqa: ANN001
+    """A long relay the router sent as a sidecar keeps its relay kind, so its command runs as the relayed user.
+
+    Relay text runs as a command today; pending decision D1 makes it conversation.
+    """
     agent_user = MagicMock()
-    agent_user.user_id = "@mindroom_router:example.com"
+    agent_user.user_id = "@mindroom_router:localhost"
     agent_user.agent_name = ROUTER_AGENT_NAME
-    agent_user.matrix_id = MatrixID.parse("@mindroom_router:example.com")
+    agent_user.matrix_id = MatrixID.parse("@mindroom_router:localhost")
 
     bot = _agent_bot(
         agent_user=agent_user,
@@ -298,13 +306,13 @@ async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_p
         config=_attach_runtime_paths(
             with_current_room_member_access(
                 Config(
-                    agents={"home": AgentConfig(display_name="Home", rooms=["!test:example.com"])},
+                    agents={"home": AgentConfig(display_name="Home", rooms=["!test:localhost"])},
                     authorization={},
                 ),
             ),
             tmp_path,
         ),
-        rooms=["!test:example.com"],
+        rooms=["!test:localhost"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = MagicMock(return_value=False)
@@ -327,11 +335,11 @@ async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_p
     send_response = AsyncMock(return_value="$reply")
     install_send_response_mock(bot, send_response)
 
-    room = _make_room("@mindroom_router:example.com", "@mindroom_home:localhost", "@alice:example.com")
+    room = _make_room("@mindroom_router:localhost", "@mindroom_home:localhost", "@alice:localhost")
     event = nio.Event.parse_event(
         {
             "event_id": "$sidecar-relay",
-            "sender": "@mindroom_router:example.com",
+            "sender": "@mindroom_router:localhost",
             "origin_server_ts": 1234567890,
             "type": "m.room.message",
             "content": {
@@ -343,8 +351,8 @@ async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_p
                     "encoding": "matrix_event_content_json",
                 },
                 "url": "mxc://server/sidecar-relay",
-                ORIGINAL_SENDER_KEY: "@alice:example.com",
-                SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+                ORIGINAL_SENDER_KEY: "@alice:localhost",
+                SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
             },
         },
     )
@@ -360,7 +368,7 @@ async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_p
         await bot._on_media_message(room, event)
         await bot._coalescing_gate.drain_all()
 
-    assert mock_schedule.await_args.kwargs["scheduled_by"] == "@alice:example.com"
+    assert mock_schedule.await_args.kwargs["scheduled_by"] == "@alice:localhost"
 
 
 @pytest.mark.asyncio
@@ -1101,7 +1109,7 @@ async def test_concurrent_voice_redelivery_shares_visible_echo_lifecycle(tmp_pat
             },
         },
         server_timestamp=event.server_timestamp,
-        source_kind_override=VOICE_SOURCE_KIND,
+        payload_trusted=True,
     )
 
     async def normalize_voice(*_args: object, **_kwargs: object) -> _VoiceNormalizationResult:
@@ -1246,7 +1254,7 @@ async def test_finalized_voice_transcript_is_not_replaced_by_late_fallback(tmp_p
                 },
             },
             server_timestamp=event.server_timestamp,
-            source_kind_override=VOICE_SOURCE_KIND,
+            payload_trusted=True,
         ),
     )
 
@@ -1290,7 +1298,7 @@ async def test_cancelled_voice_finish_does_not_replace_finalized_transcript(tmp_
             },
         },
         server_timestamp=event.server_timestamp,
-        source_kind_override=VOICE_SOURCE_KIND,
+        payload_trusted=True,
     )
 
     bot._visible_voice_echo.finish_after_cancellation(handle, fallback_event)

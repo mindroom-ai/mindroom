@@ -37,6 +37,7 @@ from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.turn_record import RevisionReplay, TurnRecord
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from scripts.testing import fuzz_live_matrix as live_fuzz
+from tests.conftest import make_ingress_facts
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -107,9 +108,7 @@ async def _observe_guard_decision(
                 for newer in history
             ],
             may_be_superseded_by_newer_requester_turn=True,
-            requester_user_id_for_event=lambda sender, _: sender,
-            is_visible_router_voice_echo=lambda *_: False,
-            sender_is_trusted_for_ingress_metadata=lambda _: False,
+            classify=lambda sender, _source: make_ingress_facts(sender),
             is_handled=lambda source: source in handled,
             logger=logger,
         )
@@ -121,9 +120,7 @@ async def _observe_guard_decision(
             thread_id="$root",
             may_be_superseded_by_newer_requester_turn=True,
             pending_turns=principal,
-            requester_user_id_for_event=lambda sender, _: sender,
-            is_visible_router_voice_echo=lambda *_: False,
-            sender_is_trusted_for_ingress_metadata=lambda _: False,
+            classify=lambda sender, _source: make_ingress_facts(sender),
             is_handled=lambda source: source in handled,
             logger=logger,
         )
@@ -1435,9 +1432,7 @@ async def test_supersession_forward_chain_requires_every_exact_link(tmp_path: Pa
             ),
         ],
         may_be_superseded_by_newer_requester_turn=True,
-        requester_user_id_for_event=lambda sender, _: sender,
-        is_visible_router_voice_echo=lambda *_: False,
-        sender_is_trusted_for_ingress_metadata=lambda _: False,
+        classify=lambda sender, _source: make_ingress_facts(sender),
         is_handled=lambda _: False,
         logger=cast("structlog.stdlib.BoundLogger", logger),
     )

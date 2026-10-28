@@ -27,14 +27,18 @@ from typing import TYPE_CHECKING, Any
 import pytest
 import structlog
 
-from mindroom.constants import SOURCE_KIND_KEY
+from mindroom.constants import SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_replay_guard import has_newer_unresponded_in_thread, has_newer_unresponded_journal_thread_event
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, source_kind_from_content
 from mindroom.event_journal import EventKind, JournalEvent
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+from tests.conftest import make_ingress_facts
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
+
+    from mindroom.ingress_facts import IngressFacts
 
 pytestmark = pytest.mark.asyncio
 
@@ -44,6 +48,25 @@ ALICE = "@alice:example.org"
 BOB = "@bob:example.org"
 OLDER = "$older"
 NEWER = "$newer"
+
+
+def _classify(
+    sender: str,
+    source: Mapping[str, object],
+    *,
+    requester_for: Mapping[str, str] | None = None,
+) -> IngressFacts:
+    """Classify a stored event from a trusted sender: content says its kind, an echo flag marks a router echo."""
+    content = source.get("content")
+    content = content if isinstance(content, dict) else {}
+    echo = content.get(VISIBLE_ROUTER_VOICE_ECHO_KEY) is True
+    return make_ingress_facts(
+        sender,
+        source_kind=source_kind_from_content(content) or MESSAGE_SOURCE_KIND,
+        requester_user_id=(requester_for or {}).get(sender, sender),
+        original_sender=sender if echo else None,
+        sender_entity_name="router" if echo else None,
+    )
 
 
 def _older_turn(*, timestamp: int | None = 1_000) -> PreparedIngress:
@@ -63,9 +86,12 @@ def _pending(
     sender: str = ALICE,
     body: str = "the newer question",
     origin_server_ts: int = 2_000,
+    voice_echo: bool = False,
 ) -> JournalEvent:
-    """Return one unsettled journal event newer than the turn under question."""
-    content = {"msgtype": "m.text", "body": body}
+    """Return one unsettled journal event newer than the turn under question, or the router's echo of one."""
+    content: dict[str, object] = {"msgtype": "m.text", "body": body}
+    if voice_echo:
+        content[VISIBLE_ROUTER_VOICE_ECHO_KEY] = True
     return JournalEvent(
         event_id=event_id,
         room_id=ROOM,
@@ -118,16 +144,9 @@ async def _guard(
     may_be_superseded_by_newer_requester_turn: bool = True,
     thread_id: str | None = THREAD,
     requester_for: Mapping[str, str] | None = None,
-    voice_echo_event_senders: Collection[str] = (),
 ) -> bool:
     """Run the guard with the smallest collaborators that answer honestly."""
     resolved_event = event if event is not None else _older_turn()
-
-    def requester_user_id_for_event(sender: str, _source: object) -> str:
-        return requester_for.get(sender, sender) if requester_for else sender
-
-    def is_visible_router_voice_echo(sender: str, _content: object) -> bool:
-        return sender in voice_echo_event_senders
 
     return await has_newer_unresponded_journal_thread_event(
         room_id=ROOM,
@@ -136,9 +155,7 @@ async def _guard(
         thread_id=thread_id,
         may_be_superseded_by_newer_requester_turn=may_be_superseded_by_newer_requester_turn,
         pending_turns=pending_turns,  # type: ignore[arg-type]
-        requester_user_id_for_event=requester_user_id_for_event,
-        is_visible_router_voice_echo=is_visible_router_voice_echo,
-        sender_is_trusted_for_ingress_metadata=lambda _sender: True,
+        classify=lambda sender, source: _classify(sender, source, requester_for=requester_for),
         is_handled=lambda event_id: event_id in handled_event_ids,
         logger=structlog.get_logger("test"),
         # ``Any`` only to satisfy the structlog stub's bound-logger type.
@@ -166,7 +183,7 @@ async def test_history_and_journal_share_requester_turn_eligibility(
     expected: bool,
 ) -> None:
     """Both evidence sources apply the same requester, echo, ledger, and command policy."""
-    pending = _pending(sender=sender, body=body)
+    pending = _pending(sender=sender, body=body, voice_echo=echo)
     if voice:
         pending.source["content"][SOURCE_KIND_KEY] = "voice"
     visible = ResolvedVisibleMessage(
@@ -183,16 +200,13 @@ async def test_history_and_journal_share_requester_turn_eligibility(
         ALICE,
         [visible],
         may_be_superseded_by_newer_requester_turn=True,
-        requester_user_id_for_event=lambda sender, _source: sender,
-        is_visible_router_voice_echo=lambda _sender, _content: echo,
-        sender_is_trusted_for_ingress_metadata=lambda _sender: True,
+        classify=_classify,
         is_handled=lambda _event_id: handled,
         logger=structlog.get_logger("test"),
     )
     from_journal = await _guard(
         _PendingTurns(events=(pending,)),
         handled_event_ids={NEWER} if handled else (),
-        voice_echo_event_senders={sender} if echo else (),
     )
     assert from_history is expected
     assert from_journal is expected
@@ -252,9 +266,9 @@ class TestOnlyTheRequestersOwnNewerTurnCounts:
 
     async def test_a_router_voice_echo_is_not_a_turn(self) -> None:
         """The echo is a display artifact of the turn, not a second question."""
-        pending_turns = _PendingTurns(events=(_pending(),))
+        pending_turns = _PendingTurns(events=(_pending(voice_echo=True),))
 
-        assert await _guard(pending_turns, voice_echo_event_senders={ALICE}) is False
+        assert await _guard(pending_turns) is False
 
     async def test_a_newer_command_is_not_a_turn_that_owes_an_answer(self) -> None:
         """A command leaves dispatch long before a response would be owed."""

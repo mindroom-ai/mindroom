@@ -15,6 +15,7 @@ from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.cancellation import current_task_is_process_shutdown
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
+from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.event_journal.opening import OpenEventJournal
 from mindroom.handled_turns import _reset_handled_turn_ledger_runtime
@@ -28,7 +29,7 @@ from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptReques
 from mindroom.response_runner import ResponseShutdownTimeoutError
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
 from mindroom.session_storage.agent_storage import create_state_storage
-from tests.conftest import unwrap_extracted_collaborator
+from tests.conftest import make_ingress_facts, unwrap_extracted_collaborator
 from tests.journal_helpers import admit_dispatch_event
 from tests.response_runner_helpers import _bot, _plain_request, _target
 from tests.test_edit_regenerator import (
@@ -134,7 +135,7 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
             room,
             event,
             EventInfo.from_event(event.source),
-            USER_ID,
+            make_ingress_facts(event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id=USER_ID),
         )
         return TurnDispatchOutcome.DEFERRED if handed_off else TurnDispatchOutcome.INTENTIONALLY_IGNORED
 

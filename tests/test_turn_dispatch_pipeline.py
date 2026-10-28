@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import nio
 import pytest
 
-from mindroom.coalescing.batch import CoalescingKey, PendingEvent, RequesterCoalescingOwner
+from mindroom.coalescing.batch import CoalescingKey, PendingEvent, RequesterCoalescingOwner, requester_coalescing_key
 from mindroom.coalescing.gate import ReadyPendingEvent
 from mindroom.coalescing.ingress_lanes import IngressRetryError
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
@@ -92,6 +92,7 @@ from tests.conftest import (
     install_generate_response_mock,
     install_runtime_journal_support,
     install_send_response_mock,
+    make_ingress_facts,
     message_origin,
     patch_response_runner_module,
     prepared_dispatch_result,
@@ -191,7 +192,7 @@ class TestAgentBot(AgentBotTestBase):
                 room=room,
                 prechecked_event=_PrecheckedEvent(
                     event=voice_event,
-                    requester_user_id=voice_event.sender,
+                    facts=make_ingress_facts(voice_event.sender, source_kind=VOICE_SOURCE_KIND),
                 ),
                 voice_target=target,
                 readiness=VoiceReadiness(
@@ -678,7 +679,10 @@ class TestAgentBot(AgentBotTestBase):
             await dispatch_test_turn(
                 bot._turn_controller,
                 room,
-                _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+                _PrecheckedEvent(
+                    event=event,
+                    facts=bot._ingress_validator.classify(event),
+                ),
             )
             await drain_coalescing(bot)
 
@@ -761,7 +765,10 @@ class TestAgentBot(AgentBotTestBase):
             await dispatch_test_turn(
                 bot._turn_controller,
                 room,
-                _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+                _PrecheckedEvent(
+                    event=event,
+                    facts=bot._ingress_validator.classify(event),
+                ),
             )
 
         mock_build_payload.assert_not_awaited()
@@ -835,7 +842,10 @@ class TestAgentBot(AgentBotTestBase):
             await dispatch_test_turn(
                 bot._turn_controller,
                 room,
-                _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+                _PrecheckedEvent(
+                    event=event,
+                    facts=bot._ingress_validator.classify(event),
+                ),
             )
 
         mock_execute_command.assert_awaited_once()
@@ -911,7 +921,10 @@ class TestAgentBot(AgentBotTestBase):
             await dispatch_test_turn(
                 bot._turn_controller,
                 room,
-                _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+                _PrecheckedEvent(
+                    event=event,
+                    facts=bot._ingress_validator.classify(event),
+                ),
             )
 
         mock_full_history.assert_not_awaited()
@@ -997,7 +1010,10 @@ class TestAgentBot(AgentBotTestBase):
             await dispatch_test_turn(
                 bot._turn_controller,
                 room,
-                _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+                _PrecheckedEvent(
+                    event=event,
+                    facts=bot._ingress_validator.classify(event),
+                ),
                 handled_turn=TurnRecord.create(
                     ["$voice", "$text"],
                     source_event_prompts={"$voice": "voice prompt", "$text": "text prompt"},
@@ -1122,7 +1138,10 @@ class TestAgentBot(AgentBotTestBase):
             await dispatch_test_turn(
                 bot._turn_controller,
                 room,
-                _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+                _PrecheckedEvent(
+                    event=event,
+                    facts=bot._ingress_validator.classify(event),
+                ),
                 handled_turn=coalesced_turn,
             )
 
@@ -1183,9 +1202,9 @@ class TestAgentBot(AgentBotTestBase):
                     server_timestamp=event.server_timestamp,
                 ),
                 room,
-                source_kind=MESSAGE_SOURCE_KIND,
-                requester_user_id="@user:localhost",
+                facts=bot._ingress_validator.classify(event),
                 ticket=ticket,
+                coalescing_key=requester_coalescing_key(room.room_id, None, "@user:localhost"),
             )
             await asyncio.wait_for(ticket.slot.settled.wait(), timeout=1.0)
 
@@ -1200,7 +1219,7 @@ class TestAgentBot(AgentBotTestBase):
         assert isinstance(pending_event.event, PreparedIngress)
         assert pending_event.event.event_id == event.event_id
         assert pending_event.event.body == event.body
-        assert pending_event.event.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+        assert pending_event.facts.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 
     @staticmethod
     def _router_relay_event(
@@ -1262,7 +1281,10 @@ class TestAgentBot(AgentBotTestBase):
             await dispatch_test_turn(
                 bot._turn_controller,
                 room,
-                _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+                _PrecheckedEvent(
+                    event=event,
+                    facts=bot._ingress_validator.classify(event),
+                ),
             )
 
         handled_turn = mock_prepare.await_args.kwargs["handled_turn"]
@@ -1285,10 +1307,10 @@ class TestAgentBot(AgentBotTestBase):
         replyless_relay = self._router_relay_event(reply_to=None)
         non_router_relay = self._router_relay_event(sender="@mindroom_general:localhost")
 
-        assert validator.router_relay_original_event_id(explicit_relay) == "$user_msg:localhost"
-        assert validator.router_relay_original_event_id(fallback_relay) is None
-        assert validator.router_relay_original_event_id(replyless_relay) is None
-        assert validator.router_relay_original_event_id(non_router_relay) is None
+        assert validator.classify(explicit_relay).discovery_event_id == "$user_msg:localhost"
+        assert validator.classify(fallback_relay).discovery_event_id is None
+        assert validator.classify(replyless_relay).discovery_event_id is None
+        assert validator.classify(non_router_relay).discovery_event_id is None
 
     @pytest.mark.asyncio
     async def test_external_trigger_to_private_agent_uses_trigger_owner_as_requester(
@@ -1452,7 +1474,10 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(
                 bot._turn_controller,
                 "_precheck_dispatch_event",
-                return_value=_PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+                return_value=_PrecheckedEvent(
+                    event=event,
+                    facts=bot._ingress_validator.classify(event),
+                ),
             ),
             patch.object(bot._turn_controller, "_ingest_live_text_event", side_effect=hold_ingress),
         ):
@@ -1492,7 +1517,10 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(
                 bot._turn_controller,
                 "_precheck_dispatch_event",
-                return_value=_PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+                return_value=_PrecheckedEvent(
+                    event=event,
+                    facts=bot._ingress_validator.classify(event),
+                ),
             ),
             patch.object(bot._turn_controller, "_ingest_live_text_event", side_effect=hold_ingress),
         ):
@@ -1566,14 +1594,17 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(
                 bot._turn_controller,
                 "_precheck_dispatch_event",
-                return_value=_PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+                return_value=_PrecheckedEvent(
+                    event=event,
+                    facts=bot._ingress_validator.classify(event),
+                ),
             ),
             patch(
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
                 new=AsyncMock(return_value=prepared_event),
             ),
             patch(
-                "mindroom.conversation_resolver.ConversationResolver.build_ingress_envelope",
+                "mindroom.conversation_resolver.ConversationResolver.build_envelope",
                 return_value=envelope,
             ),
             patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
@@ -1614,12 +1645,12 @@ class TestAgentBot(AgentBotTestBase):
         pending_event = ready_result.pending_event
         assert key == CoalescingKey(room.room_id, "$thread_root", RequesterCoalescingOwner("@user:localhost"))
         assert isinstance(pending_event, PendingEvent)
-        assert pending_event.event.requester_user_id == "@user:localhost"
+        assert pending_event.facts.run_requester_id == "@user:localhost"
         assert isinstance(pending_event.event, PreparedIngress)
         assert pending_event.event.event_id == event.event_id
         assert pending_event.event.body == event.body
-        assert pending_event.event.source_kind == MESSAGE_SOURCE_KIND
-        assert pending_event.event.dispatch_policy_source_kind is None
+        assert pending_event.facts.source_kind == MESSAGE_SOURCE_KIND
+        assert pending_event.event.active_follow_up is False
         assert pending_event.claim is not None
         assert pending_event.claim.source_event_ids == {event.event_id}
         assert pending_event.notice is mock_reserve_waiting_human_message.return_value
@@ -1678,7 +1709,7 @@ class TestAgentBot(AgentBotTestBase):
             outcome = await bot._turn_controller._dispatch_prepared_text_like_ingress(
                 room=room,
                 prepared_event=prepared_event,
-                requester_user_id="@user:localhost",
+                facts=bot._ingress_validator.classify(prepared_event),
                 ticket=ticket,
                 coalescing_thread_id="$thread_root:localhost",
             )
@@ -1744,7 +1775,7 @@ class TestAgentBot(AgentBotTestBase):
             outcome = await bot._turn_controller._dispatch_prepared_text_like_ingress(
                 room=room,
                 prepared_event=prepared_event,
-                requester_user_id="@user:localhost",
+                facts=bot._ingress_validator.classify(prepared_event),
                 ticket=ticket,
                 coalescing_thread_id="$thread_root:localhost",
             )
@@ -1799,7 +1830,10 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(
                 bot._turn_controller,
                 "_precheck_dispatch_event",
-                return_value=_PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+                return_value=_PrecheckedEvent(
+                    event=event,
+                    facts=bot._ingress_validator.classify(event),
+                ),
             ),
             patch(
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
@@ -1826,7 +1860,7 @@ class TestAgentBot(AgentBotTestBase):
         assert isinstance(pending_event.event, PreparedIngress)
         assert pending_event.event.event_id == event.event_id
         assert pending_event.event.body == event.body
-        assert pending_event.event.source_kind == source_kind
+        assert pending_event.facts.source_kind == source_kind
 
     @pytest.mark.asyncio
     async def test_voice_preview_reserves_active_thread_follow_up(
@@ -1849,7 +1883,7 @@ class TestAgentBot(AgentBotTestBase):
             body="please stop",
             source={"content": {"msgtype": "m.text", "body": "please stop", SOURCE_KIND_KEY: "voice"}},
             server_timestamp=1234567890,
-            source_kind_override="voice",
+            payload_trusted=True,
         )
 
         with (
@@ -1883,7 +1917,10 @@ class TestAgentBot(AgentBotTestBase):
             turn_claim = ticket.claim
             await bot._turn_controller._on_audio_media_message(
                 room,
-                _PrecheckedEvent(event=voice_event, requester_user_id="@user:localhost"),
+                _PrecheckedEvent(
+                    event=voice_event,
+                    facts=bot._ingress_validator.classify(voice_event, source_kind=VOICE_SOURCE_KIND),
+                ),
                 dispatch_timing=None,
                 ticket=ticket,
             )
@@ -1901,11 +1938,11 @@ class TestAgentBot(AgentBotTestBase):
         assert reserved_envelope.source_kind == VOICE_SOURCE_KIND
         pending_event = ready_event.pending_event
         assert isinstance(pending_event, PendingEvent)
-        assert pending_event.event.requester_user_id == "@user:localhost"
+        assert pending_event.facts.run_requester_id == "@user:localhost"
         assert pending_event.event.event_id == prepared_event.event_id
         assert pending_event.event.body == prepared_event.body
-        assert pending_event.event.source_kind == VOICE_SOURCE_KIND
-        assert pending_event.event.dispatch_policy_source_kind is None
+        assert pending_event.facts.source_kind == VOICE_SOURCE_KIND
+        assert pending_event.event.active_follow_up is False
         assert pending_event.notice is mock_reserve_waiting_human_message.return_value
         assert pending_event.claim is turn_claim, "the lane hands the voice claim to the ready event"
         pending_event.close()
@@ -1972,7 +2009,7 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.prepare_file_sidecar_text_event",
                 new=AsyncMock(return_value=prepared_event),
             ),
-            patch.object(bot._conversation_resolver, "build_ingress_envelope", return_value=envelope),
+            patch.object(bot._conversation_resolver, "build_envelope", return_value=envelope),
             patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
             patch.object(
                 bot._conversation_resolver,
@@ -1985,7 +2022,10 @@ class TestAgentBot(AgentBotTestBase):
             ticket = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
             handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
                 room,
-                _PrecheckedEvent(event=sidecar_event, requester_user_id="@user:localhost"),
+                _PrecheckedEvent(
+                    event=sidecar_event,
+                    facts=bot._ingress_validator.classify(sidecar_event),
+                ),
                 ticket=ticket,
                 coalescing_thread_id="$thread_root",
             )
@@ -2000,10 +2040,10 @@ class TestAgentBot(AgentBotTestBase):
         pending_event = ready_result.pending_event
         assert key == CoalescingKey(room.room_id, "$thread_root", RequesterCoalescingOwner("@user:localhost"))
         assert isinstance(pending_event, PendingEvent)
-        assert pending_event.event.requester_user_id == "@user:localhost"
+        assert pending_event.facts.run_requester_id == "@user:localhost"
         assert pending_event.event.event_id == prepared_event.event_id
         assert pending_event.event.body == prepared_event.body
-        assert pending_event.event.source_kind == MESSAGE_SOURCE_KIND
+        assert pending_event.facts.source_kind == MESSAGE_SOURCE_KIND
 
     @pytest.mark.asyncio
     async def test_file_sidecar_text_preview_reserves_active_thread_follow_up(
@@ -2066,7 +2106,7 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.prepare_file_sidecar_text_event",
                 new=AsyncMock(return_value=prepared_event),
             ),
-            patch.object(bot._conversation_resolver, "build_ingress_envelope", return_value=envelope),
+            patch.object(bot._conversation_resolver, "build_envelope", return_value=envelope),
             patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
             patch.object(
                 bot._conversation_resolver,
@@ -2094,7 +2134,10 @@ class TestAgentBot(AgentBotTestBase):
             ticket = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
             handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
                 room,
-                _PrecheckedEvent(event=sidecar_event, requester_user_id="@user:localhost"),
+                _PrecheckedEvent(
+                    event=sidecar_event,
+                    facts=bot._ingress_validator.classify(sidecar_event),
+                ),
                 ticket=ticket,
                 coalescing_thread_id="$thread_root",
             )
@@ -2110,11 +2153,11 @@ class TestAgentBot(AgentBotTestBase):
         pending_event = ready_result.pending_event
         assert key == CoalescingKey(room.room_id, "$thread_root", RequesterCoalescingOwner("@user:localhost"))
         assert isinstance(pending_event, PendingEvent)
-        assert pending_event.event.requester_user_id == "@user:localhost"
+        assert pending_event.facts.run_requester_id == "@user:localhost"
         assert pending_event.event.event_id == prepared_event.event_id
         assert pending_event.event.body == prepared_event.body
-        assert pending_event.event.source_kind == MESSAGE_SOURCE_KIND
-        assert pending_event.event.dispatch_policy_source_kind is None
+        assert pending_event.facts.source_kind == MESSAGE_SOURCE_KIND
+        assert pending_event.event.active_follow_up is False
         assert pending_event.claim is None
         assert pending_event.notice is mock_reserve_waiting_human_message.return_value
 

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.cancellation import request_task_cancel
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
-from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, VOICE_SOURCE_KIND
+from mindroom.dispatch_source import VOICE_SOURCE_KIND, source_kind_bypasses_coalescing
 from mindroom.logging_config import get_logger
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.runtime_shutdown import (
@@ -44,7 +44,6 @@ from .cleanup import (
 from .ingress_lanes import IngressAdmissionClosedError, IngressLanes, LaneSlot, ReceiptLaneKey
 from .policy import (
     QueueKind,
-    is_coalescing_exempt_source_kind,
     pending_event_is_text,
     pending_events_sent_together,
     queue_kind,
@@ -65,7 +64,6 @@ __all__ = [
     "LaneSlot",
     "ReadyPendingEvent",
     "close_ready_result",
-    "is_coalescing_exempt_source_kind",
 ]
 
 _COALESCING_FLUSH_WARNING_SECONDS = 5.0
@@ -310,7 +308,7 @@ class CoalescingGate:
     def queues_other_run(self, key: CoalescingKey, requester_user_id: str) -> bool:
         """Return whether a queue still holds a run other than this requester's own messages for this agent."""
         return any(
-            pending_event_run_identity(key, pending_event) != (requester_user_id, None)
+            pending_event_run_identity(pending_event) != (requester_user_id, None)
             or pending_event.event.for_another_participant
             for pending_event in self.queued_pending_events(key)
         )
@@ -425,13 +423,13 @@ class CoalescingGate:
         return source_or_event_allows_room_scope_batching(
             queued.source_kind,
         ) or source_or_event_allows_room_scope_batching(
-            queued.pending_event.event.source_kind,
+            queued.pending_event.facts.source_kind,
             queued.pending_event.event,
         )
 
     @staticmethod
     def _queued_event_is_voice(queued: _QueuedEvent) -> bool:
-        return VOICE_SOURCE_KIND in {queued.source_kind, queued.pending_event.event.source_kind}
+        return VOICE_SOURCE_KIND in {queued.source_kind, queued.pending_event.facts.source_kind}
 
     @staticmethod
     def _queued_event_is_thread_root_media(queued: _QueuedEvent, thread_id: str) -> bool:
@@ -718,7 +716,7 @@ class CoalescingGate:
             requester_user_id=coalescing_owner_log_label(key.owner),
             event_id=pending_event.event.event_id,
             pending_count=pending_count,
-            source_kind=pending_event.event.source_kind,
+            source_kind=pending_event.facts.source_kind,
             timing_scope=event_timing_scope(pending_event.event.event_id),
         )
 
@@ -800,13 +798,13 @@ class CoalescingGate:
             gate,
             enqueue_start=enqueue_start,
             path=path,
-            source_kind=pending_event.event.source_kind,
+            source_kind=pending_event.facts.source_kind,
         )
         emit_elapsed_timing(
             "coalescing_gate.enqueue",
             enqueue_start,
             path=path,
-            source_kind=pending_event.event.source_kind,
+            source_kind=pending_event.facts.source_kind,
             pending_count=self._gate_work_count(gate),
             flush_outcome=flush_outcome,
             oldest_pending_age_ms=self._oldest_pending_age_ms(gate),
@@ -818,14 +816,8 @@ class CoalescingGate:
         if is_active_follow_up_coalescing_key(key) or not self._conversation_is_busy(key):
             return key
         pending_event = ready_result.pending_event
-        if pending_event.event.dispatch_policy_source_kind is None and not is_coalescing_exempt_source_kind(
-            pending_event.event,
-            pending_event.event.source_kind,
-        ):
-            pending_event.event = replace(
-                pending_event.event,
-                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-            )
+        if not source_kind_bypasses_coalescing(pending_event.facts.source_kind):
+            pending_event.event = replace(pending_event.event, active_follow_up=True)
         return active_follow_up_coalescing_key(key.room_id, key.thread_id)
 
     async def admit(
@@ -1216,7 +1208,7 @@ class CoalescingGate:
         )
         if candidate_count == 0:
             return
-        candidate_count = self._front_same_run_identity_length(key, gate, candidate_count)
+        candidate_count = self._front_same_run_identity_length(gate, candidate_count)
 
         claimed_admissions = self._claim_front_events(gate, candidate_count)
         if parallel_root:
@@ -1227,16 +1219,16 @@ class CoalescingGate:
             gate.drain_all_requested = False
 
     @staticmethod
-    def _front_same_run_identity_length(key: CoalescingKey, gate: _GateEntry, count: int) -> int:
+    def _front_same_run_identity_length(gate: _GateEntry, count: int) -> int:
         """Cap a front run at its first change of run identity or addressing, so each turn runs as its own sender.
 
         Uploads that mention nobody just before an addressing change stay with the message after them, their caption.
         """
-        front_identity = pending_event_run_identity(key, gate.queue[0].pending_event)
+        front_identity = pending_event_run_identity(gate.queue[0].pending_event)
         addressing: bool | None = None
         uploads_start: int | None = None
         for index, queued in enumerate(islice(gate.queue, count)):
-            if pending_event_run_identity(key, queued.pending_event) != front_identity:
+            if pending_event_run_identity(queued.pending_event) != front_identity:
                 return index
             event_addressing = pending_event_addressing(queued.pending_event)
             if event_addressing is None:
@@ -1257,7 +1249,6 @@ class CoalescingGate:
             return False
 
         candidate_count = self._front_same_run_identity_length(
-            key,
             gate,
             self._front_normal_run_length(gate, run_limit=None),
         )

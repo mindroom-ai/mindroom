@@ -20,7 +20,6 @@ from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VISIBLE_ROU
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import (
-    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
@@ -66,6 +65,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.coalescing.batch import PreparedTurn
     from mindroom.event_journal import EventJournalStore
+    from mindroom.ingress_facts import IngressFacts
 
 
 def _room(room_id: str = "!room:localhost") -> nio.MatrixRoom:
@@ -287,7 +287,7 @@ async def test_straggler_follow_up_logs_missed_combined_turn() -> None:
     )
     await gate.drain_all()
     assert [list(batch.handled_turn.source_event_ids) for batch in batches] == [["$late"]]
-    assert batches[0].ingress.dispatch_policy_source_kind is None
+    assert batches[0].ingress.active_follow_up is False
 
 
 @pytest.mark.asyncio
@@ -323,7 +323,7 @@ async def test_follow_up_delivered_while_still_busy_is_not_logged_as_missed() ->
     busy["value"] = False
     idle.set()
     await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in batches] == [["$queued"]])
-    assert batches[0].ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+    assert batches[0].ingress.active_follow_up is True
     await gate.drain_all()
 
 
@@ -360,7 +360,7 @@ async def test_busy_conversation_queues_any_sender_into_one_combined_follow_up()
     busy["value"] = False
     idle.set()
     await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in batches] == [["$a", "$b"]])
-    assert batches[0].ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+    assert batches[0].ingress.active_follow_up is True
     await gate.drain_all()
 
 
@@ -391,7 +391,7 @@ async def test_machine_fire_queues_while_conversation_busy() -> None:
     busy["value"] = False
     idle.set()
     await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in batches] == [["$fire2"]])
-    assert batches[0].ingress.dispatch_policy_source_kind is None
+    assert batches[0].ingress.active_follow_up is False
     await gate.drain_all()
 
 
@@ -842,13 +842,13 @@ async def test_long_running_turn_never_delays_other_ingress_from_same_sender(tmp
     async def fake_prepare_dispatch(
         _room: object,
         event: object,
-        requester_user_id: str,
+        facts: IngressFacts,
         **_kwargs: object,
     ) -> object:
         thread_id = "$other" if event.event_id == "$m3" else f"{event.event_id}-thread"
         dispatch = _prepared_dispatch(
             event_id=event.event_id,
-            requester_user_id=requester_user_id,
+            requester_user_id=facts.run_requester_id,
             body=event.body,
             thread_id=thread_id,
         )
@@ -931,7 +931,7 @@ def _normalized_voice_transcript(
                 "content": content,
             },
             server_timestamp=event.server_timestamp,
-            source_kind_override=VOICE_SOURCE_KIND,
+            payload_trusted=True,
         ),
     )
 
@@ -1047,13 +1047,13 @@ async def test_voice_echo_and_follow_up_slots_never_hold_another_conversation(tm
     async def fake_prepare_dispatch(
         _room: object,
         event: object,
-        requester_user_id: str,
+        facts: IngressFacts,
         **_kwargs: object,
     ) -> object:
         thread_id = "$threadB" if event.event_id == "$b1" else "$threadA"
         dispatch = _prepared_dispatch(
             event_id=event.event_id,
-            requester_user_id=requester_user_id,
+            requester_user_id=facts.run_requester_id,
             body=event.body,
             thread_id=thread_id,
         )
@@ -1135,13 +1135,13 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
     async def fake_prepare_dispatch(
         _room: object,
         event: object,
-        requester_user_id: str,
+        facts: IngressFacts,
         **_kwargs: object,
     ) -> object:
         thread_id = "$threadB" if event.event_id == "$b1" else "$threadA"
         dispatch = _prepared_dispatch(
             event_id=event.event_id,
-            requester_user_id=requester_user_id,
+            requester_user_id=facts.run_requester_id,
             body=event.body,
             thread_id=thread_id,
         )
@@ -1357,12 +1357,12 @@ async def test_response_failure_drains_follow_up_queue(tmp_path: Path) -> None:
     async def fake_prepare_dispatch(
         _room: object,
         event: object,
-        requester_user_id: str,
+        facts: IngressFacts,
         **_kwargs: object,
     ) -> object:
         dispatch = _prepared_dispatch(
             event_id=event.event_id,
-            requester_user_id=requester_user_id,
+            requester_user_id=facts.run_requester_id,
             body=event.body,
             thread_id="$m1-thread",
         )
@@ -1453,8 +1453,8 @@ async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> N
         assert await runner.drain_inbox_responses() is True
 
         await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in calls] == [["$f1"], ["$f2"]])
-    assert [batch.requester_user_id for batch in calls] == ["@alice:localhost", "@bob:localhost"]
-    assert all(batch.ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND for batch in calls)
+    assert [batch.facts.run_requester_id for batch in calls] == ["@alice:localhost", "@bob:localhost"]
+    assert all(batch.ingress.active_follow_up is True for batch in calls)
 
 
 @pytest.mark.asyncio
@@ -1490,8 +1490,8 @@ async def test_machine_and_human_follow_ups_split_solo_batch() -> None:
     busy["value"] = False
     idle.set()
     await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in batches] == [["$human"], ["$fire"]])
-    assert batches[0].ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-    assert batches[1].ingress.dispatch_policy_source_kind is None
+    assert batches[0].ingress.active_follow_up is True
+    assert batches[1].ingress.active_follow_up is False
     await gate.drain_all()
 
 

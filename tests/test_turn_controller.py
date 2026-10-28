@@ -19,7 +19,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY
 from mindroom.dispatch_handoff import PreparedIngress
-from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
+from mindroom.dispatch_source import INTERACTIVE_SELECTION_SOURCE_KIND, MESSAGE_SOURCE_KIND
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import send_streaming_response
@@ -29,6 +29,7 @@ from tests.conftest import (
     delivered_matrix_side_effect,
     install_generate_response_mock,
     live_turn_claim,
+    make_ingress_facts,
     make_pending_event,
     replace_turn_controller_deps,
     runtime_paths_for,
@@ -273,8 +274,7 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
     await bot._turn_controller._handle_interactive_selection(
         room,
         selection=selection,
-        transport_sender_id="@user:localhost",
-        requester_user_id="@user:localhost",
+        facts=make_ingress_facts("@user:localhost", source_kind=INTERACTIVE_SELECTION_SOURCE_KIND),
         source_event_id="$selection:localhost",
     )
 
@@ -363,8 +363,7 @@ async def test_handle_interactive_selection_does_not_mark_handled_when_runner_re
         await bot._turn_controller._handle_interactive_selection(
             room,
             selection=selection,
-            transport_sender_id="@user:localhost",
-            requester_user_id="@user:localhost",
+            facts=make_ingress_facts("@user:localhost", source_kind=INTERACTIVE_SELECTION_SOURCE_KIND),
             source_event_id="$selection:localhost",
         )
 

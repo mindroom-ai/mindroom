@@ -23,7 +23,7 @@ from mindroom.delivery_gateway import (
     ResponseHookService,
     ResponseIdentity,
 )
-from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
+from mindroom.dispatch_source import EDIT_SOURCE_KIND, MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import HistoryScope
@@ -58,6 +58,7 @@ from tests.conftest import (
     finish_edit_regenerations,
     ignore_final_delivery_handoff,
     install_runtime_journal_support,
+    make_ingress_facts,
     make_matrix_client_mock,
     message_origin,
     replace_edit_regenerator_deps,
@@ -506,7 +507,7 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
         ),
         patch.object(
             bot._conversation_resolver,
-            "build_message_envelope",
+            "build_envelope",
             return_value=_envelope(body="   "),
         ),
         patch.object(
@@ -525,7 +526,7 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
             room,
             edit_event,
             event_info,
-            requester_user_id="@user:localhost",
+            make_ingress_facts(edit_event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id="@user:localhost"),
         )
         await finish_edit_regenerations(bot)
 

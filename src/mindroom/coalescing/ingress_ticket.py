@@ -68,15 +68,13 @@ class IngressTicket:
         """Move the claim and queued notice into the event and hand it to the gate through this lane slot."""
         pending_event.claim, self.claim = self.claim, None
         pending_event.notice, self.notice = self.notice, None
-        source_kind = pending_event.event.source_kind
-        assert source_kind is not None
         try:
             self.gate.submit_lane_slot(
                 self.slot,
                 key=key,
                 ready_result=ReadyPendingEvent(pending_event=pending_event),
                 source_event_id=pending_event.event.event_id,
-                source_kind=source_kind,
+                source_kind=pending_event.facts.source_kind,
             )
         except BaseException:
             pending_event.close()

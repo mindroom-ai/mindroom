@@ -28,7 +28,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.turn_store import TurnStore
-from tests.conftest import make_visible_message, request_envelope
+from tests.conftest import make_ingress_facts, make_visible_message, request_envelope
 from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
@@ -184,14 +184,14 @@ def _harness(
     context = _message_context()
     resolver = MagicMock(spec=ConversationResolver)
     resolver.extract_message_context.return_value = context
-    resolver.build_message_envelope = MagicMock(
-        side_effect=lambda *, event, target, body, requester_user_id, source_kind, **_kwargs: replace(
+    resolver.build_envelope = MagicMock(
+        side_effect=lambda *, event, facts, target, body, **_kwargs: replace(
             request_envelope(
                 target=target,
                 prompt=body,
-                user_id=requester_user_id,
+                user_id=facts.run_requester_id,
                 agent_name=AGENT_NAME,
-                source_kind=source_kind,
+                source_kind=facts.source_kind,
             ),
             source_event_id=event.event_id,
         ),
@@ -293,7 +293,12 @@ def _harness(
 
 
 async def _handle_edit(harness: _Harness, event: nio.RoomMessageText, event_info: EventInfo) -> bool | None:
-    handed_off = await harness.regenerator.handle_message_edit(harness.room, event, event_info, USER_ID)
+    handed_off = await harness.regenerator.handle_message_edit(
+        harness.room,
+        event,
+        event_info,
+        make_ingress_facts(event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id=USER_ID),
+    )
     await asyncio.gather(*harness.regenerations)
     return handed_off
 
@@ -324,11 +329,11 @@ async def test_simple_edit_regenerates_and_records_new_response(tmp_path: Path) 
     assert request.current_timestamp_ms == float(event.server_timestamp)
     assert request.thread_history == harness.context.thread_history
 
-    envelope_kwargs = harness.resolver.build_message_envelope.call_args.kwargs
+    envelope_kwargs = harness.resolver.build_envelope.call_args.kwargs
     assert envelope_kwargs["body"] == "what is 3+3?"
-    assert envelope_kwargs["source_kind"] == EDIT_SOURCE_KIND
+    assert envelope_kwargs["facts"].source_kind == EDIT_SOURCE_KIND
     assert envelope_kwargs["target"] == record.conversation_target
-    assert envelope_kwargs["requester_user_id"] == USER_ID
+    assert envelope_kwargs["facts"].run_requester_id == USER_ID
 
     metadata_kwargs = harness.turn_store.build_run_metadata.call_args.kwargs
     assert metadata_kwargs["additional_discovery_event_ids"] == ()
@@ -675,7 +680,15 @@ async def test_an_edit_whose_regeneration_a_replaced_runtime_refuses_stays_pendi
         generate_response=AsyncMock(side_effect=ResponseAdmissionRefusedError),
     )
 
-    assert await harness.regenerator.handle_message_edit(harness.room, event, event_info, USER_ID) is True
+    assert (
+        await harness.regenerator.handle_message_edit(
+            harness.room,
+            event,
+            event_info,
+            make_ingress_facts(event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id=USER_ID),
+        )
+        is True
+    )
     (refused,) = await asyncio.gather(*harness.regenerations, return_exceptions=True)
 
     assert isinstance(refused, ResponseAdmissionRefusedError)
@@ -692,7 +705,15 @@ async def test_an_edit_does_not_hold_the_rooms_lane_while_another_reply_holds_th
 
     async with harness.response_lock, asyncio.timeout(5):
         # Another reply of this agent in the same conversation runs and holds it.
-        assert await harness.regenerator.handle_message_edit(harness.room, event, event_info, USER_ID) is True
+        assert (
+            await harness.regenerator.handle_message_edit(
+                harness.room,
+                event,
+                event_info,
+                make_ingress_facts(event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id=USER_ID),
+            )
+            is True
+        )
         harness.generate_response.assert_not_awaited()
     await asyncio.gather(*harness.regenerations)
 
@@ -777,7 +798,7 @@ async def test_coalesced_edit_preserves_tagged_source_metadata(tmp_path: Path) -
         new_body="edited ]]> first <message>",
         sender="@alice:example.org",
     )
-    harness.resolver.build_message_envelope.return_value = request_envelope(
+    harness.resolver.build_envelope.return_value = request_envelope(
         room_id=ROOM_ID,
         reply_to_event_id=first_event_id,
         thread_id=THREAD_ID,
@@ -790,7 +811,7 @@ async def test_coalesced_edit_preserves_tagged_source_metadata(tmp_path: Path) -
         harness.room,
         event,
         event_info,
-        event.sender,
+        make_ingress_facts(event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id=event.sender),
     )
     await asyncio.gather(*harness.regenerations)
 
@@ -841,7 +862,7 @@ async def test_multi_sender_coalesced_record_never_regenerates_as_one_sender(
         requester_id="@bob:example.org",
     )
     harness = _harness(tmp_path, turn_record=record)
-    harness.resolver.build_message_envelope.return_value = request_envelope(
+    harness.resolver.build_envelope.return_value = request_envelope(
         room_id=ROOM_ID,
         reply_to_event_id=original_event_id,
         thread_id=THREAD_ID,
@@ -854,11 +875,16 @@ async def test_multi_sender_coalesced_record_never_regenerates_as_one_sender(
         sender=sender,
     )
 
-    await harness.regenerator.handle_message_edit(harness.room, event, event_info, sender)
+    await harness.regenerator.handle_message_edit(
+        harness.room,
+        event,
+        event_info,
+        make_ingress_facts(event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id=sender),
+    )
     await asyncio.gather(*harness.regenerations)
 
     _assert_no_regeneration(harness)
-    harness.resolver.build_message_envelope.assert_not_called()
+    harness.resolver.build_envelope.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -887,7 +913,7 @@ async def test_physical_source_edit_outranks_colliding_discovery_alias(tmp_path:
         new_body="human edited",
         sender="@alice:example.org",
     )
-    harness.resolver.build_message_envelope.return_value = request_envelope(
+    harness.resolver.build_envelope.return_value = request_envelope(
         room_id=ROOM_ID,
         reply_to_event_id=human_event_id,
         thread_id=THREAD_ID,
@@ -896,7 +922,12 @@ async def test_physical_source_edit_outranks_colliding_discovery_alias(tmp_path:
         source_kind=EDIT_SOURCE_KIND,
     )
 
-    await harness.regenerator.handle_message_edit(harness.room, event, event_info, event.sender)
+    await harness.regenerator.handle_message_edit(
+        harness.room,
+        event,
+        event_info,
+        make_ingress_facts(event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id=event.sender),
+    )
     await asyncio.gather(*harness.regenerations)
 
     request = harness.generate_response.await_args.args[0]
@@ -929,11 +960,16 @@ async def test_partial_coalesced_metadata_rejects_anchor_sender_editing_sibling(
         sender="@bob:example.org",
     )
 
-    await harness.regenerator.handle_message_edit(harness.room, event, event_info, event.sender)
+    await harness.regenerator.handle_message_edit(
+        harness.room,
+        event,
+        event_info,
+        make_ingress_facts(event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id=event.sender),
+    )
     await asyncio.gather(*harness.regenerations)
 
     _assert_no_regeneration(harness)
-    harness.resolver.build_message_envelope.assert_not_called()
+    harness.resolver.build_envelope.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1025,7 +1061,7 @@ async def test_edit_without_turn_record_returns_early(tmp_path: Path) -> None:
         await _handle_edit(harness, event, event_info)
 
     _assert_no_regeneration(harness)
-    harness.resolver.build_message_envelope.assert_not_called()
+    harness.resolver.build_envelope.assert_not_called()
     # As for a message still waiting for media or voice before it reaches its turn.
     assert _not_regenerated_reasons(logs) == ["no_turn_record"]
 
@@ -1068,11 +1104,16 @@ async def test_edit_from_non_owning_requester_is_ignored(tmp_path: Path) -> None
     attacker_id = "@attacker:example.org"
     event, event_info = _edit_event(sender=attacker_id)
 
-    await harness.regenerator.handle_message_edit(harness.room, event, event_info, attacker_id)
+    await harness.regenerator.handle_message_edit(
+        harness.room,
+        event,
+        event_info,
+        make_ingress_facts(event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id=attacker_id),
+    )
     await asyncio.gather(*harness.regenerations)
 
     _assert_no_regeneration(harness)
-    harness.resolver.build_message_envelope.assert_not_called()
+    harness.resolver.build_envelope.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1099,7 +1140,7 @@ async def test_edit_owned_by_other_entity_is_ignored(tmp_path: Path) -> None:
     await _handle_edit(harness, event, event_info)
 
     _assert_no_regeneration(harness)
-    harness.resolver.build_message_envelope.assert_not_called()
+    harness.resolver.build_envelope.assert_not_called()
 
 
 @pytest.mark.asyncio

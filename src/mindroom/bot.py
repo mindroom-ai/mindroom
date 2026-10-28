@@ -511,7 +511,7 @@ class AgentBot:
             self.runtime_paths,
             self.personal_rooms,
             self._lookup_personal_room_target,
-            lambda event: self._ingress_validator.requester_user_id(sender=event.sender, source=event.source),
+            lambda event: self._ingress_validator.classify(event).lane_requester_id,
             self._provision_personal_agent,
         )
         self._room_lifecycle = BotRoomLifecycle(
@@ -2539,10 +2539,7 @@ class AgentBot:
         early_ticket = None
         approval_reply_to_event_id = EventInfo.from_event(event.source).reply_to_event_id
         if approval_reply_to_event_id is not None and is_process_active_approval_card(approval_reply_to_event_id):
-            requester_user_id = self._ingress_validator.requester_user_id(
-                sender=event.sender,
-                source=event.source,
-            )
+            requester_user_id = self._ingress_validator.classify(event).lane_requester_id
             early_ticket = self._turn_controller.reserve_prompt_ingress_order(
                 room,
                 requester_user_id,

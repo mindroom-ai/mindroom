@@ -14,16 +14,17 @@ from mindroom.dispatch_handoff import (
     PreparedIngress,
     payload_metadata_from_source,
 )
-from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.event_info import EventInfo
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_store import TurnClaim
+from tests.conftest import make_ingress_facts
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from mindroom.dispatch_handoff import MediaDispatchEvent
+    from mindroom.ingress_facts import IngressFacts
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.turn_controller import TurnController
 
@@ -31,15 +32,18 @@ if TYPE_CHECKING:
 def _prepared_ingress(
     event: PreparedIngress | nio.RoomMessageFormatted | _PrecheckedEvent,
     requester_user_id: str | None,
-) -> tuple[PreparedIngress, str]:
+) -> tuple[PreparedIngress, IngressFacts]:
+    """Return the prepared event and its facts: a prechecked event's own, else a plain message from its sender."""
     if isinstance(event, _PrecheckedEvent):
-        requester_user_id = event.requester_user_id
+        facts = event.facts
         event = event.event
-    if requester_user_id is None:
+    elif requester_user_id is None:
         msg = "requester_user_id is required when dispatching a raw test event"
         raise TypeError(msg)
+    else:
+        facts = make_ingress_facts(event.sender, requester_user_id=requester_user_id)
     if isinstance(event, PreparedIngress):
-        return event, requester_user_id
+        return event, facts
     if not isinstance(event, nio.RoomMessageFormatted):
         msg = f"Unsupported test dispatch event: {type(event).__name__}"
         raise TypeError(msg)
@@ -51,7 +55,7 @@ def _prepared_ingress(
             source=event.source,
             server_timestamp=event.server_timestamp,
         ),
-        requester_user_id,
+        facts,
     )
 
 
@@ -67,32 +71,28 @@ def make_test_turn(
     payload_metadata: DispatchPayloadMetadata | None = None,
     current_prompt_is_structured: bool = False,
     claim: TurnClaim | None = None,
+    facts: IngressFacts | None = None,
 ) -> PreparedTurn:
-    """Build realistic gate output for focused downstream-dispatch tests, carrying the ingress claim given."""
-    prepared, requester_user_id = _prepared_ingress(event, requester_user_id)
+    """Build realistic gate output for focused downstream-dispatch tests, carrying the ingress claim given.
+
+    Without ``facts`` the event is a plain message its sender wrote as ``requester_user_id``.
+    """
+    prepared, default_facts = _prepared_ingress(event, requester_user_id)
+    facts = facts or default_facts
     event_info = EventInfo.from_event(prepared.source)
     key = (
         ingress_metadata.coalescing_key
         if ingress_metadata is not None and ingress_metadata.coalescing_key is not None
-        else requester_coalescing_key(room.room_id, event_info.thread_id, requester_user_id)
-    )
-    source_kind = (
-        ingress_metadata.source_kind if ingress_metadata is not None else prepared.source_kind or MESSAGE_SOURCE_KIND
+        else requester_coalescing_key(room.room_id, event_info.thread_id, facts.lane_requester_id)
     )
     prepared = replace(
         prepared,
-        requester_user_id=requester_user_id,
-        source_kind=source_kind,
-        dispatch_policy_source_kind=(
-            ingress_metadata.dispatch_policy_source_kind if ingress_metadata is not None else None
-        ),
-        hook_source=ingress_metadata.hook_source if ingress_metadata is not None else None,
-        message_received_depth=ingress_metadata.message_received_depth if ingress_metadata is not None else 0,
-        trust_internal_payload_metadata=ingress_metadata is not None,
+        active_follow_up=ingress_metadata is not None and ingress_metadata.active_follow_up,
+        payload_trusted=facts.sender_is_managed,
     )
     turn = build_prepared_turn(
         key,
-        [PendingEvent(event=prepared, room=room, claim=claim, notice=queued_notice_reservation)],
+        [PendingEvent(event=prepared, room=room, facts=facts, claim=claim, notice=queued_notice_reservation)],
     )
     return replace(
         turn,
@@ -101,7 +101,7 @@ def make_test_turn(
         payload=(
             payload_metadata
             if payload_metadata is not None
-            else payload_metadata_from_source(prepared.source, trust_internal_metadata=ingress_metadata is not None)
+            else payload_metadata_from_source(prepared.source, trust_internal_metadata=prepared.payload_trusted)
         ),
         media_events=tuple(media_events) if media_events is not None else turn.media_events,
         current_prompt_is_structured=current_prompt_is_structured,
@@ -141,7 +141,7 @@ def prepared_turn_recorder(callback: Callable[..., Awaitable[None]]) -> Callable
         await callback(
             turn.room,
             turn.event,
-            turn.requester_user_id,
+            turn.facts.run_requester_id,
             media_events=list(turn.media_events) or None,
             handled_turn=turn.handled_turn,
             ingress_metadata=turn.ingress,

@@ -30,7 +30,7 @@ from mindroom.config.models import ToolConfigEntry
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PreparedIngress
-from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
+from mindroom.dispatch_source import INTERACTIVE_SELECTION_SOURCE_KIND
 from mindroom.event_journal import (
     AdmissionResult,
     DeliveryStage,
@@ -72,6 +72,7 @@ from tests.conftest import (
     handle_card_response_for_test,
     initialize_approval_store_for_test,
     install_relation_lookup,
+    make_ingress_facts,
     make_matrix_client_mock,
     record_turn_answered,
     replace_interactive_selection_handlers,
@@ -977,12 +978,10 @@ class TestAgentBot(AgentBotTestBase):
             event_id="$earlier",
             body="Earlier message",
             source={"content": {"msgtype": "m.text", "body": "Earlier message"}},
-            requester_user_id="@user:localhost",
-            source_kind=MESSAGE_SOURCE_KIND,
         )
         earlier_owner.admit(
             requester_coalescing_key(room.room_id, "$thread-a", "@user:localhost"),
-            PendingEvent(event=earlier_event, room=room),
+            PendingEvent(event=earlier_event, room=room, facts=make_ingress_facts("@user:localhost")),
         )
 
         try:
@@ -1158,8 +1157,11 @@ class TestAgentBot(AgentBotTestBase):
             prepare_forever,
             response_target=target,
             source_event_id="$reaction",
-            transport_sender_id="@user:localhost",
-            requester_user_id="@user:localhost",
+            facts=make_ingress_facts(
+                "@user:localhost",
+                source_kind=INTERACTIVE_SELECTION_SOURCE_KIND,
+                requester_user_id="@user:localhost",
+            ),
             selected_value="Selected",
         )
         await asyncio.wait_for(preparation_started.wait(), timeout=1.0)
@@ -1199,8 +1201,11 @@ class TestAgentBot(AgentBotTestBase):
             response,
             response_target=target,
             source_event_id="$reaction",
-            transport_sender_id="@user:localhost",
-            requester_user_id="@user:localhost",
+            facts=make_ingress_facts(
+                "@user:localhost",
+                source_kind=INTERACTIVE_SELECTION_SOURCE_KIND,
+                requester_user_id="@user:localhost",
+            ),
             selected_value="Selected",
         )
         await bot._response_runner.drain_inbox_responses()
@@ -1237,8 +1242,11 @@ class TestAgentBot(AgentBotTestBase):
             hand_off_response,
             response_target=target,
             source_event_id="$reaction",
-            transport_sender_id="@user:localhost",
-            requester_user_id="@user:localhost",
+            facts=make_ingress_facts(
+                "@user:localhost",
+                source_kind=INTERACTIVE_SELECTION_SOURCE_KIND,
+                requester_user_id="@user:localhost",
+            ),
             selected_value="Selected",
         )
         await bot._response_runner.drain_inbox_responses()
@@ -1273,8 +1281,11 @@ class TestAgentBot(AgentBotTestBase):
             await controller._handle_interactive_selection(
                 room,
                 selection=selection,
-                transport_sender_id="@user:localhost",
-                requester_user_id="@user:localhost",
+                facts=make_ingress_facts(
+                    "@user:localhost",
+                    source_kind=INTERACTIVE_SELECTION_SOURCE_KIND,
+                    requester_user_id="@user:localhost",
+                ),
                 source_event_id="$reaction",
                 response_target=target,
             )
@@ -1312,8 +1323,11 @@ class TestAgentBot(AgentBotTestBase):
                 controller._handle_interactive_selection(
                     room,
                     selection=selection,
-                    transport_sender_id="@user:localhost",
-                    requester_user_id="@user:localhost",
+                    facts=make_ingress_facts(
+                        "@user:localhost",
+                        source_kind=INTERACTIVE_SELECTION_SOURCE_KIND,
+                        requester_user_id="@user:localhost",
+                    ),
                     source_event_id="$reaction",
                     response_target=target,
                 ),
@@ -1737,8 +1751,11 @@ class TestAgentBot(AgentBotTestBase):
                     response,
                     response_target=target,
                     source_event_id="$reaction",
-                    transport_sender_id="@user:localhost",
-                    requester_user_id="@user:localhost",
+                    facts=make_ingress_facts(
+                        "@user:localhost",
+                        source_kind=INTERACTIVE_SELECTION_SOURCE_KIND,
+                        requester_user_id="@user:localhost",
+                    ),
                     selected_value=selection.selected_value,
                 )
                 if failure_stage == "queued_cancel":

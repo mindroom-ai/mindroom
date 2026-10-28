@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
@@ -40,7 +39,7 @@ from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget
 from mindroom.teams.formation import TeamResolution
 from mindroom.thread_utils import AgentResponseDecision
-from mindroom.turn_controller import _IngressAdmissionOutcome
+from mindroom.turn_controller import _IngressAdmissionOutcome, _media_source_kind, _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch
 from mindroom.turn_store import ClaimContended, TurnClaim
 from tests.bot_helpers import (
@@ -67,6 +66,7 @@ from tests.conftest import (
     dispatch_context_result,
     drain_coalescing,
     install_generate_response_mock,
+    make_ingress_facts,
     replace_turn_controller_deps,
     runtime_paths_for,
 )
@@ -220,7 +220,10 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         room = _synced_room(bot.matrix_id.full_id)
         event = self._make_handler_event("image", sender="@user:localhost", event_id="$img_event")
-        prechecked_event = SimpleNamespace(event=event, requester_user_id="@user:localhost")
+        prechecked_event = _PrecheckedEvent(
+            event=event,
+            facts=make_ingress_facts(event.sender, source_kind=_media_source_kind(event)),
+        )
         bot._conversation_resolver.coalescing_thread_id = AsyncMock(return_value=None)
         bot._turn_controller._precheck_dispatch_event = AsyncMock(return_value=prechecked_event)
         bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
@@ -288,7 +291,10 @@ class TestAgentBot(AgentBotTestBase):
 
         bot._conversation_resolver.coalescing_thread_id = AsyncMock(side_effect=record_thread_id)
         bot._turn_controller._precheck_dispatch_event = AsyncMock(
-            return_value=SimpleNamespace(event=event, requester_user_id="@user:localhost"),
+            return_value=_PrecheckedEvent(
+                event=event,
+                facts=make_ingress_facts(event.sender, source_kind=_media_source_kind(event)),
+            ),
         )
         bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
@@ -336,7 +342,7 @@ class TestAgentBot(AgentBotTestBase):
 
         ingress = MagicMock(spec=IngressValidator, wraps=bot._ingress_validator)
         ingress.deps = bot._ingress_validator.deps
-        ingress.precheck_event.return_value = "@user:localhost"
+        ingress.precheck_event.return_value = True
         resolver = MagicMock(wraps=bot._conversation_resolver)
         resolver.coalescing_thread_id = AsyncMock(side_effect=block_thread_resolution)
         controller = replace_turn_controller_deps(bot, ingress=ingress, resolver=resolver)
@@ -369,7 +375,7 @@ class TestAgentBot(AgentBotTestBase):
 
         ingress = MagicMock(spec=IngressValidator, wraps=bot._ingress_validator)
         ingress.deps = bot._ingress_validator.deps
-        ingress.precheck_event.return_value = "@user:localhost"
+        ingress.precheck_event.return_value = True
         resolver = MagicMock(wraps=bot._conversation_resolver)
         resolver.coalescing_thread_id = AsyncMock()
         controller = replace_turn_controller_deps(bot, ingress=ingress, resolver=resolver)
@@ -402,7 +408,7 @@ class TestAgentBot(AgentBotTestBase):
 
         ingress = MagicMock(spec=IngressValidator, wraps=bot._ingress_validator)
         ingress.deps = bot._ingress_validator.deps
-        ingress.precheck_event.return_value = "@user:localhost"
+        ingress.precheck_event.return_value = True
         gate = MagicMock(spec=CoalescingGate, wraps=bot._coalescing_gate)
 
         def reject_lane_reservation(*_args: object, **_kwargs: object) -> None:
@@ -432,7 +438,10 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         room = _synced_room(bot.matrix_id.full_id)
         event = self._make_handler_event("voice", sender="@user:localhost", event_id="$voice_event")
-        prechecked_event = SimpleNamespace(event=event, requester_user_id="@user:localhost")
+        prechecked_event = _PrecheckedEvent(
+            event=event,
+            facts=make_ingress_facts(event.sender, source_kind=_media_source_kind(event)),
+        )
 
         bot._turn_controller._precheck_dispatch_event = AsyncMock(return_value=prechecked_event)
         bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
@@ -498,7 +507,7 @@ class TestAgentBot(AgentBotTestBase):
                             SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
                         },
                     },
-                    source_kind_override=VOICE_SOURCE_KIND,
+                    payload_trusted=True,
                 ),
             ),
         )
