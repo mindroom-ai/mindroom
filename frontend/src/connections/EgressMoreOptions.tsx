@@ -348,11 +348,13 @@ export function MoreOptions({
                 : ` Leave the list empty to use the placeholders of the ${preset.display_name} preset.`
               : ""}
           </p>
-          <p className="text-xs text-muted-foreground">
-            {context === "personal"
-              ? personalPlaceholderHint(placeholderRules)
-              : operatorPlaceholderHint(placeholderRules)}
-          </p>
+          {form.placeholders.length > 0 && (
+            <p className="text-xs text-muted-foreground">
+              {context === "personal"
+                ? personalPlaceholderHint(placeholderRules)
+                : operatorPlaceholderHint(placeholderRules)}
+            </p>
+          )}
         </div>
         {form.placeholders.map((placeholder, index) => {
           const nameError = problemAt(placeholderField(index, "name"));

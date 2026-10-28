@@ -64,6 +64,11 @@ async function renderEditor(props: Partial<EgressServiceEditorProps> = {}) {
 /** Open the section that holds everything but the basic fields. */
 const openMoreOptions = () =>
   fireEvent.click(screen.getByRole("button", { name: "More options" }));
+/** Open More options with one placeholder, which brings the rules for its name. */
+const addPlaceholder = () => {
+  openMoreOptions();
+  fireEvent.click(screen.getByRole("button", { name: "Add placeholder" }));
+};
 const renderGithub = (props: Partial<EgressServiceEditorProps> = {}) =>
   renderEditor({ service: { preset: "github" }, name: "github", ...props });
 const type = (label: string, value: string) =>
@@ -347,23 +352,28 @@ describe("the editor form", () => {
     expect(screen.getByLabelText("Preset")).toHaveValue("future_api");
   });
 
-  it("shows the placeholder rules as hints under More options", async () => {
+  it("placeholder naming rules show only with a placeholder", async () => {
     await renderEditor();
-    expect(screen.queryByText(/must be TOKEN, KEY/)).toBeNull();
     openMoreOptions();
+    expect(
+      screen.getByText(/Use a fixed value such as mindroom-brokered/),
+    ).toBeVisible();
+    expect(screen.queryByText(/must be TOKEN, KEY/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Add placeholder" }));
     expect(
       screen.getByText(
         /one word between underscores must be TOKEN, KEY, SECRET, PASSWORD, PAT, AUTH, or CREDENTIAL/,
       ),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/Use a fixed value such as mindroom-brokered/),
-    ).toBeInTheDocument();
+    ).toBeVisible();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Remove placeholder 1" }),
+    );
+    expect(screen.queryByText(/must be TOKEN, KEY/)).toBeNull();
   });
 
   it("lists the words and prefixes a personal placeholder name cannot use", async () => {
     await renderEditor();
-    openMoreOptions();
+    addPlaceholder();
     const hint = screen.getByText(/one word between underscores must be/);
     expect(hint).toHaveTextContent(
       "No word may be COMMAND, CMD, FILE, DIR, PROVIDER, HELPER, OPTS, OPTIONS, or EXTENSIONS",
@@ -378,7 +388,7 @@ describe("the editor form", () => {
 
   it("names every word, prefix, and value length the server sends in the hint", async () => {
     await renderEditor();
-    openMoreOptions();
+    addPlaceholder();
     const hint = screen.getByText(/one word between underscores must be/);
     const { placeholder } = validation;
     for (const word of [
@@ -410,7 +420,7 @@ describe("the editor form", () => {
         },
       }),
     });
-    openMoreOptions();
+    addPlaceholder();
     const hint = screen.getByText(/one word between underscores must be/);
     expect(hint).toHaveTextContent("must be SECRET or TICKET");
     expect(hint).toHaveTextContent("No word may be SCRIPT, and");
@@ -424,7 +434,7 @@ describe("the editor form", () => {
     await renderEditor({
       loadPresets: failingPresets(),
     });
-    openMoreOptions();
+    addPlaceholder();
     const hint = screen.getByText(/The server checks the rest when you save/);
     expect(hint).toHaveTextContent(
       "Names use capital letters, digits, and underscores, and must name a credential, such as MY_API_KEY.",
@@ -473,7 +483,7 @@ describe("the editor form", () => {
 
   it("shows the operator's placeholder rules instead on the dashboard", async () => {
     await renderEditor({ context: "operator" });
-    openMoreOptions();
+    addPlaceholder();
     expect(
       screen.getByText(/GIT_CONFIG_ or MINDROOM_ are reserved/),
     ).toBeInTheDocument();
@@ -485,7 +495,7 @@ describe("the editor form", () => {
       context: "operator",
       loadPresets: failingPresets(),
     });
-    openMoreOptions();
+    addPlaceholder();
     expect(
       screen.getByText(/Some names, such as PATH and HOME, are reserved/),
     ).toBeInTheDocument();

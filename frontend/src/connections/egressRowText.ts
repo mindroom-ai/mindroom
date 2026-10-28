@@ -119,7 +119,7 @@ export function statusLabel(service: EgressCredentialService): string {
       // The tools never use a service's own account.
       return service.separate_account
         ? "Connected, not used for Agent Keys yet"
-        : "Connected for tools only";
+        : "Not used by agents yet";
     if (oauth.reset_required) return "Reset required";
     return service.separate_account ? "Not connected" : "Not set";
   }
@@ -185,7 +185,7 @@ export function unsetNote(service: EgressCredentialService): string | null {
   // never one, but a personal account connected before it still is.
   if (oauth) {
     if (oauth.connected && !oauth.reset_required)
-      return "Requests are refused until a key is set or this account is used for Agent Keys.";
+      return "Agents' requests are refused until you let them use this account.";
     // The server only says an account can be connected where this viewer may connect one.
     if (!oauth.service_account && (oauth.can_connect || oauth.reset_required))
       return "Requests are refused until a key is set or an account is connected.";

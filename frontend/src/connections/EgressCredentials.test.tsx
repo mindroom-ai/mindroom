@@ -301,13 +301,13 @@ describe("egress credentials page", () => {
     });
     await renderPage();
     expect(
-      await screen.findByText("Connected for tools only"),
+      await screen.findByText("Not used by agents yet"),
     ).toBeInTheDocument();
 
     fireEvent.click(
-      screen.getByRole("button", { name: "Use account for GitHub" }),
+      screen.getByRole("button", { name: "Let agents use GitHub" }),
     );
-    await pressInDialog("Use account");
+    await pressInDialog("Let agents use it");
     expect(
       await screen.findByText("Using connected account"),
     ).toBeInTheDocument();
@@ -322,7 +322,7 @@ describe("egress credentials page", () => {
 
     fireEvent.click(await rowAction("Stop using GitHub account for GitHub"));
     expect(
-      await screen.findByText("Connected for tools only"),
+      await screen.findByText("Not used by agents yet"),
     ).toBeInTheDocument();
   });
 
