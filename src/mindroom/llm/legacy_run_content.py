@@ -60,7 +60,8 @@ def stored_content(data: Mapping[str, Any]) -> str | None:
 # stores the redacted failure text under ``error`` and keeps ``content`` for the model's text.
 # Handling: such a run hands over its content, credentials redacted, as its failure, which is what those releases
 # handed over for it, so a delegation settled from such a row still reports why the run failed.
-# Coverage: tests/llm/test_legacy_run_content.py::test_a_failed_row_main_wrote_hands_over_its_content_redacted
+# Coverage: tests/llm/test_legacy_run_content.py::test_a_failed_row_main_wrote_hands_over_its_content_redacted,
+#   tests/test_delegation_audit.py::test_a_child_row_an_earlier_recovery_stopped_still_settles_with_its_reason
 def legacy_failure_text(content: str | None) -> str | None:
     """Return what a failed run stored without an ``error`` hands over: its content, credentials redacted."""
     return None if content is None else redact_sensitive_text(content)

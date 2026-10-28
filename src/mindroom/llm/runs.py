@@ -283,7 +283,8 @@ class _RunRecordCommon:
     # What the run's model wrote, its requests' texts a blank line apart; a resumed run's holds only what its model
     # wrote since the resume (``resumed_record``). A pause is in ``requirements`` and a failure in ``error``, never here.
     content: str | None = None
-    # Why an ``ERROR`` run failed, credentials redacted, set by whatever ended the run so.
+    # Why the run failed or was stopped, credentials redacted, set by whatever ended it so: the loop for an ``ERROR``
+    # run, and delegation recovery for a child run it fails or cancels. A run its own cancellation stopped has none.
     error: str | None = None
     model: str | None = None
     model_provider: str | None = None
@@ -299,13 +300,13 @@ class _RunRecordCommon:
 
     @property
     def handover_content(self) -> str | None:
-        """Return what the run shows whoever reads it after it ends: why it failed, else its content.
+        """Return what the run shows whoever reads it after it ends: why it failed or was stopped, else its content.
 
         The run that started it, a team's document of its members, and a delegation's settlement all read this.
         """
-        if self.status is not RunStatus.error:
-            return self.content
-        return self.error if self.error is not None else legacy_failure_text(self.content)
+        if self.error is not None:
+            return self.error
+        return legacy_failure_text(self.content) if self.status is RunStatus.error else self.content
 
     def _scalars_dict(self, identity: Mapping[str, str | None]) -> dict[str, Any]:
         """Return the scalar keys in stored order: the run, its agent or team, then the rest."""
