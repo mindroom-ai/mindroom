@@ -81,12 +81,17 @@ def _user(text: str = "Hello") -> list[Message]:
 def test_unknown_extra_kwargs_are_rejected_with_the_accepted_keys() -> None:
     """Dropped Agno features and another route's keys fail at construction and name what is accepted."""
     with pytest.raises(ValueError, match=r"skills.*Accepted keys: .*cache_system_prompt") as skills:
-        parse_claude_settings("anthropic", {"skills": [{"type": "anthropic", "skill_id": "pptx"}]})
+        parse_claude_settings("anthropic", {"skills": [{"type": "anthropic", "skill_id": "pptx"}]}, model_id="m")
     assert "mcp_servers" not in str(skills.value)
     with pytest.raises(ValueError, match="project_id"):
-        parse_claude_settings("anthropic", {"project_id": "p"})
-    assert parse_claude_settings("vertexai_claude", {"project_id": "p", "region": "global"}).region == "global"
-    settings = parse_claude_settings("bedrock_claude", {"aws_region": "us-east-1", "cache_system_prompt": False})
+        parse_claude_settings("anthropic", {"project_id": "p"}, model_id="m")
+    vertex = parse_claude_settings("vertexai_claude", {"project_id": "p", "region": "global"}, model_id="m")
+    assert vertex.region == "global"
+    settings = parse_claude_settings(
+        "bedrock_claude",
+        {"aws_region": "us-east-1", "cache_system_prompt": False},
+        model_id="claude-unlisted",
+    )
     assert (settings.aws_region, settings.cache_system_prompt, settings.extended_cache_time) == (
         "us-east-1",
         False,
@@ -94,7 +99,7 @@ def test_unknown_extra_kwargs_are_rejected_with_the_accepted_keys() -> None:
     )
     assert settings.max_tokens == 8192
     assert settings.timeout is None
-    assert parse_claude_settings("anthropic", {"timeout": 120.0}).timeout == 120.0
+    assert parse_claude_settings("anthropic", {"timeout": 120.0}, model_id="m").timeout == 120.0
 
 
 @pytest.mark.parametrize(
@@ -1649,6 +1654,34 @@ async def test_client_params_override_route_settings_but_not_headers_or_the_http
     )
     await claude_turn(bedrock, ModelRequest(messages=_user()))
     assert wire.requests[-1].url.host == "bedrock-mantle.eu-central-1.api.aws"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route", "model_id", "authored", "max_tokens"),
+    [
+        ("anthropic", "claude-sonnet-5-5", {}, 128_000),
+        ("vertexai_claude", "claude-opus-4-5@20251101", {}, 64_000),
+        ("bedrock_claude", "global.anthropic.claude-opus-4-6-v1", {}, 128_000),
+        ("anthropic", "claude-haiku-4-5-20251001", {}, 64_000),
+        ("anthropic", "claude-unlisted-9", {}, 8192),
+        ("anthropic", "claude-sonnet-5-5", {"max_tokens": 4096}, 4096),
+    ],
+)
+async def test_a_reply_may_run_to_the_model_s_documented_output_maximum(
+    tmp_path: Path,
+    route: str,
+    model_id: str,
+    authored: dict[str, Any],
+    max_tokens: int,
+) -> None:
+    """A model that authors no ``max_tokens`` gets its documented maximum, an unlisted one 8192, and config wins."""
+    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
+    provider = route_provider(route, tmp_path, wire, id=model_id, extra_kwargs=authored)
+
+    await claude_turn(provider, ModelRequest(messages=_user()))
+
+    assert json.loads(wire.requests[0].content)["max_tokens"] == max_tokens
 
 
 @pytest.mark.asyncio

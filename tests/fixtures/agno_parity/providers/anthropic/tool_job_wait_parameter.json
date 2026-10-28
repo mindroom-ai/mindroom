@@ -123,7 +123,7 @@
   },
   "request": {
     "body": {
-      "max_tokens": 8192,
+      "max_tokens": 128000,
       "messages": [
         {
           "role": "user",
