@@ -190,6 +190,7 @@ Unmapped keys and unauthenticated callers can use every available model but cann
 ## Errors
 
 Errors use the OpenAI error format with an HTTP status, message, and `code`.
+An agent turn that fails before its answer begins returns HTTP 500 with `Agent execution failed`; one that fails after its answer began returns 200, streamed or not, with the partial answer followed by the failure's message.
 
 | Status | Message or code | Fix |
 |---|---|---|

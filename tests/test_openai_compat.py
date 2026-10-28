@@ -1320,6 +1320,56 @@ class TestChatCompletions:
         assert response.json()["choices"][0]["message"]["content"] == "Agent reply"
         assert not constants.matrix_state_file(runtime_paths=runtime_paths).exists()
 
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_a_completion_that_fails_after_its_answer_began_ends_with_the_failure(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        stream: bool,
+    ) -> None:
+        """A turn that fails after streaming part of its answer sends that part, then the failure, in either mode."""
+        config = Config(
+            agents={"general": AgentConfig(display_name="GeneralAgent", role="General-purpose assistant", rooms=[])},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        )
+        runtime_paths = resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "data",
+            process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
+        )
+        app = FastAPI()
+        app.include_router(openai_compat.router)
+        initialize_api_app(app, runtime_paths)
+
+        async def lose_the_provider() -> None:
+            msg = "provider connection lost"
+            raise ProviderError(msg, provider="Synthetic")
+
+        model = ScriptedModel([[TextDelta("Checking."), Await(lose_the_provider)]])
+        install_model_providers(monkeypatch, {"default": model})
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
+            patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+            TestClient(app, base_url="http://localhost") as client,
+        ):
+            response = client.post(
+                "/v1/chat/completions",
+                json={"model": "general", "messages": [{"role": "user", "content": "Hi"}], "stream": stream},
+            )
+
+        assert response.status_code == 200
+        if stream:
+            content = "".join(
+                chunk["choices"][0]["delta"].get("content", "")
+                for line in response.text.splitlines()
+                if line.startswith("data: {") and (chunk := json.loads(line.removeprefix("data: ")))
+            )
+        else:
+            content = response.json()["choices"][0]["message"]["content"]
+        assert content.startswith("Checking.")
+        assert "provider connection lost" in content
+
     def test_openai_execution_identity_ignores_request_user(self) -> None:
         """OpenAI-compatible execution identity should not trust the request-body user."""
         identity = build_tool_execution_identity(
