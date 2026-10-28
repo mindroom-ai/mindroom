@@ -19,10 +19,11 @@ if TYPE_CHECKING:
 # LEGACY_COMPAT: Request snapshots omit their provider and model.
 # Legacy format: Requests contain only created_at and metrics.
 # Last legacy release: v2026.9.303; replacement: v2026.9.304, which attributes each request to its model.
-# Current producer: save_compaction_usage also emits one untagged, single-model request.
+# Compaction summaries stored their one request untagged through v2026.10.624; replacement: v2026.10.625.
 # Handling: Inherit only a single run model; the caller must reconcile every counter.
 # Coverage: tests/test_request_usage.py::test_request_export_keeps_short_calls_distinct_and_preserves_all_counters;
-# tests/test_request_usage.py::test_unreconciled_request_details_preserve_aggregates_and_mark_coverage.
+# tests/test_request_usage.py::test_unreconciled_request_details_preserve_aggregates_and_mark_coverage;
+# tests/test_request_usage.py::test_a_compaction_summary_stored_with_an_untagged_request_reports_its_model.
 def legacy_request_model(models: Mapping[tuple[str, str], object]) -> tuple[str, str] | None:
     """Return unambiguous run attribution for requests written without a model."""
     return next(iter(models)) if len(models) == 1 else None

@@ -38,6 +38,7 @@ from mindroom.hooks import (
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.runs import RunRecord
+from mindroom.llm.usage import HelperUsage, RunMetrics
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import (
     ResponseRequest,
@@ -503,7 +504,7 @@ async def test_session_started_fires_for_a_session_a_helper_usage_write_created(
             usage_id="thread_summary:1",
             kind="thread_summary",
             requester_id="@alice:localhost",
-            run={"model_provider": "P", "model": "m", "created_at": 1, "metrics": {}, "messages": []},
+            usage=HelperUsage(run_id="1", model="m", provider="P", metrics=RunMetrics(), created_at=1),
             initial_session=_first_session(session_id),
         )
 
