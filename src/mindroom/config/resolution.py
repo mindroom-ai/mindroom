@@ -305,11 +305,10 @@ class AgentToolFacts:
 
     ``authored`` are its tool entries (see `authored_tool_entries`). ``injected`` are toolkits its settings add without
     an entry: delegation, self-config, agent management, skill saving, and its graph. ``disabled`` are toolkits its
-    settings turn off even
-    when an entry names them. ``tool_names`` are every toolkit its entries name, presets and implied toolkits expanded,
-    less the disabled ones; ``startup_tool_names`` the eager and initial ones among them. ``scope_incompatible`` maps a
-    deferred entry to the expanded toolkits its execution scope cannot run. ``worker_tools`` is the resolved worker tool
-    list, or None to follow the runtime's sandbox settings.
+    settings turn off even when an entry names them. ``tool_names`` are every toolkit its entries name, presets and
+    implied toolkits expanded, less the disabled ones; ``startup_tool_names`` the eager and initial ones among them.
+    ``scope_incompatible`` maps a deferred entry to the expanded toolkits its execution scope cannot run.
+    ``worker_tools`` is the resolved worker tool list, or None to follow the runtime's sandbox settings.
     """
 
     agent_name: str
