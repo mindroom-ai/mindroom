@@ -144,7 +144,8 @@ It calls `agent_settings` to read its current values and the tool names it may c
 - Each value replaces the whole field, so send a changed `instructions` list in full.
 - `null` restores the template's value, or for a created agent its creator's value.
 - `tools` are toolkit names such as `calculator`, never function names, chosen from the `allowed_tools` that `agent_settings` returns, which are the tools of the template or creator.
-  A chosen tool keeps the settings it has there, and a tool that was not chosen is left out, even one from `defaults.tools`.
+  A chosen tool keeps the settings it has there, and so does each tool it brings along, such as `attachments` with `matrix_message`; any other tool that was not chosen is left out, even one from `defaults.tools`.
+- A change that the next config load would reject is refused with `The agent would not load with this change, so nothing was stored: <reason>`, and so is a new agent from `create_agent`.
 - A field with no edit follows its template or creator, so a later change to either reaches it.
 
 Only the agent's owners may ask, and anyone else is refused with `Only <owners> may change <agent>`.
