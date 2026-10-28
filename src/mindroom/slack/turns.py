@@ -59,7 +59,6 @@ _DELIVERED_SECONDS = 86_400
 _THREAD_SECONDS = 7 * 86_400
 _PENDING_THREAD_SECONDS = 300
 _TILDE_RUN = re.compile(r"~+")
-_DIRECT_CONVERSATIONS = {"im": "a direct message", "mpim": "a group direct message"}
 # Failures a later attempt may not meet: Slack or the replay store unavailable, or responses not admitted right now.
 RETRYABLE_ERRORS = (
     SlackApiError,
@@ -135,14 +134,12 @@ async def event_author(attempt: SlackAttempt) -> SlackAuthor:
 
 
 async def conversation_label(attempt: SlackAttempt) -> str:
-    """Name the event's conversation for a turn header: `#name`, `a direct message` or `a group direct message`.
+    """Name the event's channel for a turn header as `#name`.
 
     A channel whose name Slack cannot give is named by its ID: the name is only for display,
     so its lookup must never fail or retry a delivery.
     """
     event = attempt.event
-    if (direct := _DIRECT_CONVERSATIONS.get(event.channel_type)) is not None:
-        return direct
     try:
         name = await slack_channel_name(
             attempt.client,

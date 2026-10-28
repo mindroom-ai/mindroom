@@ -12876,7 +12876,7 @@ Other Atlassian errors keep Atlassian's message with URLs removed.
 
 # Slack
 
-The `slack` tool lets agents search, read, download from, post to, and react in Slack through one Slack app that your organization creates for MindRoom.
+The `slack` tool lets agents search and read Slack, list recent conversations, download and upload files, and post, edit, delete, and react to messages through one Slack app that your organization creates for MindRoom.
 Agents can also answer mentions of that app in Slack channels, and people can have their own Slack mentions and direct messages forwarded into a Matrix room.
 OAuth connection mechanics shared with other providers are on [OAuth Integration Framework](https://docs.mindroom.chat/oauth-framework/).
 
@@ -12894,14 +12894,18 @@ An agent works in one of two modes, chosen by whether its `slack` entry lists `c
 | Function | Does | Personal | Project |
 | --- | --- | --- | --- |
 | `slack_search` | Finds messages, conversations, or people and returns the IDs the other functions take | `messages` (Slack search syntax, such as `launch in:#general from:@dana after:2026-10-01`), `conversations`, and `people` | `conversations` only, among the agent's channels |
+| `slack_recent` | Lists conversations by their latest message, newest first, with that message's start and link | `dms` (direct and group direct messages, named after the other person) or `channels`, active within `active_within` such as `30d`, `12h`, or `90m` | `channels` only: the agent's channels the app has joined |
 | `slack_read` | Reads a conversation's latest messages, or one thread | any conversation the person can see | the agent's channels |
 | `slack_download` | Saves a file of up to 50 MB in the agent workspace's `slack-downloads/` folder | any file the person can see | files shared in the agent's channels |
+| `slack_upload` | Shares a workspace file of up to 50 MB in a conversation or thread, with an optional `title` and `comment` | as the person; a user ID opens a direct message | as the app, in the agent's channels |
 | `slack_post` | Posts a message, or a reply in a thread | as the person; a user ID opens a direct message | as the app, in the agent's channels |
+| `slack_edit` | Replaces a message's text | the person's own messages | the app's own messages, in the agent's channels |
+| `slack_delete` | Deletes a message | messages the person may delete in Slack | the app's own messages, in the agent's channels |
 | `slack_react` | Adds an emoji reaction to a message | as the person | as the app, in the agent's channels |
 | `slack_watch` | Starts, stops, or checks a [watch](#watches) | in a Matrix conversation | not offered |
 
 Functions take a conversation ID such as `C0123ABCD`, `<conversation>:<ts>` such as `C0123ABCD:1714000000.000100`, or a message link, never a channel name.
-Agents cannot edit or delete messages or upload files.
+`slack_upload` takes a path in the agent's workspace and follows the agent's [`file_access`](https://docs.mindroom.chat/configuration/agents/) setting.
 [Background scripts](https://docs.mindroom.chat/tools/background-scripts/) cannot call `slack`.
 
 ## Set Up The Slack App
@@ -13035,7 +13039,7 @@ The `slack` entry of an agent takes these options:
 | --- | --- | --- | --- |
 | `channels` | list of channel IDs | unset | Makes the agent a [project agent](#project-agents) with these channels, such as `C0123ABCD`; leave it out for a personal agent. A channel's ID is at the bottom of its details in Slack. Set it on the agent's own entry, not in `defaults.tools`. |
 | `room` | string | unset | One of the agent's `rooms`, where Slack mentions of the app in its channels start threads. Needs `channels` and the `slack` section above. |
-| `write` | boolean | `true` | When `false`, the agent has no `slack_post` and `slack_react`. An agent with `room` needs `true`, because it posts its replies to Slack. |
+| `write` | boolean | `true` | When `false`, the agent has no `slack_post`, `slack_edit`, `slack_delete`, `slack_react`, and `slack_upload`. An agent with `room` needs `true`, because it posts its replies to Slack. |
 
 ## Personal Agents
 
@@ -13106,7 +13110,7 @@ In the room, ask the agent, for example "Tell me when someone messages or mentio
 - `channels` (optional) limits channel messages to those channel IDs; direct messages are not limited by it.
   Replies in a thread where the person was mentioned also arrive, within those channels.
 
-Each delivery opens a thread in the room, such as "Slack direct message for you from Dana", with the Slack text, its author, its channel, and a link.
+Each delivery opens a thread in the room, such as "Slack direct message for you from Dana", with the Slack text, its author, its channel unless it is a direct message, and a link.
 Messages in the same direct message conversation join one thread, and replies in a Slack channel thread join that thread, until 7 days pass without a message.
 The agent can then summarize it or draft a reply; its turn runs as the watch's owner.
 A watch lasts until it is stopped.
@@ -13129,9 +13133,9 @@ A watch delivers only while all of these hold, so someone else never reads a pri
 | `paused: people who join this room later could read earlier messages` | Change the room's history visibility so that people who join later do not see earlier messages, or use a personal room. |
 | `paused: room members could not be checked` | Try again when the homeserver answers. |
 
-Security: Slack text comes from other people, so during a turn that a watch started, `slack_post` and `slack_react` refuse with `Ask me in a new message to post to Slack`, and `slack_watch` start and stop refuse with `Ask me in a new message to change your Slack watch`.
+Security: Slack text comes from other people, so during a turn that a watch started, `slack_post`, `slack_edit`, `slack_delete`, `slack_react`, and `slack_upload` refuse with `Ask me in a new message to post to Slack`, and `slack_watch` start and stop refuse with `Ask me in a new message to change your Slack watch`.
 A new message from the owner in the same thread can post.
-Work that turn schedules or delegates still runs as the owner, so add a [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rule for `slack_post` and `slack_react` to keep Slack writes behind a person's approval.
+Work that turn schedules or delegates still runs as the owner, so add the [approval](#approval) rules below to keep Slack writes behind a person's approval.
 
 ## MCP
 
@@ -13149,7 +13153,13 @@ tool_approval:
   rules:
     - match: slack_post
       action: require_approval
+    - match: slack_edit
+      action: require_approval
+    - match: slack_delete
+      action: require_approval
     - match: slack_react
+      action: require_approval
+    - match: slack_upload
       action: require_approval
 ```
 
@@ -13160,6 +13170,7 @@ The 👀 reaction and the reply MindRoom posts to a Slack mention are not tool c
 - Slack sends at most 30,000 events per hour per workspace, and events beyond that are not delivered, so in a very busy workspace some watch deliveries and mentions can be missed until the next hour.
 - If MindRoom is unreachable for more than a few minutes, Slack stops resending, and those messages never reach agents.
 - Messages sent directly to the app in Slack are not answered.
+- `slack_recent` checks at most 1,000 conversations, one Slack request each, so for a person in many conversations Slack's rate limit can stop it early; it then reports `complete: false` with how many it skipped and when to retry.
 
 ## Troubleshooting
 
@@ -13173,8 +13184,13 @@ The 👀 reaction and the reply MindRoom posts to a Slack mention are not tool c
 | `Slack needs the <scope> permission; reconnect Slack to grant it` | A personal connection lacks a user scope. Reconnect Slack. |
 | `Slack needs the <scope> permission; add it to the MindRoom Slack app` | A project call needs a bot scope. Add it in the app and reinstall the app. |
 | `Slack rate limit, retry after 30s` | Slack asked to wait; the agent can retry then. |
-| `Slack did not answer; the message may have been sent, so check with slack_read before retrying` | A post may have gone through; check before posting again. |
-| `Slack refused the request: <code>` | Slack's own error code: for example, `channel_not_found` means the account cannot see that conversation, and `not_in_channel` means it is not a member, so join it or invite the app. |
+| `Slack did not answer; the message may have been sent, so check with slack_read before retrying` | A post, edit, delete, or upload may have gone through; check before trying again. |
+| `Slack refused the request: <code>` | Slack's own error code: for example, `channel_not_found` means the account cannot see that conversation, `not_in_channel` means it is not a member, so join it or invite the app, and `cant_update_message` or `cant_delete_message` means the account may not change that message. |
+| `Use <conversation>:<ts> or a message link to edit a message` | `slack_edit`, `slack_delete`, and `slack_react` act on one message, not a conversation or a person. |
+| `active_within looks like 30d, 12h or 90m` | Give a whole number of days, hours, or minutes. |
+| `Direct messages need a personal Slack connection` | A project agent lists only its channels, with `kind="channels"`. |
+| `path '<path>' must be an existing file inside the agent workspace` | `slack_upload` reads only workspace files under the default `file_access`; save the file in the workspace first. |
+| `<path> is <size> bytes; the limit is 52428800 bytes.` | `slack_upload` takes files of up to 50 MB. |
 | `This Slack account belongs to another workspace` | The person approved with an account outside the app's workspace. |
 | `The MindRoom Slack app needs an app-level token for watches` | Add `app_token` to `slack_app`. |
 | `Cannot watch Slack here: another person is in this room` | A watch needs a room where only the owner is; the text after the colon names the cause, as in the table above. |
@@ -16136,7 +16152,7 @@ Do not report or "fix" these; they are deliberate.
 - `POST /api/slack/events` is public: it has no dashboard login, accepts a request only when it carries a valid signature from the Slack app's signing secret made within five minutes, and answers 404 while no Slack app is configured.
 - A Slack message wakes a project agent as the MindRoom account that its author's confirmed Slack email maps to through `slack.email_domain` and `slack.matrix_user_id_template`, still subject to the agent's `access`, so whoever can set that email on a full member account of the workspace can act as that MindRoom account; guests, bots, other workspaces, and emails that map to one of MindRoom's own accounts never map.
   Slack text is delivered as a fenced block that is never parsed for Matrix mentions, so it cannot wake other agents.
-- A personal Slack watch delivers only into a room where the owner is the only human, nobody is invited, and people who join later cannot read earlier messages; the turn runs as the owner, and the toolkit refuses Slack writes in it, but work that turn schedules or delegates still runs as the owner, so a `tool_approval` rule for `slack_post` and `slack_react` is the boundary for those.
+- A personal Slack watch delivers only into a room where the owner is the only human, nobody is invited, and people who join later cannot read earlier messages; the turn runs as the owner, and the toolkit refuses Slack writes in it, but work that turn schedules or delegates still runs as the owner, so `tool_approval` rules for Slack's write functions (`slack_post`, `slack_edit`, `slack_delete`, `slack_react`, and `slack_upload`) are the boundary for those.
 - The MCP gateway runs an agent's tools without its instructions, so it withholds agents whose worker scope is `shared` or unset unless `mcp_gateway_shared_credentials` opts one in; an opted-in agent's users can call its tools directly with its shared accounts and worker, and the shared workspace and browser profiles of a non-private `user` or `user_agent` agent stay reachable through the gateway as they are in chat.
 
 ## Reviewing security findings

@@ -438,7 +438,7 @@ async def _connection_required(
 
 
 class SlackTools(Toolkit):
-    """Search, read, and download from Slack as the requester, or in a project agent's channels."""
+    """Search, read, and write Slack as the requester, or in a project agent's channels."""
 
     def __init__(
         self,

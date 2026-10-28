@@ -122,13 +122,13 @@ async def _deliver_to_watch(
         return retry_later(event, "the watch's agent is not running")
     bot, client = running
     author = await event_author(attempt)
-    conversation = await conversation_label(attempt)
+    # A direct message names itself, so only a channel message says where it is.
     if is_direct_message(event):
-        kind = "direct message"
-    elif watch.slack_user_id in mentioned_user_ids(event.text):
-        kind = "mention"
+        kind = "group direct message" if event.channel_type == "mpim" else "direct message"
+        where = ""
     else:
-        kind = "thread reply"
+        kind = "mention" if watch.slack_user_id in mentioned_user_ids(event.text) else "thread reply"
+        where = f" in {await conversation_label(attempt)}"
     async with admitted_response_decision(bot.admission_gate, refuse_while_closed):
         problem = await watch_problem(
             watch,
@@ -144,10 +144,7 @@ async def _deliver_to_watch(
             thread_key=watch_thread_key(watch.watch_id, event),
             agent=watch.agent_name,
             room_id=watch.room_id,
-            header=(
-                f"Slack {kind} for you from {author.display_name} (@{event.user_id}) "
-                f"in {conversation}: {attempt.permalink}"
-            ),
+            header=f"Slack {kind} for you from {author.display_name} (@{event.user_id}){where}: {attempt.permalink}",
             hook_source=f"slack-watch/{watch.watch_id}",
             requester=watch.owner_id,
         )

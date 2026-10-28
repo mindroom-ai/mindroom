@@ -698,7 +698,7 @@ async def test_watch_dm_delivers_to_owner_room(harness: Harness) -> None:
     (room_id, content), (_, follow_up) = harness.matrix.sent
     assert room_id == WATCH_ROOM
     assert content["body"] == (
-        f"{assistant_id} Slack direct message for you from Dana (@{SLACK_IDS['dana']}) in a direct message: "
+        f"{assistant_id} Slack direct message for you from Dana (@{SLACK_IDS['dana']}): "
         f"{WORKSPACE_URL}archives/{DM}/p1700000000000100\n~~~slack-message\nare you free at 3?\n~~~"
     )
     assert content["m.mentions"] == {"user_ids": [assistant_id]}
@@ -717,6 +717,7 @@ async def test_watch_dm_delivers_to_owner_room(harness: Harness) -> None:
 
 @pytest.mark.asyncio
 async def test_watch_group_dm_is_named_a_group_direct_message(harness: Harness) -> None:
+    """A group direct message says so, since others in it read a reply there; it names no conversation."""
     alice_watch(harness.paths)
     connect_alice(harness.paths)
     payload = event_payload("message", author="dana", text="lunch?", channel="G0123ABCD", channel_type="mpim")
@@ -725,8 +726,8 @@ async def test_watch_group_dm_is_named_a_group_direct_message(harness: Harness) 
 
     ((_, content),) = harness.matrix.sent
     assert content["body"].startswith(
-        f"{harness.agent_id('assistant')} Slack direct message for you from Dana (@{SLACK_IDS['dana']}) "
-        f"in a group direct message: {WORKSPACE_URL}archives/G0123ABCD/",
+        f"{harness.agent_id('assistant')} Slack group direct message for you from Dana (@{SLACK_IDS['dana']}): "
+        f"{WORKSPACE_URL}archives/G0123ABCD/",
     )
     assert harness.slack.calls("conversations.info") == []
 
@@ -748,7 +749,7 @@ async def test_watch_mention_in_a_channel_and_its_replies(harness: Harness) -> N
 
     (_, content), (_, follow_up) = harness.matrix.sent
     assert f" Slack mention for you from Dana (@{SLACK_IDS['dana']}) in #{CHANNEL_NAME}: " in content["body"]
-    assert " Slack thread reply for you from Dana " in follow_up["body"]
+    assert f" Slack thread reply for you from Dana (@{SLACK_IDS['dana']}) in #{CHANNEL_NAME}: " in follow_up["body"]
     assert follow_up["m.relates_to"]["event_id"] == "$sent1"
 
 
