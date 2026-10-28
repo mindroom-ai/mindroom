@@ -42,6 +42,7 @@ from mindroom.llm.provider import (
     complete,
 )
 from mindroom.native_compaction import native_compaction_route
+from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers.openai import build as openai_build
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.openai.chat import ChatAdapter
@@ -49,6 +50,7 @@ from mindroom.providers.openai.errors import provider_error
 from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.pipeline import retry as retry_stage
+from mindroom.providers.pipeline.media import FALLBACK_MARKER
 from tests.providers.golden_support import PacedBytes, encoded_response
 from tests.providers.openai_family_support import (
     golden_provider,
@@ -619,20 +621,19 @@ async def test_a_chat_route_sends_audio_and_file_attachments_inline(tmp_path: Pa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("model_config", "reply", "text_part"),
+    ("model_config", "reply"),
     [
-        (_OPENAI_CHAT, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")), "text"),
-        (_OPENAI_RESPONSES, _responses_reply(*_text_events("ok"), _completed()), "input_text"),
+        (_OPENAI_CHAT, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop"))),
+        (_OPENAI_RESPONSES, _responses_reply(*_text_events("ok"), _completed())),
     ],
     ids=["chat", "responses"],
 )
-async def test_attachments_deleted_since_their_turn_are_left_out(
+async def test_attachments_deleted_since_their_turn_are_sent_as_the_media_note(
     tmp_path: Path,
     model_config: dict[str, Any],
     reply: dict[str, Any],
-    text_part: str,
 ) -> None:
-    """History whose attachment files were cleaned up still replays: its text is sent and each missing file logged."""
+    """A turn whose attachment files were cleaned up still runs: its text is sent with the media fallback's note."""
     gone = tmp_path / "cleaned-up"
     photo, report = gone / "att_photo.png", gone / "att_report.pdf"
     earlier = Message(
@@ -648,8 +649,8 @@ async def test_attachments_deleted_since_their_turn_are_left_out(
 
     body = built.body()
     sent = body["messages"][0] if "messages" in body else body["input"][0]
-    assert sent["content"] == [{"type": text_part, "text": "Compare these."}]
-    assert [log["path"] for log in logs if log["event"] == "Model input file not found"] == [str(photo), str(report)]
+    assert sent["content"] == f"Compare these.\n\n{FALLBACK_MARKER}\n{INLINE_MEDIA_FALLBACK_PROMPT}"
+    assert [log["path"] for log in logs if log["event"] == "media_file_unreadable"] == [str(photo)]
 
 
 # --- Errors ---------------------------------------------------------------------------------------------------

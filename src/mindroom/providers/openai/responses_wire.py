@@ -215,7 +215,7 @@ def responses_replay(
     )
 
 
-def _prompt_item(message: Message) -> dict[str, Any]:
+def _prompt_item(message: Message, provider: str) -> dict[str, Any]:
     """Return a system or user message as a Responses input message with its images and files."""
     item: dict[str, Any] = {"role": "developer" if message.role == "system" else "user"}
     if message.content is not None:
@@ -223,12 +223,14 @@ def _prompt_item(message: Message) -> dict[str, Any]:
     if message.images and isinstance(message.content, str):
         item["content"] = [
             {"type": "input_text", "text": message.content},
-            *(part for image in message.images if (part := responses_image_part(image)) is not None),
+            *(part for image in message.images if (part := responses_image_part(image, provider=provider)) is not None),
         ]
     if message.files:
         content = item.get("content")
         parts: list[Any] = content if isinstance(content, list) else [{"type": "input_text", "text": content or ""}]
-        parts.extend(part for file in message.files if (part := responses_file_part(file)) is not None)
+        parts.extend(
+            part for file in message.files if (part := responses_file_part(file, provider=provider)) is not None
+        )
         item["content"] = parts
     return item
 
@@ -258,14 +260,14 @@ def _call_ids(messages: Sequence[Message]) -> dict[str, str]:
     return call_ids
 
 
-def _input_items(replay: ResponsesReplay) -> list[Any]:
+def _input_items(replay: ResponsesReplay, provider: str) -> list[Any]:
     """Convert the messages a request sends to Responses input items."""
     canonical = reformat_tool_call_ids(replay.history, "responses")
     call_ids = _call_ids(canonical)
     items: list[Any] = []
     for message in canonical[replay.sent_from :]:
         if message.role in {"user", "system"}:
-            items.append(_prompt_item(message))
+            items.append(_prompt_item(message, provider))
         elif message.role == "tool":
             result = tool_result_view(message)
             if result.call_id:
@@ -295,16 +297,23 @@ def _with_system_prefix_breakpoint(formatted_input: list[Any]) -> list[Any]:
     return [{**first_message, "content": [prefix_block]}, *formatted_input[1:]]
 
 
-def responses_input(replay: ResponsesReplay, *, cache_system_prompt: bool, explicit_breakpoint: bool) -> list[Any]:
+def responses_input(
+    replay: ResponsesReplay,
+    *,
+    cache_system_prompt: bool,
+    explicit_breakpoint: bool,
+    provider: str,
+) -> list[Any]:
     """Return the ``input`` items for one request.
 
     Explicit replay rebuilds stored tool loops from their ordered output items, so encrypted reasoning
-    stays attached to the calls it produced even when the next response is stored again.
+    stays attached to the calls it produced even when the next response is stored again. ``provider`` names the
+    adapter in the error for an attachment file that cannot be read.
     """
     # Ordered output is restored only for the spans the request still sends.
     formatted = formatted_input_with_provider_items(
         replay.history[replay.sent_from :],
-        _input_items(replay),
+        _input_items(replay, provider),
         native_route=replay.native_route,
         replay_reasoning=replay.replay_reasoning,
     )
@@ -405,6 +414,7 @@ def responses_request_kwargs(
     request: ModelRequest,
     settings: ResponsesSettings,
     wire: ResponsesWire,
+    provider: str,
 ) -> dict[str, Any]:
     """Return the ``responses.create`` keyword arguments for one request.
 
@@ -436,6 +446,7 @@ def responses_request_kwargs(
         replay,
         cache_system_prompt=settings.cache_system_prompt,
         explicit_breakpoint=wire.explicit_breakpoint,
+        provider=provider,
     )
     return sdk_call_kwargs({"model": model_id, "input": formatted_input, **params}, "responses")
 

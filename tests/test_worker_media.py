@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 def _openai_audio_format(result: ToolResult) -> str:
     """Return the format the OpenAI chat wire sends for the first audio of a tool result."""
-    part = chat_audio_part(tool_value(result).audios[0])
+    part = chat_audio_part(tool_value(result).audios[0], provider="OpenAI Chat")
     assert part is not None
     return part["input_audio"]["format"]
 
@@ -143,7 +143,7 @@ def test_document_name_and_type_survive_inlining(
     assert document.url is None
     assert document.filename == ("chosen.csv" if explicit else "report one.txt")
     assert document.mime_type == ("text/csv" if explicit else "text/plain")
-    payload = chat_file_part(tool_value(decoded).files[0])
+    payload = chat_file_part(tool_value(decoded).files[0], provider="OpenAI Chat")
     assert payload is not None
     assert payload["file"]["filename"] == document.filename
     assert payload["file"]["file_data"].startswith(f"data:{document.mime_type};base64,")

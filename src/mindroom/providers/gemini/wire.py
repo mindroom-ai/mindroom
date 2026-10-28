@@ -11,7 +11,6 @@ import asyncio
 import base64
 import json
 import mimetypes
-import os
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
@@ -27,12 +26,12 @@ from google.genai.types import (
 )
 
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, InvalidRequest, ProviderError
-from mindroom.llm.media import IMAGE_HEADER_BYTES, canonical_mime_type, image_mime_type
+from mindroom.llm.media import canonical_mime_type, image_mime_type
 from mindroom.llm.messages import system_text, tool_result_view
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported, hosted_tool_started
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.logging_config import get_logger
+from mindroom.providers.media_files import read_media_file
 from mindroom.providers.remote_media import download_media
 
 if TYPE_CHECKING:
@@ -47,8 +46,6 @@ if TYPE_CHECKING:
     from mindroom.llm.media import Audio, File, Image, Video
     from mindroom.llm.messages import Message, ToolResultView
     from mindroom.llm.provider import StopReason, StreamEvent, ToolChoice, ToolSpec
-
-logger = get_logger(__name__)
 
 _ROLE_MAP = {"assistant": "model", "tool": "user"}
 # Gemini rejects requests above 20 MB, so larger local media goes through the Files API, which Vertex AI lacks.
@@ -253,20 +250,6 @@ def _file_uri(uri: str, mime_type: str) -> dict[str, Any]:
     return {"file_data": {"file_uri": uri, "mime_type": mime_type}}
 
 
-def _read_local_media(path: Path, kind: str, provider: str, inline_limit: int) -> tuple[int, bytes]:
-    """Return the size of a local media file and its bytes: all of them up to ``inline_limit``, else its header."""
-    try:
-        if not path.is_file():
-            raise FileNotFoundError(path)
-        with path.open("rb") as stream:
-            size = os.fstat(stream.fileno()).st_size
-            return size, stream.read() if size <= inline_limit else stream.read(IMAGE_HEADER_BYTES)
-    except OSError as error:
-        logger.warning("gemini_media_file_unreadable", kind=kind, path=str(path), error=str(error))
-        msg = f"The {kind} attachment could not be read"
-        raise InvalidRequest(msg, provider=provider) from error
-
-
 async def _local_part(
     path: str,
     kind: str,
@@ -278,7 +261,8 @@ async def _local_part(
     ``mime_type`` gets the file's bytes, or only its header when the file is uploaded.
     """
     file_path = Path(path)
-    size, data = await asyncio.to_thread(_read_local_media, file_path, kind, route.provider, _INLINE_MEDIA_LIMIT_BYTES)
+    read = partial(read_media_file, file_path, kind=kind, provider=route.provider, limit=_INLINE_MEDIA_LIMIT_BYTES)
+    size, data = await asyncio.to_thread(read)
     if not size:
         return None
     if size <= _INLINE_MEDIA_LIMIT_BYTES:

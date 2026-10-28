@@ -12,14 +12,13 @@ import json
 import time
 from contextlib import aclosing
 from dataclasses import dataclass, field
-from pathlib import Path
+from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 from uuid import uuid4
 
 from ollama import AsyncClient
 
 from mindroom.credentials.sync import get_ollama_api_key, get_ollama_host
-from mindroom.llm.errors import InvalidRequest
 from mindroom.llm.messages import tool_result_view, with_joined_system
 from mindroom.llm.provider import (
     Capabilities,
@@ -33,10 +32,10 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.providers.assistant_turn import ThinkTagSplitter, finished_assistant_message, output_started
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
+from mindroom.providers.media_files import read_media_file
 from mindroom.providers.ollama.errors import provider_error
 from mindroom.providers.ollama.settings import OllamaSettings
 from mindroom.providers.remote_media import download_media
@@ -52,8 +51,6 @@ if TYPE_CHECKING:
     from mindroom.llm.media import Image
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest, StopReason, StreamEvent, ToolSpec
-
-logger = get_logger(__name__)
 
 _PROVIDER = "Ollama"
 # Remote images are downloaded up to this size; a larger one is left to the media fallback's note.
@@ -256,18 +253,8 @@ async def _image_bytes(image: Image, provider: str) -> bytes | None:
         return data
     if image.filepath is None:
         return image.content
-    return await asyncio.to_thread(_read_image, Path(image.filepath), provider)
-
-
-def _read_image(path: Path, provider: str) -> bytes:
-    try:
-        if not path.is_file():
-            raise FileNotFoundError(path)
-        return path.read_bytes()
-    except OSError as error:
-        logger.warning("ollama_media_file_unreadable", path=str(path), error=str(error))
-        msg = "The image attachment could not be read"
-        raise InvalidRequest(msg, provider=provider) from error
+    _, data = await asyncio.to_thread(partial(read_media_file, image.filepath, kind="image", provider=provider))
+    return data
 
 
 def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:

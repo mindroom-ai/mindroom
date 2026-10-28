@@ -477,6 +477,7 @@ class ClaudeProvider:
             projected,
             append_trailing_user_message=not supports_prefill(self.identity.id) or authors_thinking,
             earlier_thinking=self._replays_earlier_thinking(params),
+            provider=self.identity.provider_name,
         )
         body: dict[str, Any] = {"model": self.identity.id, "messages": conversation.messages, **params}
         if tools:

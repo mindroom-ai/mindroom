@@ -50,7 +50,7 @@ def test_saved_file_reaches_the_model_as_the_bytes_the_tool_returned(tmp_path: P
     (workspace / "notes.txt").symlink_to(outside)
 
     file = tool_value(result).files[0]
-    part = chat_file_part(file)
+    part = chat_file_part(file, provider="OpenAI Chat")
 
     assert file.filepath is None
     assert part is not None

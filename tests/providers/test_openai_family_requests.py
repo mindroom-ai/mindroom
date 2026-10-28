@@ -172,6 +172,7 @@ def _input(messages: list[Message], *, store: bool | None = False, portable: boo
         ),
         cache_system_prompt=kwargs.get("cache_system_prompt", False),
         explicit_breakpoint=kwargs.get("explicit_breakpoint", False),
+        provider="OpenAI Responses",
     )
 
 
@@ -497,6 +498,7 @@ def _request(adapter: ResponsesAdapter, messages: list[Message], **request: Any)
         request=ModelRequest(messages=messages, **request),
         settings=adapter.settings,
         wire=adapter.wire,
+        provider=adapter.identity.provider_name,
     )
     return {**kwargs.pop("extra_body", {}), **kwargs}
 
@@ -1140,8 +1142,8 @@ def test_an_attachment_s_type_comes_from_its_original_filename(
 )
 def test_chat_and_responses_type_a_file_by_one_rule(file: File, expected_mime: str) -> None:
     """Both wires name a file by its original filename and type it by the same rule; a compressed name has no type."""
-    chat = chat_file_part(file)
-    responses = responses_file_part(file)
+    chat = chat_file_part(file, provider="OpenAI Chat")
+    responses = responses_file_part(file, provider="OpenAI Responses")
 
     assert chat is not None
     assert responses is not None
@@ -1355,6 +1357,7 @@ def test_every_request_setting_a_chat_dialect_accepts_reaches_its_body(
         structured_output=adapter.capabilities.structured_output,
         settings=adapter.settings,
         wire=adapter.wire,
+        provider=adapter.identity.provider_name,
     )
 
     body = {**kwargs.pop("extra_body", {}), **kwargs}

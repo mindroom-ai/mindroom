@@ -85,6 +85,7 @@ class ChatAdapter:
             structured_output=self.capabilities.structured_output,
             settings=request_settings(self.settings, request.overrides, self.capabilities),
             wire=self.wire,
+            provider=self.identity.provider_name,
         )
         if self.wire.route != "openrouter":
             return kwargs
