@@ -471,6 +471,13 @@
           "description": "Allow this agent to modify its own configuration via a tool",
           "title": "Allow Self Config"
         },
+        "created_agents_per_owner": {
+          "default": 0,
+          "description": "How many agents each person may create through this agent with create_agent; 0 turns create_agent off",
+          "minimum": 0,
+          "title": "Created Agents Per Owner",
+          "type": "integer"
+        },
         "automations": {
           "anyOf": [
             {

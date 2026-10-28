@@ -2,32 +2,22 @@
 
 from __future__ import annotations
 
-import mimetypes
 import os
 import stat
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlsplit
 
 import httpx
 from httpx._utils import get_environment_proxies
 
-from mindroom.llm.media import Audio, File, Image, Video, canonical_mime_type, named_by_resource
+from mindroom.llm.media import Audio, File, Image, Video, canonical_mime_type, named_by_resource, url_file_name
 from mindroom.server_fetch_url import ServerFetchHTTPTransport, ServerFetchUrlError, validate_server_fetch_url
 from mindroom.tool_system import media_transport
 from mindroom.tool_system.agno_toolkits import read_tool_value
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
 
 type _Media = Image | Audio | Video | File
-
-_AUDIO_FORMAT_BY_MIME_TYPE = {
-    "audio/mpeg": "mp3",
-    "audio/mp3": "mp3",
-    "audio/wav": "wav",
-    "audio/wave": "wav",
-    "audio/x-wav": "wav",
-}
 
 
 class _WorkerMediaProxyTransport(httpx.HTTPTransport):
@@ -98,30 +88,7 @@ def _read_url(url: str, limit: int) -> tuple[bytes, str | None]:
 def _resource_name(media: _Media) -> str:
     if media.filepath is not None:
         return Path(media.filepath).name
-    return Path(unquote(urlsplit(media.url or "").path)).name
-
-
-def _inline_metadata(media: _Media, declared_mime: str | None) -> dict[str, Any]:
-    """Retain provider-relevant resource identity before dropping its location."""
-    name = _resource_name(media)
-    if isinstance(media, File):
-        named = named_by_resource(media, name, declared_mime)
-        return {"filename": named.filename, "mime_type": named.mime_type}
-    updates: dict[str, Any] = {}
-    if media.mime_type is None and media.format is None:
-        family = media_transport.MEDIA_MIME_FAMILIES[type(media)]
-        inferred_mime = mimetypes.guess_type(name)[0] if isinstance(media, Image) else None
-        candidates = (declared_mime, inferred_mime)
-        updates["mime_type"] = next((value for value in candidates if value and value.startswith(family)), None)
-    if isinstance(media, (Audio, Video)) and media.format is None and name:
-        updates["format"] = Path(name).suffix.removeprefix(".").lower() or None
-    if isinstance(media, Audio) and media.format is None:
-        suffix_mime = mimetypes.guess_type(name)[0] or ""
-        if updates.get("format") not in {"mp3", "wav", "ogg", "webm"} and not suffix_mime.startswith("audio/"):
-            mime = media.mime_type or updates.get("mime_type")
-            if audio_format := _AUDIO_FORMAT_BY_MIME_TYPE.get(mime or ""):
-                updates["format"] = audio_format
-    return updates
+    return url_file_name(media.url or "")
 
 
 def _materialize_media(media: _Media, limit: int) -> tuple[_Media, int]:
@@ -147,8 +114,9 @@ def _materialize_media(media: _Media, limit: int) -> tuple[_Media, int]:
     if not content or len(content) > limit:
         msg = "Worker media must contain bytes within the byte limit."
         raise ValueError(msg)
-    updates = {"content": content, "url": None, "filepath": None, **_inline_metadata(media, declared_mime)}
-    return replace(media, **updates), len(content)
+    # The resource's name and declared type keep identifying the media once its location is gone.
+    named = named_by_resource(media, _resource_name(media), declared_mime)
+    return replace(named, content=content, url=None, filepath=None), len(content)
 
 
 def serialize_worker_tool_result(result: object) -> object:

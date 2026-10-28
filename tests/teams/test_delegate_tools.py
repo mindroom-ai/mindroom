@@ -144,7 +144,7 @@ async def test_a_delegation_with_arguments_its_definition_refuses_fails_and_runs
 
     async def run_member(member: TeamMember, task: str) -> RunRecord:
         asked.append(task)
-        return RunRecord(run_id=member.spec.id, status=RunStatus.completed, content="done")
+        return RunRecord(run_id=member.id, status=RunStatus.completed, content="done")
 
     members = [member("writer", "Writer", scripted("writer-model"))]
     record = TeamRunRecord(run_id="t", team_id="squad")

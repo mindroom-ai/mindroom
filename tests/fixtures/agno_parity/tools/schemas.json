@@ -1,4 +1,76 @@
 {
+  "agent_manager": {
+    "instructions": null,
+    "guidance": null,
+    "functions": [
+      {
+        "name": "create_agent",
+        "description": "Create an agent for the person asking, with a role of its own and some of your tools.\nThe new agent's ID is your name plus `name`. `instructions` replace yours; omit them to keep yours.\n`tools` are toolkit names you have, such as `calculator`, never function names; omit it to give all of yours.\nThe owner approves on a card unless their own !auto_approve window is open;\non \"Tool approval needs the router in this room\", call `invite_router` and retry.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "display_name": {
+              "type": "string"
+            },
+            "role": {
+              "type": "string"
+            },
+            "instructions": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tools": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "name",
+            "display_name",
+            "role"
+          ]
+        },
+        "strict": false,
+        "requires_confirmation": true,
+        "external_execution": false,
+        "approval_type": null,
+        "stop_after_tool_call": false
+      }
+    ]
+  },
   "agent_vault_access": {
     "instructions": null,
     "guidance": null,

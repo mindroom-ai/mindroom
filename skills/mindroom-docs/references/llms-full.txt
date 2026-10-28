@@ -1784,6 +1784,7 @@ agents:
 | `num_history_runs`, `num_history_messages`, `max_tool_calls_from_history` | | | See [History Settings](https://docs.mindroom.chat/configuration/history/#history-settings) |
 | `compaction` | object | `defaults.compaction` | Per-agent compaction overrides; `enabled: false` turns automatic compaction off. See [Agent Compaction Settings](https://docs.mindroom.chat/configuration/history/#agent-compaction-settings) |
 | `max_tool_calls_per_turn` | int, >= 1 | `null` | Tool calls one turn may execute. Further calls return a tool error, and after this many plus two model requests the turn ends with the text produced so far, which also stops loops of unknown or malformed tool calls |
+| `created_agents_per_owner` | int, >= 0 | `0` | How many agents each person may create through this agent with `create_agent`; `0` turns the tool off. It applies to this agent only and is not inherited from `defaults`. See [Created Agents and Self-Updates](https://docs.mindroom.chat/personal-agents/#created-agents-and-self-updates) |
 | `show_tool_calls` | bool | `null` | Show tool-call markers and trace metadata in Matrix messages; see [Tool Calls During Streaming](https://docs.mindroom.chat/streaming/#tool-calls-during-streaming) |
 | `worker_tools` | list | `null` | Tools to run in an isolated worker instead of the primary process; `[]` runs everything in the primary process. When unset here and in `defaults`, the deployment's [execution mode](https://docs.mindroom.chat/deployment/sandbox-proxy/#execution-modes) decides. See [Worker Routing](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-routing) |
 | `worker_scope` | string | `null` | How worker runtimes are shared: `shared` (one per agent), `user` (one per user, across agents), or `user_agent` (one per user and agent). Not allowed together with `private`. See [Worker scopes](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes) |
@@ -2080,7 +2081,7 @@ models:
       base_url: http://localhost:8080/v1
 ```
 
-Models of every provider except `google`, `ollama`, and `synthetic` verify an HTTPS endpoint's certificate against the operating system's trust store, as do OpenAI embeddings, avatar generation, and the OpenAI speech requests of voice calls and outgoing voice messages, so a private CA installed in that store is trusted.
+Models of every provider except `google`, `ollama`, and `synthetic` verify an HTTPS endpoint's certificate against the operating system's trust store, as do downloads of media that tools return as URLs, OpenAI embeddings, avatar generation, and the OpenAI speech requests of voice calls and outgoing voice messages, so a private CA installed in that store is trusted.
 Setting `SSL_CERT_FILE` or `SSL_CERT_DIR` in the process environment replaces that store, so the file or directory must hold the public CAs too, for example the system CA bundle with the private CA appended.
 An `SSL_CERT_DIR` must be a hashed directory, as `c_rehash` or `openssl rehash` creates.
 
@@ -2431,10 +2432,11 @@ A model with any other key, including a misspelled key or a retired Agno model s
 | `vertexai_claude` | The `anthropic` keys without `auth_token`, plus `base_url`, `project_id`, and `region` |
 | `bedrock_claude` | The `anthropic` keys without `auth_token`, plus `aws_access_key`, `aws_profile`, `aws_region`, `aws_secret_key`, and `aws_session_token` |
 | `google`, `gemini` | `api_key`, `cached_content`, `client_params`, `frequency_penalty`, `generation_config`, `generative_model_kwargs`, `include_thoughts`, `location`, `logprobs`, `max_output_tokens`, `presence_penalty`, `project_id`, `safety_settings`, `search`, `seed`, `stop_sequences`, `temperature`, `thinking_budget`, `thinking_level`, `timeout`, `top_k`, `top_p`, `vertexai` |
-| `ollama` | `api_key`, `client_params`, `format`, `keep_alive`, `options`, `request_params`, `timeout` |
+| `ollama` | `api_key`, `client_params`, `format`, `keep_alive`, `options`, `request_params`, `think`, `timeout` |
 | `synthetic` | `chars_per_second`, `chunk_chars`, `max_response_chars`, `min_response_chars`, `seed`, `tool_call_probability` (see [Built-In Synthetic Model](#built-in-synthetic-model)) |
 
 On `deepseek`, `use_thinking`, a boolean that defaults to `true`, runs requests in DeepSeek's thinking mode, where the model reasons before it answers; set it to `false` to answer without thinking.
+An `ollama` model's `think` turns a thinking model's reasoning on (`true`) or off (`false`), or sets its effort (`low`, `medium`, or `high`) on models that take a level; unset leaves the choice to Ollama.
 
 When a response reaches the model's output limit (`max_tokens` or the route's equivalent), its text is kept, but none of its tool calls run: the agent is asked to split the work into smaller tool calls, and a third such response ends the reply with an error.
 
@@ -2652,6 +2654,7 @@ A team lets several agents answer one request together, either as a named team u
 | `collaborate` | Every member works on the same task independently, and the team model synthesizes their answers | You want several perspectives on one question | "What do you think about X?": every agent answers, then the views are combined |
 
 A team reply opens with a `🤝 Team Response (<members>)` header, shows each member's contribution under its name, and ends with a **Team Consensus** section; without a consensus it notes that only the individual responses are shown.
+A member that fails, including one that cannot start because of a configuration error such as invalid model settings, fails only the work handed to it: the team model reads why and still answers, and the reply shows the reason under the member's name.
 
 ## Named Teams
 
@@ -5627,6 +5630,7 @@ When a provider rejects a request containing inline media (images, audio, video,
 The retry adds `[Inline media unavailable for this model]` to the message that carried the media and tells the agent the content was not inspected, so the agent can still open the file through the [`attachments` tool](https://docs.mindroom.chat/attachments/#the-attachments-tool) or explain the limitation.
 If the provider error says the model does not support that kind of input, such as `does not support image input` or `is not a multimodal model`, later requests to the same model leave that media kind out from the start until MindRoom restarts.
 Other rejections, such as an image the provider could not decode, drop the media from that one request only.
+The same note replaces the request's media when an attachment file no longer exists or cannot be read, or when MindRoom cannot download media a tool returned as a URL, including media larger than 20 MiB.
 Once a reply has produced text, tool calls, or reasoning, a later provider error is reported instead of retried without media, and provider safeguard refusals are never retried without media.
 
 # Attachments
@@ -7137,7 +7141,7 @@ Every generated agent also gets these settings, whatever the template says:
 
 - The owner is added to `access.users` and `credential_managers` when missing.
 - `access.members_of_rooms` is `[]` when missing or null, so membership of the agent's rooms grants nothing unless you list rooms yourself.
-- `allow_self_config` is `false`, even when `defaults.allow_self_config` is true, because `self_config` edits `agents.<name>`, which a generated agent does not have.
+- `allow_self_config` is `false`, even when `defaults.allow_self_config` is true, because `self_config` edits `agents.<name>`, which a generated agent does not have, so owners use `update_agent` instead.
 
 Config validation rejects `private` and `allow_self_config: true` in the template's `agent` and in any `users` override, because a personal agent already belongs to one user.
 A template or override that would produce an invalid agent fails validation as soon as you save or load it, even before anyone has onboarded, with `personal_agents would generate an invalid agent for a new user:` and the reason.
@@ -7145,10 +7149,12 @@ A template or override that would produce an invalid agent fails validation as s
 ## Generated Agents
 
 Generated agents are ordinary agents in the running config, and workers receive them too.
+Docker workers take them from the config the runtime last accepted, and every other setting from `config.yaml`, so a rejected `config.yaml` edit can give a worker a mix of the two until you fix the file.
 They never appear in the saved config file, and the dashboard and `config_manager` edit only what you authored.
 
 - Editing the template changes every user's agent at the next reload.
   The name, Matrix account, and `{user_display_name}` stay fixed at what onboarding stored.
+  A field its owner changed with [`update_agent`](#updating-a-generated-agent) keeps the owner's value until the owner restores it.
 - An authored agent or team that uses a generated agent's name fails validation with an error such as `agents.mind_alice collides with the agent generated from personal_agents.mind for @alice:example.org`.
   The same error rejects a dashboard or `config_manager` save that edits a generated agent in place, so use `personal_agents.<key>.users` for per-user changes.
 - A team member or `delegate_to` entry can name a generated agent only once it exists, because validation rejects an unknown agent name before then.
@@ -7179,6 +7185,7 @@ A [bridge alias](https://docs.mindroom.chat/authorization/#bridge-aliases) onboa
 A Matrix ID containing a space, `*`, `?`, `[`, or `]` gets no agent, because access settings cannot name it exactly.
 
 The roster of generated agents is `tracking/personal_agents.json` in the storage directory; back it up with the storage, because an agent's name and Matrix account never change once recorded there.
+It also holds the agents that agents [create](#created-agents-and-self-updates) and every owner's edits.
 Stop MindRoom before editing it by hand; a file MindRoom cannot read fails config loading with `Personal agent roster <path> is invalid:` and the reason.
 
 > [!WARNING]
@@ -7192,13 +7199,121 @@ MindRoom's own accounts and the internal `mindroom_user` never get an agent.
 
 The dashboard's Settings page edits `personal_agents` next to Personal rooms.
 Its `personal_rooms.agent` dropdown lists the configured agents and the `personal_agents` templates.
-The Agents page lists every generated agent, read-only, with its owner, Matrix ID, template, and whether it is active, pending, or stopped because its template was removed.
+The Agents page lists every agent generated from a template, read-only, with its owner, Matrix ID, template, and whether it is active, pending, or stopped because its template was removed.
+Agents that agents [create](#created-agents-and-self-updates) do not appear there.
 
 ## Switching From a Single Personal-Room Agent
 
 When `personal_rooms.agent` changes from an agent to a template, existing personal rooms stay with the old agent, and a user's new agent cannot take over a room the old agent created.
 Set a new `personal_rooms.alias_prefix` at the same time so that each user gets a new personal room with their own agent; otherwise their onboarding fails with `Personal-room alias ... which this agent does not own`.
 The old agent's `access` no longer limits who gets an agent: everyone in an onboarding room gets one.
+
+## Created Agents and Self-Updates
+
+A template gives every person the same agent.
+A person cannot narrow its tools or reword its role, and cannot get a second agent with a narrower job unless an administrator edits `config.yaml` for them.
+The [`agent_manager`](https://docs.mindroom.chat/tools/agent-orchestration/#agent_manager) tool covers both, and MindRoom adds it by itself:
+
+- Every generated agent, personal or created, can show and change its own `display_name`, `role`, `instructions`, and `tools` for its owners.
+- An agent with `created_agents_per_owner` above 0 can create new agents for the people who ask it.
+
+Every call that creates, changes, or deletes an agent waits for the person asking to approve it on a card; see [Approval Cards](#approval-cards).
+
+### Updating a Generated Agent
+
+Ask the agent to change itself, for example to answer more briefly or to drop a tool.
+It calls `agent_settings` to read its current values and the tool names it may choose from, then `update_agent` with only the fields to change.
+
+- Each value replaces the whole field, so send a changed `instructions` list in full.
+- `null` restores the template's value, or for a created agent its creator's value.
+- `tools` are toolkit names such as `calculator`, never function names, chosen from the `allowed_tools` that `agent_settings` returns, which are the tools of the template or creator.
+  A chosen tool keeps the settings it has there, and so does each tool it brings along, such as `attachments` with `matrix_message`; any other tool that was not chosen is left out, even one from `defaults.tools`.
+- A change that the next config load would reject is refused with `The agent would not load with this change, so nothing was stored: <reason>`, and so is a new agent from `create_agent`.
+- A field with no edit follows its template or creator, so a later change to either reaches it.
+
+Only the agent's owners may ask, and anyone else is refused with `Only <owners> may change <agent>`.
+A personal agent has one owner, the person it was made for, and cannot be deleted.
+
+### Letting an Agent Create Agents
+
+Set `created_agents_per_owner` on the agent that people may ask for helpers.
+It applies to that agent only, never through `defaults`, and under a template's `agent:` it lets each person's agent create agents.
+
+```yaml
+agents:
+  mind:
+    display_name: Mind
+    role: Personal assistant
+    model: sonnet
+    tools: [calculator, file]
+    created_agents_per_owner: 2
+```
+
+The person asks `mind` for a helper, and `mind` calls `create_agent` with a `name`, a `display_name`, a `role`, and optionally `instructions` and `tools`.
+
+- The new agent's ID is the creator's name, an underscore, and the `name` lowercased with other characters turned into underscores, trimmed of leading and trailing underscores, and cut to 30 characters, so `Research Helper` from `mind` gives `mind_research_helper`.
+  The tool replies with its Matrix ID.
+- `tools` come from the creator's tools, with the creator's settings for each, and omitting `tools` gives the new agent all of them.
+  Asking for a tool the creator lacks is refused with the list of names it may use.
+- `instructions` replace the creator's, and omitting them keeps the creator's.
+- Everything else is copied from the creator, including its model, memory backend, knowledge bases, skills, and worker settings.
+- Only the person who asked, any co-owners they add, and platform administrators may use the agent, and only the owners may invite it.
+  Its `credential_managers` stay the creator's, because an unscoped agent shares its creator's credentials and OAuth connections; with a `user` or `user_agent` worker scope, each owner still manages their own connections.
+  It starts with no rooms and no delegation, takes its automations from `defaults`, gets no `self_config` from `allow_self_config`, and cannot create agents of its own.
+
+The new agent joins no room by itself.
+The owner invites its Matrix ID to a room to talk to it, and the agent accepts because the invitation comes from an owner.
+Authored config cannot reference a created agent, so a `delegate_to` list or a team that names one fails to load.
+A change to a created agent through `self_config` or `config_manager` is refused with `agents.<name> was created by another agent; its owners change it with update_agent`, because saving it to `config.yaml` would lose it.
+
+> [!WARNING]
+> **A created agent has its creator's tools, knowledge bases, skills, and model.**
+> Anyone who may ask the creator can make copies of it up to the cap, and a copy can drop tools but never add one.
+> Set `created_agents_per_owner` only on agents whose whole configuration you would hand to each person who may ask them.
+> A copy's access is its owners, not the creator's `access`.
+> An owner can add any Matrix ID as a co-owner, including someone on another server who may not ask the creator, and a copy keeps working for its owners after they lose access to the creator.
+> To take one copy away, stop MindRoom and remove its entry from `created` in `tracking/personal_agents.json`; setting the cap to 0 or removing the creator stops every copy of that creator.
+
+The cap counts each person's agents from one creator, including one still being created.
+A person at the cap is refused with `<owner> already has <n> agents from <creator>, which may create <cap> per owner`, and deleting an agent frees a place.
+A name that is already taken is refused with `<name> is taken; choose another name`.
+A name stays taken after the agent is deleted, because its Matrix account stays.
+
+### Owners and Co-Owners
+
+The person whose request creates an agent is its owner, resolved through any [bridge alias](https://docs.mindroom.chat/authorization/#bridge-aliases) to the person.
+Only a person can own an agent, so a MindRoom account is refused, and so is a Matrix ID with `[`, `]`, a space, `*`, or `?`.
+
+An owner can share a created agent by passing `co_owners` to `update_agent`, and passing `null` clears them.
+Co-owners may use the agent, invite it, and change its `display_name`, `role`, `instructions`, and `tools`.
+Only the owner may change `co_owners` or delete the agent with `delete_agent`.
+
+### Approval Cards
+
+`create_agent`, `update_agent`, and `delete_agent` each show an [approval card](https://docs.mindroom.chat/tool-approval/#approving-and-denying) to the person asking, whatever `tool_approval` says, because the agent asking may have read text its owner did not write.
+The card shows the exact arguments, and only that person can approve it.
+The 5, 10, and 30 minute options on a card are never offered for these calls, but the person asking can skip their cards in a thread with [`!auto_approve`](https://docs.mindroom.chat/tool-approval/#auto-approve-everything).
+`agent_settings` only reads and asks for no approval of its own, so it shows a card only when a `tool_approval` default or rule requires one.
+
+In a room without the router the call is denied with `Tool approval needs the router in this room`.
+The agent then calls `invite_router` and retries, as described in [When the Router Is Missing](https://docs.mindroom.chat/tool-approval/#when-the-router-is-missing).
+
+### Changing the Creator Later
+
+A created agent is built again from its creator at every config load, so changing the creator changes its agents.
+
+- A tool removed from the creator leaves the created agents that chose it, and the load logs `generated_agent_tool_dropped`.
+  The choice stays stored, so the tool returns if the creator gets it back.
+- Lowering `created_agents_per_owner` keeps each person's oldest agents up to the new cap and stops the rest with `created_agent_skipped` and `reason=over_cap`.
+  Setting it to 0 stops them all and removes `create_agent`.
+- Removing the creator stops its agents with `reason=creator_missing`.
+- Stopped agents keep their roster entries and Matrix accounts, so restoring the creator or raising the cap starts them again.
+  A stopped agent leaves every room except its direct messages, so an owner must invite it back into those rooms.
+- Changing the creator's `access` does not change who may use its created agents; see the warning in [Letting an Agent Create Agents](#letting-an-agent-create-agents).
+- Saving an agent, team, or template under a created agent's name from the dashboard or `config_manager` is refused with `<section>.<name> collides with the agent <creator> created for <owner>`.
+  One added to `config.yaml` by hand keeps the name, and the created agent stops with `reason=name_taken`.
+  The authored agent then logs in with the created agent's Matrix account, so it joins that agent's rooms and uses its memory and workspace, and every later dashboard or `config_manager` save is refused until one of the two is renamed or the roster entry is removed.
+- A created agent copies a personal creator as its template defines it, so the owner's edits to that creator do not carry over, and the tools it may give come from the template.
 
 ## Troubleshooting Personal Agents
 
@@ -7208,9 +7323,12 @@ Failed onboarding retries after 30 seconds, then at doubling intervals up to one
 | Log message | Meaning |
 | --- | --- |
 | `Personal agent is starting` | Normal: the user's agent was just created or has not finished its first sync, and the trigger is retried when it has. |
-| `Personal-room onboarding trigger failed` | Onboarding one user failed. For a personal agent, `error` is usually the homeserver refusing the registration, `No free personal agent name for <user>` when the plain and the hashed names are both taken, or `<user> cannot own a personal agent` for an unsupported Matrix ID. |
+| `Personal-room onboarding trigger failed` | Onboarding one user failed. For a personal agent, `error` is usually the homeserver refusing the registration, `No free personal agent name for <user>` when the plain and the hashed names are both taken, `<user> cannot own an agent: brackets in a Matrix ID are not supported` for an ID with `[` or `]`, `<user> cannot own a personal agent: <reason>` for another unsupported Matrix ID such as one with a space, `*`, or `?`, or `<user> is a MindRoom account and cannot own a personal agent`. |
 | `Personal-room reconciliation failed` | A retry failed, with the attempt number and the delay before the next try. |
 | `Personal agent roster unavailable` | The roster file cannot be read, and the pass is retried. |
+| `created_agent_skipped` | A created agent did not load; `reason` is `pending` while it is still being created, or until the next `create_agent` removes one a crash interrupted, `creator_missing`, `over_cap`, or `name_taken`. |
+| `generated_agent_tool_dropped` | A tool an owner chose is no longer among the tools of the template or creator, so the agent loads without it. |
+| `generated_agents_invalid` | The config with the owners' edits and the created agents is invalid for the reason in `error`, so MindRoom ignores them all until it is fixed, and each personal agent runs from its template. |
 
 - A refused registration usually means the localpart is already held by another account, or, with `MATRIX_MANAGED_ACCOUNT_AUTH=appservice`, that a custom `matrix_username` is outside the application service's exclusive user namespace (see [Agent Users](https://docs.mindroom.chat/matrix/#agent-users)).
   Make the namespace cover the rendered name, including the `_<MINDROOM_NAMESPACE>` suffix, or change the pattern.
@@ -7918,7 +8036,7 @@ These configurations fail validation:
 - `initial: true` without `defer: true` fails with `Tool entry initial=true requires defer=true`.
 - Deferral is per agent, so `defaults.tools` entries reject both flags with `defaults.tools does not support defer or initial flags: <tools>`.
 - Presets such as [`openclaw_compat`](https://docs.mindroom.chat/openclaw/) cannot be deferred; set the flags on the individual member tools instead.
-- The control-plane tools `delegate`, `dynamic_tools`, `external_trigger_manager`, `invite_router`, `self_config`, and `skill_manage` cannot be deferred and fail with `'<tool>' is a control-plane tool and cannot be deferred; defer/initial are only valid on runtime tools.`
+- The control-plane tools `agent_manager`, `delegate`, `dynamic_tools`, `external_trigger_manager`, `invite_router`, `self_config`, and `skill_manage` cannot be deferred and fail with `'<tool>' is a control-plane tool and cannot be deferred; defer/initial are only valid on runtime tools.`
 
 ## Native Server-Side Tool Search
 
@@ -8204,7 +8322,7 @@ Each run keeps the limits and `allowed_tools` value in effect when it started.
 - A non-empty `allowed_tools` list restricts the script to those toolkits, and their functions run without approval.
 - An empty list lets the script call every eligible toolkit on the agent, but each call waits for approval unless a `tool_approval` rule auto-approves it.
 - Unknown or ineligible toolkit names, including `*`, make `start_script` fail with an error.
-- The `browser`, `script`, `claude_agent`, `compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `memory`, `self_config`, and `skill_manage` toolkits are never available to scripts, even when the agent has them.
+- The `browser`, `script`, `agent_manager`, `claude_agent`, `compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `memory`, `self_config`, and `skill_manage` toolkits are never available to scripts, even when the agent has them.
 - Listing `config_manager` or `scheduler` in `allowed_tools` does not auto-approve their calls; only a `tool_approval` rule can.
 - Operator [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules are checked first, so a matching `require_approval` rule still pauses the call, and functions that declare their own confirmation still ask for it.
 - Only the original requester can approve or deny a script's call, and approval cards for a cancelled or finished run are settled without running the call.
@@ -13606,6 +13724,7 @@ These built-in tools let an agent hand tasks to other agents, build and run reus
 - [`report_publishing`](#report_publishing) - Publish workflow reports or workspace static sites through revocable public links.
 - [`config_manager`](#config_manager) - Inspect and patch the full configuration, and create, update, or validate agents and teams.
 - [`self_config`](#self_config) - Let an agent read and update only its own configuration.
+- [`agent_manager`](#agent_manager) - Create agents for the people asking, and let owners change or delete the agents generated for them.
 - [`claude_agent`](#claude_agent) - Run persistent Claude Agent SDK coding sessions.
 
 Related tools documented elsewhere:
@@ -13954,7 +14073,7 @@ The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `partici
 - **`inputs`**: An object schema with `required` and `properties`; each property supports `type`, `description`, and `enum`.
 - **`participants`**: Up to 8 entries with `kind` set to `subagent` (the default) or `room_agent`.
   - A `subagent` is an [authored subagent](#authored-subagents) of the caller: it declares `id`, an optional `description`, and either `profile`, naming a `subagents/<name>.md` profile in the caller's workspace, or an inline `system_prompt` with optional `tools`, `skills`, `model`, and `mode`.
-    Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, `invite_router`, or `thread_model`, and a participant that names no tools, inline or in its profile, gets none.
+    Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `agent_manager`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, `invite_router`, or `thread_model`, and a participant that names no tools, inline or in its profile, gets none.
     Its `skills` must be the caller's own skills, and a participant that names no skills gets none; it reads its skills whenever the caller could without approval, but reads a skill's scripts only when an operator `auto_approve` rule allows `get_skill_script`.
     It searches no knowledge bases, even when its profile lists `knowledge`.
     Its `model` is any alias or model ID in `models:` and defaults to the caller's current model; when `permissions.models` is set, it must also list it.
@@ -14207,6 +14326,38 @@ update_own_config(
     context_files=["SOUL.md", "USER.md"],
 )
 ```
+
+## [`agent_manager`]
+
+`agent_manager` lets people get agents of their own and reshape them, without an administrator editing `config.yaml` for each change.
+MindRoom adds it automatically and it is never listed under `tools`.
+A generated agent is an agent made for one person from a [`personal_agents`](https://docs.mindroom.chat/personal-agents/) template, or one that another agent created.
+Which functions an agent gets depends on what it is:
+
+| Function | Offered to | What it does |
+| --- | --- | --- |
+| `create_agent(name, display_name, role, instructions=None, tools=None)` | Agents with `created_agents_per_owner` above 0 | Creates an agent for the person asking, with some of the creator's tools, and returns its Matrix ID |
+| `agent_settings()` | Every generated agent | Shows the agent's editable settings, its owners if it was created, and the toolkit names `tools` may use as `allowed_tools` |
+| `update_agent(changes)` | Every generated agent | Changes its `display_name`, `role`, `instructions`, or `tools`; for a created agent, its owner may also change `co_owners` |
+| `delete_agent()` | Created agents | Deletes the agent for its owner; its Matrix account stays, so the name stays taken |
+
+Only an agent's owners may read or change it, and only a created agent's owner may delete it or change its co-owners.
+`create_agent`, `update_agent`, and `delete_agent` always show an [approval card](https://docs.mindroom.chat/tool-approval/#approving-and-denying) to the person asking, even when `tool_approval.default` is `auto_approve`, and only that person's [`!auto_approve`](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) window skips it.
+In a room without the router the call is denied, and the agent recovers with `invite_router` as described in [When the Router Is Missing](https://docs.mindroom.chat/tool-approval/#when-the-router-is-missing).
+Scripts and workflow participants cannot call it, and it cannot be deferred.
+
+```python
+create_agent(
+    name="research",
+    display_name="Research Helper",
+    role="Find and summarize sources for the owner.",
+    tools=["duckduckgo", "wikipedia"],
+)
+update_agent({"role": "Answer in two sentences.", "instructions": None})
+```
+
+`tools` are toolkit names such as `duckduckgo`, never function names, and each value in `update_agent` replaces the whole field, with `None` restoring the base agent's value.
+[Created Agents and Self-Updates](https://docs.mindroom.chat/personal-agents/#created-agents-and-self-updates) covers naming, the cap, owners and co-owners, and what happens when the creator changes.
 
 ## [`claude_agent`]
 
@@ -17097,8 +17248,7 @@ Custom events default to 1000 ms.
   `role` is `"user"` for a message the agent was sent and `"assistant"` for the agent's or team's own reply.
   `sender` is `None` for a reply; for a user line it is the sender's Matrix ID, or a placeholder such as `"unknown"` when MindRoom recorded no sender, and `display_name` is the name the message carried, or `None`.
   `text` is the message's text without the context `message:enrich` hooks attached, and is not redacted.
-  Tool calls, tool results, automation turns, queued-message notices, compaction summaries, job and media follow-up prompts, and the reply of a stopped turn are left out.
-  A few notes MindRoom adds to a thread's context still appear as user lines: the note that earlier thread messages were omitted, the note that the agent's previous reply is still being delivered, and that reply's unfinished text under the agent's own Matrix ID.
+  Tool calls, tool results, automation turns, queued-message notices, compaction summaries, job and media follow-up prompts, the reply of a stopped turn, and the notes MindRoom adds to a thread's context (that earlier thread messages were omitted, or that the agent's previous reply is still being delivered, with that reply's unfinished text) are left out.
   A compaction during a reply also covers what the reply wrote so far, but not the message it answers, which stays uncompacted.
 - **`schedule:fired`**: `ctx.thread_id` is the thread the message will be delivered to, which can differ from `ctx.workflow.thread_id` when the task starts a new thread or posts at room level.
   The event fires for visible and silent schedules.
@@ -19246,7 +19396,7 @@ agents:
 The tools that default to workers when no list is set are `browser_mcp`, `coding`, `docker`, `file`, `python`, and `shell`.
 Any other registered tool can be listed in `worker_tools`, except tools that need the primary runtime or room context, which stay in the primary runtime even when listed.
 These include the Matrix, scheduling, todo, attachment, and thread tools, `gmail` and the other Google tools, `github`, `atlassian`, `slack`, `spotify`, `homeassistant`, `reasoning`, `daytona`, `e2b`, `mem0`, `claude_agent`, `config_manager`, `oauth_connections`, and `agent_vault_access`, plus `browserbase`, `composio`, `duckdb`, `pandas`, `sql`, and `zep`, which keep a session, connection, or other state between calls.
-The built-in `memory`, `delegate`, and `self_config` tools also always run in the primary runtime.
+The built-in `memory`, `delegate`, `self_config`, and `agent_manager` tools also always run in the primary runtime.
 The `browser` tool chooses per call: `target: desktop` stays in the primary runtime, while `target: host` follows the worker routing.
 
 ### Execution modes
@@ -19916,7 +20066,7 @@ When more than one user can sign in through a trusted upstream gateway, set `MIN
 ### Using a connected account
 
 An account connected for the provider's tools, on the Connections portal or here, serves only those tools until someone allows Agent Keys to use it for the service.
-Its row then shows "Connected for tools only" and offers **Use account**, and brokered requests that need it are refused with `oauth_reuse: "off"` (see [Error responses](#error-responses)).
+Its row then shows "Connected for tools only" and offers **Let commands use it**, and brokered requests that need it are refused with `oauth_reuse: "off"` (see [Error responses](#error-responses)).
 The provider's tools ask for approval before they write, but an allowed account lets the agent's shell and python commands act as it with its full access and without those prompts, so allowing it asks for confirmation first.
 Whoever may connect the account may allow it (see **Who may connect and set keys** above).
 Allowing a GitHub or Atlassian account covers every agent of that requester with a service of the same name, because the account is the requester's own; allowing any other account covers the scope of the service's keys (see [Secret management](#secret-management)), so on a shared agent everyone using it gets it.
@@ -19977,12 +20127,13 @@ When a config service sets the same variable, the config value wins, and the edi
 
 ### A service's own account
 
-A user service that signs in with a connected account on a `user` or `user_agent` agent can set `oauth_separate_account: true` (in the editor, **Use its own account, not the one the agent's tools use**), for example to use a second Google account for a shared mailbox or another calendar from the agent's commands.
+A user service that signs in with a connected account on a `user` or `user_agent` agent can set `oauth_separate_account: true` (in the editor, **Account**: **Another <provider> account**), for example to use a second Google account for a shared mailbox or another calendar from the agent's commands.
 A GitHub or Atlassian login cannot, because those accounts belong to each user rather than to one agent.
-A row's **Add another account** opens **Add service** with that row's preset and **Use its own account** ticked: save it, then use **Connect** on the new row.
-That service's row then connects, allows, and disconnects an account of its own, which shows as "Connected, not used for Agent Keys yet" until it is allowed, and the agent's tools and every other service keep the account they use.
+A row on the tools' account with a connected account offers **Add another <provider> account** under its status, which adds such a service with the row's preset and the next free name (`google_gmail-2`) at once.
+After that link, or **Save and sign in** in the editor, the new row asks what agents may do with the account and then opens the provider's sign-in, where Google always shows its account picker; cancelled, the row keeps its **Connect** button.
+That service's row then connects, allows, and disconnects an account of its own, which shows as "Not used by commands yet" until it is allowed, and the agent's tools and every other service keep the account they use.
 It uses only that account, so it takes no key and its row offers none: until the account is connected the service has none, and it never uses the tools' account instead.
-Deleting the service, unticking the box, or changing its account login also removes its own account and its opt-in.
+Deleting the service, switching it back to the tools' account, or changing its account login also removes its own account and its opt-in.
 
 Such a service usually covers the same hosts and paths as a service of your administrator's, which wins a tie, so a request picks it by name with the `X-Agent-Keys-Service` header:
 
@@ -20008,7 +20159,8 @@ One editor adds, edits, and deletes services in two places:
 On the personal page the editor saves the service and its key in one step.
 Pick a **Preset**, or **Custom** and fill in the website (the host of the first rule), how the key is sent (bearer token, header, basic auth, query parameter, or a custom header template), and the header, username, or parameter name.
 The **Name** is fixed once saved.
-**More options** holds the display name, description, path prefix, port, extra rules, **Replace the preset's rules with my own**, **Refuse other paths on these hosts** (`restrict_to_rules`), the account login (for a **Custom** service), **Use its own account, not the one the agent's tools use** (for a service of your own with an account login, see [A service's own account](#a-services-own-account)), and the placeholder variables.
+**More options** holds the display name, description, path prefix, port, extra rules, **Replace the preset's rules with my own**, **Refuse other paths on these hosts** (`restrict_to_rules`), the account login (for a **Custom** service), and the placeholder variables.
+A service of your own with an account login asks **Account** instead of an API key: the account the agent's tools use, or another account of that provider (see [A service's own account](#a-services-own-account)); a preset asks it right after **Preset**, a **Custom** service under **More options** after its account login.
 
 ### The limit editor
 

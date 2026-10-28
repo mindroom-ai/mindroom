@@ -17,12 +17,27 @@ import signal
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 name = Path(sys.argv[0]).name
 args = sys.argv[1:]
+log_dir = Path(os.environ["KIND_TEST_LOG_DIR"])
+
+
+def forward_listens(port):
+    for path in log_dir.glob("*.json"):
+        forwarded = json.loads(path.read_text())["args"]
+        if "port-forward" in forwarded and forwarded[-1].split(":")[0] == port:
+            return True
+    return False
+
+
 if name == "kubectl":
     record = {"kubeconfig": os.environ.get("KUBECONFIG"), "args": args}
-    (Path(os.environ["KIND_TEST_LOG_DIR"]) / f"{os.getpid()}.json").write_text(json.dumps(record))
+    # Renamed into place, so a record is never read half written.
+    partial = log_dir / f"{os.getpid()}.partial"
+    partial.write_text(json.dumps(record))
+    partial.replace(log_dir / f"{os.getpid()}.json")
     if "port-forward" in args:
         local_port, remote_port = args[-1].split(":")
         print(f"Forwarding from 127.0.0.1:{local_port} -> {remote_port}", flush=True)
@@ -36,6 +51,12 @@ elif name == "kind":
     else:
         raise SystemExit("Unexpected kind operation")
 elif name == "curl":
+    # A forwarded port answers once its forward listens, which a forward shows by recording itself; the bound stays
+    # below the script's timeout, so a forward that never starts is reported by the count of recorded calls.
+    port = str(urlsplit(next(arg for arg in args if arg.startswith("http://"))).port)
+    deadline = time.monotonic() + 5
+    while not forward_listens(port) and time.monotonic() < deadline:
+        time.sleep(0.01)
     print("200" if "%{http_code}" in args else '{"status":"ok"}')
 elif name == "sleep":
     time.sleep(0.1)

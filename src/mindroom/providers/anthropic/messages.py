@@ -1,16 +1,16 @@
 """The Claude adapter over the Anthropic Messages API, on the direct API, Vertex AI, and Bedrock Mantle.
 
-One frozen adapter serves all three routes; per-request state travels in ``ModelRequest``. Each request
-fetches its URL-backed media, then builds its SDK client and wire body off the event loop (Bedrock credential
-resolution and attachment encoding block), streams the reply through the SDK's message stream, and parses the
-finished message once. The only state an adapter keeps is the ambient Google credentials a Vertex route
+One frozen adapter serves all three routes; per-request state travels in ``ModelRequest``. Each request builds
+its SDK client and wire body off the event loop (Bedrock credential resolution and attachment encoding block),
+streams the reply through the SDK's message stream, and parses the finished message once; the pipeline already
+downloaded its URL media. The only state an adapter keeps is the ambient Google credentials a Vertex route
 discovers once.
 """
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import anthropic
@@ -75,7 +75,6 @@ from mindroom.providers.anthropic.wire import (
     checks_thinking_prefix,
     format_claude_messages,
     format_claude_tools,
-    inline_url_media,
     parse_claude_usage,
     stop_reason_of,
     supports_forced_tool_use,
@@ -272,7 +271,6 @@ class ClaudeProvider:
         that stops early still settles what Anthropic bills.
         """
         timer = TurnTimer()
-        request = replace(request, messages=await inline_url_media(request.messages, self.http_client))
         prepared = await asyncio.to_thread(self._prepare, request)
         client, kwargs = prepared.client, prepared.kwargs
         try:
@@ -472,6 +470,7 @@ class ClaudeProvider:
             projected,
             append_trailing_user_message=not supports_prefill(self.identity.id) or authors_thinking,
             earlier_thinking=self._replays_earlier_thinking(params),
+            provider=self.identity.provider_name,
         )
         body: dict[str, Any] = {"model": self.identity.id, "messages": conversation.messages, **params}
         if tools:

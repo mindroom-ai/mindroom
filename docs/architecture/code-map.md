@@ -180,8 +180,8 @@ Matrix sync callback
 | `routing.py` | Intelligent responder selection when no agent or team is mentioned |
 | `routing_judgment.py` | Opt-in bounded System One or OpenAI Decisions responder selection, with explicit no-fit outcomes and existing LLM routing fallback |
 | `teams/formation.py` | Forming a team from one turn: who was asked, who is eligible, which members can be materialized, and the execution-time mode choice for an ad hoc team |
-| `teams/members.py` | Materializing a team's exact members as agent builds without silent shrinkage, the leader's and members' model aliases for a turn, and `build_team_spec`: the leader's model, prompt, job controls, call budget, and history settings with each member's prompt, role, and loop hooks |
-| `teams/spec.py` | `TeamMode`, `TeamMember`, and `TeamSpec`: what a team run is built from |
+| `teams/members.py` | Resolving a team's exact members without silent shrinkage, the leader's and members' model aliases for a turn, and `build_team_spec`: the leader's model, prompt, job controls, call budget, and history settings with each member's roster entry and the build its first delegation makes |
+| `teams/spec.py` | `TeamMode`, `TeamMember` with its `MemberBuild`, and `TeamSpec`: what a team run is built from |
 | `teams/prompt.py` | The leader's system messages, rendered like an agent's: the stable one holds the team's identity, the markdown line, the roster and mode block, and tool instructions; the turn one holds the date, session context, and enrichment |
 | `teams/delegate_tools.py` | `delegate_task_to_member` and `delegate_task_to_members`, the member result texts, the pause a paused member propagates to the team run, and the answer its resumed run gives the waiting call |
 | `teams/runtime.py` | `run_team` and `continue_team` over the agent loop: members as child runs, member decisions routed by member and call, team usage |
@@ -252,7 +252,7 @@ Matrix sync callback
 | `providers/names.py` | `provider_route`, the route a configured provider value selects with aliases such as `gemini` resolved, which model dispatch, pricing, and the wire adapters compare, and `PROVIDER_ROUTES`, the routes the provider registry builds, which config validation accepts as a model's `provider`, in a module that imports nothing |
 | `providers/anthropic/messages.py` | The Claude adapter (`ModelProvider`) for the direct API, Vertex AI, and Bedrock Mantle routes, with their client factories, error mapping, and `build_provider` |
 | `providers/anthropic/settings.py` | Claude route settings parsed from `extra_kwargs` under Agno's field names, and the keys each route accepts |
-| `providers/anthropic/wire.py` | Claude Messages API formatting of messages and tools, inlining of URL-backed media, and parsing of the finished response into an assistant message |
+| `providers/anthropic/wire.py` | Claude Messages API formatting of messages and tools, and parsing of the finished response into an assistant message |
 | `providers/anthropic/repairs.py` | Replay-safe transforms of a Claude request body: citations, tool-result order, tool-search blocks, inline media budgets |
 | `providers/anthropic/prompt_cache.py` | The wire preparation of one Claude request body: history repairs, deferred tool search, tool choice, and the prompt-cache ladder |
 | `providers/cache_ladder.py` | The Claude prompt-cache ladder primitives (breakpoint markers, message rungs, the tools marker) shared by the Claude adapter and the OpenRouter Claude ladder |
@@ -263,7 +263,8 @@ Matrix sync callback
 | `model_selection_scope.py` | Current joined membership and readable-root eligibility for model selection |
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `providers/openai/` | OpenAI-family adapters: one Chat Completions adapter for every OpenAI-compatible route, one Responses adapter for OpenAI and Codex, `build_provider`, the OpenRouter Claude cache ladder, OpenAI server-side tool search tagging, the Responses explicit cache breakpoint on the stable system message and ordered output replay, and the history budget's size of explicitly replayed Responses input (`replay_estimate.py`) |
-| `providers/pipeline/` | Stages composed around a provider's `stream()`: portable deferred tool search (`llm/tool_search.py`), media fallback, the malformed tool-call guidance retry, stream retry with the idle limit, the typed safeguard refusal, and request logging |
+| `providers/openai/legacy_response_replay.py` | The hosted tool-search items that Responses replies stored without an ordered output kept apart, read for replay |
+| `providers/pipeline/` | Stages composed around a provider's `stream()`: portable deferred tool search (`llm/tool_search.py`), media fallback, downloads of the media URLs a route does not send (`remote_media.py`), the malformed tool-call guidance retry, stream retry with the idle limit, the typed safeguard refusal, and request logging |
 | `providers/registry.py` | `build_model_provider`, the only way a configured model is built: the dashboard key, the family adapter, and the request pipeline around it with the model's stream idle limit; `model_capabilities` reads a configured model's route capabilities from its bare adapter; `check_extra_kwargs` rejects, at config load and without loading a provider SDK, `extra_kwargs` keys the model's route does not accept |
 | `providers/gemini/` | Gemini adapter for the Gemini API and Vertex AI: contents, Files API uploads, Google Search grounding, decision-request config, reply parsing, and the `extra_kwargs` a Gemini model accepts (`settings.py`, which loads no Google SDK) |
 | `providers/ollama/` | Ollama adapter over the native chat API, the `extra_kwargs` an Ollama model accepts (`settings.py`, which loads no ollama SDK), and the Ollama SDK's failures as normalized provider errors, which the adapter and the Ollama embedder share (`errors.py`) |
@@ -274,7 +275,7 @@ Matrix sync callback
 | `providers/errors.py` | One classification of provider statuses, context-window wording, and transport failures into the normalized provider errors, shared by every adapter |
 | `providers/assistant_turn.py` | What adapters share to build a turn: the `mindroom_model` provenance stamp and timings, the progress event of a provider chunk without events, the events that end a finished turn, and the split of a leading inline `<think>` block into reasoning |
 | `llm/request_context.py` | The per-request logging context (agent, session, correlation id) bound around a model request and read by request telemetry |
-| `providers/remote_media.py` | Downloads URL media for the adapters that send media only inline |
+| `providers/media_files.py` | Reads the attachment files every wire sends; a file that cannot be read raises `InvalidRequest`, so the media fallback replaces the request's media with its note |
 | `budgets/pricing.py` | Per-model USD pricing of token counters, keyed by the provider and model ID usage records |
 | `budgets/spend.py` | Month-to-date per-requester spend derived from retained usage |
 | `budgets/caps.py` | Per-user monthly caps kept as runtime state under the storage root, written atomically and read lock-free |
@@ -418,7 +419,9 @@ Matrix sync callback
 | `tool_system/metadata.py` | Runtime tool lookup, validation, plugin resolution, and instance construction |
 | `tool_system/runtime_context.py` | Shared runtime ContextVar for tool calls (including attachment scope) |
 | `tool_system/tool_function.py` | The tool values, free of Agno: `ToolFunction`, the only tool shape the agent loop sees (finished schema, loop flags, entrypoint, what each injected parameter receives) and the owner of how a call of it pauses, `AdaptedToolkit`, `ToolValue`, a finished tool value's text and media, and `ToolOutcome`, a call's value with its stop and failure flags |
-| `tool_system/agno_toolkits.py` | Adapts Agno toolkits and functions to `ToolFunction` once, builds the Agno-shaped call-time arguments (run context, actor stand-in) their entrypoints expect, reads the Agno `ToolResult` a vendor tool returns or streams as the `ToolValue` MindRoom's own tools return, and is where modules outside the tool packages import Agno's tool types from |
+| `tool_system/authoring.py` | MindRoom's Agno-free tool authoring API that plugins import: `Toolkit`, `@tool`, `current_call()` for the call a function runs for, and `toolkit_functions()` for a toolkit's callables by name |
+| `tool_system/tool_schema.py` | Derives a tool function's description and parameter schema from its docstring and annotations, as Agno derives them for the annotations in use, and validates a call's arguments against them |
+| `tool_system/agno_toolkits.py` | Adapts Agno and owned toolkits and functions to `ToolFunction` once, builds the Agno-shaped call-time arguments (run context, actor stand-in) their entrypoints expect, reads the Agno `ToolResult` a vendor tool returns or streams as the `ToolValue` MindRoom's own tools return, and is where modules outside the tool packages import Agno's tool types from |
 | `tool_system/toolkit_connections.py` | Connects the `requires_connect` toolkits, such as Postgres, around each run that offers them, and holds the cancellation-safe connect and close helpers the script broker and MCP gateway share |
 | `tool_system/invocation.py` | Decodes a model's tool-call arguments, runs one call through middleware to its outcome for the loop or to the tool's own value for runners outside it (injection, synchronous offload, generator draining, error text), and reads that value as the text and media references a runner hands its client |
 | `tool_system/tool_hooks.py` | MindRoom's tool-call policy as middleware around every call: plugin before-call, environment, and after-call hooks, the background-script approval gate, job and authority checkpoints, durable call recording, and failure records |

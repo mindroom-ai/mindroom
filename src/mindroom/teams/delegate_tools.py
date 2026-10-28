@@ -15,14 +15,13 @@ from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from pydantic import validate_call
-
 from mindroom.llm.provider import ToolSpec
 from mindroom.llm.runs import RunStatus
 from mindroom.teams.prompt import TEAM_MEMBER_NOT_FOUND_TEMPLATE, render_members_roster
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
+from mindroom.tool_system.tool_schema import validated_entrypoint
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping, Sequence
@@ -98,7 +97,7 @@ def delegate_functions(
     The arguments are checked against the entrypoint's signature before it runs, so a call with a missing or mistyped
     argument fails with the validation error the model reads.
     """
-    by_id = {member.spec.id: member for member in members}
+    by_id = {member.id: member for member in members}
 
     async def delegate_task_to_member(member_id: str, task: str) -> str:
         """Run the member ``member_id`` on ``task`` and return what the leader reads of its run."""
@@ -109,7 +108,7 @@ def delegate_functions(
         if child.status is RunStatus.paused:
             propagate_member_pause(record, member, child)
             _running_call(record).child_run_id = child.run_id
-            return MEMBER_PAUSED_RESULT.format(name=member.spec.name)
+            return MEMBER_PAUSED_RESULT.format(name=member.name)
         return member_result_text(child)
 
     async def delegate_task_to_members(task: str) -> str:
@@ -124,7 +123,7 @@ def delegate_functions(
         name=definition.name,
         description=definition.description,
         parameters=definition.parameters,
-        entrypoint=validate_call(entrypoint),
+        entrypoint=validated_entrypoint(entrypoint),
     )
     return AdaptedToolkit(name="team_delegation", functions=(function,), instructions=None)
 
@@ -159,9 +158,9 @@ def collaborate_result_text(
     for member, child in zip(members, children, strict=True):
         if child.status is RunStatus.paused:
             propagate_member_pause(record, member, child)
-            pieces.append(_labeled_piece(member.spec.name, _COLLABORATE_PAUSED_NOTICE))
+            pieces.append(_labeled_piece(member.name, _COLLABORATE_PAUSED_NOTICE))
         else:
-            pieces.append(_labeled_piece(member.spec.name, member_result_text(child)))
+            pieces.append(_labeled_piece(member.name, member_result_text(child)))
     return "\n\n".join(pieces)
 
 
@@ -188,8 +187,8 @@ def answer_delegation(
     # execute, but I need confirmation.") after its call ran. Hand over only what the resume added
     # (``new_handover_content``) or a completion note. The leader model would notice.
     result = member_result_text(run)
-    name = run.agent_display_name or member.spec.name
-    coordinate = _waiting_coordinate_call(tools, member.spec.id, run, MEMBER_PAUSED_RESULT.format(name=name))
+    name = run.agent_display_name or member.name
+    coordinate = _waiting_coordinate_call(tools, member.id, run, MEMBER_PAUSED_RESULT.format(name=name))
     if coordinate is not None:
         coordinate.result = result
         return coordinate
@@ -274,8 +273,8 @@ def member_requirement(requirement: RunRequirement, member: TeamMember, run_id: 
     return replace(
         requirement,
         tool_execution=deepcopy(requirement.tool_execution),
-        member_agent_id=member.spec.id,
-        member_display_name=member.spec.name,
+        member_agent_id=member.id,
+        member_display_name=member.name,
         member_run_id=run_id,
     )
 

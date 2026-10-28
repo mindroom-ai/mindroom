@@ -81,6 +81,7 @@ if TYPE_CHECKING:
 # a durable agent runtime; they can never be granted to workflow participants.
 _WORKFLOW_RESTRICTED_TOOLS = frozenset(
     {
+        "agent_manager",
         "compact_context",
         "delegate",
         "dynamic_tools",

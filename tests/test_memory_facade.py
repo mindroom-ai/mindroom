@@ -26,7 +26,7 @@ from mindroom.memory import search_agent_memories as public_search_agent_memorie
 from mindroom.memory import store_conversation_memory as public_store_conversation_memory
 from mindroom.memory import update_agent_memory as public_update_agent_memory
 from mindroom.memory._prompting import format_memories_as_context
-from mindroom.memory.config import _Mem0StrictOpenAIEmbedder
+from mindroom.memory.config import _Mem0Embedder, _Mem0StrictOpenAIEmbedder
 from mindroom.prompts import MEMORY_CONTEXT_PROMPT_TEMPLATE
 from mindroom.tool_system.worker_routing import agent_state_root_path, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for
@@ -260,7 +260,10 @@ class TestMemoryFacade:
 
         class SwallowingMemory:
             def __init__(self) -> None:
-                self.embedding_model = _Mem0StrictOpenAIEmbedder(FailingEmbedder())
+                self.embedding_model = _Mem0Embedder(
+                    _Mem0StrictOpenAIEmbedder(FailingEmbedder()),
+                    openai_embedder_error,
+                )
 
             async def add(self, messages: list[dict], **_kwargs: object) -> dict[str, list]:
                 try:

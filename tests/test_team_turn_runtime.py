@@ -39,7 +39,7 @@ from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, EnrichmentItem, MessageEnvelope, ToolBeforeCallContext, hook
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import NativeCompactionReplay, TextDelta, TurnCompleted, UsageReported
+from mindroom.llm.provider import ModelRequest, NativeCompactionReplay, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
@@ -776,7 +776,8 @@ async def test_a_member_approval_pauses_the_team_with_the_member_s_identity_and_
     assert (requirement.member_agent_id, requirement.member_display_name) == ("checker", "Checker")
     assert requirement.tool_execution.tool_call_id == "call-touch"
     assert paused.toolkit_owners[("checker", "touch")] == PROBE_TOOL
-    assert ("writer", "touch") in paused.toolkit_owners
+    # The writer never ran, so it was never built and owns none of the team's calls.
+    assert not any(member == "writer" for member, _function in paused.toolkit_owners)
     assert paused.approval_agent_name is None
     assert paused.runtime_model_name == "default"
     assert paused.team_member_model_names == (("checker", "checker-model"), ("writer", "writer-model"))
@@ -2169,24 +2170,24 @@ async def test_a_member_keeps_its_hooks_across_its_delegation_continuation(
     )
 
 
-def test_a_copy_of_a_member_keeps_the_hooks_of_its_runs() -> None:
-    """A member is a frozen spec that holds its runs' hooks, so ``replace`` must carry them over.
+def test_a_copy_of_a_member_build_keeps_the_hooks_of_its_runs() -> None:
+    """A member's build is a frozen spec that holds its runs' hooks, so ``replace`` must carry them over.
 
     A copy continues a run with the hooks the run started with, and a new run gets one set whichever copy runs it.
     """
-    built: list[LoopHooks] = []
+    made: list[LoopHooks] = []
 
     def new_hooks() -> LoopHooks:
-        built.append(LoopHooks())
-        return built[-1]
+        made.append(LoopHooks())
+        return made[-1]
 
-    writer = replace(squad_member("writer", "Writer", ScriptedModel([])), new_hooks=new_hooks)
+    writer = replace(squad_member("writer", "Writer", ScriptedModel([])).build(), new_hooks=new_hooks)
     first = writer.hooks("run-1")
-    copy = replace(writer, role="Edited role.")
+    copy = replace(writer, request_template=ModelRequest(messages=()))
 
     assert copy.hooks("run-1") is first
     assert copy.hooks("run-2") is writer.hooks("run-2")
-    assert len(built) == 2
+    assert len(made) == 2
 
 
 @pytest.mark.asyncio

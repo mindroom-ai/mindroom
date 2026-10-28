@@ -22,16 +22,22 @@ import {
   type RuleForm,
   NOT_EXPLICITLY_EMPTY,
   emptyRule,
+  firstFreeName,
   formFromService,
+  offersSeparateAccount,
   presetOf,
   serializeService,
+  serviceLogin,
+  signsInAfterSave,
   suggestedName,
+  toolsAccountUse,
   usesMoreOptions,
   usesOwnRules,
 } from "./egressServiceForm";
 import {
   overlapWarnings,
   presetPlaceholderWarnings,
+  ruleCoverage,
   scopeNote,
 } from "./egressServiceNotes";
 import {
@@ -41,7 +47,7 @@ import {
   ruleField,
   validateService,
 } from "./egressServiceValidation";
-import { hostPort, limitOverlap } from "./egressRowText";
+import { limitOverlap } from "./egressRowText";
 import { looksLikeGithub } from "./githubLimits";
 import {
   GITHUB_API_HOST,
@@ -56,6 +62,7 @@ import {
   restoredHelperInput,
 } from "./EgressGithubHelper";
 import type { HelperInput, HelperLabels } from "./EgressGithubHelper";
+import { EgressAccountChoice } from "./EgressAccountChoice";
 import { MoreOptions, RulesSection } from "./EgressMoreOptions";
 import { errorText } from "./request";
 import {
@@ -74,28 +81,12 @@ import type {
   EgressOAuthProviderOption,
   EgressPreset,
   EgressPresetCatalog,
-  EgressRuleSummary,
   EgressScope,
 } from "./types";
 
 /** A problem with no field to show it, or with a field the basic form does not have. */
 function needsMoreOptions(problem: ServiceProblem): boolean {
   return problem.field !== "form" && !isBasicField(problem.field);
-}
-
-/** The name a new limit starts with: `github-limited`, or the first of `-2`, `-3`... that is free. */
-function limitedServiceName(taken: readonly string[]): string {
-  const base = "github-limited";
-  for (let n = 1; ; n += 1) {
-    const name = n === 1 ? base : `${base}-${n}`;
-    if (!taken.includes(name)) return name;
-  }
-}
-
-/** A rule as a short host and path, such as `www.googleapis.com/drive/`. */
-function ruleCoverage(rule: EgressRuleSummary): string {
-  const path = rule.path_prefix === "/" ? "" : rule.path_prefix;
-  return `${hostPort(rule)}${path}`;
 }
 
 export interface EgressServiceEditorProps {
@@ -148,6 +139,12 @@ export interface EgressServiceEditorProps {
    */
   onSave: (name: string, service: AuthoredEgressService) => Promise<void>;
   /**
+   * Called after a save that gives the service an account of its own it has
+   * not signed in to, with that account's login as the form resolved it, so
+   * the page can ask to sign in next. Leave it out where nothing signs in.
+   */
+  onSignIn?: (name: string, provider: string) => void;
+  /**
    * Save the API key typed in the form for the service of that name, called
    * after `onSave` succeeds and only when a key was typed. Without it the form
    * has no key field. When it rejects, the service stays saved and the form
@@ -183,6 +180,7 @@ export function EgressServiceEditor({
   saveWarning = null,
   onDirtyChange,
   onSave,
+  onSignIn,
   saveKey,
   onDelete,
   onClose,
@@ -212,7 +210,10 @@ export function EgressServiceEditor({
   const [form, setForm] = useState(() => {
     if (addingLimit)
       return {
-        ...formFromService(limitedServiceName(openedWithNames), service),
+        ...formFromService(
+          firstFreeName("github-limited", openedWithNames),
+          service,
+        ),
         restrictOnly: true,
         rules: [],
       };
@@ -223,9 +224,6 @@ export function EgressServiceEditor({
   });
   // A service that only limits repositories has no key, login, or website of its own.
   const limiting = form.restrictOnly;
-  // One with its own account signs in through Connect, so the form asks for
-  // no key and saves none typed before.
-  const takesKey = !limiting && !form.separateAccount;
   const [apiKey, setApiKey] = useState("");
   const [moreOpen, setMoreOpen] = useState(() => usesMoreOptions(form));
   const loadPresetsRef = useRef(loadPresets);
@@ -243,8 +241,8 @@ export function EgressServiceEditor({
   // them anew only after they change and keeps rules edited by hand until then.
   const appliedHelper = useRef<string | null>(restored.applied);
   const showGithubHelper = limiting ? restored.exact : looksLikeGithub(form);
-  // A new service that starts from another, such as another account, is still
-  // new: the save writes it from the form alone.
+  // A new service that starts from another is still new: the save writes it
+  // from the form alone.
   const initial = editing ? service : null;
   const settings = { editing, takenNames: openedWithNames, service: initial };
 
@@ -340,10 +338,34 @@ export function EgressServiceEditor({
       ?.focus();
   }, [focusRequest]);
 
+  // A new service starts on an account of its own where another service of
+  // the agent already uses the tools' one, again each time its login can
+  // change. An edited one has the account last picked, the saved one until
+  // the user picks, wherever its login can have an account of its own.
+  const startsOnOwnAccount = (next: EgressServiceForm) => {
+    const fresh = { ...next, separateAccount: false };
+    const nextPreset = presetOf(presets, next.preset);
+    return (
+      offersSeparateAccount(fresh, options, nextPreset) &&
+      toolsAccountUse(serviceLogin(fresh, nextPreset), agentServices, name)
+        .usedBy !== null
+    );
+  };
+  const pickedOwn = useRef(service?.oauth_separate_account === true);
   const set = (changes: Partial<EgressServiceForm>) => {
     setConfirmingSave(false);
     setForm((previous) => {
       const next = { ...previous, ...changes };
+      if ("preset" in changes || "oauthProvider" in changes) {
+        next.separateAccount = !editing
+          ? startsOnOwnAccount(next)
+          : pickedOwn.current &&
+            offersSeparateAccount(
+              { ...next, separateAccount: false },
+              options,
+              presetOf(presets, next.preset),
+            );
+      }
       return nameLocked || nameTyped || "name" in changes
         ? next
         : { ...next, name: suggestedName(next, openedWithNames) };
@@ -356,6 +378,55 @@ export function EgressServiceEditor({
   };
 
   const preset = presetOf(presets, form.preset);
+  // A service of one's own that signs in asks which account, in place of a
+  // key: it saves none typed before. Its row still offers a key for the
+  // tools' account.
+  const login = serviceLogin(form, preset);
+  const choosesAccount =
+    !limiting && offersSeparateAccount(form, options, preset);
+  const takesKey = !limiting && !choosesAccount;
+  const toolsAccount = toolsAccountUse(login, agentServices, name);
+  const signsIn = signsInAfterSave(form, initial, presets);
+  // What a save removes from the service as listed: its own connected
+  // account, on a switch to the tools' account or to another login, and its
+  // API key, on a switch to its own account, which takes none.
+  const listed = editing
+    ? agentServices.find((other) => other.name === name)
+    : undefined;
+  const ownAddress = listed?.separate_account
+    ? listed.oauth?.account_label
+    : null;
+  const disconnects =
+    ownAddress && (!form.separateAccount || signsIn) ? ownAddress : null;
+  const removesKey =
+    form.separateAccount &&
+    initial?.oauth_separate_account !== true &&
+    listed?.key_configured === true;
+  const accountChoice = choosesAccount && (
+    <EgressAccountChoice
+      id={`${id}-account`}
+      provider={
+        providers.find((option) => option.id === login)?.display_name ??
+        (login || form.preset)
+      }
+      name={form.name}
+      separateAccount={form.separateAccount}
+      toolsAddress={toolsAccount.address}
+      usedBy={toolsAccount.usedBy}
+      disconnects={disconnects}
+      removesKey={removesKey}
+      signsIn={signsInAfterSave(
+        { ...form, separateAccount: true },
+        initial,
+        presets,
+      )}
+      disabled={disabled}
+      onChange={(separateAccount) => {
+        pickedOwn.current = separateAccount;
+        set({ separateAccount });
+      }}
+    />
+  );
   // Shown beside the preset, since it is the preset that brings these variables.
   const presetWarnings = presetPlaceholderWarnings(
     form,
@@ -382,7 +453,7 @@ export function EgressServiceEditor({
       : "Add service";
   const note =
     context === "personal" && agentName !== undefined
-      ? scopeNote(scope, agentName, scopeAgents, form.separateAccount)
+      ? scopeNote(scope, agentName, scopeAgents, choosesAccount)
       : null;
   // Deleting takes the service from everyone the store serves, so say who that is.
   const deleteNote =
@@ -393,15 +464,13 @@ export function EgressServiceEditor({
           scopeAgents,
         )
       : null;
-  // The services this form would send a key to the same website as, for this agent.
-  const overlaps = limiting
-    ? []
-    : overlapWarnings(form, preset, agentServices, name);
-  // A request picks a service with its own account by the header its box names, so one note stands in for the warnings.
-  const headerNote =
-    form.separateAccount && overlaps.length > 0
-      ? "Without this service's header, the usual routing order applies."
-      : null;
+  // The services that already send a credential where this form would, for
+  // this agent. A request picks a service with its own account by its
+  // header, so it is warned about none of them.
+  const overlaps =
+    limiting || form.separateAccount
+      ? []
+      : overlapWarnings(form, preset, agentServices, name);
   // Another service of the user's with rules on the hosts a limit, or the
   // repositories applied to this service, cover.
   const overlapHosts = !limiting
@@ -480,6 +549,9 @@ export function EgressServiceEditor({
       // The service goes first, and the key only after it is written.
       if (signature !== savedSignature) {
         await onSave(current.name, authored);
+        const login = serviceLogin(current, presetOf(presets, current.preset));
+        if (login && signsInAfterSave(current, initial, presets))
+          onSignIn?.(current.name, login);
         setSavedSignature(signature);
       }
     } catch (cause) {
@@ -571,23 +643,24 @@ export function EgressServiceEditor({
               {warning}
             </p>
           ))}
+          {preset && accountChoice}
+          {/* Without the Account field, the save still removes the own account. */}
+          {!choosesAccount && disconnects && (
+            <p className="text-xs text-muted-foreground">
+              Saving disconnects {disconnects}.
+            </p>
+          )}
           {usesOwnRules(form) && (
             <div className="grid gap-3 sm:grid-cols-2">
               <RuleHostField {...ruleEditing(0, primaryRule)} />
               <RuleSendFields {...ruleEditing(0, primaryRule)} />
             </div>
           )}
-          {headerNote ? (
-            <p role="status" className="text-xs text-muted-foreground">
-              {headerNote}
+          {overlaps.map((warning) => (
+            <p key={warning} role="status" className={warningClass}>
+              {warning}
             </p>
-          ) : (
-            overlaps.map((warning) => (
-              <p key={warning} role="status" className={warningClass}>
-                {warning}
-              </p>
-            ))
-          )}
+          ))}
         </>
       )}
       <Field
@@ -723,8 +796,8 @@ export function EgressServiceEditor({
               onGithub={showGithubHelper}
               configPlaceholders={configPlaceholders}
               ruleEditing={ruleEditing}
+              accountChoice={accountChoice}
               newService={!editing}
-              focusDisplayName={!editing && service !== null}
             />
           )}
         </section>
@@ -767,6 +840,8 @@ export function EgressServiceEditor({
             "Save all changes"
           ) : limiting ? (
             "Save limit"
+          ) : signsIn ? (
+            "Save and sign in"
           ) : (
             "Save service"
           )}

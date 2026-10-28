@@ -441,6 +441,8 @@ async def _admit_ready(
     gate: CoalescingGate,
     key: CoalescingKey,
     pending_event: PendingEvent,
+    *,
+    receipt_time: float | None = None,
 ) -> None:
     """Admit one already-ready event through the canonical gate API."""
     await gate.admit(
@@ -448,6 +450,7 @@ async def _admit_ready(
         source_event_id=pending_event.event.event_id,
         source_kind=pending_event.facts.source_kind,
         ready_result=ReadyPendingEvent(pending_event=pending_event),
+        receipt_time=receipt_time,
     )
 
 
@@ -2452,10 +2455,12 @@ async def test_same_window_lane_slot_resolving_to_different_thread_waits_then_sp
     first_key = CoalescingKey("!room:localhost", "$thread-a:localhost", RequesterCoalescingOwner("@user:localhost"))
     second_key = CoalescingKey("!room:localhost", "$thread-b:localhost", RequesterCoalescingOwner("@user:localhost"))
 
-    await _admit_ready(gate, first_key, _image_pending("$first:localhost", 1_000_000))
-    await asyncio.sleep(0.005)
+    receipt_time = time.monotonic()
+    await _admit_ready(gate, first_key, _image_pending("$first:localhost", 1_000_000), receipt_time=receipt_time)
+    # The slot is received 5 ms into the window and entered before the drain runs, however late the loop resumes.
     slot = gate.enter_lane(
         ReceiptLaneKey(room_id=first_key.room_id, sender_id=first_key.owner.requester_user_id),
+        receipt_time=receipt_time + 0.005,
     )
     await asyncio.sleep(0.05)
 

@@ -1,11 +1,11 @@
 """Only the tool and knowledge-reader boundary under ``src/mindroom`` imports Agno, and Agno's reach only shrinks.
 
-Agno stays MindRoom's tool library: ``Toolkit``, ``Function``, and ``@tool`` remain the tool authoring API, tools
-return text or MindRoom's ``ToolValue`` while a vendor toolkit's ``ToolResult`` is read as one in the adapter, and Agno's
-knowledge readers stay. The built-in, custom, OAuth, and MCP tool packages, the toolkit adapter, the
-skills toolkit, and the knowledge reader module may import Agno; ``logging_config`` may too, because it routes Agno's
-loggers, which vendor toolkits log through. Every other module must take Agno's tool types from
-``mindroom.tool_system.agno_toolkits``.
+Agno stays MindRoom's tool library: vendor toolkits and the MindRoom tools not yet on the owned authoring API
+(``tool_system/authoring.py``) use Agno's ``Toolkit``, ``Function``, and ``@tool``, tools return text or MindRoom's
+``ToolValue`` while a vendor toolkit's ``ToolResult`` is read as one in the adapter, and Agno's knowledge readers stay.
+The built-in, custom, OAuth, and MCP tool packages, the toolkit adapter, the skills toolkit, and the knowledge reader
+module may import Agno; ``logging_config`` may too, because it routes Agno's loggers, which vendor toolkits log through.
+Every other module must take Agno's tool types from ``mindroom.tool_system.agno_toolkits``.
 
 The ratchets below list the modules that still take an Agno type through that re-export and the test modules that
 import Agno. Each list must match the code exactly, so a module that stops leaves its list in the same change, and no

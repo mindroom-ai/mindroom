@@ -32,6 +32,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import TURN_INTENT_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.custom_tools.skill_manage import SkillManageTools
 from mindroom.history import summary_rows
+from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
     Capabilities,
@@ -42,7 +43,7 @@ from mindroom.llm.provider import (
     UsageReported,
 )
 from mindroom.llm.request_context import current_llm_request_log_context
-from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.mid_turn import QueuedMessage
 from mindroom.path_confinement import open_directory_within_root
@@ -241,9 +242,12 @@ def _seed(
     seed_session(storage, _stored(session_id, *runs))
 
 
-def _stored(session_id: str, *runs: RunRecord) -> ConversationSession:
+def _stored(session_id: str, *runs: RunRecord | TeamRunRecord) -> ConversationSession:
     """Return the agent session that holds ``runs``."""
     return ConversationSession(session_id=session_id, kind="agent", owner_id="mind", runs=list(runs))
+
+
+_MIND = HistoryScope(kind="agent", scope_id="mind")
 
 
 def _skills_root(config: Config, paths: RuntimePaths, identity: ToolExecutionIdentity | None = None) -> Path:
@@ -589,7 +593,7 @@ def _transcript(*runs: RunRecord, summary: str | None = None, budget_chars: int)
     for run in runs:
         run.user_id = "@alice:x"
     return render_transcript(
-        conversation_messages(_stored("session", *runs)),
+        conversation_messages(_stored("session", *runs), _MIND),
         summary=summary,
         budget_chars=budget_chars,
     )
@@ -620,6 +624,26 @@ def test_transcript_digests_older_turns_and_keeps_recent_evidence_verbatim() -> 
     small = _transcript(_run("r1", *older, *recent), budget_chars=3_000)
     assert "earlier turns omitted" in small
     assert len(small) < 3_500
+
+
+def test_a_replayed_review_reads_the_turns_a_request_of_the_agent_replays() -> None:
+    """A review reads the agent's own finished top-level turns, as its requests replay them, and no other scope's."""
+
+    def exchange(name: str) -> list[Message]:
+        return [Message(role="user", content=f"{name} question"), Message(role="assistant", content=f"{name} answer")]
+
+    session = _stored(
+        "session",
+        _run("own", *exchange("own")),
+        RunRecord(run_id="other-agent", agent_id="helper", messages=exchange("other-agent")),
+        TeamRunRecord(run_id="team-named-like-the-agent", team_id="mind", messages=exchange("team")),
+        RunRecord(run_id="member", agent_id="mind", parent_run_id="team", messages=exchange("member")),
+        RunRecord(run_id="stopped", agent_id="mind", status=RunStatus.cancelled, messages=exchange("stopped")),
+    )
+
+    said = [part.unredacted for message in conversation_messages(session, _MIND) for part in message]
+
+    assert said == ["own question", "own answer"]
 
 
 def test_transcript_names_who_said_each_message() -> None:
