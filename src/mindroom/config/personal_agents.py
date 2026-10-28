@@ -162,6 +162,11 @@ class CreatedAgentEntry(BaseModel):
     # Recorded before the account is registered, so no load sees it without one; a failed creation removes it.
     pending: bool = False
 
+    @property
+    def owners(self) -> list[str]:
+        """Return the people who may change this agent: its owner first, then its co-owners."""
+        return [self.owner, *self.co_owners]
+
 
 class PersonalAgentRosterEntry(BaseModel):
     """One generated agent: the template, its owner, and the names fixed at onboarding."""
@@ -180,6 +185,11 @@ class PersonalAgentRosterEntry(BaseModel):
     # Recorded before the account is registered, so an interrupted registration resumes under these names.
     pending: bool = False
     edits: GeneratedAgentEdits | None = None
+
+    @property
+    def owners(self) -> list[str]:
+        """Return the person who may change this agent."""
+        return [self.user_id]
 
 
 @dataclass(frozen=True)

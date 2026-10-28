@@ -59,7 +59,7 @@ def _generated_agent_data(
             ]
             data["include_default_tools"] = False
     if created is not None:
-        owners = [created.owner, *created.co_owners]
+        owners = created.owners
         # credential_managers stays the creator's, because an unscoped agent shares its creator's credentials.
         data |= {
             "access": {"users": owners, "members_of_rooms": []},
@@ -73,19 +73,13 @@ def _generated_agent_data(
     return data, dropped
 
 
-def _created_skip_reason(
-    base: Config,
-    created: CreatedAgentEntry,
-    taken: set[str],
-    counts: Counter[tuple[str, str]],
-) -> str | None:
+def _created_skip_reason(base: Config, created: CreatedAgentEntry, taken: set[str], rank: int) -> str | None:
+    """Return why a created entry is left out, given its rank among its owner's active agents from its creator."""
     if created.pending:
         return "pending"
     if (creator := base.agents.get(created.creator)) is None:
         return "creator_missing"
-    # Active entries count in roster order, so lowering the cap keeps an owner's oldest agents.
-    counts[created.creator, created.owner] += 1
-    if counts[created.creator, created.owner] > creator.created_agents_per_owner:
+    if rank > creator.created_agents_per_owner:
         return "over_cap"
     return "name_taken" if created.agent_name in taken else None
 
@@ -116,7 +110,10 @@ def expand_generated_agents(
     counts: Counter[tuple[str, str]] = Counter()
     for created in roster.created:
         name, creator = created.agent_name, created.creator
-        if (reason := _created_skip_reason(base, created, taken, counts)) is not None:
+        if not created.pending and creator in base.agents:
+            # Active entries count in roster order, so lowering the cap keeps an owner's oldest agents.
+            counts[creator, created.owner] += 1
+        if (reason := _created_skip_reason(base, created, taken, counts[creator, created.owner])) is not None:
             logger.warning("created_agent_skipped", agent_name=name, creator=creator, reason=reason)
             continue
         taken.add(name)

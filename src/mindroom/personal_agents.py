@@ -344,7 +344,7 @@ def _owned_entry(
     if entry is None or config.generated_agent(agent_name) is None:
         msg = f"{agent_name} is not a generated agent"
         raise _GeneratedAgentError(msg)
-    owners = [entry.owner, *entry.co_owners] if isinstance(entry, CreatedAgentEntry) else [entry.user_id]
+    owners = entry.owners
     requester = resolve_human_requester_alias(requester_id, config, runtime_paths)
     if requester not in owners:
         msg = f"Only {' or '.join(owners)} may change {agent_name}"
@@ -362,7 +362,7 @@ def generated_agent_settings(
     """Return the current values an owner may edit, the tools they may choose from and, if created, the owners."""
     entry, _ = _owned_entry(config, runtime_paths, agent_name, requester_id)
     current = config.agents[agent_name].model_dump(include={"display_name", "role", "instructions"})
-    current["tools"] = [entry.name for entry in config.resolve_entity(agent_name).authored_tool_configs]
+    current["tools"] = [tool.name for tool in config.resolve_entity(agent_name).authored_tool_configs]
     settings = {"agent_name": agent_name, "edits": current, "allowed_tools": list(config.tool_ceiling(agent_name))}
     if isinstance(entry, CreatedAgentEntry):
         settings |= {"owner": entry.owner, "co_owners": entry.co_owners}
@@ -398,7 +398,7 @@ def update_generated_agent(
             # A bridge alias is stored as its person, so it matches the resolved requester.
             co_owners = [resolve_human_requester_alias(user_id, config, runtime_paths) for user_id in updated.co_owners]
             updated = updated.model_copy(update={"co_owners": co_owners})
-            _refuse_owners([updated.owner, *updated.co_owners], runtime_paths)
+            _refuse_owners(updated.owners, runtime_paths)
         _replace_roster_entry(runtime_paths, entry, updated, config)
 
 
