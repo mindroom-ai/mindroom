@@ -354,8 +354,8 @@ class ResponseTurnContext:
 class TurnSinks:
     """Mutable turn outputs owned by the caller and updated by the turn's one driver.
 
-    ``on_completed`` receives the attempt that completes the turn; ``on_failed`` the error of a turn that ended with
-    the failure's message instead.
+    ``on_completed`` receives the attempt that completes the turn; ``on_failed`` the error an attempt that failed with
+    the failure's message reports (``HandledAttempt.error``).
     """
 
     turn_recorder: TurnRecorder | None = None
@@ -1186,6 +1186,4 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     except Exception as e:
         failure_text = _failed_turn_text(ctx, adapter, sinks, run, e)
         if failure_text is not None:
-            if sinks.on_failed is not None:
-                sinks.on_failed(e)
             yield adapter.make_text_chunk(failure_text)
