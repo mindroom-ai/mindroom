@@ -398,7 +398,7 @@ export function EgressServiceEditor({
       : "Add service";
   const note =
     context === "personal" && agentName !== undefined
-      ? scopeNote(scope, agentName, scopeAgents, form.separateAccount)
+      ? scopeNote(scope, agentName, scopeAgents, choosesAccount)
       : null;
   // Deleting takes the service from everyone the store serves, so say who that is.
   const deleteNote =

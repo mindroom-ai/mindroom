@@ -147,16 +147,16 @@ export function overlapWarnings(
 
 /**
  * Who uses a personal service, for the note under the form's title; null where
- * nothing needs saying. A service with its own account (`separateAccount`)
- * has that account instead of a key.
+ * nothing needs saying. A service whose form asks which account it uses
+ * (`account`) has that account instead of a key.
  */
 export function scopeNote(
   scope: EgressScope | undefined,
   agent: string,
   scopeAgents: readonly string[],
-  separateAccount = false,
+  account = false,
 ): string | null {
-  const credential = separateAccount ? "account" : "key";
+  const credential = account ? "account" : "key";
   if (scope === "user_agent")
     return `Only your ${agent} uses this service and its ${credential}.`;
   if (scope === "user")

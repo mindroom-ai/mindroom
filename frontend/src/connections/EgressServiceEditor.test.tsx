@@ -2187,20 +2187,29 @@ describe("the note on whose service this is", () => {
     ).toBeInTheDocument();
   });
 
-  it("speaks of its account, not a key, for a service with its own account", async () => {
-    await renderEditor({
-      scope: "user_agent",
+  it("speaks of its account, not a key, wherever the form asks which account", async () => {
+    const scoped = {
+      scope: "user_agent" as const,
       agentName: "Code Helper",
       scopeAgents: [],
+    };
+    await renderEditor({
+      ...scoped,
       service: { preset: "google_calendar", oauth_separate_account: true },
       name: "team_calendar",
     });
-    expect(
-      screen.getByText(
-        "Only your Code Helper uses this service and its account.",
-      ),
-    ).toBeInTheDocument();
+    const account = "Only your Code Helper uses this service and its account.";
+    expect(screen.getByText(account)).toBeInTheDocument();
+    // The tools' account takes no key in this form either.
     fireEvent.click(toolsAccount());
+    expect(screen.getByText(account)).toBeInTheDocument();
+    cleanup();
+    // A GitHub account belongs to each user, so the form asks for a key.
+    await renderEditor({
+      ...scoped,
+      service: { preset: "github" },
+      name: "gh",
+    });
     expect(
       screen.getByText("Only your Code Helper uses this service and its key."),
     ).toBeInTheDocument();
