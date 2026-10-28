@@ -34,7 +34,7 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.output_files import ToolOutputFileHandled, current_tool_output_file_request
 from mindroom.tool_system.progress import report_tool_progress
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tool_system.tool_environment import current_tool_environment
+from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
 from mindroom.vendor_telemetry import vendor_telemetry_env_values
 
 _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS = frozenset(
@@ -165,22 +165,22 @@ def _workspace_home_contract_env_from_process_env(base_process_env: dict[str, st
 def _shell_subprocess_env(
     runtime_env: dict[str, str],
     *,
+    call_environment: ToolEnvironment,
     base_process_env: dict[str, str] | None = None,
     shell_path_prepend: str | None = None,
-    extra_path_prepend: tuple[str, ...] = (),
     workspace_dir: Path | None = None,
-    removed: frozenset[str] = frozenset(),
 ) -> dict[str, str]:
     """Build the env passed to shell subprocesses.
 
-    ``removed`` names variables the call keeps from the command, which the base environment would otherwise give it;
-    the workspace variables, ``PATH`` entries, and telemetry settings MindRoom adds here still apply.
+    ``call_environment`` is the call's own environment, applied over ``runtime_env``; the variables it removes stay
+    away from the command even where the base environment would give them, while the workspace variables, ``PATH``
+    entries, and telemetry settings MindRoom adds here still apply.
     """
     env = {key: value for key, value in os.environ.items() if key in _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS}
     if base_process_env is not None:
         env.update({key: value for key, value in base_process_env.items() if key in _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS})
-    env.update(runtime_env)
-    for name in removed:
+    env.update(call_environment.applied(runtime_env, base_process_env or {}))
+    for name in call_environment.removed:
         env.pop(name, None)
     workspace_home_contract = (
         _workspace_home_contract_env_from_process_env(base_process_env) if base_process_env is not None else {}
@@ -193,7 +193,7 @@ def _shell_subprocess_env(
 
     path_value = subprocess_path_with_prepends(
         env.get("PATH"),
-        prepend_entries=(*extra_path_prepend, *_shell_path_prepend_entries(shell_path_prepend)),
+        prepend_entries=(*call_environment.path_prepend, *_shell_path_prepend_entries(shell_path_prepend)),
     )
     if path_value is None:
         env.pop("PATH", None)
@@ -437,15 +437,13 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             if timeout is not None and timeout <= 0:
                 # A model may mean "no limit" or "run in the background"; either way, stopping at once helps nobody.
                 return "Error: timeout must be a positive number of seconds; omit it for the default limit."
-            # The call's own environment: plugin hooks' changes and the response's CLI grant.
-            call_environment = current_tool_environment()
             subprocess_env = _shell_subprocess_env(
-                call_environment.applied(self._runtime_env, self._base_process_env),
+                self._runtime_env,
+                # The call's own environment: plugin hooks' changes and the response's CLI grant.
+                call_environment=current_tool_environment(),
                 base_process_env=self._base_process_env,
                 shell_path_prepend=self._shell_path_prepend,
-                extra_path_prepend=call_environment.path_prepend,
                 workspace_dir=self.base_dir,
-                removed=call_environment.removed,
             )
             argv = _shell_subprocess_args(command_args, subprocess_env)
             cwd = str(self.base_dir) if self.base_dir else None

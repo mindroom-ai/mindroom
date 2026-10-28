@@ -18,6 +18,7 @@ from mindroom.shell.execution import _MAX_OUTPUT_BYTES
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.progress import tool_progress_reporter
+from mindroom.tool_system.tool_environment import ToolEnvironment
 from mindroom.tools.shell import (
     _shell_subprocess_env,
     _workspace_home_contract_env_from_process_env,
@@ -579,7 +580,12 @@ def test_shell_subprocess_env_exports_workspace_from_base_dir_without_home_contr
     """Local execution keeps the host HOME but still exports the workspace env var."""
     workspace = tmp_path / "workspace"
 
-    env = _shell_subprocess_env({}, base_process_env={"HOME": "/home/host-user"}, workspace_dir=workspace)
+    env = _shell_subprocess_env(
+        {},
+        call_environment=ToolEnvironment(),
+        base_process_env={"HOME": "/home/host-user"},
+        workspace_dir=workspace,
+    )
 
     assert env["MINDROOM_AGENT_WORKSPACE"] == str(workspace.resolve())
     assert env["HOME"] == "/home/host-user"
@@ -596,6 +602,7 @@ def test_shell_subprocess_env_replaces_incomplete_workspace_contract(tmp_path: P
 
     env = _shell_subprocess_env(
         {"MINDROOM_AGENT_WORKSPACE": str(stale_workspace)},
+        call_environment=ToolEnvironment(),
         base_process_env=base_env,
         workspace_dir=workspace,
     )
@@ -616,7 +623,12 @@ def test_shell_subprocess_env_prefers_worker_home_contract_over_base_dir(tmp_pat
         "VIRTUAL_ENV": str(tmp_path / "venv"),
     }
 
-    env = _shell_subprocess_env({}, base_process_env=base_env, workspace_dir=tmp_path / "other-base-dir")
+    env = _shell_subprocess_env(
+        {},
+        call_environment=ToolEnvironment(),
+        base_process_env=base_env,
+        workspace_dir=tmp_path / "other-base-dir",
+    )
 
     assert env["MINDROOM_AGENT_WORKSPACE"] == str(contract_workspace)
     assert env["HOME"] == str(contract_workspace)
