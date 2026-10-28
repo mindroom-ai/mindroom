@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 import nio
 
-from mindroom.approval.tool_approval import arm_scheduled_call_approval
+from mindroom.approval import manager as approval_manager
 from mindroom.constants import ROUTER_AGENT_NAME, SCHEDULED_TASK_EVENT_TYPE
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.failure_text import failure_text
@@ -823,8 +823,11 @@ async def _arm_scheduled_call(
     config: Config,
 ) -> ScheduledApprovalArmState:
     """Arm a firing task's call approval; an approval-journal error leaves the call asking at send time."""
+    manager = approval_manager.get_approval_store()
+    if manager is None:
+        return "none"
     try:
-        return await arm_scheduled_call_approval(
+        return await manager.arm_scheduled_call_approval(
             task_id,
             scheduled_call_workflow_digest(task_id, workflow),
             any_arguments_allowed=config.tool_approval.scheduled_any_arguments,

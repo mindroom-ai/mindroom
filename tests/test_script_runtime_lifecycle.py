@@ -23,7 +23,12 @@ import mindroom.workers.runtime as workers_runtime_module
 from mindroom.api.script_gateway import bind_script_tool_broker
 from mindroom.api.script_gateway import router as script_gateway_router
 from mindroom.approval.auto_approve_windows import start_auto_approve
-from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, ToolApprovalDecision
+from mindroom.approval.tool_approval import (
+    DEFAULT_ROUTER_MANAGED_ROOM_REASON,
+    NO_APPROVER_REASON,
+    BackgroundScriptToolOrigin,
+    ToolApprovalDecision,
+)
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.event_journal import BackgroundApprovalDecision
@@ -69,7 +74,12 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.models import WorkerHandle, WorkerSpec
 from tests.authorization_helpers import make_test_tool_runtime_context
-from tests.conftest import SETTLE_TIMEOUT_SECONDS, make_conversation_reader_mock, make_relation_lookup
+from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
+    initialize_approval_store_for_test,
+    make_conversation_reader_mock,
+    make_relation_lookup,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -4859,6 +4869,62 @@ async def test_live_resolver_approves_without_a_card_inside_the_requesters_auto_
     )
 
     assert decision == ToolApprovalDecision(approved=True)
+    approvals.request_background_approval.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("has_approver", "router_in_room", "reason"),
+    [(False, True, NO_APPROVER_REASON), (True, False, DEFAULT_ROUTER_MANAGED_ROOM_REASON)],
+)
+async def test_live_resolver_denies_a_call_no_one_can_answer_without_a_card(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    has_approver: bool,
+    router_in_room: bool,
+    reason: str,
+) -> None:
+    """A script call no one may approve, or one in a room without the router, is denied as every approval kind is."""
+    runtime_paths = _runtime_paths(tmp_path)
+    run = _run(runtime_paths)
+    context = SimpleNamespace(
+        requester_id=run.owner_user_id,
+        room_id=run.room_id,
+        resolved_thread_id=run.thread_root_event_id,
+        current_config=_config(),
+        runtime_paths=runtime_paths,
+    )
+    approvals = SimpleNamespace(request_background_approval=AsyncMock())
+    runtime = build_script_runtime(
+        runtime_paths,
+        config_provider=_config,
+        bot_provider=lambda _name: None,
+        worker_lease_provider=lambda _locator: None,
+        api_enabled=True,
+    )
+    resolver = runtime.resolver
+    resolver.approval_provider = lambda: approvals
+    monkeypatch.setattr(
+        "mindroom.orchestration.script_runtime.resolve_tool_approval_approver",
+        lambda *_args: run.owner_user_id if has_approver else None,
+    )
+    initialize_approval_store_for_test(runtime_paths, router_missing=lambda _room_id: not router_in_room)
+
+    decision = await resolver.request_approval(
+        origin=BackgroundScriptToolOrigin(
+            run_id="run-1",
+            call_id="call-1",
+            requester_id=run.owner_user_id,
+            toolkit_name="calculator",
+            function_name="add",
+        ),
+        context=cast("ToolRuntimeContext", context),
+        grant=ScriptToolGrant("calculator", "add"),
+        arguments={"a": 1, "b": 2},
+        timeout_seconds=30.0,
+    )
+
+    assert decision == ToolApprovalDecision(approved=False, reason=reason)
     approvals.request_background_approval.assert_not_awaited()
 
 

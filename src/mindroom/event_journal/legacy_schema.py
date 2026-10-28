@@ -6,8 +6,11 @@ from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
 
+from .schema import OUTBOX_TABLE, SQLITE_DIALECT
+
 if TYPE_CHECKING:
     from .backend import Transaction
+    from .upgrades import SchemaInspector
 
 logger = get_logger(__name__)
 
@@ -39,7 +42,7 @@ _RETIRED_TABLES = (
 )
 
 
-def upgrade_legacy_journal(transaction: Transaction, existing_tables: frozenset[str]) -> None:
+def upgrade_legacy_journal(transaction: Transaction, inspector: SchemaInspector) -> None:
     """Retire old work inside the transaction that installs the current schema.
 
     Keep event identities, projected history, completed-turn tracking, and the
@@ -47,6 +50,7 @@ def upgrade_legacy_journal(transaction: Transaction, existing_tables: frozenset[
     consumer table in this same transaction makes the upgrade crash-atomic and
     prevents another open from retiring work admitted after the cutover.
     """
+    existing_tables = inspector.tables()
     if "journal_events" not in existing_tables or "matrix_sync_consumers" in existing_tables:
         return
     logger.warning(
@@ -78,8 +82,9 @@ def upgrade_legacy_journal(transaction: Transaction, existing_tables: frozenset[
 # change. Each thread an older walk marked is walked again on its next read, and the new walk replaces its coverage.
 # Coverage: tests/test_journal_upgrade_boundary.py::test_thread_markers_from_before_walk_versions_are_walked_again,
 # tests/test_conversation_hydration.py::TestMarkersFromAnOlderWalk.
-def upgrade_hydration_walk_version(transaction: Transaction, hydration_columns: frozenset[str]) -> None:
+def upgrade_hydration_walk_version(transaction: Transaction, inspector: SchemaInspector) -> None:
     """Version the hydration markers of a journal created before walk versions, inside the schema transaction."""
+    hydration_columns = inspector.columns("conversation_hydration")
     if not hydration_columns or "walk_version" in hydration_columns:
         return
     transaction.execute("ALTER TABLE conversation_hydration ADD COLUMN walk_version BIGINT NOT NULL DEFAULT 0")
@@ -102,19 +107,14 @@ _PRE_REPLY_OUTBOX_COLUMNS = (
 # indexes are created; PostgreSQL adds the columns and replaces the stage constraint. Existing rows keep null reply
 # identity, which every reader treats as a delivery that is not a reply row.
 # Coverage: tests/test_journal_upgrade_boundary.py::test_outbox_upgrade_keeps_rows_and_admits_edit_stage.
-def upgrade_outbox_reply_rows(
-    transaction: Transaction,
-    outbox_columns: frozenset[str],
-    *,
-    outbox_table_ddl: str,
-    sqlite: bool,
-) -> None:
+def upgrade_outbox_reply_rows(transaction: Transaction, inspector: SchemaInspector) -> None:
     """Admit reply rows in an outbox created before them, inside the schema transaction."""
+    outbox_columns = inspector.columns("matrix_delivery_outbox")
     if not outbox_columns or "reply_id" in outbox_columns:
         return
-    if sqlite:
+    if inspector.dialect is SQLITE_DIALECT:
         transaction.execute("ALTER TABLE matrix_delivery_outbox RENAME TO matrix_delivery_outbox_pre_reply")
-        transaction.execute(outbox_table_ddl)
+        transaction.execute(OUTBOX_TABLE)
         transaction.execute(
             f"INSERT INTO matrix_delivery_outbox ({_PRE_REPLY_OUTBOX_COLUMNS}) "  # noqa: S608 - fixed columns
             f"SELECT {_PRE_REPLY_OUTBOX_COLUMNS} FROM matrix_delivery_outbox_pre_reply",

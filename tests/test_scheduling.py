@@ -65,6 +65,7 @@ from tests.scheduling_helpers import (
     serve_full_room_state,
     serve_task_state_events,
 )
+from tests.tool_approval_helpers import scheduled_call_approvals
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -1492,6 +1493,7 @@ async def test_cancel_scheduled_task_persists_through_the_router_when_active_age
     state_writers, router = _recording_state_writer(room_state)
     workflow = ScheduledWorkflow(
         schedule_type="once",
+        created_by="@user:server",
         execute_at=datetime.now(UTC) + timedelta(minutes=5),
         message="cancel me",
         description="cancel me",
@@ -1596,6 +1598,7 @@ async def test_cancel_all_scheduled_tasks(tmp_path: Path) -> None:
     # Create workflows for testing
     workflow1 = ScheduledWorkflow(
         schedule_type="once",
+        created_by="@user:server",
         execute_at=datetime.now(UTC) + timedelta(minutes=5),
         message="Test message 1",
         description="Test task 1",
@@ -1605,6 +1608,7 @@ async def test_cancel_all_scheduled_tasks(tmp_path: Path) -> None:
 
     workflow2 = ScheduledWorkflow(
         schedule_type="once",
+        created_by="@user:server",
         execute_at=datetime.now(UTC) + timedelta(minutes=10),
         message="Test message 2",
         description="Test task 2",
@@ -1703,6 +1707,7 @@ async def test_cancel_all_scheduled_tasks_persists_through_the_router_when_activ
     state_writers, router = _recording_state_writer(room_state)
     workflow = ScheduledWorkflow(
         schedule_type="once",
+        created_by="@user:server",
         execute_at=datetime.now(UTC) + timedelta(minutes=5),
         message="cancel all",
         description="cancel all",
@@ -2113,7 +2118,7 @@ async def test_parsed_schedule_never_carries_a_call_approval(tmp_path: Path) -> 
             return_value=[ids["assistant"]],
         ),
         patch("mindroom.scheduling.tasks._parse_workflow_schedule", new=AsyncMock(return_value=parsed)),
-        patch("mindroom.scheduling.tasks.withdraw_scheduled_call_approval", new=withdraw),
+        scheduled_call_approvals(withdraw_scheduled_call_approval=withdraw),
     ):
         result = await edit_scheduled_task(
             runtime=_scheduling_runtime(

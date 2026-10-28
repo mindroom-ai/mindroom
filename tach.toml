@@ -525,6 +525,7 @@ depends_on = [
     "mindroom.legacy_delivery_payloads",
     "mindroom.logging_config",
     "mindroom.matrix.sidecar_content",
+    "mindroom.redaction",
     "mindroom.reply_lifecycle",
     "mindroom.tool_system.worker_routing",
     "mindroom.turn_record",
@@ -532,8 +533,11 @@ depends_on = [
 visibility = [
     "mindroom.agent_cli.delegation",
     "mindroom.event_journal.legacy_response_attempts",
+    "mindroom.approval.continuation_rules",
+    "mindroom.approval.failure",
     "mindroom.approval.recovery",
     "mindroom.agent_reply_membership_sync",
+    "mindroom.approval.continuation_runner",
     "mindroom.approval.execution",
     "mindroom.approval.manager",
     "mindroom.approval.receipt",
@@ -554,7 +558,6 @@ visibility = [
     "mindroom.pending_event_worker",
     "mindroom.reaction_dispatch",
     "mindroom.reply_scope",
-    "mindroom.response_runner",
     "mindroom.thread_export.projected_history",
     "mindroom.tool_jobs.follow_ups",
     "mindroom.turn_controller",
@@ -832,6 +835,7 @@ visibility = [
     "mindroom.agent_cli.cli_approval_recovery",
     "mindroom.ai",
     "mindroom.api.openai_compat",
+    "mindroom.approval.continuation_runner",
     "mindroom.approval.execution",
     "mindroom.approval.resume",
     "mindroom.response_runner",
@@ -1067,11 +1071,6 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.approval.legacy_approval_payloads"
-depends_on = []
-visibility = ["mindroom.approval.events"]
-
-[[modules]]
 path = "mindroom.session_storage.types"
 depends_on = []
 
@@ -1287,21 +1286,21 @@ depends_on = [
 ]
 visibility = [
     "mindroom.orchestrator",
+    "mindroom.approval.continuation_runner",
     "mindroom.approval.response",
     "mindroom.approval.transport",
     "mindroom.orchestration.script_runtime",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.approval.tool_approval",
     "mindroom.commands.auto_approve_commands",
+    "mindroom.scheduling.tasks",
     "mindroom.tool_jobs.approvals",
+    "mindroom.scheduling.runtime",
 ]
 
 [[modules]]
 path = "mindroom.approval.events"
-depends_on = [
-    "mindroom.approval.legacy_approval_payloads",
-    "mindroom.matrix.event_info",
-]
+depends_on = []
 visibility = ["mindroom.approval.manager"]
 
 [[modules]]
@@ -1349,7 +1348,7 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.agent_cli.approval",
 ]
-visibility = ["mindroom.response_runner"]
+visibility = ["mindroom.approval.continuation_runner"]
 
 [[modules]]
 path = "mindroom.approval.resume"
@@ -1437,8 +1436,8 @@ visibility = [
     "mindroom.approval.execution",
     "mindroom.approval.receipt",
     "mindroom.approval.resume",
+    "mindroom.approval.continuation_runner",
     "mindroom.delegation.execution",
-    "mindroom.response_runner",
     "mindroom.teams",
     "mindroom.tool_jobs.runtime",
 ]
@@ -1446,24 +1445,44 @@ visibility = [
 [[modules]]
 path = "mindroom.approval.response"
 depends_on = [
-    "mindroom.response_sources",
-    "mindroom.approval.failure",
     "mindroom.approval.manager",
-    "mindroom.cancellation",
-    "mindroom.constants",
-    "mindroom.delegation.recovery",
     "mindroom.delegation.state",
-    "mindroom.delivery_gateway",
     "mindroom.event_journal",
     "mindroom.message_target",
-    "mindroom.reply_lifecycle",
     "mindroom.approval.tool_approval",
-    "mindroom.approval.auto_approve_windows",
-    "mindroom.tool_jobs.runtime",
-    "mindroom.tool_jobs.settings",
     "mindroom.tool_system.events",
 ]
-visibility = ["mindroom.response_runner", "mindroom.tool_jobs.approvals", "mindroom.delegation.job_approvals"]
+visibility = ["mindroom.approval.continuation_runner", "mindroom.tool_jobs.approvals", "mindroom.delegation.job_approvals"]
+
+[[modules]]
+path = "mindroom.approval.continuation_runner"
+depends_on = [
+    "mindroom.agent_cli.cli_approval_waits",
+    "mindroom.approval.continuation_rules",
+    "mindroom.approval.execution",
+    "mindroom.approval.failure",
+    "mindroom.approval.manager",
+    "mindroom.delegation.recovery",
+    "mindroom.approval.receipt_readers",
+    "mindroom.approval.response",
+    "mindroom.constants",
+    "mindroom.delivery_gateway",
+    "mindroom.event_journal",
+    "mindroom.hooks",
+    "mindroom.matrix.client_visible_messages",
+    "mindroom.orchestration.runtime",
+    "mindroom.post_response_effects",
+    "mindroom.reply_lifecycle",
+    "mindroom.reply_presentation",
+    "mindroom.reply_scope",
+    "mindroom.response_runner",
+    "mindroom.response_turn",
+    "mindroom.streaming",
+    "mindroom.teams",
+    "mindroom.tool_system.events",
+    "mindroom.tool_system.runtime_context",
+]
+visibility = ["mindroom.response_runner"]
 
 [[modules]]
 path = "mindroom.approval.auto_approve_windows"
@@ -1472,9 +1491,8 @@ depends_on = [
     "mindroom.durable_write",
 ]
 visibility = [
-    "mindroom.approval.response",
+    "mindroom.approval.tool_approval",
     "mindroom.commands.auto_approve_commands",
-    "mindroom.orchestration.script_runtime",
 ]
 
 [[modules]]
@@ -1494,6 +1512,7 @@ visibility = [
 [[modules]]
 path = "mindroom.approval.tool_approval"
 depends_on = [
+    "mindroom.approval.auto_approve_windows",
     "mindroom.approval.manager",
     "mindroom.constants",
     "mindroom.entity_resolution",
@@ -1513,7 +1532,6 @@ visibility = [
     "mindroom.agent_cli.minimal_mode_preflight",
     "mindroom.orchestration.script_runtime",
     "mindroom.orchestrator",
-    "mindroom.scheduling.runtime",
     "mindroom.scheduling.tasks",
     "mindroom.tool_system.tool_hooks",
     "mindroom.delegation.execution",
@@ -3191,7 +3209,6 @@ depends_on = [
     "mindroom.script_runs.store",
     "mindroom.script_runs.worker_client",
     "mindroom.approval.tool_approval",
-    "mindroom.approval.auto_approve_windows",
     "mindroom.tool_system.worker_routing",
 ]
 visibility = ["mindroom.orchestrator"]
@@ -3269,16 +3286,13 @@ depends_on = [
 [[modules]]
 path = "mindroom.response_runner"
 depends_on = [
-    "mindroom.agent_cli.cli_approval_waits",
     "mindroom.agent_modes",
     "mindroom.agent_run_context",
     "mindroom.agents",
     "mindroom.ai",
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
-    "mindroom.approval.execution",
-    "mindroom.approval.receipt_readers",
-    "mindroom.approval.response",
+    "mindroom.approval.continuation_runner",
     "mindroom.automations.steps",
     "mindroom.config.participation",
     "mindroom.constants",
@@ -3286,7 +3300,6 @@ depends_on = [
     "mindroom.delivery_gateway",
     "mindroom.entity_resolution",
     "mindroom.error_handling",
-    "mindroom.event_journal",
     "mindroom.history.interrupted_replay",
     "mindroom.history.runtime",
     "mindroom.history.storage",
@@ -3339,7 +3352,6 @@ path = "mindroom.response_sources"
 depends_on = []
 visibility = [
     "mindroom.event_journal",
-    "mindroom.approval.response",
     "mindroom.delivery_gateway",
     "mindroom.edit_regenerator",
     "mindroom.reply_scope",
@@ -3477,6 +3489,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.api.openai_compat",
+    "mindroom.approval.continuation_runner",
     "mindroom.bot",
     "mindroom.responder_availability",
     "mindroom.response_runner",
@@ -4357,6 +4370,7 @@ depends_on = [
 visibility = [
     "mindroom.matrix.room_history_reads",
     "mindroom.api.openai_request_parsing",
+    "mindroom.approval.continuation_runner",
     "mindroom.commands.handler",
     "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.matrix_room",
@@ -5290,6 +5304,7 @@ depends_on = [
     "mindroom.providers.registry",
     "mindroom.agent_loop.helper",
     "mindroom.llm",
+    "mindroom.approval.manager",
     "mindroom.approval.tool_approval",
     "mindroom.failure_text",
     "mindroom.scheduling.ownership",
@@ -5298,7 +5313,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.scheduling.runtime"
 depends_on = [
-    "mindroom.approval.tool_approval",
+    "mindroom.approval.manager",
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.failure_text",
@@ -7623,6 +7638,7 @@ from = ["mindroom.approval.transport"]
 expose = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
     "JOB_APPROVAL_TYPE",
+    "NO_APPROVER_REASON",
     "POLICY_CONFIRMATION_APPROVAL_TYPE",
     "ApprovalActionResult",
     "AutomationToolOrigin",
@@ -7633,19 +7649,14 @@ expose = [
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
     "approval_gated",
-    "arm_scheduled_call_approval",
-    "claim_scheduled_call",
     "evaluate_tool_approval",
     "handle_matrix_approval_action",
+    "human_gate",
     "is_process_active_approval_card",
-    "record_scheduled_call_outcome",
-    "request_scheduled_call_approval",
     "resolve_tool_approval_approver",
-    "scheduled_call",
     "scheduled_call_offers_any_arguments",
     "shutdown_approval_runtime",
     "tool_may_require_approval",
-    "withdraw_scheduled_call_approval",
 ]
 from = ["mindroom.approval.tool_approval"]
 
@@ -7920,13 +7931,32 @@ depends_on = ["mindroom.cli.api", "mindroom.cli.config", "mindroom.config.legacy
 
 
 [[modules]]
+path = "mindroom.approval.continuation_rules"
+depends_on = ["mindroom.event_journal", "mindroom.reply_lifecycle"]
+visibility = [
+    "mindroom.agent_cli.cli_approval_waits",
+    "mindroom.approval.continuation_runner",
+    "mindroom.approval.recovery",
+]
+
+[[modules]]
 path = "mindroom.approval.failure"
-depends_on = []
-visibility = ["mindroom.approval.recovery", "mindroom.approval.response"]
+depends_on = ["mindroom.event_journal", "mindroom.reply_lifecycle"]
+visibility = [
+    "mindroom.agent_cli.cli_approval_waits",
+    "mindroom.approval.continuation_runner",
+    "mindroom.approval.recovery",
+]
 
 [[modules]]
 path = "mindroom.approval.recovery"
-depends_on = ["mindroom.approval.failure", "mindroom.event_journal", "mindroom.logging_config"]
+depends_on = [
+    "mindroom.approval.continuation_rules",
+    "mindroom.approval.failure",
+    "mindroom.event_journal",
+    "mindroom.logging_config",
+    "mindroom.reply_lifecycle",
+]
 visibility = ["mindroom.orchestrator"]
 
 [[modules]]
@@ -8330,7 +8360,7 @@ depends_on = [
 visibility = [
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.orchestrator",
-    "mindroom.approval.response",
+    "mindroom.approval.continuation_runner",
     "mindroom.custom_tools.delegate",
     "mindroom.delegation.execution",
 ]
@@ -8728,7 +8758,6 @@ visibility = [
     "mindroom.tool_jobs.publication",
     "mindroom.commands.handler",
     "mindroom.tool_jobs.client_cancel",
-    "mindroom.approval.response",
     # The bot lets the job runtime apply a Stop its replies recorded at once.
     "mindroom.bot",
     "mindroom.custom_tools.delegate",
@@ -9090,7 +9119,6 @@ depends_on = [
     "mindroom.background_tasks",
     "mindroom.event_journal",
     "mindroom.llm",
-    "mindroom.logging_config",
     "mindroom.approval.tool_approval",
     "mindroom.tool_jobs.control",
     "mindroom.tool_jobs.runtime",
@@ -9394,13 +9422,15 @@ path = "mindroom.agent_cli.cli_approval_waits"
 depends_on = [
     "mindroom.agent_cli.events",
     "mindroom.agent_cli.lifetime",
+    "mindroom.approval.continuation_rules",
+    "mindroom.approval.failure",
     "mindroom.event_journal",
     "mindroom.orchestration.runtime",
     "mindroom.response_turn",
     "mindroom.streaming",
 ]
 visibility = [
-    "mindroom.response_runner",
+    "mindroom.approval.continuation_runner",
 ]
 
 [[interfaces]]
@@ -9585,7 +9615,6 @@ visibility = [
     "mindroom.ai",
     "mindroom.api.config_lifecycle",
     "mindroom.approval.execution",
-    "mindroom.approval.response",
     "mindroom.approval.tool_owners",
     "mindroom.agent_cli.cli_shell_agent",
     "mindroom.commands.config_commands",

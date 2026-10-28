@@ -1656,7 +1656,7 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
         )
 
     with (
-        patch.object(coordinator, "_build_lifecycle", MagicMock(return_value=_NoopResponseLifecycle())),
+        patch.object(coordinator, "build_lifecycle", MagicMock(return_value=_NoopResponseLifecycle())),
         patch.object(
             coordinator,
             "_run_cancellable_response",
@@ -1742,7 +1742,7 @@ async def test_generate_response_keeps_locked_target_when_payload_preparation_re
         return _NoopResponseLifecycle()
 
     with (
-        patch.object(coordinator, "_build_lifecycle", MagicMock(side_effect=fake_build_lifecycle)),
+        patch.object(coordinator, "build_lifecycle", MagicMock(side_effect=fake_build_lifecycle)),
         patch.object(
             coordinator.deps.request_preparer,
             "prepare",
@@ -1821,7 +1821,7 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
         )
 
     with (
-        patch.object(coordinator, "_build_lifecycle", MagicMock(return_value=lifecycle)),
+        patch.object(coordinator, "build_lifecycle", MagicMock(return_value=lifecycle)),
         patch.object(
             coordinator,
             "_run_cancellable_response",
@@ -1900,7 +1900,7 @@ async def test_generate_team_response_keeps_locked_target_when_payload_preparati
         )
 
     with (
-        patch.object(coordinator, "_build_lifecycle", MagicMock(return_value=lifecycle)),
+        patch.object(coordinator, "build_lifecycle", MagicMock(return_value=lifecycle)),
         patch.object(
             coordinator.deps.request_preparer,
             "prepare",
@@ -3868,7 +3868,7 @@ async def test_response_runner_binds_agent_mid_turn_judge(  # noqa: PLR0915
 
     try:
         assert (
-            await runner._run_locked_response_lifecycle(
+            await runner.run_locked_response_lifecycle(
                 request,
                 response_kind="agent",
                 locked_operation=locked_operation,

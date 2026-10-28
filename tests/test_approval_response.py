@@ -489,15 +489,15 @@ async def test_hidden_agent_continuation_separates_text_across_a_new_tool_bounda
 @pytest.mark.parametrize("owner", [None, "calculator"])
 async def test_pause_plan_requires_exact_live_toolkit_origin(tmp_path: Path, owner: str | None) -> None:
     """A new card cannot defer discovering its toolkit owner until approval time."""
-    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)._approval_responses
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     tool = ToolExecution(tool_call_id="call-1", tool_name="add", requires_confirmation=True)
     origins = {("general", "add"): owner, ("other", "add"): "calculator"}
     if owner is None:
         with pytest.raises(RuntimeError, match="toolkit origin"):
             await plan_approval_calls(
                 ((tool, "general"),),
-                config=coordinator.config(),
-                runtime_paths=coordinator.runtime_paths,
+                config=runner.deps.runtime.config,
+                runtime_paths=runner.deps.runtime_paths,
                 requester_id="@user:localhost",
                 toolkit_owners=origins,
                 room_id="!room:test",
@@ -506,8 +506,8 @@ async def test_pause_plan_requires_exact_live_toolkit_origin(tmp_path: Path, own
     else:
         plan = await plan_approval_calls(
             ((tool, "general"),),
-            config=coordinator.config(),
-            runtime_paths=coordinator.runtime_paths,
+            config=runner.deps.runtime.config,
+            runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners=origins,
             room_id="!room:test",

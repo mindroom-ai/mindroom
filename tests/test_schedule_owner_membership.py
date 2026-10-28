@@ -40,6 +40,7 @@ from tests.scheduling_helpers import (
     serve_full_room_state,
     serve_task_state_events,
 )
+from tests.tool_approval_helpers import scheduled_call_approvals
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -131,7 +132,7 @@ async def test_departed_owner_cancels_persisted_schedule(
     client, workflow, state = _owner_schedule([{"membership": membership}], pre_approved_call=pre_approved_call)
     cancel_approval = AsyncMock()
 
-    with patch("mindroom.scheduling.tasks.withdraw_scheduled_call_approval", new=cancel_approval):
+    with scheduled_call_approvals(withdraw_scheduled_call_approval=cancel_approval):
         task = await runnable_task(
             client,
             "!test:server",
@@ -159,7 +160,7 @@ async def test_departed_owner_cancellation_retries_a_failed_approval_withdrawal(
     withdraw = AsyncMock(side_effect=[RuntimeError("journal unavailable"), None])
 
     with (
-        patch("mindroom.scheduling.tasks.withdraw_scheduled_call_approval", new=withdraw),
+        scheduled_call_approvals(withdraw_scheduled_call_approval=withdraw),
         patch("mindroom.scheduling.tasks.asyncio.sleep", new=AsyncMock()),
     ):
         task = await runnable_task(

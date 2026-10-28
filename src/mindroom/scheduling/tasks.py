@@ -21,13 +21,12 @@ from pydantic import BaseModel, Field, field_validator
 from pydantic.json_schema import SkipJsonSchema  # noqa: TC002 - pydantic resolves field annotations at runtime
 
 from mindroom.agent_loop.helper import complete_prompt
+from mindroom.approval import manager as approval_manager
 from mindroom.approval.tool_approval import (
     ToolApprovalScriptError,
     evaluate_tool_approval,
-    request_scheduled_call_approval,
     resolve_tool_approval_approver,
     scheduled_call_offers_any_arguments,
-    withdraw_scheduled_call_approval,
 )
 from mindroom.constants import ROUTER_AGENT_NAME, SCHEDULED_TASK_EVENT_TYPE
 from mindroom.entity_resolution import current_entity_id, entity_identity_registry, persisted_bot_user_ids
@@ -1355,9 +1354,13 @@ def _stored_task_has_scheduled_call(room_id: str, task_id: str, content: dict[st
 
 
 async def withdraw_scheduled_call(task_id: str, *, reason: str) -> None:
-    """Withdraw a task's call approval, reporting a journal failure the way task-state failures are reported."""
+    """Withdraw a task's call approval, reporting a failure or an unready approval runtime as task-state failures are."""
+    manager = approval_manager.get_approval_store()
+    if manager is None:
+        msg = f"could not withdraw the approval for its scheduled call ({approval_manager.RUNTIME_NOT_READY_REASON})"
+        raise ValueError(msg)
     try:
-        await withdraw_scheduled_call_approval(task_id, reason=reason)
+        await manager.withdraw_scheduled_call_approval(task_id, reason=reason)
     except Exception as exc:
         msg = f"could not withdraw the approval for its scheduled call ({exc})"
         raise ValueError(msg) from exc
@@ -1519,8 +1522,9 @@ async def schedule_approved_tool_call(
     task_published = False
     # None until the request answers: a request that raised may have reserved its card.
     card_reserved: bool | None = None
+    manager = approval_manager.get_approval_store()
     try:
-        card_reserved = await request_scheduled_call_approval(
+        card_reserved = manager is not None and await manager.request_scheduled_call_approval(
             binding,
             approver_user_id=approver_id,
             scheduled_for_text=_format_local_time(send_at, timezone),

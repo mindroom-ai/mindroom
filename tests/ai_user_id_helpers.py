@@ -22,7 +22,8 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseHookService
-from mindroom.event_journal import EventJournalStore, PrincipalStore
+from mindroom.event_journal import EventJournalStore
+from mindroom.event_journal.approval_store import ApprovalStore
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.history.session_context import resolve_bound_team_scope
 from mindroom.history.types import HistoryScope
@@ -398,7 +399,7 @@ def _build_response_runner(
         agent_name=bot.agent_name,
     )
     bot._knowledge_access_support = knowledge_access_support or _knowledge_access_support()
-    approval_store = MagicMock(spec=PrincipalStore)
+    approval_store = MagicMock(spec=ApprovalStore)
     approval_store.approval_continuation_for_source = AsyncMock(return_value=None)
 
     return ResponseRunner(
@@ -431,7 +432,6 @@ def _build_response_runner(
                 generation="test-runtime",
                 retry_sources=lambda _room_id, _event_ids: None,
                 complete_turn=AsyncMock(),
-                hold_conversation=lambda _continuation: None,
                 approval_ended=lambda _ended: None,
             ),
         ),

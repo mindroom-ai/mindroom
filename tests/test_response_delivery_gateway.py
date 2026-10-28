@@ -281,7 +281,6 @@ def _response_recovery_bot(journal_store: EventJournalStore, turn_store: TurnSto
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         complete_turn=AsyncMock(),
-        hold_conversation=lambda _continuation: None,
         approval_ended=lambda _ended: None,
     )
     return bot

@@ -19,7 +19,7 @@ from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS
 from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.config.main import Config
 from mindroom.custom_tools.calculator import CalculatorTools
-from mindroom.event_journal.approval_continuations import ApprovalCall, approval_arguments_digest
+from mindroom.event_journal.approval_calls import ApprovalCall, approval_arguments_digest
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelIdentity

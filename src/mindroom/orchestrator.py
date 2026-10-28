@@ -651,20 +651,11 @@ class _MultiAgentOrchestrator:
 
     def _configure_approval_store_transport(self) -> None:
         """Bind approval transport hooks to the current shared runtime services."""
-        transport = self._approval_transport
         initialize_approval_store(
             self.runtime_paths,
-            prepare_event=transport.prepare_approval_event,
-            send_delivery=transport.send_approval_delivery,
-            resolve_delivery=transport.resolve_approval_delivery,
-            resolve_action_delivery=transport.resolve_approval_action_delivery,
+            transport=self._approval_transport,
             cards=self._approval_cards(),
-            transport_sender=transport.transport_sender_id,
-            sending_device=transport.transport_device_id,
-            continuation_ready=transport.wake_continuation_sources,
             recovery=self._approval_recovery,
-            responder_principal=transport.responder_principal_id,
-            router_missing=transport.router_missing,
         )
 
     async def _ensure_user_account(self, config: Config) -> None:
@@ -1756,6 +1747,8 @@ class _MultiAgentOrchestrator:
             msg = "Another MindRoom runtime is already using this event journal"
             raise PermanentStartupError(msg)
         self._journal_held = True
+        # Every bot follows the paused replies of its principal from these on.
+        await store.load_approval_signals()
 
     async def event_journal_still_held(self) -> bool:
         """Return whether this runtime still holds the journal it claimed; true before it claims one."""

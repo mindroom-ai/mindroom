@@ -383,7 +383,7 @@ async def test_team_reply_resumed_after_approval_saves_the_conversation(
     async def fake_store_conversation_memory(*args: Any, **kwargs: Any) -> None:  # noqa: ANN401
         store_calls.append((args, kwargs))
 
-    queue = bot._response_runner._approval_memory_persistence(continuation)
+    queue = bot._response_runner._approvals._approval_memory_persistence(continuation)
     assert queue is not None
     with patch_response_runner_module(store_conversation_memory=fake_store_conversation_memory):
         queue()
@@ -613,7 +613,7 @@ async def test_agent_reply_saves_its_conversation_only_with_mem0(
         session_id="session-1",
     )
     store = AsyncMock()
-    queue = bot._response_runner._memory_persistence(
+    queue = bot._response_runner.memory_persistence(
         agent_name="a1",
         session_id="session-1",
         execution_identity=identity,
@@ -662,7 +662,7 @@ async def test_job_follow_up_hands_no_prompt_to_memory(
     )
 
     def memory_persistence(agent_name: str | list[str]) -> Callable[[], None] | None:
-        return bot._response_runner._memory_persistence(
+        return bot._response_runner.memory_persistence(
             agent_name=agent_name,
             session_id="session-1",
             execution_identity=identity,
@@ -682,4 +682,4 @@ async def test_job_follow_up_hands_no_prompt_to_memory(
         execution_identity=identity,
         origin=follow_up,
     )
-    assert bot._response_runner._approval_memory_persistence(continuation) is None
+    assert bot._response_runner._approvals._approval_memory_persistence(continuation) is None
