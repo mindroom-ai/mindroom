@@ -212,7 +212,7 @@ async def _deliver_to_project(attempt: SlackAttempt, answering: tuple[SlackAnswe
     agent = project_wake_agent(event, answering)
     if agent is None:
         return "ignored"
-    thread_key = project_thread_key(event)
+    thread_key = project_thread_key(event.team_id, event.channel_id, event.thread_ts or event.ts)
     result = await retry_on_failure(event, _wake_project_agent(attempt, agent, thread_key))
     if result == "retry" and attempt.last_attempt:
         _notify_author(attempt, thread_key, _UNRECEIVED)

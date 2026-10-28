@@ -259,8 +259,7 @@ def test_mention_parsing_forms(text: str, expected: set[str]) -> None:
 def test_thread_keys() -> None:
     reply = _event(thread_ts="1700000000.000050")
     top = _event()
-    assert project_thread_key(reply) == f"{TEAM}:{CHANNEL}:1700000000.000050"
-    assert project_thread_key(top) == f"{TEAM}:{CHANNEL}:1700000000.000100"
+    assert project_thread_key(TEAM, CHANNEL, "1700000000.000050") == f"{TEAM}:{CHANNEL}:1700000000.000050"
     assert watch_thread_key("w1", reply) == f"w1:{CHANNEL}:1700000000.000050"
     assert watch_thread_key("w1", top) == f"w1:{CHANNEL}:1700000000.000100"
     for channel_type in ("im", "mpim"):

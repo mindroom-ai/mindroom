@@ -127,9 +127,9 @@ def is_direct_message(event: SlackMessageEvent) -> bool:
     return event.channel_type in _DIRECT_CHANNEL_TYPES
 
 
-def project_thread_key(event: SlackMessageEvent) -> str:
-    """Return the key of the Slack thread an event belongs to, for a project agent."""
-    return f"{event.team_id}:{event.channel_id}:{event.thread_ts or event.ts}"
+def project_thread_key(team_id: str, channel_id: str, root_ts: str) -> str:
+    """Return the key of a project agent's Slack thread, named by its team, channel and root message."""
+    return f"{team_id}:{channel_id}:{root_ts}"
 
 
 def watch_thread_key(watch_id: str, event: SlackMessageEvent) -> str:

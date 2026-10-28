@@ -21,6 +21,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.state import resolve_room_id
 from mindroom.slack.api import SLACK_CHANNEL_ID_RE, SlackApiError, neutralize_broadcasts, slack_call
 from mindroom.slack.app import load_slack_app, slack_bot_identity
+from mindroom.slack.events import project_thread_key
 from mindroom.slack.turns import failure_reason, project_scope, slack_replay_store
 from mindroom.tool_system.events import strip_visible_tool_markers
 from mindroom.turn_origin import SenderKind, TurnIntent
@@ -120,7 +121,7 @@ async def mirror_reply_to_slack(
             bound = await asyncio.to_thread(
                 slack_replay_store(control_state_root).bound_thread_root,
                 project_scope(envelope.agent_name),
-                f"{identity.team_id}:{channel_id}:{root_ts}",
+                project_thread_key(identity.team_id, channel_id, root_ts),
                 now=int(time.time()),
             )
             if bound != (envelope.target.room_id, envelope.target.resolved_thread_id):
