@@ -42,6 +42,7 @@ import mindroom.knowledge.refresh_scheduler as knowledge_refresh_scheduler
 import mindroom.knowledge.registry as knowledge_registry
 import mindroom.knowledge.utils as knowledge_utils
 from mindroom import file_locks
+from mindroom.agent_policy import PRIVATE_KNOWLEDGE_BASE_ID_PREFIX
 from mindroom.api import config_lifecycle, main
 from mindroom.api import knowledge as knowledge_api
 from mindroom.background_tasks import wait_for_background_tasks
@@ -8291,7 +8292,7 @@ def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path, monkeypa
         _create_idle_refresh_lock(knowledge_registry.source_root_for_refresh_target(refresh_target))
 
     private_index_count = sum(
-        key.base_id.startswith(config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX) for key in knowledge_registry._published_indexes
+        key.base_id.startswith(PRIVATE_KNOWLEDGE_BASE_ID_PREFIX) for key in knowledge_registry._published_indexes
     )
     assert private_index_count <= knowledge_registry._MAX_PRIVATE_PUBLISHED_INDEXES
     assert len(knowledge_utils._refresh_scheduled_at) <= knowledge_utils._MAX_REFRESH_SCHEDULED_COOLDOWNS
@@ -8358,7 +8359,7 @@ def test_private_index_read_path_cache_insertion_is_bounded(tmp_path: Path) -> N
         assert lookup.index is not None
 
     private_index_count = sum(
-        key.base_id.startswith(config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX) for key in knowledge_registry._published_indexes
+        key.base_id.startswith(PRIVATE_KNOWLEDGE_BASE_ID_PREFIX) for key in knowledge_registry._published_indexes
     )
     assert private_index_count <= knowledge_registry._MAX_PRIVATE_PUBLISHED_INDEXES
 

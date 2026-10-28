@@ -12,7 +12,6 @@ from mindroom.mcp.toolkit import require_mcp_server_manager
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_room_flags
 from mindroom.tool_system.catalog import ensure_tool_registry_loaded
-from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -92,13 +91,7 @@ async def _warm_approval_mcp_catalog(
     await manager.get_request_catalog(
         server_id,
         credentials_manager=get_runtime_credentials_manager(runtime_paths),
-        worker_target=build_agent_toolkit_worker_target(
-            runtime.execution.execution_scope,
-            agent_name,
-            is_private=runtime.execution.is_private,
-            execution_identity=execution_identity,
-            runtime_paths=runtime_paths,
-        ),
+        worker_target=runtime.execution.worker_target,
         expected_config=config,
     )
 

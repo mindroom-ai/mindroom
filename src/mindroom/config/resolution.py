@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, TypedDict
 
-from mindroom.agent_policy import ResolvedAgentPolicy, resolve_agent_policy_from_data
+from mindroom.agent_policy import PolicyInputs, ResolvedAgentPolicy, resolve_agent_policy
 from mindroom.config.automations import Automation, ExplorationAutomation
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, EffectiveToolConfig
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -225,11 +225,10 @@ def cheap_model(config: Config, agent_name: str) -> str | None:
 
 def agent_policy(config: Config, agent_name: str) -> ResolvedAgentPolicy:
     """Return one agent's execution policy: its worker scope, scope label, and private storage and knowledge."""
-    return resolve_agent_policy_from_data(
+    return resolve_agent_policy(
         agent_name,
-        config.get_agent(agent_name),
+        PolicyInputs.from_agent(config.get_agent(agent_name)),
         default_worker_scope=config.defaults.worker_scope,
-        private_knowledge_base_id_prefix=config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
     )
 
 

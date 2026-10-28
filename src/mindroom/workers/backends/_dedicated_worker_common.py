@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
-from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
+from mindroom.agent_policy import PolicyInputs, build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.constants import RuntimePaths, deserialize_runtime_paths, serialize_public_runtime_paths
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root
@@ -188,16 +188,16 @@ def resolved_agent_policies_from_config_data(
     if not isinstance(raw_agents, dict):
         return {}
 
-    agent_mappings = {
-        agent_name: cast("dict[str, object]", raw_agent)
+    agent_inputs = {
+        agent_name: PolicyInputs.model_validate(raw_agent)
         for agent_name, raw_agent in raw_agents.items()
         if isinstance(agent_name, str) and isinstance(raw_agent, dict)
     }
-    if not agent_mappings:
+    if not agent_inputs:
         return {}
 
     seeds = build_agent_policy_seeds(
-        agent_mappings,
+        agent_inputs,
         default_worker_scope=_default_worker_scope_from_config_data(config_data),
     )
     return resolve_agent_policy_index(seeds).policies

@@ -1811,8 +1811,8 @@ def test_resolve_agent_runtime_keeps_user_scope_worker_key_for_shared_agents(tmp
     assert runtime.workspace.file_memory_path is None
 
 
-def test_resolve_agent_runtime_requires_explicit_shared_execution_identity(tmp_path: Path) -> None:
-    """Shared worker scope should not infer worker keys from ambient runtime context."""
+def test_resolve_agent_runtime_without_identity_keeps_shared_roots_under_the_tenant_worker(tmp_path: Path) -> None:
+    """Without a request, a shared agent's execution uses its tenant's shared worker, and its state stays shared."""
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
@@ -1825,7 +1825,7 @@ def test_resolve_agent_runtime_requires_explicit_shared_execution_identity(tmp_p
 
     assert runtime.execution.is_private is False
     assert runtime.execution.execution_scope == "shared"
-    assert runtime.execution.worker_key is None
+    assert runtime.execution.worker_key == "v1:tenant-123:shared:general"
     assert runtime.state_root == agent_state_root_path(tmp_path, "general")
     assert runtime.workspace.root == agent_workspace_root_path(tmp_path, "general")
 

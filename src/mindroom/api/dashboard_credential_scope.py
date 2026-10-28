@@ -7,18 +7,19 @@ from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import HTTPException, Request
 
-from mindroom.agent_policy import ResolvedAgentPolicy, resolve_agent_policy_from_data
 from mindroom.api import config_lifecycle
 from mindroom.authorization import (
     is_platform_administrator,
     is_sender_allowed_for_agent_credential_management,
     is_sender_allowed_for_agent_oauth_connection,
 )
+from mindroom.config.resolution import agent_policy
 from mindroom.matrix.identity import try_parse_historical_matrix_user_id
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, build_requester_execution_identity
 
 if TYPE_CHECKING:
+    from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -190,12 +191,7 @@ def resolve_dashboard_agent_execution_scope_request(
             draft_scope_preview=True,
         )
 
-    persisted_policy = resolve_agent_policy_from_data(
-        agent_name,
-        config.agents[agent_name],
-        default_worker_scope=config.defaults.worker_scope,
-        private_knowledge_base_id_prefix=config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
-    )
+    persisted_policy = agent_policy(config, agent_name)
     persisted_execution_scope = persisted_policy.effective_execution_scope
     requested_execution_scope = (
         execution_scope_override if execution_scope_override_provided else persisted_execution_scope

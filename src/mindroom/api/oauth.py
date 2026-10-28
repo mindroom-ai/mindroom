@@ -90,9 +90,9 @@ from mindroom.oauth.service import (
     oauth_success_redirect_url,
 )
 from mindroom.origins import dashboard_origin
+from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
-    build_agent_toolkit_worker_target,
     build_requester_execution_identity,
 )
 
@@ -422,13 +422,12 @@ def _conversation_connect_context(
         runtime_paths=runtime_paths,
         requester_id=requester_id,
     )
-    worker_target = build_agent_toolkit_worker_target(
-        config.resolve_agent(agent_name).policy.effective_execution_scope,
+    worker_target = resolve_agent_execution(
         agent_name,
-        is_private=config.get_agent(agent_name).private is not None,
+        config,
+        runtime_paths,
         execution_identity=identity,
-        runtime_paths=runtime_paths,
-    )
+    ).worker_target
     context = resolve_oauth_credential_context(
         provider,
         runtime_paths,

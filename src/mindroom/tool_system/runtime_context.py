@@ -21,7 +21,7 @@ from mindroom.hooks import (
     validate_event_name,
 )
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
-from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
+from mindroom.tool_system.worker_routing import build_tool_execution_identity
 
 if TYPE_CHECKING:
     import asyncio
@@ -261,13 +261,15 @@ class ToolRuntimeContext:
                 "Team and router dispatches have no single agent execution scope."
             )
             raise ValueError(msg)
-        return build_agent_toolkit_worker_target(
-            self.config.resolve_agent(self.agent_name).policy.effective_execution_scope,
+        # why-lazy: runtime resolution loads the config and credential modules, which slim tool authoring must not.
+        from mindroom.runtime_resolution import resolve_agent_execution  # noqa: PLC0415
+
+        return resolve_agent_execution(
             self.agent_name,
-            is_private=self.config.get_agent(self.agent_name).private is not None,
+            self.config,
+            self.runtime_paths,
             execution_identity=build_execution_identity_from_runtime_context(self),
-            runtime_paths=self.runtime_paths,
-        )
+        ).worker_target
 
 
 @dataclass(frozen=True)

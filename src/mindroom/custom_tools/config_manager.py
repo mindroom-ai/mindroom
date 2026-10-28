@@ -36,6 +36,7 @@ from mindroom.oauth.credential_lifecycle import oauth_credentials_worker_target
 from mindroom.oauth.registry import load_oauth_providers
 from mindroom.oauth.service import oauth_connect_url
 from mindroom.redaction import REDACTED, redact_sensitive_text
+from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.catalog import (
     ToolCategory,
     ToolStatus,
@@ -46,7 +47,6 @@ from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
 )
-from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
 from mindroom.yaml_io import safe_dump
 
 if TYPE_CHECKING:
@@ -402,14 +402,12 @@ def _build_oauth_onboarding_guidance(
         agent_name=agent_name,
         transport_agent_name=agent_name,
     )
-    agent = config.get_agent(agent_name)
-    worker_target = build_agent_toolkit_worker_target(
-        config.resolve_agent(agent_name).policy.effective_execution_scope,
+    worker_target = resolve_agent_execution(
         agent_name,
-        is_private=agent.private is not None,
+        config,
+        runtime_paths,
         execution_identity=target_identity,
-        runtime_paths=runtime_paths,
-    )
+    ).worker_target
     providers = load_oauth_providers(config, runtime_paths)
     link_lines: list[str] = []
     any_requires_host_browser = False

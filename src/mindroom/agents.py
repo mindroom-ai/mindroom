@@ -97,7 +97,6 @@ from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.tool_system.toolkit_connections import run_connection
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
-    build_agent_toolkit_worker_target,
     resolve_agent_owned_path,
     shared_storage_root,
 )
@@ -843,13 +842,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
         agent_state_root=agent_runtime.state_root,
         tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         workspace_in_worker=workspace_in_worker,
-        worker_target=build_agent_toolkit_worker_target(
-            worker_scope,
-            agent_name,
-            is_private=agent_runtime.execution.is_private,
-            execution_identity=execution_identity,
-            runtime_paths=runtime_paths,
-        ),
+        worker_target=agent_runtime.execution.worker_target,
     )
 
 

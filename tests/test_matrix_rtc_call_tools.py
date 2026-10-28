@@ -398,7 +398,7 @@ async def test_call_agent_cache_build_cancellation_waits_for_the_build(
         config=_config(),
         runtime_paths=test_runtime_paths(tmp_path),
         context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
-        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
+        execution_identity=_identity(test_runtime_paths(tmp_path)),  # type: ignore[arg-type]
         active_model_name="default",
     )
 
@@ -1196,7 +1196,7 @@ def test_call_response_tracker_keeps_fifo_without_retaining_settled_tokens(tmp_p
         agent_name=AGENT,
         config=_config(),
         runtime_paths=test_runtime_paths(tmp_path),
-        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
+        execution_identity=_identity(test_runtime_paths(tmp_path)),  # type: ignore[arg-type]
     )
     state = _CallAgentRunState(
         session_id="call-session",
@@ -1304,7 +1304,7 @@ async def test_call_response_tracker_failed_settlement_does_not_abort_next_turn(
         agent_name=AGENT,
         config=_config(),
         runtime_paths=test_runtime_paths(tmp_path),
-        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
+        execution_identity=_identity(test_runtime_paths(tmp_path)),  # type: ignore[arg-type]
     )
     state = _CallAgentRunState(
         session_id="call-session",
@@ -1364,8 +1364,8 @@ async def test_cascaded_responder_uses_the_fallback_for_an_over_budget_caller(
             context = _runtime_context(config=config, runtime_paths=runtime_paths, target=target)
             return replace(context, active_model_name=cast("str | None", kwargs.get("active_model_name")))
 
-        def build_execution_identity(self, **_kwargs: object) -> SimpleNamespace:
-            return SimpleNamespace()
+        def build_execution_identity(self, **_kwargs: object) -> object:
+            return _identity(runtime_paths)
 
         async def run_in_context(
             self,
@@ -1434,8 +1434,8 @@ async def test_cascaded_responder_switches_to_the_fallback_when_the_caller_cross
             )
             return replace(context, active_model_name=cast("str | None", kwargs.get("active_model_name")))
 
-        def build_execution_identity(self, **_kwargs: object) -> SimpleNamespace:
-            return SimpleNamespace()
+        def build_execution_identity(self, **_kwargs: object) -> object:
+            return _identity(runtime_paths)
 
         async def run_in_context(
             self,
@@ -1764,7 +1764,7 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
     first_scheduler = object()
     second_scheduler = object()
     orchestrator = SimpleNamespace(knowledge_refresh_scheduler=first_scheduler, budgets=None)
-    execution_identity = SimpleNamespace()
+    execution_identity = _identity(runtime_paths)
     ready_knowledge = _ready_knowledge()
     resolver_calls: list[dict[str, object]] = []
     ai_calls: list[tuple[ResponseTurnContext, dict[str, object]]] = []
@@ -1896,7 +1896,7 @@ async def test_call_responder_adds_origin_brief_enrichment(
                 runtime_paths=runtime_paths,
                 target=target,
             ),
-            build_execution_identity=lambda **_kwargs: SimpleNamespace(),
+            build_execution_identity=lambda **_kwargs: _identity(runtime_paths),
             run_in_context=lambda **kwargs: kwargs["operation"](),
         ),  # type: ignore[arg-type]
         room_id="!room:example.org",
@@ -1933,8 +1933,8 @@ async def test_cascaded_responder_waits_for_interrupted_playout_settlement(
         def build_context(self, target: MessageTarget, **_kwargs: object) -> ToolRuntimeContext:
             return _runtime_context(config=config, runtime_paths=runtime_paths, target=target)
 
-        def build_execution_identity(self, **_kwargs: object) -> SimpleNamespace:
-            return SimpleNamespace()
+        def build_execution_identity(self, **_kwargs: object) -> object:
+            return _identity(runtime_paths)
 
         async def run_in_context(
             self,

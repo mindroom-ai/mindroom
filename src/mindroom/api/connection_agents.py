@@ -14,7 +14,8 @@ from mindroom.matrix.identity import try_parse_historical_matrix_user_id
 from mindroom.mcp_gateway.types import GatewayOwner
 from mindroom.origins import deployment_origin, is_local_origin
 from mindroom.requester_identity import resolve_human_requester_alias
-from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
+from mindroom.runtime_resolution import resolve_agent_execution
+from mindroom.tool_system.worker_routing import build_tool_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -166,14 +167,12 @@ def _connection_agent_identity_and_target(
         resolved_thread_id=None,
         session_id=None,
     )
-    target = build_agent_toolkit_worker_target(
-        config.resolve_agent(agent_name).policy.effective_execution_scope,
+    return identity, resolve_agent_execution(
         agent_name,
-        is_private=config.agents[agent_name].private is not None,
+        config,
+        runtime_paths,
         execution_identity=identity,
-        runtime_paths=runtime_paths,
-    )
-    return identity, target
+    ).worker_target
 
 
 def build_connection_agent_target(

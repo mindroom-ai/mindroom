@@ -25,6 +25,8 @@ from pydantic import (
 from mindroom import yaml_io
 from mindroom.access_policy import resolve_responder_access
 from mindroom.agent_policy import (
+    PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
+    PolicyInputs,
     build_agent_policy_seeds,
     get_agent_delegation_closure,
     get_unsupported_team_agents,
@@ -137,7 +139,7 @@ from mindroom.workspaces import control_plane_owns_private_templates, validate_w
 if TYPE_CHECKING:
     from collections.abc import Collection
 
-    from mindroom.agent_policy import ResolvedAgentPolicy
+    from mindroom.agent_policy import AgentPolicySeed, ResolvedAgentPolicy
     from mindroom.tool_system.catalog import ToolValidationInfo
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -369,7 +371,6 @@ class Config(BaseModel):
         description="Credential-injecting egress broker for worker shell and python traffic",
     )
 
-    PRIVATE_KNOWLEDGE_BASE_ID_PREFIX: ClassVar[str] = "__agent_private__:"
     TOOL_PRESETS: ClassVar[dict[str, tuple[str, ...]]] = {
         "openclaw_compat": _OPENCLAW_COMPAT_PRESET_TOOLS,
     }
@@ -891,14 +892,12 @@ class Config(BaseModel):
     @classmethod
     def _validate_knowledge_base_ids(cls, base_ids: Collection[str]) -> None:
         """Apply authored knowledge-base ID constraints to any config entry point."""
-        reserved_ids = sorted(
-            base_id for base_id in base_ids if base_id.startswith(cls.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
-        )
+        reserved_ids = sorted(base_id for base_id in base_ids if base_id.startswith(PRIVATE_KNOWLEDGE_BASE_ID_PREFIX))
         if reserved_ids:
             formatted = ", ".join(reserved_ids)
             msg = (
                 "knowledge_bases keys must not use the reserved private prefix "
-                f"'{cls.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX}'; invalid keys: {formatted}"
+                f"'{PRIVATE_KNOWLEDGE_BASE_ID_PREFIX}'; invalid keys: {formatted}"
             )
             raise ValueError(msg)
 
@@ -1334,13 +1333,16 @@ class Config(BaseModel):
             return DEFAULT_WORKER_GRANTABLE_CREDENTIALS
         return frozenset(configured)
 
+    def _agent_policy_seeds(self) -> dict[str, AgentPolicySeed]:
+        """Return the policy seed of every configured agent."""
+        return build_agent_policy_seeds(
+            {agent_name: PolicyInputs.from_agent(agent) for agent_name, agent in self.agents.items()},
+            default_worker_scope=self.defaults.worker_scope,
+        )
+
     def get_agent_policies(self) -> dict[str, ResolvedAgentPolicy]:
         """Return the canonical execution policy of every configured agent."""
-        seeds = build_agent_policy_seeds(self.agents, default_worker_scope=self.defaults.worker_scope)
-        return resolve_agent_policy_index(
-            seeds,
-            private_knowledge_base_id_prefix=self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
-        ).policies
+        return resolve_agent_policy_index(self._agent_policy_seeds()).policies
 
     def agent_has_tool_at_execution_scope(
         self,
@@ -1357,14 +1359,7 @@ class Config(BaseModel):
 
     def get_private_knowledge_base_agent(self, base_id: str) -> str | None:
         """Return the owning agent for a synthetic private knowledge base ID."""
-        return resolve_private_knowledge_base_agent(
-            base_id,
-            build_agent_policy_seeds(
-                self.agents,
-                default_worker_scope=self.defaults.worker_scope,
-            ),
-            private_knowledge_base_id_prefix=self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
-        )
+        return resolve_private_knowledge_base_agent(base_id, self._agent_policy_seeds())
 
     def get_knowledge_base_config(self, base_id: str) -> KnowledgeBaseConfig:
         """Return one effective knowledge base config, including synthetic private bases."""
@@ -1559,14 +1554,7 @@ class Config(BaseModel):
         closures: dict[str, frozenset[str]] | None = None,
     ) -> frozenset[str]:
         """Return one agent plus all agents reachable through transitive delegation."""
-        return get_agent_delegation_closure(
-            agent_name,
-            build_agent_policy_seeds(
-                self.agents,
-                default_worker_scope=self.defaults.worker_scope,
-            ),
-            closures=closures,
-        )
+        return get_agent_delegation_closure(agent_name, self._agent_policy_seeds(), closures=closures)
 
     def get_unsupported_team_agents(
         self,
@@ -1583,10 +1571,7 @@ class Config(BaseModel):
         """
         return get_unsupported_team_agents(
             agent_names,
-            build_agent_policy_seeds(
-                self.agents,
-                default_worker_scope=self.defaults.worker_scope,
-            ),
+            self._agent_policy_seeds(),
             closures=closures,
             allow_direct_private_agents=allow_direct_private_agents,
         )

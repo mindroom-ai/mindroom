@@ -14,7 +14,6 @@ from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.catalog import ensure_tool_registry_loaded, get_tool_by_name
-from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -40,17 +39,10 @@ def _shell_problems(
     config: Config,
     runtime_paths: RuntimePaths,
     agent_name: str,
-    execution_identity: ToolExecutionIdentity,
     storage: ResolvedAgentStorage,
 ) -> list[str]:
     """Check the agent's effective shell functions without opening integrations or a worker."""
-    worker_target = build_agent_toolkit_worker_target(
-        storage.execution.execution_scope,
-        agent_name,
-        is_private=storage.execution.is_private,
-        execution_identity=execution_identity,
-        runtime_paths=runtime_paths,
-    )
+    worker_target = storage.execution.worker_target
     try:
         ensure_tool_registry_loaded(runtime_paths, config, load_plugin_tools=False)
         shell = _effective_shell(config, agent_name)
@@ -83,7 +75,7 @@ def minimal_mode_problems(
     """Return every unmet agent and deployment requirement for one agent scope."""
     storage = resolve_agent_storage(agent_name, config, runtime_paths, execution_identity)
     return [
-        *_shell_problems(config, runtime_paths, agent_name, execution_identity, storage),
+        *_shell_problems(config, runtime_paths, agent_name, storage),
         *minimal_shell_problems(config, runtime_paths, agent_name),
     ]
 
