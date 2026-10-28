@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.config.main import failed_config_source_fingerprint, load_config
@@ -12,11 +12,7 @@ from mindroom.config.reload_status import ConfigReloadStatus
 from mindroom.config.yaml_includes import partial_source_files
 from mindroom.event_journal.opening import describe_event_journal, pending_event_journal_restart
 from mindroom.logging_config import get_logger
-from mindroom.orchestration.config_updates import (
-    build_config_update_plan,
-    configured_entity_names,
-    plugin_change_paths,
-)
+from mindroom.orchestration.config_updates import build_config_update_plan, plugin_change_paths
 from mindroom.orchestration.runtime import cancel_logged_task, create_logged_task
 from mindroom.tool_jobs.settings import pending_background_tool_jobs_restart
 
@@ -31,10 +27,6 @@ if TYPE_CHECKING:
     from mindroom.response_admission import ResponseAdmissionGate
 
 logger = get_logger(__name__)
-
-# One planned config transition and the plugin paths it changes.
-type _ConfigTransition = tuple[ConfigUpdatePlan, tuple[str, ...]]
-
 
 _CONFIG_RELOAD_DEBOUNCE_SECONDS = 2.0
 _REPLACEMENT_DRAIN_IDLE_POLL_SECONDS = 0.5
@@ -104,7 +96,7 @@ class ConfigReloadLifecycle:
     current_config: Callable[[], Config | None]
     agent_bots: Callable[[], Mapping[str, AgentBot | TeamBot]]
     load_initial_config: Callable[[Config], Awaitable[bool]]
-    apply_update_plan: Callable[[Config, ConfigUpdatePlan, tuple[str, ...]], Awaitable[bool]]
+    apply_update_plan: Callable[[Config, ConfigUpdatePlan], Awaitable[bool]]
     response_admission_gate: ResponseAdmissionGate
     before_runtime_replacement: Callable[[], Awaitable[None]]
     # Shared with manual plugin reloads and MCP catalog-change handling so no
@@ -229,7 +221,7 @@ class ConfigReloadLifecycle:
                 and runtime_effective_config != current_effective_config
             ):
                 repair_config = runtime_config
-            requested_transition = None
+            requested_plan = None
             if repair_config is not None:
                 logger.warning(
                     "config_reload_repairing_partial_publication",
@@ -238,7 +230,7 @@ class ConfigReloadLifecycle:
             else:
                 # The bot inventory changes only under the admission lock held here,
                 # so this plan is still exact when the apply runs after any drain.
-                requested_transition = self._plan_config_transition(current_config, new_config)
+                requested_plan = self._plan_config_transition(current_config, new_config)
 
             updated = False
 
@@ -248,7 +240,7 @@ class ConfigReloadLifecycle:
                     fully_applied_config=current_config,
                     requested_config=new_config,
                     repair_config=repair_config,
-                    requested_transition=requested_transition,
+                    requested_plan=requested_plan,
                 )
                 self.record_applied(new_config)
 
@@ -256,7 +248,7 @@ class ConfigReloadLifecycle:
                 apply_update_steps,
                 operation_name="configuration reload",
                 request_is_current=self._reload_publication_is_current,
-                wait_for_idle=requested_transition is None or requested_transition[0].requires_response_drain,
+                wait_for_idle=requested_plan is None or requested_plan.requires_response_drain,
             )
             return updated if applied else None
 
@@ -266,7 +258,7 @@ class ConfigReloadLifecycle:
         fully_applied_config: Config,
         requested_config: Config,
         repair_config: Config | None,
-        requested_transition: _ConfigTransition | None = None,
+        requested_plan: ConfigUpdatePlan | None = None,
     ) -> bool:
         """Restore the last-good state when needed, then apply the requested config."""
         updated = False
@@ -280,7 +272,7 @@ class ConfigReloadLifecycle:
                 requested_updated = await self._apply_config_transition(
                     fully_applied_config,
                     requested_config,
-                    requested_transition,
+                    requested_plan,
                 )
                 updated = updated or requested_updated
                 self._incomplete_config = None
@@ -291,29 +283,22 @@ class ConfigReloadLifecycle:
         self,
         current_config: Config,
         new_config: Config,
-        transition: _ConfigTransition | None = None,
+        plan: ConfigUpdatePlan | None = None,
     ) -> bool:
         """Apply one normal config transition, planning it now unless already planned."""
-        plan, plugin_changes = transition or self._plan_config_transition(current_config, new_config)
-        return await self.apply_update_plan(current_config, plan, plugin_changes)
+        return await self.apply_update_plan(
+            current_config,
+            plan or self._plan_config_transition(current_config, new_config),
+        )
 
-    def _plan_config_transition(self, current_config: Config, new_config: Config) -> _ConfigTransition:
+    def _plan_config_transition(self, current_config: Config, new_config: Config) -> ConfigUpdatePlan:
         """Build one config transition plan against the current bot inventory."""
-        agent_bots = self.agent_bots()
-        plugin_changes = plugin_change_paths(current_config, new_config)
-        plan = build_config_update_plan(
+        return build_config_update_plan(
             current_config=current_config,
             new_config=new_config,
-            configured_entities=set(configured_entity_names(new_config)),
-            existing_entities=set(agent_bots.keys()),
-            agent_bots=agent_bots,
+            bots=self.agent_bots(),
+            plugin_changes=plugin_change_paths(current_config, new_config),
         )
-        if plugin_changes:
-            plan = replace(
-                plan,
-                entities_to_restart=plan.entities_to_restart | set(agent_bots),
-            )
-        return plan, plugin_changes
 
     def _reload_publication_is_current(self) -> bool:
         """Allow direct updates, but skip queued snapshots superseded before publication."""

@@ -13,6 +13,7 @@ import sys
 import threading
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, contextmanager, nullcontext
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -2819,10 +2820,9 @@ class TestMultiAgentOrchestrator:
         plan = ConfigUpdatePlan(
             new_config=config,
             changed_mcp_servers=set(),
-            configured_entities={ROUTER_AGENT_NAME},
-            entities_to_restart=set(),
-            new_entities=set(),
-            removed_entities=set(),
+            restart=set(),
+            start=set(),
+            remove=set(),
             mindroom_user_changed=False,
             room_access_changed=False,
             matrix_space_changed=False,
@@ -2861,15 +2861,14 @@ class TestMultiAgentOrchestrator:
         plan = ConfigUpdatePlan(
             new_config=config,
             changed_mcp_servers=set(),
-            configured_entities={ROUTER_AGENT_NAME, "general"},
-            entities_to_restart=set(),
-            new_entities=set(),
-            removed_entities=set(),
+            restart=set(),
+            start=set(),
+            remove=set(),
             mindroom_user_changed=False,
             room_access_changed=False,
             matrix_space_changed=False,
             authorization_changed=False,
-            entities_to_reconcile_rooms={ROUTER_AGENT_NAME, "general"},
+            reconcile_rooms={ROUTER_AGENT_NAME, "general"},
         )
 
         with patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as setup_rooms:
@@ -2892,15 +2891,14 @@ class TestMultiAgentOrchestrator:
         plan = ConfigUpdatePlan(
             new_config=config,
             changed_mcp_servers=set(),
-            configured_entities={ROUTER_AGENT_NAME},
-            entities_to_restart=set(),
-            new_entities=set(),
-            removed_entities=set(),
+            restart=set(),
+            start=set(),
+            remove=set(),
             mindroom_user_changed=False,
             room_access_changed=False,
             matrix_space_changed=False,
             authorization_changed=False,
-            entities_to_reconcile_rooms={ROUTER_AGENT_NAME},
+            reconcile_rooms={ROUTER_AGENT_NAME},
         )
 
         with (
@@ -4610,10 +4608,9 @@ class TestMultiAgentOrchestrator:
         plan = ConfigUpdatePlan(
             new_config=new_config,
             changed_mcp_servers=set(),
-            configured_entities=set(),
-            entities_to_restart=set(),
-            new_entities=set(),
-            removed_entities=set(),
+            restart=set(),
+            start=set(),
+            remove=set(),
             mindroom_user_changed=False,
             room_access_changed=False,
             matrix_space_changed=False,
@@ -4627,9 +4624,9 @@ class TestMultiAgentOrchestrator:
             patch.object(type(runtime), "apply_update_plan", new=apply_update_plan),
             pytest.raises(RuntimeError, match="script reload boundary"),
         ):
-            await orchestrator._apply_config_update_plan(current_config, plan, ())
+            await orchestrator._apply_config_update_plan(current_config, plan)
 
-        apply_update_plan.assert_awaited_once_with(plan, plugins_changed=False)
+        apply_update_plan.assert_awaited_once_with(plan)
         assert orchestrator.script_runtime is runtime
         assert orchestrator.config is current_config
 
@@ -4643,18 +4640,7 @@ class TestMultiAgentOrchestrator:
         new_config = _runtime_bound_config(Config(), tmp_path)
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(current_config))
         orchestrator.config = current_config
-        plan = ConfigUpdatePlan(
-            new_config=new_config,
-            changed_mcp_servers=set(),
-            configured_entities=set(),
-            entities_to_restart=set(),
-            new_entities=set(),
-            removed_entities=set(),
-            mindroom_user_changed=False,
-            room_access_changed=False,
-            matrix_space_changed=False,
-            authorization_changed=False,
-        )
+        plan = ConfigUpdatePlan(new_config=new_config, plugin_changes=("plugins/example.py",))
         apply_update_plan = AsyncMock(side_effect=RuntimeError("script plugin boundary"))
         replace_plugins = AsyncMock()
 
@@ -4664,9 +4650,9 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_apply_plugin_changes_for_config_update", new=replace_plugins),
             pytest.raises(RuntimeError, match="script plugin boundary"),
         ):
-            await orchestrator._apply_config_update_plan(current_config, plan, ("plugins/example.py",))
+            await orchestrator._apply_config_update_plan(current_config, plan)
 
-        apply_update_plan.assert_awaited_once_with(plan, plugins_changed=True)
+        apply_update_plan.assert_awaited_once_with(plan)
         replace_plugins.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -4682,10 +4668,9 @@ class TestMultiAgentOrchestrator:
         plan = ConfigUpdatePlan(
             new_config=new_config,
             changed_mcp_servers=set(),
-            configured_entities=set(),
-            entities_to_restart=set(),
-            new_entities=set(),
-            removed_entities=set(),
+            restart=set(),
+            start=set(),
+            remove=set(),
             mindroom_user_changed=False,
             room_access_changed=False,
             matrix_space_changed=False,
@@ -4719,7 +4704,7 @@ class TestMultiAgentOrchestrator:
             ),
             pytest.raises(RuntimeError, match="script reload boundary"),
         ):
-            await orchestrator._apply_config_update_plan(current_config, plan, ())
+            await orchestrator._apply_config_update_plan(current_config, plan)
 
         assert orchestrator.config is current_config
         assert runtime._worker_replacement_phase == "idle"
@@ -4739,10 +4724,9 @@ class TestMultiAgentOrchestrator:
         plan = ConfigUpdatePlan(
             new_config=new_config,
             changed_mcp_servers=set(),
-            configured_entities=set(),
-            entities_to_restart=set(),
-            new_entities=set(),
-            removed_entities=set(),
+            restart=set(),
+            start=set(),
+            remove=set(),
             mindroom_user_changed=False,
             room_access_changed=False,
             matrix_space_changed=False,
@@ -4773,7 +4757,7 @@ class TestMultiAgentOrchestrator:
             ),
             pytest.raises(RuntimeError, match="maintenance cancellation failed"),
         ):
-            await orchestrator._apply_config_update_plan(current_config, plan, ())
+            await orchestrator._apply_config_update_plan(current_config, plan)
 
         assert completed_configs == [current_config]
 
@@ -4790,10 +4774,9 @@ class TestMultiAgentOrchestrator:
         plan = ConfigUpdatePlan(
             new_config=new_config,
             changed_mcp_servers=set(),
-            configured_entities=set(),
-            entities_to_restart=set(),
-            new_entities=set(),
-            removed_entities=set(),
+            restart=set(),
+            start=set(),
+            remove=set(),
             mindroom_user_changed=False,
             room_access_changed=False,
             matrix_space_changed=False,
@@ -4823,7 +4806,7 @@ class TestMultiAgentOrchestrator:
             ),
             pytest.raises(RuntimeError, match="post-commit failure"),
         ):
-            await orchestrator._apply_config_update_plan(current_config, plan, ())
+            await orchestrator._apply_config_update_plan(current_config, plan)
 
         assert completed_configs == [new_config, new_config]
 
@@ -5040,10 +5023,9 @@ class TestMultiAgentOrchestrator:
         plan = ConfigUpdatePlan(
             new_config=new_config,
             changed_mcp_servers=set(),
-            configured_entities={"first", "second"},
-            entities_to_restart=set(),
-            new_entities=set(),
-            removed_entities=set(),
+            restart=set(),
+            start=set(),
+            remove=set(),
             mindroom_user_changed=False,
             room_access_changed=False,
             matrix_space_changed=False,
@@ -5176,19 +5158,7 @@ class TestMultiAgentOrchestrator:
             ),
         )
         orchestrator.config = current_config
-        plan = SimpleNamespace(
-            mindroom_user_changed=False,
-            new_config=new_config,
-            changed_mcp_servers=set(),
-            configured_entities=set(),
-            entities_to_restart=set(),
-            new_entities=set(),
-            added_entities=set(),
-            removed_entities=set(),
-            live_updated_entities=set(),
-            only_support_service_changes=True,
-            requires_response_drain=True,
-        )
+        plan = ConfigUpdatePlan(new_config=new_config, reply_authorization_changed=True)
         generation_refreshes: list[Config] = []
 
         async def complete_worker_replacement(_runtime: object) -> None:
@@ -5249,19 +5219,7 @@ class TestMultiAgentOrchestrator:
         )
         orchestrator.config = current_config
         record_opened_event_journal(current_config.event_journal, runtime_paths=runtime_paths)
-        plan = SimpleNamespace(
-            mindroom_user_changed=False,
-            new_config=new_config,
-            changed_mcp_servers=set(),
-            configured_entities=set(),
-            entities_to_restart=set(),
-            new_entities=set(),
-            added_entities=set(),
-            removed_entities=set(),
-            live_updated_entities=set(),
-            only_support_service_changes=True,
-            requires_response_drain=True,
-        )
+        plan = ConfigUpdatePlan(new_config=new_config, reply_authorization_changed=True)
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
@@ -5299,19 +5257,7 @@ class TestMultiAgentOrchestrator:
 
         orchestrator.config = current_config
         orchestrator.hook_registry = old_hook_registry
-        plan = SimpleNamespace(
-            mindroom_user_changed=True,
-            new_config=new_config,
-            changed_mcp_servers=set(),
-            entities_to_restart=set(),
-            new_entities=set(),
-            added_entities=set(),
-            configured_entities=set(),
-            removed_entities=set(),
-            live_updated_entities=set(),
-            only_support_service_changes=True,
-            requires_response_drain=True,
-        )
+        plan = ConfigUpdatePlan(new_config=new_config, mindroom_user_changed=True, reply_authorization_changed=True)
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
@@ -5319,7 +5265,10 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.HookRegistry.from_plugins", return_value=new_hook_registry),
             patch("mindroom.orchestrator.set_scheduling_hook_registry") as mock_set_scheduling_hook_registry,
             patch("mindroom.orchestrator.clear_worker_validation_snapshot_cache") as mock_clear_snapshot_cache,
-            patch("mindroom.orchestration.config_lifecycle.build_config_update_plan", return_value=plan),
+            patch(
+                "mindroom.orchestration.config_lifecycle.build_config_update_plan",
+                side_effect=lambda **kwargs: replace(plan, plugin_changes=kwargs["plugin_changes"]),
+            ),
             patch.object(
                 orchestrator,
                 "_prepare_user_account",
@@ -5360,10 +5309,9 @@ class TestMultiAgentOrchestrator:
         plan = ConfigUpdatePlan(
             new_config=new_config,
             changed_mcp_servers={"demo-server"},
-            configured_entities=set(),
-            entities_to_restart=set(),
-            new_entities=set(),
-            removed_entities=set(),
+            restart=set(),
+            start=set(),
+            remove=set(),
             mindroom_user_changed=False,
             room_access_changed=False,
             matrix_space_changed=False,
@@ -5374,7 +5322,10 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
-            patch("mindroom.orchestration.config_lifecycle.build_config_update_plan", return_value=plan),
+            patch(
+                "mindroom.orchestration.config_lifecycle.build_config_update_plan",
+                side_effect=lambda **kwargs: replace(plan, plugin_changes=kwargs["plugin_changes"]),
+            ),
             patch.object(
                 orchestrator,
                 "_stop_entities_before_mcp_sync",
@@ -5465,10 +5416,9 @@ class TestMultiAgentOrchestrator:
         plan = ConfigUpdatePlan(
             new_config=new_config,
             changed_mcp_servers={"demo-server"},
-            configured_entities=set(),
-            entities_to_restart=set(),
-            new_entities=set(),
-            removed_entities=set(),
+            restart=set(),
+            start=set(),
+            remove=set(),
             mindroom_user_changed=False,
             room_access_changed=False,
             matrix_space_changed=False,
@@ -5480,7 +5430,10 @@ class TestMultiAgentOrchestrator:
         try:
             with (
                 patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
-                patch("mindroom.orchestration.config_lifecycle.build_config_update_plan", return_value=plan),
+                patch(
+                    "mindroom.orchestration.config_lifecycle.build_config_update_plan",
+                    side_effect=lambda **kwargs: replace(plan, plugin_changes=kwargs["plugin_changes"]),
+                ),
                 patch.object(
                     orchestrator,
                     "_stop_entities_before_mcp_sync",
@@ -5536,10 +5489,9 @@ class TestMultiAgentOrchestrator:
         plan = ConfigUpdatePlan(
             new_config=new_config,
             changed_mcp_servers=set(),
-            configured_entities=set(),
-            entities_to_restart=set(),
-            new_entities=set(),
-            removed_entities=set(),
+            restart=set(),
+            start=set(),
+            remove=set(),
             mindroom_user_changed=False,
             room_access_changed=False,
             matrix_space_changed=False,
@@ -5559,7 +5511,10 @@ class TestMultiAgentOrchestrator:
 
             with (
                 patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
-                patch("mindroom.orchestration.config_lifecycle.build_config_update_plan", return_value=plan),
+                patch(
+                    "mindroom.orchestration.config_lifecycle.build_config_update_plan",
+                    side_effect=lambda **kwargs: replace(plan, plugin_changes=kwargs["plugin_changes"]),
+                ),
                 patch.object(
                     orchestrator,
                     "_stop_entities_before_mcp_sync",
@@ -5654,7 +5609,7 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
             patch("mindroom.orchestrator.load_plugins"),
             patch(
-                "mindroom.orchestration.config_updates._identify_entities_to_restart",
+                "mindroom.orchestration.config_updates._get_changed_agents",
                 return_value=set(),
             ),
             patch("mindroom.orchestrator.create_bot_for_entity", return_value=new_bot),
@@ -5748,7 +5703,7 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
             patch("mindroom.orchestrator.load_plugins"),
             patch(
-                "mindroom.orchestration.config_updates._identify_entities_to_restart",
+                "mindroom.orchestration.config_updates._get_changed_agents",
                 return_value=set(),
             ),
             patch("mindroom.orchestrator.create_bot_for_entity", return_value=new_bot),

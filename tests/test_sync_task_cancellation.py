@@ -3062,10 +3062,9 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
     plan = ConfigUpdatePlan(
         new_config=new_config,
         changed_mcp_servers=set(),
-        configured_entities=set(),
-        entities_to_restart=set(),
-        new_entities=set(),
-        removed_entities=set(),
+        restart=set(),
+        start=set(),
+        remove=set(),
         mindroom_user_changed=False,
         room_access_changed=False,
         matrix_space_changed=False,
@@ -3134,10 +3133,9 @@ async def test_config_reload_during_post_readiness_room_setup_replays_it_with_li
     plan = ConfigUpdatePlan(
         new_config=new_config,
         changed_mcp_servers=set(),
-        configured_entities=set(),
-        entities_to_restart=set(),
-        new_entities=set(),
-        removed_entities=set(),
+        restart=set(),
+        start=set(),
+        remove=set(),
         mindroom_user_changed=False,
         room_access_changed=False,
         matrix_space_changed=False,
@@ -3221,7 +3219,7 @@ async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> N
     """Test that update_config properly cancels old sync tasks."""
     with (
         patch("mindroom.orchestration.config_lifecycle.load_config") as mock_load_config,
-        patch("mindroom.orchestration.config_updates._identify_entities_to_restart") as mock_identify,
+        patch("mindroom.orchestration.config_updates._get_changed_agents") as mock_identify,
         patch("mindroom.orchestrator.stop_entities") as mock_stop_entities,
         patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
         patch("mindroom.orchestrator.sync_forever_with_restart"),
@@ -3481,7 +3479,7 @@ async def test_reload_replaces_restarted_entities_when_one_reply_outlives_the_dr
     try:
         with (
             patch(
-                "mindroom.orchestration.config_updates._identify_entities_to_restart",
+                "mindroom.orchestration.config_updates._get_changed_agents",
                 return_value={"general", "coach"},
             ),
             patch("mindroom.orchestrator.create_bot_for_entity", side_effect=make_bot),

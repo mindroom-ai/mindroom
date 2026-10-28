@@ -17,7 +17,7 @@ import uvicorn
 
 from mindroom import constants
 from mindroom.agent_cli.session import TurnToolRegistry
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex, agent_reply_membership_policy_changed
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.api.startup_probes import serve_startup_probes
@@ -140,7 +140,7 @@ from .event_journal.opening import OpenEventJournal, bind_event_journal, open_ev
 from .logging_config import get_logger, setup_logging
 from .orchestration.computer_runtime import ComputerRuntimeCoordinator
 from .orchestration.config_lifecycle import ConfigReloadLifecycle
-from .orchestration.config_updates import build_config_update_plan, configured_entity_names
+from .orchestration.config_updates import catalog_change_restarts, configured_entity_names, mcp_dependents
 from .orchestration.config_warnings import warn_about_config_risks
 from .orchestration.external_trigger_runtime import ExternalTriggerRuntimeCoordinator
 from .orchestration.plugin_watch import PluginWatchState, watch_plugins_task
@@ -1302,14 +1302,7 @@ class _MultiAgentOrchestrator:
                 )
                 return None
             config = self._require_config()
-            plan = build_config_update_plan(
-                current_config=config,
-                new_config=config,
-                configured_entities=set(configured_entity_names(config)),
-                existing_entities=set(self.agent_bots),
-                agent_bots=self.agent_bots,
-            )
-            await self._script_runtime.apply_update_plan(plan, plugins_changed=True)
+            await self._script_runtime.interrupt_for_plugin_reload()
             logger.info(
                 "Reloading plugins",
                 source=source,
@@ -1809,7 +1802,7 @@ class _MultiAgentOrchestrator:
         unchanged_bots = [
             (entity_name, bot)
             for entity_name, bot in self.agent_bots.items()
-            if entity_name not in plan.entities_to_restart
+            if entity_name not in plan.restart | plan.remove
         ]
         for _, bot in unchanged_bots:
             bot.config = plan.new_config
@@ -1903,9 +1896,12 @@ class _MultiAgentOrchestrator:
         if not changed_server_ids:
             return set()
 
-        affected_entities = current_config.get_entities_referencing_tools(
-            {mcp_tool_name(server_id) for server_id in changed_server_ids},
-        ) | new_config.get_entities_referencing_tools({mcp_tool_name(server_id) for server_id in changed_server_ids})
+        # A removed dependent is not stopped here: its removal still needs its bot.
+        affected_entities = (
+            (mcp_dependents(current_config, changed_server_ids) | mcp_dependents(new_config, changed_server_ids))
+            & set(self.agent_bots)
+            & set(configured_entity_names(new_config))
+        )
         if not affected_entities:
             return set()
 
@@ -1913,10 +1909,7 @@ class _MultiAgentOrchestrator:
         self._computer_runtime.unbind_for_entity_changes(affected_entities)
         for entity_name in affected_entities:
             await self._cancel_bot_start_task(entity_name)
-        await self._stop_runtime_entities(
-            affected_entities,
-            restart_entities=affected_entities & set(configured_entity_names(new_config)),
-        )
+        await self._stop_runtime_entities(affected_entities, restart_entities=affected_entities)
         return affected_entities
 
     async def _restart_changed_entities(
@@ -1926,33 +1919,23 @@ class _MultiAgentOrchestrator:
         already_stopped_entities: set[str] | None = None,
     ) -> tuple[set[str], list[str], list[str]]:
         """Restart or create entities affected by the config change."""
-        self._permanently_failed_entities.difference_update(
-            plan.entities_to_restart | plan.new_entities | plan.removed_entities,
-        )
-        entities_to_stop = plan.entities_to_restart - (already_stopped_entities or set())
+        self._permanently_failed_entities.difference_update(plan.restart | plan.start | plan.remove)
+        entities_to_stop = set(plan.restart) - (already_stopped_entities or set())
         if entities_to_stop:
             self._external_trigger_runtime.unbind_for_entity_changes(entities_to_stop)
             self._computer_runtime.unbind_for_entity_changes(entities_to_stop)
             for entity_name in entities_to_stop:
                 await self._cancel_bot_start_task(entity_name)
-            await self._stop_runtime_entities(
-                entities_to_stop,
-                restart_entities=entities_to_stop & plan.configured_entities,
-            )
+            await self._stop_runtime_entities(entities_to_stop, restart_entities=entities_to_stop)
 
-        entities_to_recreate = plan.entities_to_restart & plan.configured_entities
-        changed_entities = entities_to_recreate | plan.new_entities
+        changed_entities = set(plan.restart | plan.start)
         start_results = await self._create_and_start_entities(
             changed_entities,
             plan.new_config,
             start_sync_tasks=True,
         )
 
-        removed_restarted_entities = plan.entities_to_restart - plan.configured_entities
-        for entity_name in removed_restarted_entities:
-            self.agent_bots.pop(entity_name, None)
-
-        await self._remove_deleted_entities(plan.removed_entities)
+        await self._remove_deleted_entities(set(plan.remove))
         await self._approval_recovery.reconcile_unavailable_entities(
             set(start_results.permanently_failed_entities),
         )
@@ -2053,7 +2036,7 @@ class _MultiAgentOrchestrator:
         changed_entities: set[str],
     ) -> None:
         """Reconcile rooms and memberships after entity/config updates."""
-        bots_to_setup = self._running_bots_for_entities(changed_entities | plan.entities_to_reconcile_rooms)
+        bots_to_setup = self._running_bots_for_entities(changed_entities | plan.reconcile_rooms)
         if bots_to_setup or plan.mindroom_user_changed or plan.room_access_changed or plan.authorization_changed:
             await self._setup_rooms_and_memberships(bots_to_setup)
         elif plan.matrix_space_changed or plan.room_metadata_changed:
@@ -2064,7 +2047,7 @@ class _MultiAgentOrchestrator:
 
     async def _prepare_accounts_for_config_update(self, new_config: Config, plan: ConfigUpdatePlan) -> None:
         """Prepare or validate managed Matrix accounts before publishing a reloaded config."""
-        entities_requiring_account_check = plan.added_entities | (plan.entities_to_restart & plan.configured_entities)
+        entities_requiring_account_check = set(plan.start | plan.restart)
         self._preflight_account_provisioning(
             new_config,
             entity_names=entities_requiring_account_check,
@@ -2120,28 +2103,16 @@ class _MultiAgentOrchestrator:
             return plan
         return replace(
             plan,
-            entities_to_restart=plan.entities_to_restart
-            | plan.new_config.get_entities_referencing_tools(
-                {mcp_tool_name(server_id) for server_id in changed_server_ids},
-            ),
+            restart=plan.restart | catalog_change_restarts(plan.new_config, changed_server_ids, set(self.agent_bots)),
         )
 
-    async def _apply_config_update_plan(
-        self,
-        current_config: Config,
-        plan: ConfigUpdatePlan,
-        plugin_changes: tuple[str, ...],
-    ) -> bool:
+    async def _apply_config_update_plan(self, current_config: Config, plan: ConfigUpdatePlan) -> bool:
         """Apply one computed config update plan: restart entities and reconcile state."""
         new_config = plan.new_config
-        reply_membership_policy_changed = agent_reply_membership_policy_changed(
-            current_config,
-            new_config,
-        )
-        router_invite_policy_changed = current_config.router.accept_invites != new_config.router.accept_invites
+        plugin_changes = plan.plugin_changes
         await self._prepare_accounts_for_config_update(new_config, plan)
         replay_startup_maintenance = False
-        await self._script_runtime.apply_update_plan(plan, plugins_changed=bool(plugin_changes))
+        await self._script_runtime.apply_update_plan(plan)
 
         try:
             replay_startup_maintenance = await self._startup_maintenance.cancel()
@@ -2149,18 +2120,18 @@ class _MultiAgentOrchestrator:
                 pre_stopped_mcp_entities = await self._apply_plugin_changes_for_config_update(
                     current_config=current_config,
                     new_config=new_config,
-                    changed_server_ids=plan.changed_mcp_servers,
-                    reply_membership_policy_changed=reply_membership_policy_changed,
+                    changed_server_ids=set(plan.changed_mcp_servers),
+                    reply_membership_policy_changed=plan.reply_membership_policy_changed,
                 )
             else:
                 pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
                     current_config,
                     new_config,
-                    plan.changed_mcp_servers,
+                    set(plan.changed_mcp_servers),
                 )
                 # Only apply the new config after validation and account checks succeed.
                 self.config = new_config
-                if reply_membership_policy_changed:
+                if plan.reply_membership_policy_changed:
                     self.invalidate_agent_reply_memberships(reason="config_reload")
                 self.plugin_watch.sync_roots(new_config)
                 self._activate_hook_registry(self.hook_registry)
@@ -2176,7 +2147,7 @@ class _MultiAgentOrchestrator:
             await self._external_trigger_runtime.sync_api_config_snapshot(new_config)
             plan = await self._restart_refreshed_mcp_dependents(plan, changed_runtime_mcp_servers)
             await self._update_unchanged_bots(plan)
-            if router_invite_policy_changed and ROUTER_AGENT_NAME not in plan.entities_to_restart:
+            if plan.router_invite_policy_changed and ROUTER_AGENT_NAME not in plan.restart:
                 router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
                 if router_bot is not None:
                     router_bot.schedule_pending_invite_reconciliation()
@@ -2185,9 +2156,9 @@ class _MultiAgentOrchestrator:
                 await self._finalize_config_reload(
                     new_config=new_config,
                     current_config=current_config,
-                    changed_entities=plan.live_updated_entities,
-                    added_entities=plan.added_entities,
-                    removed_entities=plan.removed_entities,
+                    changed_entities=set(plan.live_updated),
+                    added_entities=set(plan.start),
+                    removed_entities=set(plan.remove),
                     plugin_changes=plugin_changes,
                 )
                 return False
@@ -2210,15 +2181,15 @@ class _MultiAgentOrchestrator:
             await self._finalize_config_reload(
                 new_config=new_config,
                 current_config=current_config,
-                changed_entities=changed_entities | plan.live_updated_entities,
-                added_entities=plan.added_entities,
-                removed_entities=plan.removed_entities,
+                changed_entities=changed_entities | plan.live_updated,
+                added_entities=set(plan.start),
+                removed_entities=set(plan.remove),
                 plugin_changes=plugin_changes,
             )
 
             logger.info(
                 "configuration_update_complete",
-                affected_bot_count=len(plan.entities_to_restart) + len(plan.new_entities),
+                affected_bot_count=len(plan.restart) + len(plan.start),
             )
             return True
         finally:

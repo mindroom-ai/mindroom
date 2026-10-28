@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
+from mindroom.access_policy import resolve_responder_access
+from mindroom.agent_reply_membership import agent_reply_membership_policy_changed
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.logging_config import get_logger
 from mindroom.mcp.registry import mcp_tool_name
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
+    from collections.abc import Set as AbstractSet
 
     from pydantic import BaseModel
 
@@ -113,23 +116,34 @@ _TEAM_LIVE_FIELDS = frozenset(
 
 @dataclass(frozen=True)
 class ConfigUpdatePlan:
-    """Computed impact of one config reload."""
+    """Everything one config reload changes, decided in one place.
+
+    ``restart``, ``start``, and ``remove`` are disjoint: an entity whose bot
+    exists and stays configured may restart, a configured entity without a bot
+    starts, and a bot whose entity is no longer configured is removed, never
+    restarted, so its removal still finds the bot it must stop.
+    """
 
     new_config: Config
-    changed_mcp_servers: set[str]
-    configured_entities: set[str]
-    entities_to_restart: set[str]
-    new_entities: set[str]
-    removed_entities: set[str]
-    mindroom_user_changed: bool
-    room_access_changed: bool
-    matrix_space_changed: bool
-    authorization_changed: bool
+    restart: frozenset[str] = frozenset()
+    start: frozenset[str] = frozenset()
+    remove: frozenset[str] = frozenset()
+    reconcile_rooms: frozenset[str] = frozenset()
+    live_updated: frozenset[str] = frozenset()
+    plugin_changes: tuple[str, ...] = ()
+    changed_mcp_servers: frozenset[str] = frozenset()
+    mindroom_user_changed: bool = False
+    room_access_changed: bool = False
+    matrix_space_changed: bool = False
+    authorization_changed: bool = False
     room_metadata_changed: bool = False
+    # Any input reply, invite, or trigger authorization reads changed, so publication waits for replies.
     reply_authorization_changed: bool = False
-    added_entities: set[str] = field(default_factory=set)
-    entities_to_reconcile_rooms: set[str] = field(default_factory=set)
-    live_updated_entities: set[str] = field(default_factory=set)
+    # A continuing agent's responder access changed, so background scripts it runs must be re-authorized.
+    responder_access_changed: bool = False
+    # Room-membership grant inputs changed, so every room-backed grant is revoked until the router refreshes.
+    reply_membership_policy_changed: bool = False
+    router_invite_policy_changed: bool = False
 
     @property
     def requires_response_drain(self) -> bool:
@@ -143,9 +157,7 @@ class ConfigUpdatePlan:
     @property
     def _has_entity_changes(self) -> bool:
         """Return whether any bots must be created, restarted, removed, or reconciled."""
-        return bool(
-            self.entities_to_restart or self.new_entities or self.removed_entities or self.entities_to_reconcile_rooms,
-        )
+        return bool(self.restart or self.start or self.remove or self.reconcile_rooms)
 
     @property
     def only_support_service_changes(self) -> bool:
@@ -209,32 +221,12 @@ def _agent_startup_tools(config: Config, agent_name: str) -> tuple[bool, frozens
     return "desktop" in tool_names, frozenset(tool_names & mcp_tool_names)
 
 
-def _identify_entities_to_restart(
-    config: Config | None,
-    new_config: Config,
-    agent_bots: Mapping[str, AgentBot | TeamBot],
-    changed_mcp_servers: set[str],
-) -> set[str]:
-    """Identify entities that need restarting due to config changes."""
-    agents_to_restart = _get_changed_agents(config, new_config, agent_bots)
-    teams_to_restart = _get_changed_teams(config, new_config, agent_bots)
-
-    entities_to_restart = agents_to_restart | teams_to_restart
-    entities_to_restart |= _call_agents_to_restart(config, new_config, agent_bots)
-    if changed_mcp_servers:
-        entities_to_restart |= _entities_referencing_mcp_servers(config, new_config, changed_mcp_servers)
-
-    return entities_to_restart
-
-
 def _call_agents_to_restart(
-    config: Config | None,
+    config: Config,
     new_config: Config,
     agent_bots: Mapping[str, AgentBot | TeamBot],
 ) -> set[str]:
     """Return call agents whose call setup changed or whose call in progress would keep stale config."""
-    if config is None:
-        return set()
     old_agents = set(config.calls.agents) if config.calls.enabled else set()
     new_agents = set(new_config.calls.agents) if new_config.calls.enabled else set()
     changed_agents = {
@@ -293,30 +285,15 @@ def _call_manager_signature(config: Config, agent_name: str) -> object | None:
 
 
 def _get_changed_agents(
-    config: Config | None,
+    config: Config,
     new_config: Config,
     agent_bots: Mapping[str, AgentBot | TeamBot],
 ) -> set[str]:
-    """Return agents to restart: added, removed, or changed in what their bot reads only at startup."""
-    if not config:
-        return set()
-
+    """Return kept agents changed in what their bot reads only at startup."""
     changed = set()
-    all_agents = set(config.agents.keys()) | set(new_config.agents.keys())
-
-    for agent_name in all_agents:
-        old_agent = config.agents.get(agent_name)
-        new_agent = new_config.agents.get(agent_name)
-
-        if old_agent is None or new_agent is None:
-            if new_agent is not None:
-                logger.info("new_agent_will_start", agent=agent_name)
-                changed.add(agent_name)
-            elif agent_name in agent_bots:
-                logger.info("removed_agent_will_stop", agent=agent_name)
-                changed.add(agent_name)
-            continue
-
+    for agent_name in config.agents.keys() & new_config.agents.keys():
+        old_agent = config.agents[agent_name]
+        new_agent = new_config.agents[agent_name]
         restart_fields = _restart_fields(old_agent, new_agent, _AGENT_LIVE_FIELDS, agent_bots.get(agent_name))
         if _agent_startup_tools(config, agent_name) != _agent_startup_tools(new_config, agent_name):
             restart_fields.add("tools")
@@ -328,28 +305,21 @@ def _get_changed_agents(
 
 
 def _get_changed_teams(
-    config: Config | None,
+    config: Config,
     new_config: Config,
     agent_bots: Mapping[str, AgentBot | TeamBot],
 ) -> set[str]:
-    """Return teams to restart: added, removed, or changed in what their bot reads only at startup."""
-    if not config:
-        return set()
-
-    changed = set()
-    all_teams = set(config.teams.keys()) | set(new_config.teams.keys())
-
-    for team_name in all_teams:
-        old_team = config.teams.get(team_name)
-        new_team = new_config.teams.get(team_name)
-        if old_team is None or new_team is None:
-            if new_team is not None or team_name in agent_bots:
-                changed.add(team_name)
-            continue
-        if _restart_fields(old_team, new_team, _TEAM_LIVE_FIELDS, agent_bots.get(team_name)):
-            changed.add(team_name)
-
-    return changed
+    """Return kept teams changed in what their bot reads only at startup."""
+    return {
+        team_name
+        for team_name in config.teams.keys() & new_config.teams.keys()
+        if _restart_fields(
+            config.teams[team_name],
+            new_config.teams[team_name],
+            _TEAM_LIVE_FIELDS,
+            agent_bots.get(team_name),
+        )
+    }
 
 
 def _entities_with_live_changes(config: Config, new_config: Config) -> set[str]:
@@ -381,6 +351,21 @@ def _entities_with_room_changes(
     }
 
 
+def _responder_access_changed(config: Config, new_config: Config) -> bool:
+    """Return whether a continuing agent's reply authority may change.
+
+    Background scripts re-check their owner's authority only when this is true;
+    a run whose bot is not running cannot be confirmed, so a broader trigger
+    would end runs whose authority never changed.
+    """
+    if config.authorization != new_config.authorization or config.administrators != new_config.administrators:
+        return True
+    return any(
+        resolve_responder_access(config, agent_name) != resolve_responder_access(new_config, agent_name)
+        for agent_name in config.agents.keys() & new_config.agents.keys()
+    )
+
+
 def _reply_authorization_inputs_changed(config: Config, new_config: Config) -> bool:
     """Return whether config read by reply, invite, or trigger authorization changed.
 
@@ -410,31 +395,24 @@ def _room_metadata_changed(config: Config, new_config: Config) -> bool:
     return config.rooms != new_config.rooms
 
 
-def _changed_mcp_servers(
-    config: Config | None,
-    new_config: Config,
-) -> set[str]:
+def _changed_mcp_servers(config: Config, new_config: Config) -> frozenset[str]:
     """Return MCP server ids whose config changed across a reload."""
-    if config is None:
-        return set(new_config.mcp_servers)
     all_server_ids = set(config.mcp_servers) | set(new_config.mcp_servers)
-    return {
+    return frozenset(
         server_id
         for server_id in all_server_ids
         if config.mcp_servers.get(server_id) != new_config.mcp_servers.get(server_id)
-    }
+    )
 
 
-def _entities_referencing_mcp_servers(
-    config: Config | None,
-    new_config: Config,
-    changed_server_ids: set[str],
-) -> set[str]:
-    """Return entities that reference any changed MCP server tool."""
-    tool_names = {mcp_tool_name(server_id) for server_id in changed_server_ids}
-    old_entities = set() if config is None else config.get_entities_referencing_tools(tool_names)
-    new_entities = new_config.get_entities_referencing_tools(tool_names)
-    return old_entities | new_entities
+def mcp_dependents(config: Config, server_ids: Iterable[str]) -> set[str]:
+    """Return the entities whose tools include any of these MCP servers."""
+    return config.get_entities_referencing_tools({mcp_tool_name(server_id) for server_id in server_ids})
+
+
+def catalog_change_restarts(config: Config, server_ids: Iterable[str], existing_entities: AbstractSet[str]) -> set[str]:
+    """Return the running entities to replace after these MCP servers changed their tool catalogs."""
+    return mcp_dependents(config, server_ids) & existing_entities
 
 
 def _changed_entity_construction_prompts(config: Config, new_config: Config) -> set[str]:
@@ -461,74 +439,81 @@ def build_config_update_plan(
     *,
     current_config: Config,
     new_config: Config,
-    configured_entities: set[str],
-    existing_entities: set[str],
-    agent_bots: Mapping[str, AgentBot | TeamBot],
+    bots: Mapping[str, AgentBot | TeamBot],
+    plugin_changes: tuple[str, ...] = (),
 ) -> ConfigUpdatePlan:
-    """Compute the effect of reloading config for the current runtime state."""
+    """Decide everything one reload changes for the current bots."""
+    existing_entities = set(bots)
+    configured_entities = set(configured_entity_names(new_config))
+    kept_entities = existing_entities & configured_entities
     changed_mcp_servers = _changed_mcp_servers(current_config, new_config)
-    entities_to_restart = _identify_entities_to_restart(
+
+    restart = _get_changed_agents(current_config, new_config, bots) | _get_changed_teams(
         current_config,
         new_config,
-        agent_bots,
-        changed_mcp_servers,
+        bots,
     )
+    restart |= _call_agents_to_restart(current_config, new_config, bots)
+    if changed_mcp_servers:
+        restart |= mcp_dependents(current_config, changed_mcp_servers) | mcp_dependents(
+            new_config,
+            changed_mcp_servers,
+        )
+    if plugin_changes:
+        # Plugin code can register tools and hooks for any entity, so every bot rebuilds.
+        logger.info("plugins_changed_restart_required", plugin_changes=list(plugin_changes))
+        restart |= kept_entities
+
     changed_entity_construction_prompts = _changed_entity_construction_prompts(current_config, new_config)
-    if changed_entity_construction_prompts:
-        prompt_affected_entities = existing_entities & configured_entities
-        if prompt_affected_entities:
-            logger.info(
-                "entity_construction_prompts_changed_restart_required",
-                prompts=sorted(changed_entity_construction_prompts),
-                entities=sorted(prompt_affected_entities),
-            )
-        entities_to_restart |= prompt_affected_entities
+    if changed_entity_construction_prompts and kept_entities:
+        logger.info(
+            "entity_construction_prompts_changed_restart_required",
+            prompts=sorted(changed_entity_construction_prompts),
+            entities=sorted(kept_entities),
+        )
+        restart |= kept_entities
 
     changed_entity_construction_defaults = _changed_entity_construction_defaults(current_config, new_config)
-    if changed_entity_construction_defaults:
-        default_affected_entities = existing_entities & (set(new_config.agents) | set(new_config.teams))
-        if default_affected_entities:
-            logger.info(
-                "entity_construction_defaults_changed_restart_required",
-                defaults=sorted(changed_entity_construction_defaults),
-                entities=sorted(default_affected_entities),
-            )
-        entities_to_restart |= default_affected_entities
+    default_affected_entities = kept_entities - {ROUTER_AGENT_NAME}
+    if changed_entity_construction_defaults and default_affected_entities:
+        logger.info(
+            "entity_construction_defaults_changed_restart_required",
+            defaults=sorted(changed_entity_construction_defaults),
+            entities=sorted(default_affected_entities),
+        )
+        restart |= default_affected_entities
 
-    if current_config.matrix_sync != new_config.matrix_sync:
+    if current_config.matrix_sync != new_config.matrix_sync and kept_entities:
         # The sync transport is chosen when a bot's sync loop starts, so every
         # running entity must restart to pick up the new matrix_sync settings.
-        sync_affected_entities = existing_entities & configured_entities
-        if sync_affected_entities:
-            logger.info(
-                "matrix_sync_changed_restart_required",
-                entities=sorted(sync_affected_entities),
-            )
-        entities_to_restart |= sync_affected_entities
+        logger.info("matrix_sync_changed_restart_required", entities=sorted(kept_entities))
+        restart |= kept_entities
 
-    entities_to_reconcile_rooms = (
-        _entities_with_room_changes(
-            current_config,
-            new_config,
-            configured_entities=configured_entities,
-            existing_entities=existing_entities,
-        )
-        - entities_to_restart
-    )
-
-    added_entities = configured_entities - existing_entities
-    new_entities = added_entities - entities_to_restart
-    live_updated_entities = (
-        _entities_with_live_changes(current_config, new_config) & existing_entities
-    ) - entities_to_restart
+    restart &= kept_entities
+    start = configured_entities - existing_entities
+    remove = existing_entities - configured_entities
+    if start:
+        logger.info("new_entities_will_start", entities=sorted(start))
+    if remove:
+        logger.info("removed_entities_will_stop", entities=sorted(remove))
 
     return ConfigUpdatePlan(
         new_config=new_config,
+        restart=frozenset(restart),
+        start=frozenset(start),
+        remove=frozenset(remove),
+        reconcile_rooms=frozenset(
+            _entities_with_room_changes(
+                current_config,
+                new_config,
+                configured_entities=configured_entities,
+                existing_entities=existing_entities,
+            )
+            - restart,
+        ),
+        live_updated=frozenset((_entities_with_live_changes(current_config, new_config) & existing_entities) - restart),
+        plugin_changes=plugin_changes,
         changed_mcp_servers=changed_mcp_servers,
-        configured_entities=configured_entities,
-        entities_to_restart=entities_to_restart,
-        new_entities=new_entities,
-        removed_entities=existing_entities - configured_entities,
         mindroom_user_changed=current_config.mindroom_user != new_config.mindroom_user,
         room_access_changed=current_config.room_defaults != new_config.room_defaults
         or current_config.rooms != new_config.rooms,
@@ -536,7 +521,7 @@ def build_config_update_plan(
         authorization_changed=current_config.authorization != new_config.authorization,
         room_metadata_changed=_room_metadata_changed(current_config, new_config),
         reply_authorization_changed=_reply_authorization_inputs_changed(current_config, new_config),
-        added_entities=added_entities,
-        entities_to_reconcile_rooms=entities_to_reconcile_rooms,
-        live_updated_entities=live_updated_entities,
+        responder_access_changed=_responder_access_changed(current_config, new_config),
+        reply_membership_policy_changed=agent_reply_membership_policy_changed(current_config, new_config),
+        router_invite_policy_changed=current_config.router.accept_invites != new_config.router.accept_invites,
     )

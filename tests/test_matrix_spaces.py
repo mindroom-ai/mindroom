@@ -841,7 +841,6 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
 
     with (
         patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
-        patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
         patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
         patch.object(
             orchestrator,

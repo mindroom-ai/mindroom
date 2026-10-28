@@ -18,7 +18,7 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.external_triggers.store import ExternalTriggerTarget, TriggerDeliverySnapshot
 from mindroom.mcp.manager import MCPServerManager
-from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
+from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan, configured_entity_names
 from mindroom.orchestration.runtime import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.identity_helpers import persist_entity_accounts
@@ -127,14 +127,12 @@ def test_config_update_plan_restarts_only_entities_using_changed_mcp_server(tmp_
     plan = build_config_update_plan(
         current_config=current_config,
         new_config=new_config,
-        configured_entities={"router", "code", "plain", "dev_team"},
-        existing_entities={"router", "code", "plain", "dev_team"},
-        agent_bots={},
+        bots=dict.fromkeys(configured_entity_names(new_config), MagicMock(running=True)),
     )
     assert plan.changed_mcp_servers == {"demo"}
-    assert "code" in plan.entities_to_restart
-    assert "dev_team" in plan.entities_to_restart
-    assert "plain" not in plan.entities_to_restart
+    assert "code" in plan.restart
+    assert "dev_team" in plan.restart
+    assert "plain" not in plan.restart
 
 
 def test_external_trigger_policy_change_does_not_restart_entities(tmp_path: Path) -> None:
@@ -145,12 +143,10 @@ def test_external_trigger_policy_change_does_not_restart_entities(tmp_path: Path
             tmp_path,
             external_trigger_policy={"default_max_body_bytes": 4096, "max_body_bytes": 4096},
         ),
-        configured_entities={ROUTER_AGENT_NAME, "code"},
-        existing_entities={ROUTER_AGENT_NAME, "code"},
-        agent_bots={},
+        bots=dict.fromkeys(configured_entity_names(_config_with_code_agent(tmp_path)), MagicMock(running=True)),
     )
 
-    assert plan.entities_to_restart == set()
+    assert plan.restart == set()
     assert plan.only_support_service_changes is True
 
 
@@ -379,9 +375,7 @@ async def test_trigger_support_only_reload_rebinds_external_trigger_runtime(tmp_
     plan = build_config_update_plan(
         current_config=current_config,
         new_config=new_config,
-        configured_entities={ROUTER_AGENT_NAME, "code"},
-        existing_entities={ROUTER_AGENT_NAME, "code"},
-        agent_bots=orchestrator.agent_bots,
+        bots=orchestrator.agent_bots,
     )
 
     assert plan.only_support_service_changes is True
@@ -401,7 +395,7 @@ async def test_trigger_support_only_reload_rebinds_external_trigger_runtime(tmp_
         patch.object(orchestrator._external_trigger_runtime, "bind_if_ready") as mock_bind_runtime,
         patch.object(orchestrator.agent_reply_memberships, "invalidate") as mock_invalidate_memberships,
     ):
-        updated = await orchestrator._apply_config_update_plan(current_config, plan, ())
+        updated = await orchestrator._apply_config_update_plan(current_config, plan)
 
     assert updated is False
     mock_bind_runtime.assert_called_once_with(new_config, orchestrator.agent_bots)
@@ -442,9 +436,7 @@ async def test_trigger_support_only_reload_publishes_api_config_before_binding_r
     plan = build_config_update_plan(
         current_config=current_config,
         new_config=new_config,
-        configured_entities={ROUTER_AGENT_NAME, "code"},
-        existing_entities={ROUTER_AGENT_NAME, "code"},
-        agent_bots=orchestrator.agent_bots,
+        bots=orchestrator.agent_bots,
     )
 
     with (
@@ -459,7 +451,7 @@ async def test_trigger_support_only_reload_publishes_api_config_before_binding_r
         patch.object(orchestrator._approval_recovery, "mark_startup_runtime_support_ready", new=AsyncMock()),
         patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
     ):
-        await orchestrator._apply_config_update_plan(current_config, plan, ())
+        await orchestrator._apply_config_update_plan(current_config, plan)
 
     snapshot = config_lifecycle.require_api_state(api_main.app).snapshot
     runtime = config_lifecycle.app_state(api_main.app).external_trigger_runtime
@@ -512,9 +504,7 @@ async def test_trigger_support_only_reload_unbinds_and_raises_when_api_publish_f
     plan = build_config_update_plan(
         current_config=current_config,
         new_config=new_config,
-        configured_entities={ROUTER_AGENT_NAME, "code"},
-        existing_entities={ROUTER_AGENT_NAME, "code"},
-        agent_bots=orchestrator.agent_bots,
+        bots=orchestrator.agent_bots,
     )
 
     with (
@@ -529,7 +519,7 @@ async def test_trigger_support_only_reload_unbinds_and_raises_when_api_publish_f
         patch.object(orchestrator._external_trigger_runtime, "bind_if_ready") as mock_bind_runtime,
         pytest.raises(RuntimeError, match="Failed to publish external trigger API config snapshot"),
     ):
-        await orchestrator._apply_config_update_plan(current_config, plan, ())
+        await orchestrator._apply_config_update_plan(current_config, plan)
 
     mock_unbind_runtime.assert_called_once_with()
     mock_bind_runtime.assert_not_called()
@@ -749,17 +739,14 @@ async def test_router_restart_unbinds_external_trigger_runtime_before_stop_and_s
     plan = build_config_update_plan(
         current_config=config,
         new_config=config,
-        configured_entities={ROUTER_AGENT_NAME},
-        existing_entities={ROUTER_AGENT_NAME},
-        agent_bots=orchestrator.agent_bots,
+        bots=orchestrator.agent_bots,
     )
     plan = ConfigUpdatePlan(
         new_config=config,
         changed_mcp_servers=plan.changed_mcp_servers,
-        configured_entities={ROUTER_AGENT_NAME},
-        entities_to_restart={ROUTER_AGENT_NAME},
-        new_entities=set(),
-        removed_entities=set(),
+        restart={ROUTER_AGENT_NAME},
+        start=set(),
+        remove=set(),
         mindroom_user_changed=False,
         room_access_changed=False,
         matrix_space_changed=False,
@@ -809,10 +796,9 @@ async def test_removed_entity_reconciles_live_approval_continuations(tmp_path: P
     plan = ConfigUpdatePlan(
         new_config=new_config,
         changed_mcp_servers=set(),
-        configured_entities=set(),
-        entities_to_restart={"code"},
-        new_entities=set(),
-        removed_entities={"code"},
+        restart={"code"},
+        start=set(),
+        remove={"code"},
         mindroom_user_changed=False,
         room_access_changed=False,
         matrix_space_changed=False,
@@ -857,10 +843,9 @@ async def test_external_trigger_target_restart_unbinds_runtime_before_stop(tmp_p
     plan = ConfigUpdatePlan(
         new_config=config,
         changed_mcp_servers=set(),
-        configured_entities={ROUTER_AGENT_NAME, "code"},
-        entities_to_restart={"code"},
-        new_entities=set(),
-        removed_entities=set(),
+        restart={"code"},
+        start=set(),
+        remove=set(),
         mindroom_user_changed=False,
         room_access_changed=False,
         matrix_space_changed=False,
@@ -922,10 +907,9 @@ async def test_apply_config_update_plan_unbinds_runtime_before_restarted_entity_
     plan = ConfigUpdatePlan(
         new_config=new_config,
         changed_mcp_servers=set(),
-        configured_entities={ROUTER_AGENT_NAME, "code"},
-        entities_to_restart={"code"},
-        new_entities=set(),
-        removed_entities=set(),
+        restart={"code"},
+        start=set(),
+        remove=set(),
         mindroom_user_changed=False,
         room_access_changed=False,
         matrix_space_changed=False,
@@ -958,7 +942,7 @@ async def test_apply_config_update_plan_unbinds_runtime_before_restarted_entity_
         patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
         patch.object(orchestrator._external_trigger_runtime, "bind_if_ready") as mock_bind_runtime,
     ):
-        updated = await orchestrator._apply_config_update_plan(current_config, plan, ())
+        updated = await orchestrator._apply_config_update_plan(current_config, plan)
 
     assert updated is True
     assert external_trigger_runtime_bound is False
@@ -974,10 +958,9 @@ async def test_reconcile_post_update_rooms_does_not_bind_trigger_runtime(tmp_pat
     plan = ConfigUpdatePlan(
         new_config=config,
         changed_mcp_servers=set(),
-        configured_entities={ROUTER_AGENT_NAME, "code"},
-        entities_to_restart={"code"},
-        new_entities=set(),
-        removed_entities=set(),
+        restart={"code"},
+        start=set(),
+        remove=set(),
         mindroom_user_changed=False,
         room_access_changed=False,
         matrix_space_changed=False,
@@ -1016,10 +999,9 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
     plan = ConfigUpdatePlan(
         new_config=new_config,
         changed_mcp_servers=set(),
-        configured_entities={ROUTER_AGENT_NAME, "code"},
-        entities_to_restart={"code"},
-        new_entities=set(),
-        removed_entities=set(),
+        restart={"code"},
+        start=set(),
+        remove=set(),
         mindroom_user_changed=False,
         room_access_changed=False,
         matrix_space_changed=False,
@@ -1062,7 +1044,7 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
         patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
         patch.object(orchestrator._external_trigger_runtime, "bind_if_ready", side_effect=bind_runtime),
     ):
-        updated = await orchestrator._apply_config_update_plan(current_config, plan, ())
+        updated = await orchestrator._apply_config_update_plan(current_config, plan)
 
     assert updated is True
     assert call_order.count("bind") == 1
@@ -1326,9 +1308,7 @@ async def test_reload_restarts_refreshed_mcp_dependents_inline_only_after_a_drai
     plan = build_config_update_plan(
         current_config=current_config,
         new_config=new_config,
-        configured_entities=set(orchestrator.agent_bots),
-        existing_entities=set(orchestrator.agent_bots),
-        agent_bots=orchestrator.agent_bots,
+        bots=orchestrator.agent_bots,
     )
     assert plan.requires_response_drain is plan_requires_drain
 
@@ -1353,11 +1333,11 @@ async def test_reload_restarts_refreshed_mcp_dependents_inline_only_after_a_drai
         patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
         patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
     ):
-        await orchestrator._apply_config_update_plan(current_config, plan, ())
+        await orchestrator._apply_config_update_plan(current_config, plan)
 
     if plan_requires_drain:
         mock_notify.assert_not_awaited()
-        assert mock_restart.await_args.args[0].entities_to_restart == {"code", "dev_team"}
+        assert mock_restart.await_args.args[0].restart == {"code", "dev_team"}
     else:
         mock_notify.assert_awaited_once_with("demo")
         mock_restart.assert_not_awaited()

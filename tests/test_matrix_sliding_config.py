@@ -248,15 +248,14 @@ class TestSlidingBot(ThreadingBehaviorTestBase):
         plan = ConfigUpdatePlan(
             new_config=bot.config,
             changed_mcp_servers=set(),
-            configured_entities={"general"},
-            entities_to_restart=set(),
-            new_entities=set(),
-            removed_entities=set(),
+            restart=set(),
+            start=set(),
+            remove=set(),
             mindroom_user_changed=False,
             room_access_changed=False,
             matrix_space_changed=False,
             authorization_changed=False,
-            entities_to_reconcile_rooms={"general"},
+            reconcile_rooms={"general"},
         )
         try:
             await orchestrator._reconcile_post_update_rooms(plan, changed_entities=set())

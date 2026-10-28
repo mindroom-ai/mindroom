@@ -14,7 +14,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config, load_config
 from mindroom.config.reload_status import ConfigReloadStatus
 from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle, _ReplacementDrainState
-from mindroom.orchestration.config_updates import ConfigUpdatePlan
 from mindroom.orchestration.runtime import create_logged_task
 from mindroom.response_admission import ResponseAdmissionGate
 from tests.conftest import bind_runtime_paths, test_runtime_paths
@@ -24,6 +23,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot, TeamBot
+    from mindroom.orchestration.config_updates import ConfigUpdatePlan
 
 
 def _make_lifecycle(
@@ -805,10 +805,11 @@ async def test_update_config_builds_plan_and_dispatches(
 
     lifecycle.load_initial_config.assert_not_awaited()
     lifecycle.apply_update_plan.assert_awaited_once()
-    dispatched_config, plan, plugin_changes = lifecycle.apply_update_plan.await_args.args
+    dispatched_config, plan = lifecycle.apply_update_plan.await_args.args
+    plugin_changes = plan.plugin_changes
     assert dispatched_config is current_config
     assert plan.new_config is new_config
-    assert "agent1" in plan.entities_to_restart
+    assert "agent1" in plan.restart
     assert plugin_changes == ()
 
 
@@ -832,7 +833,6 @@ async def test_failed_partial_publication_retries_from_last_successful_config(
     async def apply_plan(
         applied_config: Config,
         plan: ConfigUpdatePlan,
-        _plugin_changes: tuple[str, ...],
     ) -> bool:
         nonlocal live_config
         applied_steps.append((applied_config, plan.new_config))
@@ -877,7 +877,6 @@ async def test_failed_partial_publication_allows_rollback_to_last_successful_con
     async def apply_plan(
         applied_config: Config,
         plan: ConfigUpdatePlan,
-        _plugin_changes: tuple[str, ...],
     ) -> bool:
         nonlocal live_config
         applied_from.append(applied_config)
@@ -931,7 +930,6 @@ async def test_failed_partial_publication_repairs_before_applying_corrected_conf
     async def apply_plan(
         applied_config: Config,
         plan: ConfigUpdatePlan,
-        _plugin_changes: tuple[str, ...],
     ) -> bool:
         nonlocal live_config
         applied_steps.append((applied_config, plan.new_config))
@@ -960,21 +958,10 @@ async def test_update_config_plugin_changes_restart_all_bots(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Plugin entry changes should expand the plan to restart every managed bot."""
-    current_config = Config()
-    new_config = Config(plugins=["plugins/demo"])
-    plan = ConfigUpdatePlan(
-        new_config=new_config,
-        changed_mcp_servers=set(),
-        configured_entities={"router"},
-        entities_to_restart={"agent1"},
-        new_entities=set(),
-        removed_entities=set(),
-        mindroom_user_changed=False,
-        room_access_changed=False,
-        matrix_space_changed=False,
-        authorization_changed=False,
-    )
+    """Plugin entry changes restart every kept bot and never a removed one."""
+    agents = {"agent1": AgentConfig(display_name="Agent 1"), "agent2": AgentConfig(display_name="Agent 2")}
+    current_config = Config(agents={**agents, "gone": AgentConfig(display_name="Gone")})
+    new_config = Config(agents=agents, plugins=["plugins/demo"])
     monkeypatch.setattr(
         "mindroom.orchestration.config_lifecycle.load_config",
         lambda *_args, **_kwargs: new_config,
@@ -983,21 +970,18 @@ async def test_update_config_plugin_changes_restart_all_bots(
         "mindroom.orchestration.config_lifecycle.plugin_change_paths",
         lambda *_args: ("plugins/demo",),
     )
-    monkeypatch.setattr(
-        "mindroom.orchestration.config_lifecycle.build_config_update_plan",
-        lambda **_kwargs: plan,
-    )
     lifecycle = _make_lifecycle(
         tmp_path,
         current_config=current_config,
-        agent_bots={"router": MagicMock(), "agent1": MagicMock(), "agent2": MagicMock()},
+        agent_bots={name: MagicMock() for name in ("router", "agent1", "agent2", "gone")},
     )
 
     assert await lifecycle._update_config() is True
 
-    _, dispatched_plan, plugin_changes = lifecycle.apply_update_plan.await_args.args
-    assert dispatched_plan.entities_to_restart == {"router", "agent1", "agent2"}
-    assert plugin_changes == ("plugins/demo",)
+    _, dispatched_plan = lifecycle.apply_update_plan.await_args.args
+    assert dispatched_plan.restart == {"router", "agent1", "agent2"}
+    assert dispatched_plan.remove == {"gone"}
+    assert dispatched_plan.plugin_changes == ("plugins/demo",)
 
 
 @pytest.mark.asyncio

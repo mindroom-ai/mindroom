@@ -350,6 +350,14 @@ async def _noop_stop(self: AgentBot, *, shutdown_intent: object | None = None) -
     self.running = False
 
 
+async def _noop_prepare_for_sync_shutdown(self: AgentBot, *, shutdown_intent: object | None = None) -> None:
+    del self, shutdown_intent
+
+
+async def _noop_leave_rooms(self: AgentBot) -> None:
+    del self
+
+
 def _patch_orchestrator_plugin_update_test_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch bot and orchestrator runtime helpers unrelated to plugin teardown."""
     monkeypatch.setattr(
@@ -384,6 +392,8 @@ def _patch_orchestrator_plugin_update_test_runtime(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr("mindroom.bot.TeamBot.try_start", _noop_try_start)
     monkeypatch.setattr("mindroom.bot.AgentBot.stop", _noop_stop)
     monkeypatch.setattr("mindroom.bot.TeamBot.stop", _noop_stop)
+    monkeypatch.setattr("mindroom.bot.AgentBot.prepare_for_sync_shutdown", _noop_prepare_for_sync_shutdown)
+    monkeypatch.setattr("mindroom.bot.AgentBot.leave_rooms", _noop_leave_rooms)
 
 
 @pytest.mark.asyncio
@@ -787,14 +797,7 @@ async def test_manual_plugin_reload_interrupts_scripts_before_plugin_publication
     orchestrator.running = True
     order: list[str] = []
 
-    async def apply_update_plan(
-        _runtime: object,
-        plan: ConfigUpdatePlan,
-        *,
-        plugins_changed: bool = False,
-    ) -> None:
-        assert plan.new_config is config
-        assert plugins_changed is True
+    async def interrupt_for_plugin_reload(_runtime: object) -> None:
         order.append("scripts")
 
     async def complete_worker_replacement(_runtime: object) -> None:
@@ -805,7 +808,11 @@ async def test_manual_plugin_reload_interrupts_scripts_before_plugin_publication
         return PluginReloadResult(HookRegistry.empty(), (), 0)
 
     with (
-        patch.object(type(orchestrator.script_runtime), "apply_update_plan", new=apply_update_plan),
+        patch.object(
+            type(orchestrator.script_runtime),
+            "interrupt_for_plugin_reload",
+            new=interrupt_for_plugin_reload,
+        ),
         patch.object(
             type(orchestrator.script_runtime),
             "complete_worker_replacement",
@@ -1692,10 +1699,9 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
     plan = ConfigUpdatePlan(
         new_config=new_config,
         changed_mcp_servers=set(),
-        configured_entities=set(),
-        entities_to_restart=set(),
-        new_entities=set(),
-        removed_entities=set(),
+        restart=set(),
+        start=set(),
+        remove=set(),
         mindroom_user_changed=False,
         room_access_changed=False,
         matrix_space_changed=False,
@@ -1722,7 +1728,10 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
-            patch("mindroom.orchestration.config_lifecycle.build_config_update_plan", return_value=plan),
+            patch(
+                "mindroom.orchestration.config_lifecycle.build_config_update_plan",
+                side_effect=lambda **kwargs: replace(plan, plugin_changes=kwargs["plugin_changes"]),
+            ),
             patch.object(
                 orchestrator,
                 "_stop_entities_before_mcp_sync",
@@ -1779,11 +1788,7 @@ async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_cha
     apply_started = asyncio.Event()
     finish_apply = asyncio.Event()
 
-    async def apply_update_plan(
-        _current_config: Config,
-        _plan: ConfigUpdatePlan,
-        _plugin_changes: tuple[str, ...],
-    ) -> bool:
+    async def apply_update_plan(_current_config: Config, _plan: ConfigUpdatePlan) -> bool:
         apply_started.set()
         await finish_apply.wait()
         return False
@@ -1942,12 +1947,11 @@ def _entity_edit_plan(
     stopped: AbstractSet[str] = frozenset(),
 ) -> ConfigUpdatePlan:
     entities = {ROUTER_AGENT_NAME, "helper", "other", "crew"}
+    new_config = _entity_edit_config(change)
     return build_config_update_plan(
         current_config=_entity_edit_config(),
-        new_config=_entity_edit_config(change),
-        configured_entities=entities,
-        existing_entities=entities,
-        agent_bots={entity: AsyncMock(running=entity not in stopped) for entity in entities},
+        new_config=new_config,
+        bots={entity: AsyncMock(running=entity not in stopped) for entity in entities},
     )
 
 
@@ -1990,8 +1994,8 @@ def test_config_update_plan_applies_live_entity_edits_without_restarting(
     """Edits to fields running bots read live reach them through the unchanged-bot path."""
     plan = _entity_edit_plan(change)
 
-    assert plan.entities_to_restart == set()
-    assert plan.live_updated_entities == {entity}
+    assert plan.restart == set()
+    assert plan.live_updated == {entity}
 
 
 @pytest.mark.parametrize(
@@ -2018,8 +2022,37 @@ def test_config_update_plan_restarts_only_entities_whose_startup_inputs_changed(
     """Fields a bot reads only when it starts restart that bot and no other."""
     plan = _entity_edit_plan(change)
 
-    assert plan.entities_to_restart == restarted
-    assert plan.live_updated_entities == set()
+    assert plan.restart == restarted
+    assert plan.live_updated == set()
+
+
+def _remove_other_and_crew(data: dict[str, Any]) -> None:
+    del data["agents"]["other"]
+    del data["teams"]["crew"]
+
+
+def _remove_helper_and_change_docs_server(data: dict[str, Any]) -> None:
+    del data["agents"]["helper"]
+    data["teams"]["crew"]["agents"] = ["other"]
+    data["mcp_servers"]["docs"]["command"] = "uvx"
+
+
+@pytest.mark.parametrize(
+    ("change", "removed"),
+    [
+        pytest.param(_remove_other_and_crew, {"other", "crew"}, id="plain-removal"),
+        pytest.param(_remove_helper_and_change_docs_server, {"helper"}, id="removed-mcp-dependent"),
+    ],
+)
+def test_config_update_plan_removes_deleted_entities_without_restarting_them(
+    change: Callable[[dict[str, Any]], object],
+    removed: set[str],
+) -> None:
+    """A deleted entity is only removed, so its removal path still finds its bot."""
+    plan = _entity_edit_plan(change)
+
+    assert plan.remove == removed
+    assert not plan.restart & removed
 
 
 @pytest.mark.parametrize(
@@ -2036,8 +2069,8 @@ def test_config_update_plan_restarts_a_stopped_bot_for_any_edit(
     """An edit to a bot whose startup failed retries that startup, even for a field read live."""
     plan = _entity_edit_plan(change, stopped={entity})
 
-    assert plan.entities_to_restart == {entity}
-    assert plan.live_updated_entities == set()
+    assert plan.restart == {entity}
+    assert plan.live_updated == set()
 
 
 @pytest.mark.parametrize("prompt_name", ["HIDDEN_TOOL_CALLS_PROMPT", "DELEGATE_BACKGROUND_JOB_INSTRUCTIONS"])
@@ -2075,12 +2108,10 @@ def test_config_update_plan_restarts_running_entities_when_construction_prompts_
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        bots={entity: AsyncMock() for entity in running_entities},
     )
 
-    assert plan.entities_to_restart == running_entities
+    assert plan.restart == running_entities
     assert plan.only_support_service_changes is False
 
 
@@ -2118,12 +2149,10 @@ def test_config_update_plan_does_not_restart_for_request_time_prompt_change() ->
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        bots={entity: AsyncMock() for entity in running_entities},
     )
 
-    assert plan.entities_to_restart == set()
+    assert plan.restart == set()
     assert plan.only_support_service_changes is True
 
 
@@ -2148,12 +2177,10 @@ def test_config_update_plan_reconciles_room_metadata_without_restarting_bots() -
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        bots={entity: AsyncMock() for entity in running_entities},
     )
 
-    assert plan.entities_to_restart == set()
+    assert plan.restart == set()
     assert plan.room_metadata_changed is True
     assert plan.only_support_service_changes is False
 
@@ -2197,9 +2224,7 @@ def test_config_update_plan_drains_responses_only_for_restarts_or_reply_authoriz
     plan = build_config_update_plan(
         current_config=_runtime_bound_config(Config.model_validate(base)),
         new_config=_runtime_bound_config(Config.model_validate({**base, **changes})),
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        bots={entity: AsyncMock() for entity in running_entities},
     )
 
     assert plan.requires_response_drain is requires_drain
@@ -2239,12 +2264,10 @@ def test_config_update_plan_restarts_agents_when_tool_output_threshold_changes()
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        bots={entity: AsyncMock() for entity in running_entities},
     )
 
-    assert plan.entities_to_restart == {"general", "team1"}
+    assert plan.restart == {"general", "team1"}
     assert plan.only_support_service_changes is False
 
 
@@ -2275,12 +2298,10 @@ def test_config_update_plan_restarts_old_and_new_call_agents_when_calls_change()
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities),
+        bots=_call_bots(running_entities),
     )
 
-    assert plan.entities_to_restart == {"general", "writer"}
+    assert plan.restart == {"general", "writer"}
 
 
 def _two_call_agents_config(change: Callable[[dict[str, Any]], object] | None = None) -> Config:
@@ -2361,12 +2382,10 @@ def test_config_update_plan_restarts_call_agents_for_their_call_setup_or_a_call_
     plan = build_config_update_plan(
         current_config=_two_call_agents_config(),
         new_config=_two_call_agents_config(change),
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities, in_call=in_call),
+        bots=_call_bots(running_entities, in_call=in_call),
     )
 
-    assert plan.entities_to_restart & {"general", "writer"} == expected_call_restarts | in_call
+    assert plan.restart & {"general", "writer"} == expected_call_restarts | in_call
 
 
 def test_a_knowledge_graph_change_leaves_an_agent_in_a_call_running() -> None:
@@ -2376,12 +2395,10 @@ def test_a_knowledge_graph_change_leaves_an_agent_in_a_call_running() -> None:
     plan = build_config_update_plan(
         current_config=_two_call_agents_config(),
         new_config=_two_call_agents_config(lambda d: d.update(knowledge_graph={"generation": 1})),
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities, in_call={"general"}),
+        bots=_call_bots(running_entities, in_call={"general"}),
     )
 
-    assert plan.entities_to_restart == set()
+    assert plan.restart == set()
 
 
 def test_config_update_plan_restarts_call_agents_when_administrators_change() -> None:
@@ -2407,12 +2424,10 @@ def test_config_update_plan_restarts_call_agents_when_administrators_change() ->
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities, in_call={"general"}),
+        bots=_call_bots(running_entities, in_call={"general"}),
     )
 
-    assert plan.entities_to_restart == {"general"}
+    assert plan.restart == {"general"}
 
 
 def test_config_update_plan_restarts_call_agents_for_captured_policy_changes() -> None:
@@ -2437,12 +2452,10 @@ def test_config_update_plan_restarts_call_agents_for_captured_policy_changes() -
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities, in_call={"general"}),
+        bots=_call_bots(running_entities, in_call={"general"}),
     )
 
-    assert plan.entities_to_restart == {"general"}
+    assert plan.restart == {"general"}
 
 
 def test_config_update_plan_restarts_call_agent_when_inherited_tools_change() -> None:
@@ -2468,12 +2481,10 @@ def test_config_update_plan_restarts_call_agent_when_inherited_tools_change() ->
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities, in_call={"general"}),
+        bots=_call_bots(running_entities, in_call={"general"}),
     )
 
-    assert plan.entities_to_restart == {"general"}
+    assert plan.restart == {"general"}
 
 
 def test_config_update_plan_restarts_call_agent_when_worker_routing_changes() -> None:
@@ -2499,12 +2510,10 @@ def test_config_update_plan_restarts_call_agent_when_worker_routing_changes() ->
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities, in_call={"general"}),
+        bots=_call_bots(running_entities, in_call={"general"}),
     )
 
-    assert plan.entities_to_restart == {"general"}
+    assert plan.restart == {"general"}
 
 
 @pytest.mark.parametrize("backend", ["cascaded", "live"])
@@ -2537,12 +2546,10 @@ def test_config_update_plan_restarts_delegated_call_agent_when_referenced_model_
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities),
+        bots=_call_bots(running_entities),
     )
 
-    assert plan.entities_to_restart == {"general"}
+    assert plan.restart == {"general"}
 
 
 @pytest.mark.parametrize("backend", ["cascaded", "live"])
@@ -2575,12 +2582,10 @@ def test_config_update_plan_keeps_call_agents_running_when_only_model_prices_cha
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities),
+        bots=_call_bots(running_entities),
     )
 
-    assert plan.entities_to_restart == set()
+    assert plan.restart == set()
 
 
 def test_config_update_plan_restarts_realtime_call_agent_when_agent_model_changes() -> None:
@@ -2606,12 +2611,10 @@ def test_config_update_plan_restarts_realtime_call_agent_when_agent_model_change
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities, in_call={"general"}),
+        bots=_call_bots(running_entities, in_call={"general"}),
     )
 
-    assert plan.entities_to_restart == {"general"}
+    assert plan.restart == {"general"}
 
 
 @pytest.mark.parametrize("backend", ["cascaded", "live"])
@@ -2645,12 +2648,10 @@ def test_config_update_plan_restarts_implicit_delegated_call_agent_when_room_mod
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities, in_call={"general"}),
+        bots=_call_bots(running_entities, in_call={"general"}),
     )
 
-    assert plan.entities_to_restart == {"general"}
+    assert plan.restart == {"general"}
 
 
 @pytest.mark.parametrize(
@@ -2684,12 +2685,10 @@ def test_config_update_plan_restarts_call_agents_when_room_encryption_policy_cha
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities, in_call={"general"}),
+        bots=_call_bots(running_entities, in_call={"general"}),
     )
 
-    assert plan.entities_to_restart == {"general"}
+    assert plan.restart == {"general"}
 
 
 def test_config_update_plan_restarts_call_agent_when_knowledge_definition_changes() -> None:
@@ -2721,12 +2720,10 @@ def test_config_update_plan_restarts_call_agent_when_knowledge_definition_change
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities, in_call={"general"}),
+        bots=_call_bots(running_entities, in_call={"general"}),
     )
 
-    assert plan.entities_to_restart == {"general"}
+    assert plan.restart == {"general"}
 
 
 def test_config_update_plan_restarts_call_agent_when_its_rooms_change() -> None:
@@ -2750,13 +2747,11 @@ def test_config_update_plan_restarts_call_agent_when_its_rooms_change() -> None:
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities, in_call={"general"}),
+        bots=_call_bots(running_entities, in_call={"general"}),
     )
 
-    assert plan.entities_to_restart == {"general"}
-    assert plan.entities_to_reconcile_rooms == {ROUTER_AGENT_NAME}
+    assert plan.restart == {"general"}
+    assert plan.reconcile_rooms == {ROUTER_AGENT_NAME}
 
 
 def test_config_update_plan_reconciles_agent_and_router_room_changes_without_restarts() -> None:
@@ -2800,13 +2795,11 @@ def test_config_update_plan_reconciles_agent_and_router_room_changes_without_res
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        bots={entity: AsyncMock() for entity in running_entities},
     )
 
-    assert plan.entities_to_restart == set()
-    assert plan.entities_to_reconcile_rooms == {ROUTER_AGENT_NAME, "general", "editors"}
+    assert plan.restart == set()
+    assert plan.reconcile_rooms == {ROUTER_AGENT_NAME, "general", "editors"}
     assert plan.only_support_service_changes is False
 
 
@@ -2831,16 +2824,14 @@ def test_config_update_plan_stops_call_agents_when_calls_are_disabled() -> None:
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities),
+        bots=_call_bots(running_entities),
     )
 
-    assert plan.entities_to_restart == {"general"}
+    assert plan.restart == {"general"}
 
 
-def test_config_update_plan_tracks_added_entities_even_when_they_restart() -> None:
-    """Added entities stay visible to account-preparation gates even when restart planning creates them."""
+def test_config_update_plan_starts_added_entities_without_restarting_them() -> None:
+    """An added entity is started, not restarted, so account preparation and hooks see it as added."""
     old_config = _runtime_bound_config(
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
@@ -2860,14 +2851,11 @@ def test_config_update_plan_tracks_added_entities_even_when_they_restart() -> No
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities={ROUTER_AGENT_NAME, "general", "writer"},
-        existing_entities={ROUTER_AGENT_NAME, "general"},
-        agent_bots={ROUTER_AGENT_NAME: AsyncMock(), "general": AsyncMock()},
+        bots={ROUTER_AGENT_NAME: AsyncMock(), "general": AsyncMock()},
     )
 
-    assert plan.added_entities == {"writer"}
-    assert plan.new_entities == set()
-    assert plan.entities_to_restart == {"writer"}
+    assert plan.start == {"writer"}
+    assert plan.restart == set()
 
 
 @pytest.fixture
