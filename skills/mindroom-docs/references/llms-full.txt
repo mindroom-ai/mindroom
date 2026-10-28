@@ -13781,7 +13781,7 @@ The name `background_after` is reserved on managed tools.
 If a custom or plugin tool already declares that application parameter, exclude its toolkit as shown below or rename the parameter; the affected call is rejected before execution without breaking the agent's other tools.
 Tools that stop the current model step, such as model switching, stay inline so the continuation receives their actual control result.
 Their schemas omit `background_after`, and a value for it is rejected before execution.
-Knowledge search, skill access, team delegation, and toolkits whose connection lasts only for one run, such as `postgres`, `redshift`, and Agno MCP toolkits, always run inline without `background_after`.
+Knowledge search, skill access, team delegation, and toolkits whose connection lasts only for one run, such as `postgres` and `redshift`, always run inline without `background_after`.
 
 Exclude complete toolkits in YAML when they should retain native execution:
 
@@ -16745,46 +16745,10 @@ Build clients only from the credentials the helpers return, without copies such 
 Use `AtlassianConnectionConfig` the same way to add another Atlassian Cloud site alongside the built-in `atlassian` tool.
 See [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/#add-more-connections) for the plugin example, fields, and callback setup.
 
-## MCP via plugins (advanced)
+## MCP servers
 
-Configure MCP servers directly in `config.yaml` as described in [MCP](https://docs.mindroom.chat/mcp/).
-Use a plugin only when you need a custom wrapper around Agno `MCPTools`:
-
-```python
-from agno.tools.mcp import MCPTools
-from mindroom.plugin_api import (
-    SetupType,
-    ToolCategory,
-    ToolFileAccess,
-    ToolStatus,
-    register_tool_with_metadata,
-)
-
-
-class FilesystemMCPTools(MCPTools):
-    def __init__(self, **kwargs):
-        super().__init__(
-            command="npx -y @modelcontextprotocol/server-filesystem /path/to/dir",
-            **kwargs,
-        )
-
-
-@register_tool_with_metadata(
-    name="mcp_filesystem",
-    # The filesystem server reads local paths that file_access cannot confine.
-    file_access=ToolFileAccess.UNCONFINED,
-    display_name="MCP Filesystem",
-    description="Tools from an MCP filesystem server",
-    category=ToolCategory.DEVELOPMENT,
-    status=ToolStatus.AVAILABLE,
-    setup_type=SetupType.NONE,
-)
-def mcp_filesystem_tools():
-    return FilesystemMCPTools
-```
-
-Add the plugin and assign `mcp_filesystem` to agents as in the [minimal example](#minimal-example).
-MindRoom connects and disconnects the MCP session around each agent run.
+Configure MCP servers under `mcp_servers:` in `config.yaml` as described in [MCP](https://docs.mindroom.chat/mcp/).
+MindRoom does not run plugin toolkits that subclass Agno `MCPTools`: `mindroom plugins check` rejects them once their dependencies are installed, and agents skip them with a warning that names `mcp_servers:`.
 
 ## Plugin skills
 
@@ -21412,6 +21376,12 @@ Unset or `0` disables the probe (the default), and any other value below `60` fa
 Use this page when upgrading an existing deployment across a release that needs operator action.
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
+
+## Upgrading from `MCPTools` plugin toolkits
+
+MindRoom no longer runs plugin toolkits that subclass Agno `MCPTools` (see [MCP servers](https://docs.mindroom.chat/plugins/#mcp-servers)).
+Before upgrading, configure each such server under `mcp_servers:` in `config.yaml` as [MCP](https://docs.mindroom.chat/mcp/) describes, and replace the plugin tool's name with `mcp_<server_id>` in agents' `tools:` lists and in `defaults.tools`.
+The [community plugins](https://docs.mindroom.chat/plugins/#community-plugins) are not affected.
 
 ## Upgrading to conversation storage v2
 

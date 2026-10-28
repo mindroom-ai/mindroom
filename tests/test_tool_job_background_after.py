@@ -412,17 +412,6 @@ class _ConnectedTools(Toolkit):
         return "rows"
 
 
-class MCPTools(Toolkit):
-    """Agno recognizes its MCP toolkits by this class name."""
-
-    def __init__(self) -> None:
-        super().__init__(name="mcp", tools=[self.query])
-
-    def query(self) -> str:
-        """Return synthetic rows."""
-        return "rows"
-
-
 def _excluded_tool() -> JobTool:
     """A function of a toolkit built as shell, which the test settings exclude."""
     toolkit = Toolkit(name="shell", tools=[_ordinary])
@@ -449,7 +438,6 @@ def _stopping_tool() -> JobTool:
         ("job", 0, False, "native"),
         ("job", 1, True, "native"),
         ("run_connection", 0, False, "native"),
-        ("mcp", 0, False, "native"),
         ("excluded", 0, False, "native"),
     ],
 )
@@ -478,7 +466,6 @@ def test_wait_mode_classifies_every_call_from_current_policy(
             authored_name="job",
         )["job"],
         "run_connection": lambda: toolkit_job_tools(_ConnectedTools(), authored_name="connected")["query"],
-        "mcp": lambda: toolkit_job_tools(MCPTools(), authored_name="mcp")["query"],
         "excluded": _excluded_tool,
     }
     tool = tools[case]()
@@ -498,15 +485,11 @@ def test_a_call_a_cli_command_makes_runs_inline(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("toolkit", [_ConnectedTools, MCPTools])
-async def test_run_connected_toolkits_run_inline_without_wait_metadata(
-    tmp_path: Path,
-    toolkit: type[Toolkit],
-) -> None:
+async def test_run_connected_toolkits_run_inline_without_wait_metadata(tmp_path: Path) -> None:
     """A connection opened for one run is never detached, so its calls neither advertise nor accept a wait budget."""
     context, runtime = await _managed_context(tmp_path)
     owner = build_execution_identity_from_runtime_context(context)
-    actor = job_actor(*toolkit_job_tools(toolkit(), authored_name="connected").values())
+    actor = job_actor(*toolkit_job_tools(_ConnectedTools(), authored_name="connected").values())
     model = ScriptedModel(
         [
             calls(

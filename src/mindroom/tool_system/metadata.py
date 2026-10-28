@@ -48,7 +48,6 @@ from mindroom.tool_system.registry_state import (
     scoped_plugin_registration_store,
 )
 from mindroom.tool_system.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy, primary_owns_tool_settings
-from mindroom.tool_system.toolkit_connections import register_mcp_functions
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     supports_tool_name_for_worker_scope,
@@ -650,14 +649,11 @@ def get_tool_by_name(
     agent_state_root: Path | None = None,
     tool_output_auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     worker_target: ResolvedWorkerTarget | None,
-    list_mcp_functions: bool = False,
 ) -> Toolkit:
     """Get a tool instance by its registered name.
 
     ``agent_state_root`` is the constructing agent's resolved state root in the primary runtime;
     worker runtimes leave it unset because their own storage root is the state they own.
-    ``list_mcp_functions`` registers the functions of an Agno MCP toolkit that is not connected yet, for an agent
-    whose runs connect the toolkit in this process.
     """
     if tool_name not in TOOL_REGISTRY:
         available = ", ".join(sorted(TOOL_REGISTRY.keys()))
@@ -691,8 +687,7 @@ def get_tool_by_name(
             factory,
             tool_config_overrides=validated_tool_config_overrides,
         )
-        with optional_dependency_environment():
-            tool_class = factory()
+        tool_class = load_toolkit_class(tool_name, factory)
         resolved_credentials_manager = _resolve_tool_credentials_manager(
             metadata,
             runtime_paths,
@@ -744,9 +739,6 @@ def get_tool_by_name(
 
         with optional_dependency_environment():
             toolkit = cast("Any", tool_class)(**init_kwargs)
-        if list_mcp_functions:
-            # The filters and wrappers below must see the functions an MCP toolkit registers once connected.
-            register_mcp_functions(toolkit)
         _apply_implicit_toolkit_filters(
             toolkit,
             include_tools=include_tools,
@@ -780,6 +772,20 @@ def get_tool_by_name(
         return bind_toolkit_construction(toolkit, replace(construction, authored_instructions=authored))
 
     return _build_with_tool_dependencies(tool_name, runtime_paths, build)
+
+
+def load_toolkit_class[T: type](tool_name: str, factory: Callable[[], T]) -> T:
+    """Return the toolkit class ``factory`` registers as ``tool_name``, refusing one MindRoom does not run."""
+    with optional_dependency_environment():
+        tool_class = factory()
+    # By module and class name, so building or checking a tool never imports Agno's MCP module and the MCP SDK.
+    if any((base.__module__, base.__name__) == ("agno.tools.mcp.mcp", "MCPTools") for base in tool_class.__mro__):
+        msg = (
+            f"Tool '{tool_name}' subclasses Agno MCPTools, which MindRoom does not run; "
+            "configure its MCP server under mcp_servers: in config.yaml instead"
+        )
+        raise ToolMetadataValidationError(msg)
+    return tool_class
 
 
 def _build_with_tool_dependencies(tool_name: str, runtime_paths: RuntimePaths, build: Callable[[], Toolkit]) -> Toolkit:
