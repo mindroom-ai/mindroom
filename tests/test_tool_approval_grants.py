@@ -1275,9 +1275,9 @@ async def test_a_second_delivery_pass_waits_for_an_in_flight_send_instead_of_rep
     try:
         card = await _card(journal, manager, "first")
         await _approve(manager, card)
-        grant = await owner.approval_grant_for_card(room_id="!room:test", card_event_id=card)
+        grant = await owner.approvals.approval_grant_for_card(room_id="!room:test", card_event_id=card)
         assert grant is not None
-        assert await owner.revoke_approval_grant(
+        assert await owner.approvals.revoke_approval_grant(
             room_id="!room:test",
             card_event_id=card,
             sender_id="@human:test",
