@@ -221,6 +221,30 @@ def _tracked_route_turn(
     return prepared.handled_turn
 
 
+async def run_response_action(
+    runner: ResponseRunner,
+    request: ResponseRequest,
+    action: ResponseAction,
+    *,
+    team_mode: TeamMode | None = None,
+) -> None:
+    """Run one prepared request through the runner entry its team or individual response action names.
+
+    ``team_mode`` replaces the team's resolved mode, as the mode chosen for an ad hoc team does.
+    """
+    if action.kind != "team":
+        await runner.generate_response(request)
+        return
+    assert action.form_team is not None
+    mode = action.form_team.mode if team_mode is None else team_mode
+    assert mode is not None
+    await runner.generate_team_response_helper(
+        request,
+        member_names=action.form_team.eligible_member_names,
+        team_mode=mode.value,
+    )
+
+
 @dataclass(frozen=True)
 class TurnDispatchDeps:
     """Collaborators needed to dispatch a turn after the coalescing gate."""
@@ -1031,7 +1055,7 @@ class TurnDispatcher:
             return None
         return canonicalize_turn_record(handled_turn, response_event_id=echoes[0])
 
-    async def _execute_response_action(  # noqa: C901, PLR0915
+    async def _execute_response_action(  # noqa: C901
         self,
         room: nio.MatrixRoom,
         event: DispatchEvent,
@@ -1120,8 +1144,6 @@ class TurnDispatcher:
             team_mode: TeamMode | None = None
             if action.kind == "team":
                 assert action.form_team is not None
-                assert action.form_team.mode is not None
-                team_mode = action.form_team.mode
                 if action.form_team.intent is not TeamIntent.CONFIGURED_TEAM and event.body:
                     team_mode = await select_ad_hoc_team_mode(
                         event.body,
@@ -1179,16 +1201,7 @@ class TurnDispatcher:
                     on_no_response_handled=record_no_response,
                 )
                 # The reply's records settle the sources and record the turn answered.
-                if action.kind == "team":
-                    assert action.form_team is not None
-                    assert team_mode is not None
-                    await self.deps.response_runner.generate_team_response_helper(
-                        response_request,
-                        member_names=action.form_team.eligible_member_names,
-                        team_mode=team_mode.value,
-                    )
-                else:
-                    await self.deps.response_runner.generate_response(response_request)
+                await run_response_action(self.deps.response_runner, response_request, action, team_mode=team_mode)
             except PostLockRequestPreparationError:
                 # The reply's records settled the sources, recorded the turn answered, and owe the notice.
                 return

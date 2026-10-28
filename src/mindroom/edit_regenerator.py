@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING
 
 from mindroom.coalescing.batch import coalesced_prompt, tagged_coalesced_prompt
 from mindroom.conversation_resolver import MessageContext
@@ -19,11 +19,13 @@ from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.timestamp_formatting import normalize_timestamp_ms
+from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import canonicalize_turn_record
 from mindroom.turn_store import SourcePreparation
+from mindroom.turns.dispatch import run_response_action
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine, Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     import nio
 
@@ -37,26 +39,14 @@ if TYPE_CHECKING:
     from mindroom.matrix.event_info import EventInfo
     from mindroom.message_target import MessageTarget
     from mindroom.reply_lifecycle import Reply
+    from mindroom.response_runner import ResponseRunner
+    from mindroom.turn_policy import TurnPolicy
     from mindroom.turn_record import SourceEventRevision, TurnRecord
     from mindroom.turn_store import TurnStore
     from mindroom.turns.facts import IngressFacts
 
 
 logger = get_logger(__name__)
-
-
-class _TrackInboxResponse(Protocol):
-    """Own one response task off the room's event lane, as ``ResponseRunner.track_inbox_response`` does."""
-
-    def __call__(
-        self,
-        response: Coroutine[Any, Any, None],
-        *,
-        name: str,
-        room_id: str,
-        recovery_proof_ready: Callable[[], bool | Awaitable[bool]],
-        source_event_ids: tuple[str, ...] = (),
-    ) -> asyncio.Task[None]: ...
 
 
 @dataclass(frozen=True)
@@ -69,9 +59,9 @@ class EditRegeneratorDeps:
     resolver: ConversationResolver
     turn_store: TurnStore
     ingress_hook_runner: IngressHookRunner
-    # Runs one regeneration through the bot's response path.
-    generate_response: Callable[[ResponseRequest], Awaitable[object]]
-    track_inbox_response: _TrackInboxResponse
+    # Runs each regeneration as the entity answers now, on a task of its own off the room's lane.
+    response_runner: ResponseRunner
+    turn_policy: TurnPolicy
     # Settles sources nothing will answer, as the room's lane does for an event it ignores.
     settle_sources: Callable[[tuple[str, ...]], Awaitable[None]]
     # Records a Stop on a reply that still runs, as a Stop reaction would.
@@ -404,7 +394,7 @@ class EditRegenerator:
 
         async def regenerate() -> None:
             try:
-                await self.deps.generate_response(replace(request, on_reply_claimed=on_claimed))
+                await self._run_regeneration(replace(request, on_reply_claimed=on_claimed))
             except (asyncio.CancelledError, ResponseAdmissionRefusedError):
                 # Cancelled, as at shutdown, or refused by a runtime being replaced, the edit stays pending, so a
                 # restart or the replacement regenerates again.
@@ -414,7 +404,7 @@ class EditRegenerator:
                 raise
             await settle_unless_owned()
 
-        self.deps.track_inbox_response(
+        self.deps.response_runner.track_inbox_response(
             regenerate(),
             name=f"edit_regeneration:{request.correlation_id}",
             room_id=request.response_envelope.target.room_id,
@@ -423,3 +413,27 @@ class EditRegenerator:
             source_event_ids=request.sources.pending_event_ids,
         )
         return True
+
+    async def _run_regeneration(self, request: ResponseRequest) -> None:
+        """Answer the edited turn as this entity answers now, or end its reply without an answer.
+
+        An edit that leaves no prompt ends the reply empty before any team is
+        resolved. A configured team that cannot answer now shows why in the
+        reply it regenerates.
+        """
+        runner = self.deps.response_runner
+        if not request.prompt.strip():
+            response_kind = "team" if self.deps.agent_name in self.deps.runtime.config.teams else "ai"
+            await runner.generate_response_for_empty_prompt(request, response_kind=response_kind)
+            return
+        action = self.deps.turn_policy.effective_response_action(ResponseAction(kind="individual"))
+        if action.kind == "reject":
+            assert action.form_team is not None
+            assert action.rejection_message is not None
+            await runner.deliver_team_rejection(
+                request,
+                member_names=[member.name for member in action.form_team.member_statuses],
+                rejection_message=action.rejection_message,
+            )
+            return
+        await run_response_action(runner, request, action)

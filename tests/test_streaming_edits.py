@@ -20,9 +20,9 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     drain_coalescing,
+    install_edit_regeneration_mock,
     install_runtime_journal_support,
     make_matrix_client_mock,
-    replace_edit_regenerator_deps,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -199,7 +199,7 @@ class TestStreamingEdits:
 
         # Process edit - bot SHOULD regenerate its response.
         mock_generate_response = AsyncMock(return_value=_delivery_resolution("$response123"))
-        replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+        install_edit_regeneration_mock(bot, mock_generate_response)
         await bot._on_message(mock_room, edit_event1)
         await drain_coalescing(bot)
         assert mock_generate_response.await_count == 1
@@ -231,7 +231,7 @@ class TestStreamingEdits:
 
         # Process second edit - bot should regenerate again.
         mock_generate_response = AsyncMock(return_value=_delivery_resolution("$response123"))
-        replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+        install_edit_regeneration_mock(bot, mock_generate_response)
         await bot._on_message(mock_room, edit_event2)
         await drain_coalescing(bot)
         assert mock_generate_response.await_count == 1

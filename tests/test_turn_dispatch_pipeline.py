@@ -85,7 +85,6 @@ from tests.bot_helpers import (
     assert_turn_answered,
     make_mock_agent_user,
     make_test_agent_bot,
-    make_test_team_bot,
     unique_room_send_responses,
 )
 from tests.conftest import (
@@ -2647,7 +2646,7 @@ class TestAgentBot(AgentBotTestBase):
             display_name="Team Bot",
             password=TEST_PASSWORD,
         )
-        bot = make_test_team_bot(
+        bot = make_test_agent_bot(
             team_user,
             tmp_path,
             config=config,

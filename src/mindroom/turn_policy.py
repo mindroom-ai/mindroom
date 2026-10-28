@@ -225,10 +225,10 @@ class TurnPolicy:
             self.deps.runtime_paths,
             self.deps.agent_reply_memberships,
         )
-        available = self._filter_materializable_responders(candidates.allowed, self.responder_availability())
+        available = self._filter_materializable_responders(candidates.allowed, self._responder_availability())
         return participation if self.deps.matrix_id in available else None
 
-    def responder_availability(self) -> _ResponderAvailability:
+    def _responder_availability(self) -> _ResponderAvailability:
         """Snapshot in-memory responder liveness for one decision flow.
 
         Each decision flow takes a fresh snapshot on entry and passes it down
@@ -274,7 +274,7 @@ class TurnPolicy:
         requester_user_id: str,
     ) -> list[MatrixID]:
         """Return candidates from the boundary-prepared room membership snapshot."""
-        availability = self.responder_availability()
+        availability = self._responder_availability()
         candidates = classify_responder_candidates_from_cached_room(
             room,
             requester_user_id,
@@ -442,7 +442,7 @@ class TurnPolicy:
         """Apply configured-team execution behavior before running one response action."""
         if action.kind != "individual":
             return action
-        configured_team_action = self._configured_team_response_action(self.responder_availability())
+        configured_team_action = self._configured_team_response_action(self._responder_availability())
         return configured_team_action or action
 
     def _explicit_configured_team_rejection_action(
@@ -644,7 +644,7 @@ class TurnPolicy:
         context = dispatch.context
         requester_user_id = dispatch.requester_user_id
         planning_thread_history = context.planning_thread_history
-        availability = self.responder_availability()
+        availability = self._responder_availability()
         candidates = classify_responder_candidates_from_cached_room(
             room,
             requester_user_id,

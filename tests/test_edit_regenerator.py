@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
@@ -13,7 +13,7 @@ from structlog.testing import capture_logs
 
 from mindroom import reply_lifecycle as rl
 from mindroom.coalescing.batch import tagged_coalesced_prompt
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
@@ -25,7 +25,10 @@ from mindroom.hooks.ingress import HookIngressPolicy, IngressHookRunner
 from mindroom.matrix.event_info import EventInfo
 from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionRefusedError
+from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamOutcome, TeamResolution, TeamResolutionMember
+from mindroom.teams.spec import TeamMode
 from mindroom.timestamp_formatting import format_timestamp_ms
+from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import SourceEventMetadata, TurnRecord
 from mindroom.turn_store import TurnStore
 from tests.conftest import make_ingress_facts, make_visible_message, request_envelope
@@ -36,9 +39,11 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.response_runner import ResponseRequest
+    from mindroom.response_runner import ResponseRequest, ResponseRunner
+    from mindroom.turn_policy import TurnPolicy
 
 AGENT_NAME = "assistant"
+MEMBER_NAME = "member"
 ROOM_ID = "!room:example.org"
 THREAD_ID = "$thread-root:example.org"
 USER_ID = "@user:example.org"
@@ -55,6 +60,58 @@ class _RuntimeStub:
 
     client: nio.AsyncClient | None
     config: Config
+
+
+@dataclass
+class _Runner:
+    """ResponseRunner stand-in: each entry claims the reply under the conversation lock, then records its call."""
+
+    response_lock: asyncio.Lock
+    # The newest reply answering the edited turn's sources, which an answer replaces.
+    reply_for_sources: AsyncMock
+    generate_response_entry: AsyncMock
+    team_entry: AsyncMock = field(default_factory=lambda: AsyncMock(return_value=NEW_RESPONSE_EVENT_ID))
+    empty_prompt_entry: AsyncMock = field(default_factory=lambda: AsyncMock(return_value=None))
+    rejection_entry: AsyncMock = field(default_factory=lambda: AsyncMock(return_value=NEW_RESPONSE_EVENT_ID))
+    regenerations: list[asyncio.Task[None]] = field(default_factory=list)
+
+    async def _claimed(self, entry: AsyncMock, request: ResponseRequest, **kwargs: object) -> str | None:
+        async with self.response_lock:
+            # As the runner does once the regeneration claims its reply, before it runs.
+            assert request.on_reply_claimed is not None
+            await request.on_reply_claimed()
+            event_id = await entry(request, **kwargs)
+            if event_id is not None:
+                # The reply records own the answer from then on, which is what a later edit regenerates.
+                self.reply_for_sources.return_value = _reply(event_id=event_id)
+            return event_id
+
+    async def generate_response(self, request: ResponseRequest) -> str | None:
+        return await self._claimed(self.generate_response_entry, request)
+
+    async def generate_team_response_helper(self, request: ResponseRequest, **kwargs: object) -> str | None:
+        return await self._claimed(self.team_entry, request, **kwargs)
+
+    async def generate_response_for_empty_prompt(self, request: ResponseRequest, **kwargs: object) -> str | None:
+        return await self._claimed(self.empty_prompt_entry, request, **kwargs)
+
+    async def deliver_team_rejection(self, request: ResponseRequest, **kwargs: object) -> str | None:
+        return await self._claimed(self.rejection_entry, request, **kwargs)
+
+    def track_inbox_response(self, response: Coroutine[Any, Any, None], **_ownership: object) -> asyncio.Task[None]:
+        task = asyncio.create_task(response)
+        self.regenerations.append(task)
+        return task
+
+
+@dataclass
+class _Policy:
+    """TurnPolicy stand-in whose configured-team decision a test sets; an agent answers as itself."""
+
+    configured_team_action: ResponseAction | None = None
+
+    def effective_response_action(self, action: ResponseAction) -> ResponseAction:
+        return self.configured_team_action or action
 
 
 @dataclass
@@ -77,6 +134,8 @@ class _Harness:
     regenerations: list[asyncio.Task[None]]
     # Sources of the turn the store reads as deleted.
     deleted: set[str]
+    runner: _Runner
+    policy: _Policy
     config: Config
     runtime_paths: RuntimePaths
     room: nio.MatrixRoom
@@ -173,13 +232,21 @@ def _harness(
     turn_record: TurnRecord | None,
     receipt_order: int = 1,
     deleted: tuple[str, ...] = (),
+    team: bool = False,
 ) -> _Harness:
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
         process_env={},
     )
-    config = Config(agents={AGENT_NAME: AgentConfig(display_name="Assistant")})
+    config = (
+        Config(
+            agents={MEMBER_NAME: AgentConfig(display_name="Member")},
+            teams={AGENT_NAME: TeamConfig(display_name="Assistant", role="Answer together", agents=[MEMBER_NAME])},
+        )
+        if team
+        else Config(agents={AGENT_NAME: AgentConfig(display_name="Assistant")})
+    )
     entity_ids(config, runtime_paths)
 
     context = _message_context()
@@ -226,23 +293,12 @@ def _harness(
     store.later_message_exists = AsyncMock(return_value=False)
     response_lock = asyncio.Lock()
 
-    regenerations: list[asyncio.Task[None]] = []
-
-    async def regenerate(request: ResponseRequest) -> None:
-        async with response_lock:
-            # As the runner does once the regeneration claims its reply, before it runs.
-            assert request.on_reply_claimed is not None
-            await request.on_reply_claimed()
-            event_id = await generate_response(request)
-            if event_id is None:
-                return
-            # The reply records own the answer from then on, which is what a later edit regenerates.
-            reply_for_sources.return_value = _reply(event_id=event_id)
-
-    def track_inbox_response(response: Coroutine[Any, Any, None], **_ownership: object) -> asyncio.Task[None]:
-        task = asyncio.create_task(response)
-        regenerations.append(task)
-        return task
+    runner = _Runner(
+        response_lock=response_lock,
+        reply_for_sources=reply_for_sources,
+        generate_response_entry=generate_response,
+    )
+    policy = _Policy()
 
     regenerator = EditRegenerator(
         EditRegeneratorDeps(
@@ -252,8 +308,8 @@ def _harness(
             resolver=resolver,
             turn_store=turn_store,
             ingress_hook_runner=ingress_hook_runner,
-            generate_response=regenerate,
-            track_inbox_response=track_inbox_response,
+            response_runner=cast("ResponseRunner", runner),
+            turn_policy=cast("TurnPolicy", policy),
             settle_sources=AsyncMock(),
             stop_reply=AsyncMock(),
             receipt_order=AsyncMock(return_value=receipt_order),
@@ -272,7 +328,9 @@ def _harness(
         later_message_exists=store.later_message_exists,
         settle_sources=regenerator.deps.settle_sources,  # type: ignore[arg-type]
         response_lock=response_lock,
-        regenerations=regenerations,
+        regenerations=runner.regenerations,
+        runner=runner,
+        policy=policy,
         deleted=deleted_sources,
         config=config,
         runtime_paths=runtime_paths,
@@ -641,7 +699,7 @@ async def test_an_edit_whose_regeneration_runs_nothing_is_settled_by_it(tmp_path
     event, event_info = _edit_event()
 
     # A refusal is the response ending without signalling a claim.
-    harness.regenerator.deps = replace(harness.regenerator.deps, generate_response=AsyncMock(return_value=None))
+    harness.runner.generate_response = AsyncMock(return_value=None)  # type: ignore[method-assign]
 
     assert await _handle_edit(harness, event, event_info) is True
     harness.settle_sources.assert_awaited_once_with((event.event_id,))
@@ -652,10 +710,7 @@ async def test_an_edit_whose_regeneration_a_replaced_runtime_refuses_stays_pendi
     """A runtime being replaced refuses the regeneration without settling the edit, so the replacement answers it."""
     harness = _harness(tmp_path, turn_record=_turn_record())
     event, event_info = _edit_event()
-    harness.regenerator.deps = replace(
-        harness.regenerator.deps,
-        generate_response=AsyncMock(side_effect=ResponseAdmissionRefusedError),
-    )
+    harness.runner.generate_response = AsyncMock(side_effect=ResponseAdmissionRefusedError)  # type: ignore[method-assign]
 
     assert (
         await harness.regenerator.handle_message_edit(
@@ -1191,3 +1246,80 @@ async def test_record_without_persisted_response_context_is_skipped(tmp_path: Pa
     await _handle_edit(harness, event, event_info)
 
     _assert_no_regeneration(harness)
+
+
+def _configured_team_action(harness: _Harness, outcome: TeamOutcome) -> ResponseAction:
+    """Return the action the configured team ``AGENT_NAME`` takes now: answering, or rejected because its member is not."""
+    member = TeamResolutionMember(
+        agent=entity_ids(harness.config, harness.runtime_paths)[MEMBER_NAME],
+        name=MEMBER_NAME,
+        status=TeamMemberStatus.ELIGIBLE if outcome is TeamOutcome.TEAM else TeamMemberStatus.NOT_MATERIALIZABLE,
+    )
+    resolution = TeamResolution(
+        intent=TeamIntent.CONFIGURED_TEAM,
+        requested_members=[member.agent],
+        member_statuses=[member],
+        outcome=outcome,
+        reason=None if outcome is TeamOutcome.TEAM else "Team 'assistant' cannot answer: member is unavailable.",
+        mode=TeamMode.COORDINATE if outcome is TeamOutcome.TEAM else None,
+    )
+    if outcome is TeamOutcome.TEAM:
+        return ResponseAction(kind="team", form_team=resolution)
+    return ResponseAction(kind="reject", form_team=resolution, rejection_message=resolution.reason)
+
+
+@pytest.mark.asyncio
+async def test_a_regeneration_runs_as_the_configured_team_answers_now(tmp_path: Path) -> None:
+    """A configured team's regeneration runs the team its current policy forms, with that team's mode."""
+    harness = _harness(tmp_path, turn_record=_turn_record(), team=True)
+    harness.policy.configured_team_action = _configured_team_action(harness, TeamOutcome.TEAM)
+    event, event_info = _edit_event()
+
+    assert await _handle_edit(harness, event, event_info) is True
+
+    harness.runner.team_entry.assert_awaited_once()
+    assert harness.runner.team_entry.await_args.kwargs == {"member_names": (MEMBER_NAME,), "team_mode": "coordinate"}
+    assert harness.runner.team_entry.await_args.args[0].existing_event_id == RESPONSE_EVENT_ID
+    harness.generate_response.assert_not_awaited()
+    harness.runner.rejection_entry.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_team_regeneration_shows_why_in_the_reply_it_regenerates(tmp_path: Path) -> None:
+    """A configured team that cannot answer now delivers its rejection as the final of the reply the edit regenerates."""
+    harness = _harness(tmp_path, turn_record=_turn_record(), team=True)
+    harness.policy.configured_team_action = _configured_team_action(harness, TeamOutcome.REJECT)
+    event, event_info = _edit_event()
+
+    assert await _handle_edit(harness, event, event_info) is True
+
+    harness.runner.rejection_entry.assert_awaited_once()
+    request = harness.runner.rejection_entry.await_args.args[0]
+    assert request.existing_event_id == RESPONSE_EVENT_ID
+    assert harness.runner.rejection_entry.await_args.kwargs == {
+        "member_names": [MEMBER_NAME],
+        "rejection_message": "Team 'assistant' cannot answer: member is unavailable.",
+    }
+    # The claimed reply answers the edited text from then on.
+    harness.turn_store.record_edit.assert_called_once()
+    harness.generate_response.assert_not_awaited()
+    harness.runner.team_entry.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("team", [False, True])
+async def test_an_empty_edit_finalizes_its_reply_before_any_team_decision(tmp_path: Path, team: bool) -> None:
+    """An edit that empties its message ends the reply it regenerates empty, even for a team that would be rejected."""
+    harness = _harness(tmp_path, turn_record=_turn_record(), team=team)
+    if team:
+        harness.policy.configured_team_action = _configured_team_action(harness, TeamOutcome.REJECT)
+    event, event_info = _edit_event(new_body="   ")
+
+    assert await _handle_edit(harness, event, event_info) is True
+
+    harness.runner.empty_prompt_entry.assert_awaited_once()
+    assert harness.runner.empty_prompt_entry.await_args.args[0].existing_event_id == RESPONSE_EVENT_ID
+    assert harness.runner.empty_prompt_entry.await_args.kwargs == {"response_kind": "team" if team else "ai"}
+    harness.runner.rejection_entry.assert_not_awaited()
+    harness.runner.team_entry.assert_not_awaited()
+    harness.generate_response.assert_not_awaited()

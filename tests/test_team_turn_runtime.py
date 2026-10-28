@@ -69,7 +69,7 @@ from tests.approval_continuation_helpers import (
     repeats_each_request,
     request_call_ids,
 )
-from tests.bot_helpers import make_test_agent_bot, make_test_team_bot, unique_room_send_responses
+from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_PASSWORD,
     handle_card_response_for_test,
@@ -2763,8 +2763,7 @@ def _team_bot(team: TeamTurn, tmp_path: Path, entity: str = "squad") -> AgentBot
     A completed reply would otherwise queue a thread summary on the config's real ``default`` model. An agent
     ``entity`` builds that agent's bot instead, which runs a team request as an ad hoc team.
     """
-    make_bot = make_test_team_bot if entity in team.config.teams else make_test_agent_bot
-    bot = make_bot(
+    bot = make_test_agent_bot(
         AgentMatrixUser(
             agent_name=entity,
             password=TEST_PASSWORD,

@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.automations.registry import AutomationDefinition
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.config.automations import Automation
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -192,7 +192,7 @@ class AutomationRunner:
 
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
-    bot_provider: Callable[[str], AgentBot | TeamBot | None]
+    bot_provider: Callable[[str], AgentBot | None]
     # The automations the active plugin snapshot provides, beside the built-ins, by name.
     definition_provider: Callable[[str], AutomationDefinition | None]
     # Who may use which agent, which a private instance's requester must still pass before a run on their behalf.
@@ -391,14 +391,14 @@ class AutomationRunner:
             if not posted:
                 self._release(chain.instance)
 
-    async def _notify(self, bot: AgentBot | TeamBot, chain: _Chain, thread_id: str | None, text: str) -> None:
+    async def _notify(self, bot: AgentBot, chain: _Chain, thread_id: str | None, text: str) -> None:
         """Post ``text`` as a notice whose mentions no agent acts on, so it starts no run."""
         await bot._hook_send_message(chain.room_id, text, thread_id, chain.hook_source, {SKIP_MENTIONS_KEY: True})
 
     async def _post(
         self,
         config: Config,
-        bot: AgentBot | TeamBot,
+        bot: AgentBot,
         chain: _Chain,
         thread_id: str | None,
         ask: Ask,
@@ -433,7 +433,7 @@ class AutomationRunner:
         )
         return True
 
-    async def _resolve_thread(self, bot: AgentBot | TeamBot, chain: _Chain, thread_id: str) -> None:
+    async def _resolve_thread(self, bot: AgentBot, chain: _Chain, thread_id: str) -> None:
         """Mark a finished chain's thread as resolved."""
         if bot.client is None:
             return
@@ -456,7 +456,7 @@ class AutomationRunner:
     async def _post_mention(
         self,
         config: Config,
-        bot: AgentBot | TeamBot,
+        bot: AgentBot,
         chain: _Chain,
         text: str,
         thread_id: str | None,

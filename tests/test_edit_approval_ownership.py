@@ -316,7 +316,6 @@ async def _paused_case(  # noqa: PLR0915
         regenerator.deps,
         turn_store=store,
         receipt_order=AsyncMock(return_value=3),
-        generate_response=bot._run_regenerated_response,
         store=principal,
     )
     await seed_finished_reply(

@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
     from pathlib import Path
 
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.orchestration.config_updates import ConfigUpdatePlan
@@ -102,7 +102,7 @@ class ConfigReloadLifecycle:
     runtime_paths: RuntimePaths
     is_running: Callable[[], bool]
     current_config: Callable[[], Config | None]
-    agent_bots: Callable[[], Mapping[str, AgentBot | TeamBot]]
+    agent_bots: Callable[[], Mapping[str, AgentBot]]
     load_initial_config: Callable[[Config], Awaitable[bool]]
     apply_update_plan: Callable[[Config, ConfigUpdatePlan, tuple[str, ...]], Awaitable[bool]]
     response_admission_gate: ResponseAdmissionGate

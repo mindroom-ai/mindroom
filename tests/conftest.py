@@ -69,7 +69,7 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.ai import ResponseTurnContext
 from mindroom.approval.manager import ApprovalActionResult, ApprovalManager, initialize_approval_store
 from mindroom.authorization import _ReplyAuthorizationDecision
-from mindroom.bot import AgentBot, TeamBot
+from mindroom.bot import AgentBot
 from mindroom.coalescing.batch import PendingEvent
 from mindroom.coalescing.gate import CoalescingDrainResult
 from mindroom.command_turn_executor import CommandTurnExecutor
@@ -488,6 +488,7 @@ __all__ = [
     "initialize_approval_store_for_test",
     "install_call_manager_mock",
     "install_edit_message_mock",
+    "install_edit_regeneration_mock",
     "install_generate_response_mock",
     "install_personal_room_shutdown_mock",
     "install_runtime_journal_support",
@@ -527,7 +528,7 @@ _TEST_RUNTIME_PATHS_BY_CONFIG_ID: dict[int, RuntimePaths] = {}
 _VISIBLE_MESSAGE_IDS = count(1)
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _SOFT_WRAP_RE = re.compile(r"(?<=\S)\n(?=\S)")
-RuntimeBot = AgentBot | TeamBot
+RuntimeBot = AgentBot
 TestFunction = Callable[..., object]
 
 
@@ -2875,6 +2876,16 @@ def replace_edit_regenerator_deps(bot: RuntimeBot, **changes: object) -> EditReg
     wrap_extracted_collaborators(bot, "_edit_regenerator")
     replace_turn_deps(bot, edit_regenerator=bot._edit_regenerator)
     return rebuilt
+
+
+def install_edit_regeneration_mock(
+    bot: RuntimeBot,
+    generate_response: Callable[[ResponseRequest], Awaitable[object]],
+) -> EditRegenerator:
+    """Answer the bot's edit regenerations of an agent's turns through ``generate_response``, as its runner would."""
+    runner = _ExtractedCollaboratorProxy(unwrap_extracted_collaborator(bot._response_runner))
+    runner.generate_response = generate_response
+    return replace_edit_regenerator_deps(bot, response_runner=runner)
 
 
 def replace_reaction_dispatcher_deps(bot: RuntimeBot, **changes: object) -> ReactionDispatcher:

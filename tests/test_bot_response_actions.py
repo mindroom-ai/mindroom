@@ -42,7 +42,6 @@ from tests.bot_helpers import (
     _runtime_bound_config,
     make_mock_agent_user,
     make_test_agent_bot,
-    make_test_team_bot,
 )
 from tests.conftest import (
     TEST_PASSWORD,
@@ -602,7 +601,7 @@ class TestAgentBot(AgentBotTestBase):
             display_name="Ops Team",
             password=TEST_PASSWORD,
         )
-        bot = make_test_team_bot(
+        bot = make_test_agent_bot(
             team_user,
             tmp_path,
             config=config,

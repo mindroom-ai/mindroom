@@ -23,7 +23,7 @@ from mindroom.providers.registry import build_model_provider
 from mindroom.teams.members import BuiltTeam, build_team_spec, materialize_exact_team_members
 from mindroom.teams.spec import TeamMode
 from mindroom.token_budget import compute_compaction_input_budget
-from tests.bot_helpers import make_test_agent_bot, make_test_team_bot
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -81,7 +81,7 @@ async def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncItera
             "config": config,
             "runtime_paths": runtime_paths,
         }
-        bot = make_test_team_bot(**kwargs) if name == "team" else make_test_agent_bot(**kwargs)
+        bot = make_test_agent_bot(**kwargs)
         bot.orchestrator = orchestrator
         bot.running = True
         orchestrator.agent_bots[name] = bot

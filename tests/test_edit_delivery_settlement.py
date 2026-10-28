@@ -121,7 +121,6 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
         regenerator.deps,
         turn_store=store,
         receipt_order=AsyncMock(return_value=1),
-        generate_response=bot._run_regenerated_response,
         store=principal,
     )
     await seed_finished_reply(

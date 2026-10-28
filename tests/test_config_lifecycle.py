@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from pathlib import Path
 
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
 
 
 def _make_lifecycle(
@@ -31,7 +31,7 @@ def _make_lifecycle(
     *,
     running: bool = True,
     current_config: Config | None = None,
-    agent_bots: Mapping[str, AgentBot | TeamBot] | None = None,
+    agent_bots: Mapping[str, AgentBot] | None = None,
     response_admission_gate: ResponseAdmissionGate | None = None,
 ) -> ConfigReloadLifecycle:
     """Return a lifecycle wired to stub dependencies."""

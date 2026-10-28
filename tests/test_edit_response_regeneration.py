@@ -39,17 +39,18 @@ from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.types import ConversationSession
-from mindroom.teams.formation import TeamOutcome, TeamResolution
+from mindroom.teams.formation import TeamIntent, TeamOutcome, TeamResolution
 from mindroom.teams.spec import TeamMode
 from mindroom.turn_record import SourceEventMetadata, TurnRecord
 from mindroom.turn_store import TurnStore
 from mindroom.turns.dispatch import TurnDispatcher
 from tests.access_schema_support import with_current_room_member_access
-from tests.bot_helpers import dispatch_reaction_durably, make_test_agent_bot, make_test_team_bot
+from tests.bot_helpers import dispatch_reaction_durably, make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
     finish_edit_regenerations,
+    install_edit_regeneration_mock,
     install_generate_response_mock,
     install_runtime_journal_support,
     make_ingress_facts,
@@ -71,8 +72,9 @@ from tests.response_attempt_helpers import install_direct_response_admission
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.event_journal import EventJournalStore
+    from mindroom.matrix.identity import MatrixID
 
 
 def _room_send_response(event_id: str) -> MagicMock:
@@ -125,12 +127,12 @@ def _open_storage(storage: object) -> object:
     yield storage
 
 
-def _turn_store(bot: AgentBot | TeamBot) -> object:
+def _turn_store(bot: AgentBot) -> object:
     """Return the unwrapped turn store for one bot."""
     return unwrap_extracted_collaborator(bot._turn_store)
 
 
-async def _response_event_id(bot: AgentBot | TeamBot, source_event_id: str) -> str | None:
+async def _response_event_id(bot: AgentBot, source_event_id: str) -> str | None:
     """Return the stored response event for one source event when present."""
     turn_record = await bot._turn_store.get_turn_record(source_event_id)
     if turn_record is None:
@@ -774,7 +776,7 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
     }
 
     mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback("$response:example.com"))
-    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+    install_edit_regeneration_mock(bot, mock_generate_response)
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(
@@ -829,7 +831,7 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
     )
     config = _team_test_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
-    bot = make_test_team_bot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -958,7 +960,7 @@ async def test_team_edit_regeneration_uses_the_live_team_mode(tmp_path: Path) ->
     """A team mode edit published without a restart reaches the next edit regeneration."""
     config = _team_test_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
-    bot = make_test_team_bot(
+    bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
             agent_name="test_team",
             user_id="@mindroom_test_team:example.com",
@@ -974,20 +976,28 @@ async def test_team_edit_regeneration_uses_the_live_team_mode(tmp_path: Path) ->
     live_config = config.model_copy(deep=True)
     live_config.teams["test_team"].mode = "collaborate"
     bot.config = live_config
-    rejection = TeamResolution(
-        intent=None,
-        requested_members=[],
-        member_statuses=[],
-        outcome=TeamOutcome.REJECT,
-        reason="No team members are available.",
-    )
     team_response = AsyncMock(return_value=None)
 
+    def resolve_team(
+        _team_name: str,
+        members: list[MatrixID],
+        mode: TeamMode,
+        *_args: object,
+        **_kwargs: object,
+    ) -> TeamResolution:
+        return TeamResolution(
+            intent=TeamIntent.CONFIGURED_TEAM,
+            requested_members=members,
+            member_statuses=[],
+            outcome=TeamOutcome.TEAM,
+            mode=mode,
+        )
+
     with (
-        patch("mindroom.bot.resolve_configured_team", return_value=rejection) as resolve_team,
+        patch("mindroom.turn_policy.resolve_configured_team", side_effect=resolve_team) as resolve_team_mock,
         patch.object(bot._response_runner, "generate_team_response_helper", team_response),
     ):
-        await bot._run_regenerated_response(
+        await bot._edit_regenerator._run_regeneration(
             ResponseRequest(
                 sources=ResponseSources(pending_event_ids=("$original",), logical_source_event_ids=("$original",)),
                 thread_history=[],
@@ -1003,7 +1013,7 @@ async def test_team_edit_regeneration_uses_the_live_team_mode(tmp_path: Path) ->
             ),
         )
 
-    assert resolve_team.call_args.args[2] is TeamMode.COLLABORATE
+    assert resolve_team_mock.call_args.args[2] is TeamMode.COLLABORATE
     assert team_response.await_args.kwargs["team_mode"] == "collaborate"
 
 
@@ -1361,7 +1371,7 @@ async def test_handle_message_edit_ignores_edits_of_replies_an_agent_wrote_for_t
         },
     )
     mock_generate_response = AsyncMock()
-    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+    install_edit_regeneration_mock(bot, mock_generate_response)
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
 
     with patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context:
@@ -1461,7 +1471,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
     }
 
     mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback("$response:example.com"))
-    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+    install_edit_regeneration_mock(bot, mock_generate_response)
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(
@@ -1608,7 +1618,7 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
     }
 
     mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback("$response:example.com"))
-    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+    install_edit_regeneration_mock(bot, mock_generate_response)
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(
@@ -1724,7 +1734,7 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
     }
 
     mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback(None))
-    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+    install_edit_regeneration_mock(bot, mock_generate_response)
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(
@@ -1893,7 +1903,7 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
         return outcome.event_id
 
     mock_generate_response = AsyncMock(side_effect=fail_visible_update)
-    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+    install_edit_regeneration_mock(bot, mock_generate_response)
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(
@@ -2039,7 +2049,7 @@ async def test_handle_message_edit_does_not_backfill_existing_coalesced_prompt_f
     )
 
     mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback("$response:example.com"))
-    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+    install_edit_regeneration_mock(bot, mock_generate_response)
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(
@@ -2168,7 +2178,7 @@ async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp
         ],
     )
     generate_response = AsyncMock(return_value=_delivery_resolution("$response-new:example.com"))
-    replace_edit_regenerator_deps(bot, generate_response=generate_response)
+    install_edit_regeneration_mock(bot, generate_response)
 
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
@@ -2307,7 +2317,7 @@ async def test_suppressed_interactive_regeneration_keeps_ledger_anchor(
         ],
     )
     generate_response = AsyncMock(return_value=None)
-    replace_edit_regenerator_deps(bot, generate_response=generate_response)
+    install_edit_regeneration_mock(bot, generate_response)
 
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
@@ -2427,7 +2437,7 @@ async def test_handle_message_edit_skips_when_turn_context_was_not_recorded(
         return _delivery_resolution("$response:example.com")
 
     mock_generate_response = AsyncMock(side_effect=generate_response_with_locked_cleanup)
-    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+    install_edit_regeneration_mock(bot, mock_generate_response)
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(

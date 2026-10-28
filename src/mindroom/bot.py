@@ -6,7 +6,6 @@ import asyncio
 import random
 import time
 from contextvars import Context
-from dataclasses import replace
 from functools import cached_property, partial
 from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
@@ -20,7 +19,6 @@ from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_live_bot
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
-from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal.legacy_turn_rows import legacy_responses_file_path
 from mindroom.event_journal.matrix_delivery import TurnHandoff
 from mindroom.hooks import (
@@ -73,8 +71,6 @@ from mindroom.runtime_shutdown import (
     ShutdownBudget,
     restart_reason_category_for,
 )
-from mindroom.teams.formation import TeamOutcome, resolve_configured_team
-from mindroom.teams.spec import TeamMode
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 
@@ -123,16 +119,11 @@ from .matrix.room_member_joins import (
     emit_room_member_join_at_least_once,
     room_member_left_from_event,
 )
-from .media_inputs import MediaInputs
 from .reaction_dispatch import ReactionDispatcher, ReactionDispatcherDeps
 from .reply_scope import ReplyRuntime
 from .response_admission import admitted_response_decision
 from .response_payload_preparation import ResponsePayloadPreparer
-from .response_runner import (
-    ResponseRequest,
-    ResponseRunner,
-    ResponseRunnerDeps,
-)
+from .response_runner import ResponseRunner, ResponseRunnerDeps
 from .response_shutdown_diagnostics import DeferredStopPhase
 from .scheduling.tasks import (
     ScheduledTaskRunnerOwner,
@@ -196,7 +187,7 @@ type _MatrixEventId = str
 
 logger = get_logger(__name__)
 
-__all__ = ["AgentBot", "TeamBot", "create_bot_for_entity"]
+__all__ = ["AgentBot", "create_bot_for_entity"]
 
 
 # Constants
@@ -262,8 +253,8 @@ def create_bot_for_entity(
     agent_reply_memberships: AgentReplyMembershipIndex,
     agent_reply_membership_sync: AgentReplyMembershipSync | None = None,
     room_activity_observer: Callable[[str], None] | None = None,
-) -> AgentBot | TeamBot | None:
-    """Create appropriate bot instance for an entity (agent, team, or router).
+) -> AgentBot:
+    """Create the bot for one entity: the router, a configured team, or an agent.
 
     Args:
         entity_name: Name of the entity to create a bot for
@@ -277,65 +268,35 @@ def create_bot_for_entity(
         agent_reply_membership_sync: Shared router receive-lifecycle coordinator
         room_activity_observer: Called with a room ID whenever this bot admits a conversation event there
 
-    Returns:
-        Bot instance or None if entity not found in config
+    Raises:
+        ValueError: The entity is not configured, or the router lacks its reply-membership sync coordinator.
 
     """
-    enable_streaming = config.defaults.enable_streaming
     if entity_name == ROUTER_AGENT_NAME:
         if agent_reply_membership_sync is None:
             msg = "The managed router requires the orchestrator-owned reply-membership sync coordinator."
             raise ValueError(msg)
-        all_room_aliases = config.get_all_configured_rooms()
-        rooms = resolve_room_aliases(list(all_room_aliases), runtime_paths)
-        return AgentBot(
-            agent_user,
-            storage_path,
-            config,
-            runtime_paths,
-            rooms,
-            config_path=config_path,
-            enable_streaming=enable_streaming,
-            journal_store=journal_store,
-            agent_reply_memberships=agent_reply_memberships,
-            agent_reply_membership_sync=agent_reply_membership_sync,
-            room_activity_observer=room_activity_observer,
-        )
-
-    if entity_name in config.teams:
-        team_config = config.teams[entity_name]
-        rooms = resolve_room_aliases(team_config.rooms, runtime_paths)
-        return TeamBot(
-            agent_user=agent_user,
-            storage_path=storage_path,
-            config=config,
-            runtime_paths=runtime_paths,
-            rooms=rooms,
-            config_path=config_path,
-            enable_streaming=enable_streaming,
-            journal_store=journal_store,
-            agent_reply_memberships=agent_reply_memberships,
-            room_activity_observer=room_activity_observer,
-        )
-
-    if entity_name in config.agents:
-        agent_config = config.agents[entity_name]
-        rooms = resolve_room_aliases(agent_config.rooms, runtime_paths)
-        return AgentBot(
-            agent_user,
-            storage_path,
-            config,
-            runtime_paths,
-            rooms,
-            config_path=config_path,
-            enable_streaming=enable_streaming,
-            journal_store=journal_store,
-            agent_reply_memberships=agent_reply_memberships,
-            room_activity_observer=room_activity_observer,
-        )
-
-    msg = f"Entity '{entity_name}' not found in configuration."
-    raise ValueError(msg)
+        room_aliases = list(config.get_all_configured_rooms())
+    elif entity_name in config.teams:
+        room_aliases = config.teams[entity_name].rooms
+    elif entity_name in config.agents:
+        room_aliases = config.agents[entity_name].rooms
+    else:
+        msg = f"Entity '{entity_name}' not found in configuration."
+        raise ValueError(msg)
+    return AgentBot(
+        agent_user,
+        storage_path,
+        config,
+        runtime_paths,
+        resolve_room_aliases(room_aliases, runtime_paths),
+        config_path=config_path,
+        enable_streaming=config.defaults.enable_streaming,
+        journal_store=journal_store,
+        agent_reply_memberships=agent_reply_memberships,
+        agent_reply_membership_sync=agent_reply_membership_sync,
+        room_activity_observer=room_activity_observer,
+    )
 
 
 class AgentBot:
@@ -772,29 +733,6 @@ class AgentBot:
                 replies=self._reply_runtime,
             ),
         )
-        self._edit_regenerator = EditRegenerator(
-            EditRegeneratorDeps(
-                runtime=self._runtime_view,
-                runtime_paths=self.runtime_paths,
-                agent_name=self.agent_name,
-                resolver=self._conversation_resolver,
-                turn_store=self._turn_store,
-                ingress_hook_runner=self._ingress_hook_runner,
-                generate_response=self._run_regenerated_response,
-                track_inbox_response=lambda response, **ownership: self._response_runner.track_inbox_response(
-                    response,
-                    **ownership,
-                ),
-                settle_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
-                stop_reply=lambda reply, receipt_order: self._delivery_gateway.stop_reply_by_id(
-                    reply.reply_id,
-                    receipt_order,
-                ),
-                receipt_order=self._journal_dispatcher.receipt_order,
-                timestamp_formatter=format_local_timestamp,
-                store=principal,
-            ),
-        )
         self._turn_policy = TurnPolicy(
             TurnPolicyDeps(
                 runtime=self._runtime_view,
@@ -803,6 +741,26 @@ class AgentBot:
                 agent_name=self.agent_name,
                 matrix_id=runtime_matrix_id,
                 agent_reply_memberships=self._runtime_view.agent_reply_memberships,
+            ),
+        )
+        self._edit_regenerator = EditRegenerator(
+            EditRegeneratorDeps(
+                runtime=self._runtime_view,
+                runtime_paths=self.runtime_paths,
+                agent_name=self.agent_name,
+                resolver=self._conversation_resolver,
+                turn_store=self._turn_store,
+                ingress_hook_runner=self._ingress_hook_runner,
+                response_runner=self._response_runner,
+                turn_policy=self._turn_policy,
+                settle_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
+                stop_reply=lambda reply, receipt_order: self._delivery_gateway.stop_reply_by_id(
+                    reply.reply_id,
+                    receipt_order,
+                ),
+                receipt_order=self._journal_dispatcher.receipt_order,
+                timestamp_formatter=format_local_timestamp,
+                store=principal,
             ),
         )
         self._ingress_validator = IngressValidator(
@@ -2731,10 +2689,6 @@ class AgentBot:
         """Delegate one inbound media event to the turn engine."""
         return await self._turn_ingress.handle_media_event(room, event)
 
-    async def _run_regenerated_response(self, request: ResponseRequest) -> str | None:
-        """Run one edit-regenerated turn through this bot's response path."""
-        return await self._response_runner.generate_response(request)
-
     async def _hook_send_message(
         self,
         room_id: str,
@@ -2800,55 +2754,3 @@ class AgentBot:
             self.logger.error("Failed to redact message", event_id=event_id, error=str(response))
             return False
         return True
-
-
-class TeamBot(AgentBot):
-    """A bot that represents a team of agents working together."""
-
-    def current_configured_team_agents(self) -> list[MatrixID]:
-        """Return this configured team's current persisted member Matrix IDs."""
-        team_config = self.config.teams[self.agent_name]
-        registry = entity_identity_registry(self.config, self.runtime_paths)
-        return [registry.current_id(agent_name) for agent_name in team_config.agents]
-
-    async def _run_regenerated_response(self, request: ResponseRequest) -> str | None:
-        """Run one edit-regenerated turn through the configured team path."""
-        target = request.response_envelope.target
-        if not request.prompt.strip():
-            return await self._response_runner.generate_response_for_empty_prompt(
-                request,
-                response_kind="team",
-            )
-        assert self.client is not None
-        team_config = self.config.teams[self.agent_name]
-        configured_mode = TeamMode(team_config.mode)
-        availability = self._turn_policy.responder_availability()
-        team_resolution = resolve_configured_team(
-            self.agent_name,
-            self.current_configured_team_agents(),
-            configured_mode,
-            self.config,
-            self.runtime_paths,
-            materializable_agent_names=availability.materializable_agent_names,
-        )
-        if team_resolution.outcome is not TeamOutcome.TEAM:
-            assert team_resolution.reason is not None
-            return await self._response_runner.generate_team_response_helper(
-                request,
-                member_names=team_config.agents,
-                team_mode=configured_mode.value,
-                resolution_reason=team_resolution.reason,
-            )
-        assert team_resolution.mode is not None
-
-        return await self._response_runner.generate_team_response_helper(
-            replace(
-                request,
-                media=request.media or MediaInputs(),
-                user_id=request.user_id or "",
-                correlation_id=request.correlation_id or target.reply_to_event_id,
-            ),
-            member_names=team_resolution.eligible_member_names,
-            team_mode=team_resolution.mode.value,
-            reason_prefix=f"Team '{self.agent_name}'",
-        )

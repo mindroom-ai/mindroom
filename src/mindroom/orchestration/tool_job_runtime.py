@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import EventJournalStore
@@ -108,7 +108,7 @@ class ToolJobRuntimeCoordinator:
 
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
-    bot_provider: Callable[[str], AgentBot | TeamBot | None]
+    bot_provider: Callable[[str], AgentBot | None]
     agent_reply_memberships: AgentReplyMembershipIndex
     # The event journal jobs are kept in; it is read only once a config exists, and outlives this coordinator.
     journal_provider: Callable[[], EventJournalStore]

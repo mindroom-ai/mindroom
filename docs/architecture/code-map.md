@@ -10,9 +10,9 @@ The path from a Matrix message to a delivered response; [Bot Runtime](bot-runtim
 ```text
 Matrix sync callback
   -> matrix/durable_ingestion.py                           (validate owned Nio work, commit its sequence and effects, then acknowledge)
-  -> bot.py (AgentBot/TeamBot runtime shell)
+  -> bot.py (AgentBot runtime shell, for agents, teams, and the router)
   -> journal_dispatch.py + pending_event_worker.py         (fan admitted events out to callbacks; unsettled work is woken again)
-  -> turns/ingress.py (owns one event to gate admission: precheck -> claim -> normalize -> resolve -> admit)
+  -> turns/ingress.py (owns one event to gate admission: onboarding command -> approval reply -> precheck -> claim -> normalize -> resolve -> admit)
        -> ingress_validation.py                                  (classify provenance once, dedup, echo drop; commands exit before batching)
        -> inbound_turn_normalizer.py + conversation_resolver.py  (canonical turn input, conversation identity)
        -> voice/ingress.py + turns/interactive_selection.py      (voice readiness and selection answers, admitted in receipt order)
@@ -43,15 +43,15 @@ Matrix sync callback
 | `runtime_state.py` | Shared runtime readiness state for health/ready endpoints |
 | `event_loop_stall.py` | Native-thread event-loop stall detector that logs the blocking stack |
 | `runtime_resolution.py` | Authoritative runtime resolution for one agent materialization |
-| `bot.py` | AgentBot and TeamBot runtime shells for Matrix lifecycle, sync callbacks, and room behavior |
-| `turns/ingress.py` | TurnIngress - owns one inbound text or media event from its Matrix callback to gate admission, including edits and commands that bypass the gate |
+| `bot.py` | AgentBot runtime shell of every agent, team, and the router: Matrix lifecycle, sync callbacks, and room behavior |
+| `turns/ingress.py` | TurnIngress - owns one inbound text or media event from its Matrix callback to gate admission, including onboarding commands, approval replies, edits, and commands that bypass the gate |
 | `turns/dispatch.py` | TurnDispatcher - owns one turn from the coalescing gate's exit to its recorded outcome: prepare, decide, execute, record |
 | `turns/interactive_selection.py` | Admits an answer to an interactive question behind earlier ingress and runs its response after the gate |
 | `turns/queued_notice.py` | The queued notice and approval-wait reaction that text, media, and voice ingress share |
 | `voice/ingress.py` | VoiceIngress - fixes a voice message's conversation, then readies it behind its sender's lane |
 | `voice/readiness.py` | Voice preparation and checkpointing, gated on the router's visible echo |
 | `router_relay.py` | Router relay delivery: target readiness, handoff metadata, and visible delivery |
-| `ingress_validation.py` | Ingress boundary validation: classify each event's provenance once against the entity registry, handled-id dedup, reply access |
+| `ingress_validation.py` | Ingress boundary validation: classify each event's provenance once against the entity registry, handled-id dedup, reply access at the first gate and again under the admission fence |
 | `turns/facts.py` | One inbound event's classified provenance (`IngressFacts`), the turn origin derived from it, and the one command rule |
 | `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |
 | `conversation_resolver.py` | Conversation identity, thread history, and envelope assembly from classified provenance |
@@ -78,7 +78,7 @@ Matrix sync callback
 | `reply_lifecycle.py` | Pure rules for durable reply records: every event that changes a reply, its spans, rows, and effects (see [Reply Messages](reply-messages.md)) |
 | `reply_presentation.py` | Reply presentation model, its JSON codec, and rendering into a body, trace, and terminal wire status |
 | `reply_scope.py` | `ReplyRuntime` and `SpanHandle`: reply claims, span exits, write-ahead, owed writes, and runtime ownership |
-| `edit_regenerator.py` | Decides which message edits regenerate a reply and hands each to a regeneration off the room's event lane |
+| `edit_regenerator.py` | Decides which message edits regenerate a reply and runs each off the room's event lane, as the entity answers now |
 | `event_journal/replies.py` | `ReplyStore`: reply rules applied inside journal transactions, with their in-transaction effects |
 | `event_journal/legacy_response_attempts.py` | One-time cancellation of the approvals an earlier release left pending, and removal of the tables that kept their reply identity |
 | `event_journal/turn_rows.py` | Turn state as rows, agent-scoped: lookups, narrow writes, the one reshape that forms a new source tuple, the agent's redaction record and the eligibility guard every write checks, delivery binding, and retention |

@@ -45,7 +45,7 @@ from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamOutcome, 
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.tool_system.events import ToolTraceEntry
-from mindroom.turn_policy import _ResponderAvailability
+from mindroom.turn_policy import TurnPolicy, _ResponderAvailability
 from tests.bot_helpers import (
     AgentBotTestBase,
     _configured_team_test_config,
@@ -60,7 +60,6 @@ from tests.bot_helpers import (
     _wrap_extracted_collaborators,
     make_mock_agent_user,
     make_test_agent_bot,
-    make_test_team_bot,
     unique_room_send_responses,
 )
 from tests.conftest import (
@@ -856,15 +855,15 @@ class TestAgentBot(AgentBotTestBase):
         assert mock_edit_message.await_count == 0
 
     @pytest.mark.asyncio
-    async def test_team_generate_response_nonteam_fallback_uses_locked_runner(
+    async def test_rejected_team_regeneration_enters_the_runner_with_its_existing_reply(
         self,
         tmp_path: Path,
     ) -> None:
-        """Non-team fallback must enter the runner before touching the existing response."""
+        """A regeneration its team rejects enters the runner's rejection entry with the reply it regenerates."""
         config = _configured_team_test_config(tmp_path)
         runtime_paths = runtime_paths_for(config)
         team_member = entity_ids(config, runtime_paths)["general"]
-        bot = make_test_team_bot(
+        bot = make_test_agent_bot(
             _configured_team_user(config, runtime_paths),
             tmp_path,
             config=config,
@@ -879,31 +878,35 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         resolution = TeamResolution(
-            intent=TeamIntent.EXPLICIT_MEMBERS,
+            intent=TeamIntent.CONFIGURED_TEAM,
             requested_members=[team_member],
             member_statuses=[
                 TeamResolutionMember(
                     agent=team_member,
                     name="general",
-                    status=TeamMemberStatus.ELIGIBLE,
+                    status=TeamMemberStatus.NOT_MATERIALIZABLE,
                 ),
             ],
-            outcome=TeamOutcome.NONE,
+            outcome=TeamOutcome.REJECT,
             reason="No team available",
         )
 
-        generate_team_response = AsyncMock(return_value=None)
+        deliver_team_rejection = AsyncMock(return_value=None)
 
         with (
             patch.object(
-                bot._turn_policy,
-                "responder_availability",
-                return_value=_ResponderAvailability(materializable_agent_names={"general"}, live_entity_names=None),
+                TurnPolicy,
+                "_responder_availability",
+                return_value=_ResponderAvailability(materializable_agent_names=set(), live_entity_names=None),
             ),
-            patch("mindroom.bot.resolve_configured_team", return_value=resolution),
-            patch.object(bot._response_runner, "generate_team_response_helper", new=generate_team_response),
+            patch("mindroom.turn_policy.resolve_configured_team", return_value=resolution),
+            patch.object(
+                unwrap_extracted_collaborator(bot._response_runner),
+                "deliver_team_rejection",
+                new=deliver_team_rejection,
+            ),
         ):
-            delivery_resolution = await bot._run_regenerated_response(
+            await bot._edit_regenerator._run_regeneration(
                 ResponseRequest(
                     sources=ResponseSources(
                         pending_event_ids=("$event",),
@@ -914,17 +917,12 @@ class TestAgentBot(AgentBotTestBase):
                     existing_event_id="$existing",
                     user_id="@alice:localhost",
                     response_envelope=_hook_envelope(body="hello", source_event_id="$event", thread_id="$thread"),
-                    correlation_id="corr-nonteam-fallback",
+                    correlation_id="corr-team-rejection",
                 ),
             )
 
-        assert delivery_resolution is None
-        call = generate_team_response.await_args
-        assert call.kwargs == {
-            "member_names": ["general"],
-            "team_mode": "coordinate",
-            "resolution_reason": "No team available",
-        }
+        call = deliver_team_rejection.await_args
+        assert call.kwargs == {"member_names": ["general"], "rejection_message": "No team available"}
         assert call.args[0].existing_event_id == "$existing"
 
     @pytest.mark.asyncio
@@ -932,12 +930,12 @@ class TestAgentBot(AgentBotTestBase):
         self,
         tmp_path: Path,
     ) -> None:
-        """Configured TeamBot responses should use the current persisted member IDs."""
+        """Configured team responses should use the current persisted member IDs."""
         config = _configured_team_test_config(tmp_path)
         runtime_paths = runtime_paths_for(config)
         initial_ids = entity_ids(config, runtime_paths)
         stale_member = initial_ids["general"]
-        bot = make_test_team_bot(
+        bot = make_test_agent_bot(
             _configured_team_user(config, runtime_paths),
             tmp_path,
             config=config,
@@ -988,18 +986,22 @@ class TestAgentBot(AgentBotTestBase):
                 reason="not materializable",
             )
 
-        generate_team_response = AsyncMock(return_value="$reject")
+        deliver_team_rejection = AsyncMock(return_value="$reject")
 
         with (
             patch.object(
-                bot._turn_policy,
-                "responder_availability",
+                TurnPolicy,
+                "_responder_availability",
                 return_value=_ResponderAvailability(materializable_agent_names={"general"}, live_entity_names=None),
             ),
-            patch("mindroom.bot.resolve_configured_team", side_effect=capture_resolve_configured_team),
-            patch.object(bot._response_runner, "generate_team_response_helper", new=generate_team_response),
+            patch("mindroom.turn_policy.resolve_configured_team", side_effect=capture_resolve_configured_team),
+            patch.object(
+                unwrap_extracted_collaborator(bot._response_runner),
+                "deliver_team_rejection",
+                new=deliver_team_rejection,
+            ),
         ):
-            result = await bot._run_regenerated_response(
+            await bot._edit_regenerator._run_regeneration(
                 ResponseRequest(
                     sources=ResponseSources(
                         pending_event_ids=("$event",),
@@ -1021,8 +1023,7 @@ class TestAgentBot(AgentBotTestBase):
 
         assert captured_member_ids == [[current_member.full_id]]
         assert stale_member.full_id not in captured_member_ids[0]
-        assert generate_team_response.await_args.kwargs["resolution_reason"] == "not materializable"
-        assert result == "$reject"
+        assert deliver_team_rejection.await_args.kwargs["rejection_message"] == "not materializable"
 
     @pytest.mark.asyncio
     async def test_team_generate_response_sizes_the_summary_gate_by_the_refreshed_thread(
@@ -1047,7 +1048,7 @@ class TestAgentBot(AgentBotTestBase):
 
         config = _configured_team_test_config(tmp_path)
         runtime_paths = runtime_paths_for(config)
-        bot = make_test_team_bot(
+        bot = make_test_agent_bot(
             _configured_team_user(config, runtime_paths),
             tmp_path,
             config=config,
@@ -1074,7 +1075,7 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(return_value=refreshed_history),
             ),
         ):
-            await bot._run_regenerated_response(
+            await bot._response_runner.generate_team_response_helper(
                 ResponseRequest(
                     sources=ResponseSources(
                         pending_event_ids=("$event",),
@@ -1093,6 +1094,8 @@ class TestAgentBot(AgentBotTestBase):
                         agent_name=bot.agent_name,
                     ),
                 ),
+                member_names=["general"],
+                team_mode="coordinate",
             )
 
         # The four refreshed thread messages plus the team's reply.
@@ -1103,7 +1106,7 @@ class TestAgentBot(AgentBotTestBase):
         self,
         tmp_path: Path,
     ) -> None:
-        """TeamBot must keep a visible streamed reply even if before_response tries to suppress it afterwards."""
+        """A team must keep a visible streamed reply even if before_response tries to suppress it afterwards."""
 
         @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
         async def suppressing_hook(ctx: BeforeResponseContext) -> None:
@@ -1115,7 +1118,7 @@ class TestAgentBot(AgentBotTestBase):
 
         config = _configured_team_test_config(tmp_path)
         runtime_paths = runtime_paths_for(config)
-        bot = make_test_team_bot(
+        bot = make_test_agent_bot(
             _configured_team_user(config, runtime_paths),
             tmp_path,
             config=config,
@@ -1136,7 +1139,7 @@ class TestAgentBot(AgentBotTestBase):
             typing_indicator=_noop_typing_indicator,
             team_response_stream=lambda *_args, **kwargs: fake_team_response_stream(kwargs["turn_recorder"]),
         ):
-            resolution = await bot._run_regenerated_response(
+            resolution = await bot._response_runner.generate_team_response_helper(
                 ResponseRequest(
                     sources=ResponseSources(
                         pending_event_ids=("$event",),
@@ -1154,6 +1157,8 @@ class TestAgentBot(AgentBotTestBase):
                         agent_name=bot.agent_name,
                     ),
                 ),
+                member_names=["general"],
+                team_mode="coordinate",
             )
 
         # The stream filled the reply's placeholder, and the answer stands as a delivered reply.
@@ -1561,7 +1566,7 @@ async def _team_bot_with_existing_reply(tmp_path: Path) -> AgentBot:
     """Return a configured team's bot whose reply ``$existing`` answered ``$event``."""
     config = _configured_team_test_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
-    bot = make_test_team_bot(
+    bot = make_test_agent_bot(
         _configured_team_user(config, runtime_paths),
         tmp_path,
         config=config,
@@ -1600,11 +1605,10 @@ async def test_rejected_team_regeneration_edits_its_existing_reply_with_the_reas
         typing_indicator=_noop_typing_indicator,
         should_use_streaming=AsyncMock(return_value=False),
     ):
-        await bot._response_runner.generate_team_response_helper(
+        await bot._response_runner.deliver_team_rejection(
             _team_regeneration_request(bot, prompt="Team, summarize this thread", on_reply_claimed=commit_edit),
             member_names=["general"],
-            team_mode="coordinate",
-            resolution_reason="Team 'support_team' cannot answer: general is unavailable.",
+            rejection_message="Team 'support_team' cannot answer: general is unavailable.",
         )
 
     commit_edit.assert_awaited_once()

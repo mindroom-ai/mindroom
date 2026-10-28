@@ -2654,8 +2654,10 @@ depends_on = [
     "mindroom.response_sources",
     "mindroom.runtime_protocols",
     "mindroom.timestamp_formatting",
+    "mindroom.turn_policy",
     "mindroom.turn_record",
     "mindroom.turn_store",
+    "mindroom.turns.dispatch",
 ]
 
 [[modules]]
@@ -3462,7 +3464,6 @@ depends_on = [
 ]
 visibility = [
     "mindroom.api.openai_compat",
-    "mindroom.bot",
     "mindroom.responder_availability",
     "mindroom.response_runner",
     "mindroom.turn_policy",
@@ -4815,7 +4816,6 @@ depends_on = [
     "mindroom.desktop.pairing_receiver",
     "mindroom.dispatch_callback_outcome",
     "mindroom.edit_regenerator",
-    "mindroom.entity_resolution",
     "mindroom.event_journal",
     "mindroom.event_journal.opening",
     "mindroom.hooks",
@@ -4847,7 +4847,6 @@ depends_on = [
     "mindroom.response_payload_preparation",
     "mindroom.response_runner",
     "mindroom.scheduling.tasks",
-    "mindroom.teams",
     "mindroom.timestamp_formatting",
     "mindroom.tool_jobs.conversation",
     "mindroom.tool_jobs.runtime",
@@ -6049,7 +6048,10 @@ depends_on = [
     "mindroom.turn_policy",
     "mindroom.turn_record",
 ]
-visibility = ["mindroom.bot"]
+visibility = [
+    "mindroom.bot",
+    "mindroom.edit_regenerator",
+]
 
 [[modules]]
 path = "mindroom.dispatch_replay_guard"

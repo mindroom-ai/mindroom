@@ -20,9 +20,9 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     drain_coalescing,
+    install_edit_regeneration_mock,
     install_runtime_journal_support,
     make_matrix_client_mock,
-    replace_edit_regenerator_deps,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -163,7 +163,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
 
     # Process first edit and verify regeneration happens through the shared response helper.
     mock_generate_response = AsyncMock(return_value=_delivery_resolution("$response123"))
-    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+    install_edit_regeneration_mock(bot, mock_generate_response)
     await bot._on_message(room, edit1_event)
     await drain_coalescing(bot)
 
@@ -200,7 +200,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
 
     # Process second edit and verify regeneration happens again.
     mock_generate_response = AsyncMock(return_value=_delivery_resolution("$response123"))
-    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+    install_edit_regeneration_mock(bot, mock_generate_response)
     await bot._on_message(room, edit2_event)
     await drain_coalescing(bot)
 
@@ -237,7 +237,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
 
     # Process third edit and verify regeneration still happens.
     mock_generate_response = AsyncMock(return_value=_delivery_resolution("$response123"))
-    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+    install_edit_regeneration_mock(bot, mock_generate_response)
     await bot._on_message(room, edit3_event)
     await drain_coalescing(bot)
 

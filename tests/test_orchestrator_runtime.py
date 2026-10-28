@@ -355,8 +355,6 @@ def test_repeated_reply_membership_invalidation_schedules_one_revocation_wave(
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 
-    from mindroom.bot import TeamBot
-
 
 @pytest.fixture(autouse=True)
 def _isolate_primary_worker_manager_runtime() -> Iterator[None]:
@@ -3994,7 +3992,7 @@ class TestMultiAgentOrchestrator:
         runtimes_before_sync: list[ToolJobRuntime | None] = []
         start_sync = orchestrator._start_sync_task
 
-        def record_runtime_before_sync(entity_name: str, bot: AgentBot | TeamBot) -> None:
+        def record_runtime_before_sync(entity_name: str, bot: AgentBot) -> None:
             runtimes_before_sync.append(get_background_runtime(orchestrator.runtime_paths))
             start_sync(entity_name, bot)
 

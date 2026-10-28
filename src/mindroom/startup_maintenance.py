@@ -16,12 +16,12 @@ from mindroom.orchestration.runtime import (
 )
 
 if TYPE_CHECKING:
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 
-type _StartupBot = AgentBot | TeamBot
+type _StartupBot = AgentBot
 type _SetupRooms = Callable[[list[_StartupBot]], Awaitable[None]]
 type _SyncRuntimeSupport = Callable[[Config], Awaitable[None]]
 type _MarkRuntimeSupportReady = Callable[[], Awaitable[None]]

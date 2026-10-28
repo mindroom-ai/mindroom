@@ -17,7 +17,7 @@ import nio
 import pytest
 
 from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.bot import AgentBot, TeamBot
+from mindroom.bot import AgentBot
 from mindroom.coalescing.batch import CoalescingKey, RequesterCoalescingOwner
 from mindroom.coalescing.gate import CoalescingGate, ReadyPendingEvent
 from mindroom.config.access import ResponderAccessConfig
@@ -44,7 +44,7 @@ from tests.access_schema_support import with_current_room_member_access
 from tests.authorization_helpers import (
     make_test_turn_policy_deps,
 )
-from tests.bot_helpers import make_test_agent_bot, make_test_team_bot
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -1298,7 +1298,7 @@ class TestRoutingRegression:
             "alpha": MagicMock(spec=AgentBot, running=True, first_sync_complete=True),
             "beta": MagicMock(spec=AgentBot, running=False, first_sync_complete=False),
             "writer": MagicMock(spec=AgentBot, running=True, first_sync_complete=True),
-            "ops": MagicMock(spec=TeamBot, running=True, first_sync_complete=True),
+            "ops": MagicMock(spec=AgentBot, running=True, first_sync_complete=True),
             "router": MagicMock(spec=AgentBot, running=True, first_sync_complete=True),
         }
         router_bot.orchestrator = orchestrator
@@ -1439,7 +1439,7 @@ class TestRoutingRegression:
         self,
         tmp_path: Path,
     ) -> None:
-        """A live TeamBot must surface configured-team rejection even if members are unavailable."""
+        """A live team bot must surface configured-team rejection even if members are unavailable."""
         test_room_id = "!team-reject:localhost"
         test_config = _runtime_bound_config(
             with_current_room_member_access(
@@ -1470,7 +1470,7 @@ class TestRoutingRegression:
             display_name="Ops Team",
             user_id=ids["ops"].full_id,
         )
-        bot = make_test_team_bot(
+        bot = make_test_agent_bot(
             team_user,
             tmp_path,
             config=test_config,

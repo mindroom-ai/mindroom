@@ -997,7 +997,6 @@ class _TeamResponseRequest:
     member_names: tuple[str, ...]
     team_mode: str
     reason_prefix: str = "Team request"
-    resolution_reason: str | None = None
 
 
 def _post_lock_error(error: Exception, early_placeholder: _EarlyPlaceholderState) -> Exception:
@@ -4469,7 +4468,6 @@ class ResponseRunner:
         member_names: Sequence[str],
         team_mode: str,
         reason_prefix: str = "Team request",
-        resolution_reason: str | None = None,
     ) -> str | None:
         """Generate a team response of ``member_names`` with lifecycle locking and queued-message state."""
         team_request = _TeamResponseRequest(
@@ -4477,7 +4475,6 @@ class ResponseRunner:
             member_names=tuple(member_names),
             team_mode=team_mode,
             reason_prefix=reason_prefix,
-            resolution_reason=resolution_reason,
         )
         return await self._run_locked_response_lifecycle(
             request,
@@ -4506,6 +4503,97 @@ class ResponseRunner:
                 resolved_target=resolved_target,
                 response_kind=response_kind,
             ),
+        )
+
+    async def deliver_team_rejection(
+        self,
+        request: ResponseRequest,
+        *,
+        member_names: Sequence[str],
+        rejection_message: str,
+    ) -> str | None:
+        """Deliver why a configured team cannot answer as the final of the reply this request claims.
+
+        A regeneration's request names its existing reply, so the rejection
+        edits that reply in place and its records settle the turn.
+        """
+        return await self._run_locked_response_lifecycle(
+            request,
+            response_kind="team",
+            locked_operation=lambda resolved_target, early_placeholder_state: self._deliver_team_rejection_locked(
+                request,
+                member_names=tuple(member_names),
+                rejection_message=rejection_message,
+                resolved_target=resolved_target,
+                early_placeholder_state=early_placeholder_state,
+            ),
+        )
+
+    async def _deliver_team_rejection_locked(
+        self,
+        request: ResponseRequest,
+        *,
+        member_names: tuple[str, ...],
+        rejection_message: str,
+        resolved_target: MessageTarget,
+        early_placeholder_state: _EarlyPlaceholderState,
+    ) -> str | None:
+        """Claim the reply, then deliver the rejection as its final, once the per-thread lifecycle lock is held."""
+        execution_identity = self.deps.tool_runtime.build_execution_identity(
+            target=resolved_target,
+            user_id=request.user_id,
+        )
+        session_scope = self.deps.state_writer.team_history_scope(
+            member_names,
+            requester_user_id=execution_identity.requester_id,
+        )
+        request = replace(request, participating_agent_names=member_names)
+        admitted_request = await self._admit_locked_turn(
+            request,
+            resolved_target=resolved_target,
+            history_scope=session_scope,
+            reply_entity_names=member_names,
+        )
+        if admitted_request is None:
+            return None
+        prepared_request = await self._prepare_admitted_locked_turn(
+            admitted_request,
+            resolved_target=resolved_target,
+            history_scope=session_scope,
+            execution_identity=execution_identity,
+            placeholder_message=(None if _is_silent_schedule_response(admitted_request) else TEAM_PROGRESS_PLACEHOLDER),
+            early_placeholder_state=early_placeholder_state,
+        )
+        if prepared_request is None:
+            return None
+        request = prepared_request
+        response_identity = self._response_identity(request, response_kind="team")
+        lifecycle = self._build_lifecycle(identity=response_identity, request=request)
+        progress = _DeliveryProgress()
+
+        async def deliver_rejection(message_id: str | None) -> None:
+            progress.settle(
+                await self.deps.delivery_gateway.deliver_final(
+                    FinalDeliveryRequest(
+                        target=resolved_target,
+                        existing_event_id=message_id,
+                        response_text=rejection_message,
+                        identity=response_identity,
+                        tool_trace=None,
+                        extra_content=None,
+                    ),
+                ),
+            )
+
+        return await self._run_and_settle_locked_response(
+            request,
+            target=resolved_target,
+            lifecycle=lifecycle,
+            progress=progress,
+            response_function=deliver_rejection,
+            user_id=request.user_id,
+            build_post_response_outcome=lambda _final_outcome: ResponseOutcome(),
+            post_response_deps=lambda: self._post_response_deps(request),
         )
 
     async def _generate_team_response_helper_locked(  # noqa: C901, PLR0915
@@ -4545,30 +4633,25 @@ class ResponseRunner:
         if admitted_request is None:
             return None
         request = admitted_request
-        turn_models = (
-            None
-            if team_request.resolution_reason is not None
-            else resolve_team_turn_models(
-                self.deps.agent_name,
-                agent_names,
-                request.room_id,
-                self.deps.runtime.config,
-                self.deps.runtime_paths,
-                thread_id=resolved_target.resolved_thread_id,
-                active_model_name=request.scheduled_model,
-            )
+        turn_models = resolve_team_turn_models(
+            self.deps.agent_name,
+            agent_names,
+            request.room_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            thread_id=resolved_target.resolved_thread_id,
+            active_model_name=request.scheduled_model,
         )
-        if turn_models is not None:
-            budgeted = {
-                model_name: self._budgeted_model(request, model_name)
-                for model_name in {turn_models.team_model_name, *turn_models.member_model_names.values()}
-            }
-            turn_models = TeamTurnModelSelection(
-                team_model_name=budgeted[turn_models.team_model_name],
-                member_model_names={
-                    member: budgeted[model_name] for member, model_name in turn_models.member_model_names.items()
-                },
-            )
+        budgeted = {
+            model_name: self._budgeted_model(request, model_name)
+            for model_name in {turn_models.team_model_name, *turn_models.member_model_names.values()}
+        }
+        turn_models = TeamTurnModelSelection(
+            team_model_name=budgeted[turn_models.team_model_name],
+            member_model_names={
+                member: budgeted[model_name] for member, model_name in turn_models.member_model_names.items()
+            },
+        )
         request = await self._prepare_admitted_locked_turn(
             request,
             resolved_target=resolved_target,
@@ -4583,36 +4666,6 @@ class ResponseRunner:
         # What the reply showed before this turn's delivery, which its terminal handling continues from.
         team_existing_event_id = _existing_event_id(request)
         team_replaceable_placeholder = _replaceable_placeholder(request)
-        reason = team_request.resolution_reason
-        if reason is not None:
-            response_identity = self._response_identity(request, response_kind="team")
-            lifecycle = self._build_lifecycle(identity=response_identity, request=request)
-            progress = _DeliveryProgress()
-
-            async def deliver_resolution_reason(message_id: str | None) -> None:
-                progress.settle(
-                    await self.deps.delivery_gateway.deliver_final(
-                        FinalDeliveryRequest(
-                            target=resolved_target,
-                            existing_event_id=message_id,
-                            response_text=reason,
-                            identity=response_identity,
-                            tool_trace=None,
-                            extra_content=None,
-                        ),
-                    ),
-                )
-
-            return await self._run_and_settle_locked_response(
-                request,
-                target=resolved_target,
-                lifecycle=lifecycle,
-                progress=progress,
-                response_function=deliver_resolution_reason,
-                user_id=request.user_id,
-                build_post_response_outcome=lambda _final_outcome: ResponseOutcome(),
-                post_response_deps=lambda: self._post_response_deps(request),
-            )
         requester_user_id = request.user_id or ""
         memory_prompt, memory_thread_history, prepared_prompt, model_thread_history = _prepare_memory_and_model_context(
             request.prompt,
@@ -4623,7 +4676,6 @@ class ResponseRunner:
             timezone=self.deps.runtime.config.get_entity_timezone(self.deps.agent_name),
             model_prompt=request.model_prompt,
         )
-        assert turn_models is not None
         model_name = turn_models.team_model_name
         member_model_names = turn_models.member_model_names
         # A resumed reply is a stream, and a blocking answer would replace what it already showed.

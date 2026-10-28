@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from typing import Any
 
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.constants import RuntimePaths
 
 
@@ -87,7 +87,7 @@ def _restricted_config(tmp_path: Path) -> Config:
 def _coordinator(
     runtime_paths: RuntimePaths,
     config: Config | None,
-    bots: dict[str, AgentBot | TeamBot],
+    bots: dict[str, AgentBot],
 ) -> TodoPokeRuntimeCoordinator:
     return TodoPokeRuntimeCoordinator(
         runtime_paths=runtime_paths,

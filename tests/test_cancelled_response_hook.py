@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import TeamBot
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -51,7 +50,7 @@ from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
-from tests.bot_helpers import make_test_team_bot
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -73,7 +72,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
-    from mindroom.bot import TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.event_journal import EventJournalStore, PrincipalStore
     from mindroom.reply_scope import SpanHandle
 
@@ -172,7 +171,7 @@ def _response_lifecycle(
     )
 
 
-def _team_bot(tmp_path: Path) -> TeamBot:
+def _team_bot(tmp_path: Path) -> AgentBot:
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     team_user = AgentMatrixUser(
@@ -181,7 +180,7 @@ def _team_bot(tmp_path: Path) -> TeamBot:
         display_name="Team Bot",
         password=TEST_PASSWORD,
     )
-    bot = make_test_team_bot(
+    bot = make_test_agent_bot(
         team_user,
         tmp_path,
         config=config,
@@ -409,7 +408,7 @@ async def test_response_hook_service_skips_when_no_hooks(tmp_path: Path) -> None
 
 @pytest.mark.asyncio
 async def test_team_bot_empty_prompt_emits_cancelled_hook_once(tmp_path: Path) -> None:
-    """TeamBot empty prompts must finalize through lifecycle so message:cancelled fires exactly once."""
+    """A team's empty prompts must finalize through lifecycle so message:cancelled fires exactly once."""
     bot = _team_bot(tmp_path)
 
     with (

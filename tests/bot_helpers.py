@@ -68,7 +68,7 @@ from tests.journal_helpers import admit_dispatch_event
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.coalescing.gate import ReadyPendingEvent
     from mindroom.config.knowledge import KnowledgeBaseConfig
     from mindroom.conversation_resolver import MessageContext
@@ -92,15 +92,6 @@ def make_test_agent_bot(*args: Any, **kwargs: Any) -> AgentBot:  # noqa: ANN401
             membership_sync.memberships if membership_sync is not None else AgentReplyMembershipIndex()
         )
     return RuntimeAgentBot(*args, **kwargs)
-
-
-def make_test_team_bot(*args: Any, **kwargs: Any) -> TeamBot:  # noqa: ANN401
-    """Build a standalone test team bot with an explicit real membership index."""
-    from mindroom.agent_reply_membership import AgentReplyMembershipIndex  # noqa: PLC0415
-    from mindroom.bot import TeamBot as RuntimeTeamBot  # noqa: PLC0415
-
-    kwargs.setdefault("agent_reply_memberships", AgentReplyMembershipIndex())
-    return RuntimeTeamBot(*args, **kwargs)
 
 
 def _stream_outcome(
@@ -279,7 +270,7 @@ def _replace_turn_policy_deps(bot: AgentBot, **changes: object) -> TurnPolicy:
     return shared_replace_turn_policy_deps(bot, **changes)
 
 
-def _turn_store(bot: AgentBot | TeamBot) -> TurnStore:
+def _turn_store(bot: AgentBot) -> TurnStore:
     """Return the real turn store behind one wrapped bot."""
     return unwrap_extracted_collaborator(bot._turn_store)
 
@@ -301,7 +292,7 @@ def _stored_facts(record: TurnRecord) -> TurnRecord:
     )
 
 
-async def assert_turn_answered(bot: AgentBot | TeamBot, expected: TurnRecord) -> None:
+async def assert_turn_answered(bot: AgentBot, expected: TurnRecord) -> None:
     """Assert the bot's turn store holds ``expected`` answered, as its terminal write recorded it."""
     stored = await _turn_store(bot).get_turn_record(expected.source_event_ids[0])
     assert stored is not None, f"no turn recorded for {expected.source_event_ids}"
@@ -309,7 +300,7 @@ async def assert_turn_answered(bot: AgentBot | TeamBot, expected: TurnRecord) ->
     assert _stored_facts(stored) == _stored_facts(expected)
 
 
-async def assert_no_turn_answered(bot: AgentBot | TeamBot) -> None:
+async def assert_no_turn_answered(bot: AgentBot) -> None:
     """Assert the bot's agent has recorded no turn answered."""
     store = _turn_store(bot)
     rows = await store.deps.turn_records.read(
@@ -369,7 +360,7 @@ def _matrix_room(
 
 
 def _policy_dispatch(
-    bot: AgentBot | TeamBot,
+    bot: AgentBot,
     room: nio.MatrixRoom,
     context: MessageContext,
     requester_user_id: str,
@@ -509,7 +500,7 @@ def _fake_indexing_settings(base_id: str) -> IndexingSettings:
 
 
 def _configured_team_test_config(runtime_root: Path) -> Config:
-    """Return a runtime-bound config with one configured team for TeamBot tests."""
+    """Return a runtime-bound config with one configured team for team bot tests."""
     return _runtime_bound_config(
         with_current_room_member_access(
             Config(
@@ -533,7 +524,7 @@ def _configured_team_test_config(runtime_root: Path) -> Config:
 
 
 def _configured_team_user(config: Config, runtime_paths: RuntimePaths) -> AgentMatrixUser:
-    """Return the Matrix user for the configured TeamBot test team."""
+    """Return the Matrix user for the configured test team."""
     team_name = "support_team"
     ids = entity_ids(config, runtime_paths)
     team_config = config.teams[team_name]

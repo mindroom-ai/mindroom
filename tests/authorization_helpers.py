@@ -8,7 +8,7 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.commands.handler import CommandHandlerContext
     from mindroom.matrix.identity import MatrixID
     from mindroom.orchestration.external_trigger_runtime import ExternalTriggerRuntimeCoordinator
@@ -93,7 +93,7 @@ def make_test_external_trigger_runtime_coordinator(
     return ExternalTriggerRuntimeCoordinator(*args, **kwargs)
 
 
-def make_test_bot_for_entity(*args: Any, **kwargs: Any) -> AgentBot | TeamBot | None:  # noqa: ANN401
+def make_test_bot_for_entity(*args: Any, **kwargs: Any) -> AgentBot:  # noqa: ANN401
     """Build a detached entity bot with an explicit isolated membership index."""
     from mindroom.bot import create_bot_for_entity  # noqa: PLC0415
 

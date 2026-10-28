@@ -162,7 +162,6 @@ if TYPE_CHECKING:
     from mindroom.matrix.thread_history_result import ThreadHistoryResult
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
-    from mindroom.turn_policy import _ResponderAvailability as ResponderAvailability
     from mindroom.turns.facts import IngressFacts
 
 _ROOM_ID = "!focused:localhost"
@@ -382,9 +381,6 @@ class _SpyTurnPolicy:
         observed_room: nio.MatrixRoom | None = None,
     ) -> bool:
         return self.inner.can_reply_to_sender_in_room(sender_id, room_id, observed_room=observed_room)
-
-    def responder_availability(self) -> ResponderAvailability:
-        return self.inner.responder_availability()
 
     async def responder_candidates_for_room(
         self,
