@@ -3605,18 +3605,6 @@ class ResponseRunner:
             failure_reason=outcome.failure_reason,
         )
 
-    async def _end_failed_stream(self, target: MessageTarget, *, failure_reason: str) -> FinalDeliveryOutcome:
-        """End the reply of a stream that stopped on a failure: its span exit notes the failure below what it shows."""
-        outcome = self.deps.delivery_gateway.terminal_outcome_without_visible_event(
-            terminal_status="error",
-            failure_reason=failure_reason,
-        )
-        handle = current_span()
-        if handle is None or handle.exited:
-            return outcome
-        # A failure ends its reply failed whether or not delivery started; only an interruption tells them apart.
-        return await self._end_span_after_outcome(handle, outcome, target=target, delivery_started=False)
-
     def _build_lifecycle(
         self,
         *,
@@ -4064,10 +4052,18 @@ class ResponseRunner:
         response_identity = self._response_identity(request, response_kind=turn.response_kind)
         lifecycle = self._build_lifecycle(identity=response_identity, request=request)
 
-        def build_post_response_outcome(_delivery_outcome: FinalDeliveryOutcome) -> ResponseOutcome:
+        # Set once the turn's generation returned a delivery; a turn cut short later, such as by a Stop during
+        # message:before_response, has a completed record but did not deliver it.
+        generated: list[FinalDeliveryOutcome] = []
+
+        def build_post_response_outcome(final_delivery_outcome: FinalDeliveryOutcome) -> ResponseOutcome:
             return ResponseOutcome(
                 response_run_id=recorder.run_id or turn.run_id,
-                run_succeeded=recorder.outcome == "completed",
+                run_succeeded=(
+                    recorder.outcome == "completed"
+                    if generated
+                    else final_delivery_outcome.terminal_status == "completed" and not final_delivery_outcome.suppressed
+                ),
                 response_target=turn.response_target,
                 thread_summary_message_count_hint=self._thread_summary_message_count_hint(request),
                 thread_summary_entity_name=self.deps.agent_name,
@@ -4098,6 +4094,7 @@ class ResponseRunner:
                         key=request.participation.decline_reaction,
                         kind="participation_decline",
                     )
+                generated.append(delivery)
                 progress.settle(delivery)
 
             return await self._run_and_settle_locked_response(
@@ -4268,7 +4265,11 @@ class ResponseRunner:
             if skipped := _skip_unapproved_response(participation):
                 return skipped
             failure_reason = raised.failure_reason if isinstance(raised, StreamingDeliveryError) else str(error)
-            return await self._end_failed_stream(runtime.resolved_target, failure_reason=failure_reason)
+            # The span's exit notes the failure below what the reply shows.
+            return self.deps.delivery_gateway.terminal_outcome_without_visible_event(
+                terminal_status="error",
+                failure_reason=failure_reason,
+            )
 
         if participation is not None and participation.is_silent:
             return _skipped_participation_outcome()

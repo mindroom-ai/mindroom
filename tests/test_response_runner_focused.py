@@ -5828,12 +5828,12 @@ async def test_process_shutdown_skips_stream_terminalization_after_cancelled_gen
         yield "chunk"
 
     finalize = AsyncMock(return_value=_completed_outcome("$stream"))
-    end_failed_stream = AsyncMock()
+    end_interrupted_span = AsyncMock()
 
     with (
         patch.object(DeliveryGateway, "deliver_stream", new=AsyncMock(side_effect=cancelled_then_failed_delivery)),
         patch.object(DeliveryGateway, "finalize_streamed_response", new=finalize),
-        patch.object(coordinator, "_end_failed_stream", new=end_failed_stream),
+        patch.object(DeliveryGateway, "end_interrupted_span", new=end_interrupted_span),
         _agent_turn(fake_stream, streaming=True),
     ):
         task = asyncio.create_task(coordinator.generate_response(_plain_request(_target())))
@@ -5844,7 +5844,7 @@ async def test_process_shutdown_skips_stream_terminalization_after_cancelled_gen
             await task
 
     finalize.assert_not_awaited()
-    end_failed_stream.assert_not_awaited()
+    end_interrupted_span.assert_not_awaited()
 
 
 @pytest.mark.asyncio

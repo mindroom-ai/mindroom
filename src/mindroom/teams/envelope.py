@@ -580,7 +580,7 @@ class _TeamTurn:
         )
         return attempt, stream_with_llm_request_log_context(events, request_context=request_context)
 
-    async def run_streaming_attempt(
+    async def run_attempt(
         self,
         run: TurnRunState,
         continuation_state: TurnContinuationRunState,
@@ -598,7 +598,7 @@ class _TeamTurn:
                         shown = chunk.content
                         yield chunk
         except Exception as error:
-            logger.exception("team_streaming_failed", agents=attempt.members.display_names)
+            logger.exception("team_response_failed", agents=attempt.members.display_names)
             yield AttemptResolved(
                 HandledAttempt(
                     self.error_text(error),
@@ -863,7 +863,7 @@ async def team_response_stream(
 
     adapter = TurnAdapter[TeamStreamChunk](
         load_scope=turn.load_scope,
-        run_attempt=turn.run_streaming_attempt,
+        run_attempt=turn.run_attempt,
         finalize_attempt=turn.finalize_attempt,
         make_text_chunk=lambda text: text,
         user_message=ctx.prompt,

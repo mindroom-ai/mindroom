@@ -104,7 +104,7 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.model_loop import LoopHooks
@@ -273,24 +273,21 @@ class _StreamingAttemptState:
         return self.tool_tracker.completed_tools
 
 
-@dataclass(frozen=True)
-class _AgentTurnCallbacks:
-    """The agent's adapter callbacks for its turn driver."""
-
-    load_scope: Callable[[], ScopeSessionContext]
-    on_scope_loaded: Callable[[ScopeSessionContext | None], None]
-    discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]
-
-
-def _build_agent_turn_callbacks(
+def _agent_turn_adapter(
     *,
     agent_name: str,
+    user_message: str,
     session_id: str,
     runtime_paths: RuntimePaths,
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
-) -> _AgentTurnCallbacks:
-    """Build the entity-specific turn-driver callbacks for one agent response."""
+    run_attempt: Callable[
+        [TurnRunState, TurnContinuationRunState],
+        AsyncIterator[AIStreamChunk | AttemptResolved],
+    ],
+    finalize_attempt: Callable[[ScopeSessionContext | None], Awaitable[None]],
+) -> TurnAdapter[AIStreamChunk]:
+    """Return the turn driver's adapter for one agent response: its scope, its attempts, and its storage callbacks."""
 
     def _load_scope() -> ScopeSessionContext:
         return load_scope_session(
@@ -316,10 +313,14 @@ def _build_agent_turn_callbacks(
             output_tokens=discard.output_tokens,
         )
 
-    return _AgentTurnCallbacks(
+    return TurnAdapter[AIStreamChunk](
         load_scope=_load_scope,
-        on_scope_loaded=_on_scope_loaded,
+        run_attempt=run_attempt,
         discard_empty_run=_discard_empty_run,
+        on_scope_loaded=_on_scope_loaded,
+        finalize_attempt=finalize_attempt,
+        make_text_chunk=TextDelta,
+        user_message=user_message,
     )
 
 
@@ -1229,7 +1230,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     ctx = _with_background_tool_jobs(ctx, config, runtime_paths)
     sinks = sinks or TurnSinks()
     agent_name = ctx.entity_label
-    logger.info("AI streaming request", agent=agent_name, room_id=ctx.room_id)
+    logger.info("AI request", agent=agent_name, room_id=ctx.room_id)
     session_id = _turn_session_id(ctx)
     media_inputs = ctx.media or MediaInputs()
     show_tool_calls = ctx.show_tool_calls
@@ -1241,24 +1242,16 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         yield get_user_friendly_error_message(e, agent_name, runtime_paths=runtime_paths)
         return
 
-    callbacks = _build_agent_turn_callbacks(
-        agent_name=agent_name,
-        session_id=session_id,
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=ctx.execution_identity,
-    )
-
     attempt_started = False
 
-    async def _finalize_streaming_attempt(scope_context: ScopeSessionContext | None) -> None:
+    async def _finalize_attempt(scope_context: ScopeSessionContext | None) -> None:
         nonlocal attempt_started
         if not attempt_started:
             return
         attempt_started = False
         ai_runtime.register_scope_notice_storage(scope_context=scope_context, entity_name=agent_name)
 
-    async def _run_streaming_attempt(  # noqa: C901
+    async def _run_attempt(  # noqa: C901
         run: TurnRunState,
         continuation_state: TurnContinuationRunState,
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
@@ -1275,7 +1268,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 turn_recorder=run.record,
             )
         except Exception as e:
-            logger.exception("Error preparing agent for streaming", agent=agent_name)
+            logger.exception("Error preparing agent", agent=agent_name)
             if skipped := skip_unapproved_attempt(ctx.participation, reason="preparation_failed"):
                 yield AttemptResolved(skipped)
                 return
@@ -1392,14 +1385,15 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             ),
         )
 
-    adapter = TurnAdapter[AIStreamChunk](
-        load_scope=callbacks.load_scope,
-        run_attempt=_run_streaming_attempt,
-        discard_empty_run=callbacks.discard_empty_run,
-        on_scope_loaded=callbacks.on_scope_loaded,
-        finalize_attempt=_finalize_streaming_attempt,
-        make_text_chunk=TextDelta,
+    adapter = _agent_turn_adapter(
+        agent_name=agent_name,
         user_message=_compose_current_turn_prompt(raw_prompt=ctx.prompt, model_prompt=ctx.model_prompt),
+        session_id=session_id,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=ctx.execution_identity,
+        run_attempt=_run_attempt,
+        finalize_attempt=_finalize_attempt,
     )
     response_stream = stream_response_turn(
         ctx,

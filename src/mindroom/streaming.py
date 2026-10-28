@@ -813,7 +813,9 @@ class StreamingResponse:
             )
         try:
             final_delivery = await self._prepare_delivery_async(is_final=True, allow_empty_progress=has_placeholder)
-            send_succeeded = final_delivery is not None and await self._send_prepared_delivery(
+            # A stream with text, or a placeholder it may end with nothing, always has a final payload.
+            assert final_delivery is not None
+            send_succeeded = await self._send_prepared_delivery(
                 client,
                 prepared_delivery=final_delivery,
                 is_final=True,
@@ -845,7 +847,7 @@ class StreamingResponse:
                 failure_reason=f"terminal_update_exception:{exc.__class__.__name__}",
                 interactive_metadata=self._last_committed_interactive_metadata,
             )
-        if final_delivery is None or not send_succeeded:
+        if not send_succeeded:
             logger.warning("Failed to persist terminal stream status", event_id=self.event_id, room_id=self.room_id)
             committed_rendered_body, committed_visible_body_state = self._committed_terminal_snapshot()
             return StreamTransportOutcome(

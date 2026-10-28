@@ -238,6 +238,23 @@ async def test_a_before_response_cancellation_ends_the_reply_stopped_by_the_user
 
 
 @pytest.mark.asyncio
+async def test_a_reply_stopped_in_before_response_runs_no_successful_run_effects(tmp_path: Path) -> None:
+    """A Stop in before_response leaves a completed run that was never delivered, so memory and skill review skip it."""
+    coordinator, _config, _runtime_paths = _before_response_stopped_runner(tmp_path)
+    effects = AsyncMock(return_value=None)
+
+    with (
+        patch("mindroom.response_runner.stream_agent_response", new=streamed_answer(AsyncMock(return_value="Hello!"))),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=effects),
+    ):
+        await coordinator.generate_response(_thread_request())
+
+    effects.assert_awaited_once()
+    _final, outcome, _deps = effects.await_args.args
+    assert outcome.run_succeeded is False
+
+
+@pytest.mark.asyncio
 async def test_a_user_stop_mid_stream_ends_the_reply_stopped_by_the_user(
     tmp_path: Path,
 ) -> None:
