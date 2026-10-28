@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from mindroom.llm.messages import Message, is_own_model_message
+from mindroom.llm.messages import is_own_model_message
 from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Sequence
+
+    from mindroom.llm.messages import Message
 
 __all__ = ["legacy_failure_text", "stored_content"]
 
@@ -48,13 +50,11 @@ _TEAM_PAUSED_NOTICE_HEADER = "Team run paused. The following require input:\n"
 #   tests/llm/test_legacy_run_content.py::test_a_reply_the_model_wrote_that_matches_a_notice_keeps_its_content,
 #   tests/llm/test_legacy_run_content.py::test_a_requester_quoting_a_notice_leaves_it_read_as_no_content,
 #   tests/llm/test_legacy_run_content.py::test_an_earlier_reply_the_input_carried_is_not_the_run_s_answer
-def stored_content(data: Mapping[str, Any]) -> str | None:
-    """Return the content a stored run dict holds, or None when it holds a paused notice instead of the model's text."""
-    content = data.get("content")
+def stored_content(content: str | None, messages: Sequence[Message]) -> str | None:
+    """Return a stored run's content, or None when it holds a paused notice instead of the model's text."""
     if not isinstance(content, str) or not _is_paused_notice(content):
         return content
-    answers = [Message.from_dict(message) for message in data.get("messages") or ()]
-    own = [message.get_content_string().strip() for message in answers if is_own_model_message(message)]
+    own = [message.get_content_string().strip() for message in messages if is_own_model_message(message)]
     return content if any(_is_paused_notice(text) for text in own) else None
 
 

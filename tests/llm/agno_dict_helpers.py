@@ -1,7 +1,7 @@
 """What the owned codecs write for a dict Agno stored: the same dict minus the keys the owned types dropped.
 
-A run's content that is a paused notice, as Agno and the owned runtime up to v2026.10.651 stored for a run paused
-without text, goes too, since the owned reader reads it as no content (``mindroom.llm.legacy_run_content``).
+A run's content that is a paused notice, as earlier releases stored for a run paused without text, goes too, since
+the owned reader reads it as no content (see the ``LEGACY_COMPAT`` marker in ``mindroom.llm.legacy_run_content``).
 """
 
 from __future__ import annotations

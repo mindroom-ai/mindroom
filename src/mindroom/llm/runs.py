@@ -383,17 +383,18 @@ def _common_from_dict(data: Mapping[str, Any]) -> dict[str, Any]:
     tools = data.get("tools")
     requirements = data.get("requirements")
     metrics = data.get("metrics")
+    messages = [Message.from_dict(message) for message in data.get("messages") or []]
     values: dict[str, Any] = {
         "run_id": data["run_id"],
         "session_id": data.get("session_id"),
         "parent_run_id": data.get("parent_run_id"),
         "user_id": data.get("user_id"),
         "status": _stored_status(data.get("status", RunStatus.running.value)),
-        "content": stored_content(data),
+        "content": stored_content(data.get("content"), messages),
         "error": data.get("error"),
         "model": data.get("model"),
         "model_provider": data.get("model_provider"),
-        "messages": [Message.from_dict(message) for message in data.get("messages") or []],
+        "messages": messages,
         "tools": None if tools is None else [ToolExecution.from_dict(tool) for tool in tools],
         "uncounted_tool_calls": data.get("uncounted_tool_calls", 0),
         "requirements": None if requirements is None else [RunRequirement.from_dict(item) for item in requirements],
