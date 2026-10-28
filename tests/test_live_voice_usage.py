@@ -135,6 +135,10 @@ async def test_realtime_call_tokens_count_once_for_the_caller(tmp_path: Path) ->
         ("gpt-realtime-2.1", "OpenAI"),
         ("gpt-realtime-2.1", "OpenAI"),
     ]
+    # The call's first usage created the caller's conversation, dated when the call started.
+    conversation = storage.load_session("call", "agent")
+    assert conversation is not None
+    assert conversation.created_at == 1_700_000_000
 
 
 @pytest.mark.asyncio
