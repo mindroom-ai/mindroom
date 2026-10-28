@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.event_journal import CallKey, EventJournalStore, approval_signals
-from mindroom.event_journal.approval_signals import PausedReply
+from mindroom.event_journal.approval_signals import DecidedCard, PausedReply
 from mindroom.event_journal.sqlite_backend import SqliteBackend
 
 if TYPE_CHECKING:
@@ -165,6 +165,34 @@ async def test_a_listener_on_another_loop_hears_a_pause_and_its_end_in_commit_or
     await store.close()
 
 
+async def test_a_listener_that_stopped_hears_nothing_its_loop_had_not_run_yet(tmp_path: Path) -> None:
+    """A change handed to a busy listener loop is dropped when the listener stops before that loop runs it."""
+    store = EventJournalStore.open_sqlite(tmp_path / "journal.db")
+    heard: list[object] = []
+    subscribed, published = threading.Event(), threading.Event()
+
+    def listen_on_its_own_loop() -> None:
+        async def listen() -> None:
+            stop = store.approval_signals.follow_paused_replies(_PRINCIPAL, paused=heard.append, ended=heard.append)
+            subscribed.set()
+            # Blocking keeps this loop from running the change handed to it meanwhile.
+            assert published.wait(_TIMEOUT_SECONDS)
+            stop()
+            await asyncio.sleep(0)
+
+        asyncio.run(listen())
+
+    listener = threading.Thread(target=listen_on_its_own_loop, name="second-loop-listener", daemon=True)
+    listener.start()
+    assert await asyncio.to_thread(subscribed.wait, _TIMEOUT_SECONDS)
+    await store.backend.write(lambda transaction: approval_signals.paused(transaction, _PAUSED))
+    published.set()
+    await asyncio.to_thread(listener.join, _TIMEOUT_SECONDS)
+
+    assert heard == []
+    await store.close()
+
+
 async def test_following_reports_the_replies_paused_now_and_nothing_after_it_stops(tmp_path: Path) -> None:
     """Following hears the current set before it returns, then each change, until it stops."""
     store = EventJournalStore.open_sqlite(tmp_path / "journal.db")
@@ -216,4 +244,21 @@ async def test_a_decision_wakes_the_waiter_registered_for_its_call(tmp_path: Pat
     with signals.decision_wakeup(CallKey.detached("tool-job:job-1", "call-2")) as other:
         await store.backend.write(lambda transaction: approval_signals.decided(transaction, call, None))
         assert not other.is_set()
+    await store.close()
+
+
+async def test_a_decision_reports_the_card_whose_terminal_edit_it_queued(tmp_path: Path) -> None:
+    """A decided-card listener hears each decision that queued a card's terminal edit, until it stops."""
+    store = EventJournalStore.open_sqlite(tmp_path / "journal.db")
+    call = CallKey.detached("tool-job:job-1", "call-1")
+    card = DecidedCard("router@shared", "script-approval:tool-job:job-1:call-1", "$card", "!room:localhost")
+    cards: list[DecidedCard] = []
+    stop = store.approval_signals.follow_decided_cards(cards.append)
+
+    await store.backend.write(lambda transaction: approval_signals.decided(transaction, call, card))
+    await store.backend.write(lambda transaction: approval_signals.decided(transaction, call, None))
+    stop()
+    await store.backend.write(lambda transaction: approval_signals.decided(transaction, call, card))
+
+    assert cards == [card]
     await store.close()

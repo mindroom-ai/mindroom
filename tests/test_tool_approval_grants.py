@@ -2050,7 +2050,8 @@ async def test_an_active_grant_does_not_approve_a_call_already_past_its_deadline
         assert card is not None
         assert card.kind == "request"
         assert card.offers_timed_approval
-        assert await _call_row(journal, "past-deadline") == (None, None)
+        # The grant never approves it; the deadline sweep the card's publication woke may already have expired it.
+        assert await _call_row(journal, "past-deadline") in {(None, None), ("expired", None)}
     finally:
         await manager.shutdown()
 

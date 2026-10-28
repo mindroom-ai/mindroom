@@ -77,6 +77,7 @@ Matrix sync callback
 | `event_journal/approval_calls.py` | One row per gated call, whatever owns it, and `resolve_call`, the only writer of a call's decision and its card's terminal edit |
 | `event_journal/approval_cards.py` | Approval cards and receipts: reservation, the events that show them, terminal edits, retirement, departure cleanup, and the typed `ApprovalCardView` clicks and recovery read |
 | `event_journal/approval_grants.py` | Timed grants: the consent a card offers, the grant it originates, its batch, and revocation edits |
+| `event_journal/approval_signals.py` | `ApprovalSignals`: what committed approval writes tell the process, each principal's paused replies that bots' holds follow and each decided call that wakes its waiter and sends its card's terminal edit |
 | `event_journal/legacy_approval_records.py` | One-time conversion of an earlier release's per-kind approval tables to one row per call and card |
 | `event_journal/legacy_response_attempts.py` | One-time cancellation of the approvals an earlier release left pending, and removal of the tables that kept their reply identity |
 | `event_journal/legacy_approval_failures.py` | One-time conversion of the free-text failure reasons failing approval continuations stored into their failure kind and detail |

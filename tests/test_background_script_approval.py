@@ -12,6 +12,7 @@ import pytest
 from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
 from mindroom.config.agent import AgentConfig
 from mindroom.event_journal import (
+    JOB_ENDED_REASON,
     ApprovalCardReservation,
     ApprovalCardView,
     BackgroundApprovalDecision,
@@ -20,6 +21,7 @@ from mindroom.event_journal import (
     DepartureSource,
     EventJournalStore,
     MatrixDelivery,
+    tool_job_run_id,
 )
 from mindroom.event_journal.approval_store import ApprovalStore
 from mindroom.script_runs.broker import ScriptToolBroker, ScriptToolCallRequest
@@ -450,6 +452,126 @@ async def test_a_waiting_call_wakes_as_its_decision_commits(
         assert await manager.settle_background_approval(_origin(), reason="Cancelled.") is True
         decision = await asyncio.wait_for(decision_task, timeout=_SETTLED_DECISION_WAIT_SECONDS)
         assert decision == BackgroundApprovalDecision(status="denied", reason="Cancelled.")
+    finally:
+        if not decision_task.done():
+            decision_task.cancel()
+            await asyncio.gather(decision_task, return_exceptions=True)
+        await manager.shutdown()
+        await journal.close()
+
+
+def _recording_sends(manager: ApprovalManager) -> tuple[list[tuple[str, DeliveryStage]], asyncio.Event]:
+    """Record every approval delivery the manager sends, and set the returned event at the first terminal edit."""
+    sent: list[tuple[str, DeliveryStage]] = []
+    final_sent = asyncio.Event()
+    send = manager.transport.send_approval_delivery
+
+    async def record(delivery: MatrixDelivery) -> str:
+        sent.append((delivery.delivery_id, delivery.stage))
+        if delivery.stage is DeliveryStage.FINAL:
+            final_sent.set()
+        return await send(delivery)
+
+    manager.transport.send_approval_delivery = record
+    return sent, final_sent
+
+
+@pytest.mark.asyncio
+async def test_an_ended_jobs_card_shows_its_denial_as_the_end_commits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The save of a job's end denies its card in the journal, and the card's terminal edit is sent at once."""
+    manager, journal, _initial_sent = await _approval_manager(tmp_path)
+    sent, final_sent = _recording_sends(manager)
+    origin = _origin(run_id=tool_job_run_id("job-1"))
+    waiting = asyncio.Event()
+    original_read = ApprovalStore.detached_decision
+
+    async def note_undecided(approvals: ApprovalStore, call: CallKey) -> BackgroundApprovalDecision | None:
+        decision = await original_read(approvals, call)
+        if decision is None:
+            waiting.set()
+        return decision
+
+    monkeypatch.setattr(ApprovalStore, "detached_decision", note_undecided)
+    decision_task = asyncio.create_task(
+        manager.request_background_approval(
+            owner_kind="job",
+            origin=origin,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            agent_name="watcher",
+            requester_id="@alice:localhost",
+            approver_user_id="@alice:localhost",
+            tool_name="add",
+            arguments={"a": 1, "b": 2},
+            timeout_seconds=30.0,
+        ),
+    )
+    jobs = journal.tool_jobs("runtime-1")
+    try:
+        await asyncio.wait_for(waiting.wait(), timeout=_SETTLED_DECISION_WAIT_SECONDS)
+        await jobs.take_ownership()
+        await jobs.accept("job-1", "{}")
+        # No manager decides this call: the job's own save does.
+        await jobs.save("job-1", "{}", ended=True)
+
+        await asyncio.wait_for(final_sent.wait(), timeout=_SETTLED_DECISION_WAIT_SECONDS)
+        decision = await asyncio.wait_for(decision_task, timeout=_SETTLED_DECISION_WAIT_SECONDS)
+        assert decision == BackgroundApprovalDecision(status="denied", reason=JOB_ENDED_REASON)
+        assert sent == [
+            (f"script-approval:{origin.run_id}:call-1", DeliveryStage.INITIAL),
+            (f"script-approval:{origin.run_id}:call-1", DeliveryStage.FINAL),
+        ]
+    finally:
+        if not decision_task.done():
+            decision_task.cancel()
+            await asyncio.gather(decision_task, return_exceptions=True)
+        await manager.shutdown()
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_a_decision_the_manager_writes_sends_its_cards_terminal_edit_once(tmp_path: Path) -> None:
+    """The manager's own flush and the one its decided-card signal starts are one send, whichever runs first."""
+    manager, journal, initial_sent = await _approval_manager(tmp_path)
+    sent, _final_sent = _recording_sends(manager)
+    decision_task = asyncio.create_task(
+        manager.request_background_approval(
+            owner_kind="script",
+            origin=_origin(),
+            room_id="!room:localhost",
+            thread_id="$thread",
+            agent_name="watcher",
+            requester_id="@alice:localhost",
+            approver_user_id="@alice:localhost",
+            tool_name="add",
+            arguments={"a": 1, "b": 2},
+            timeout_seconds=30.0,
+        ),
+    )
+    try:
+        await asyncio.wait_for(initial_sent.wait(), timeout=_SETTLED_DECISION_WAIT_SECONDS)
+        await _wait_for_pending_card(journal)
+        result = await handle_card_response_for_test(
+            manager,
+            room_id="!room:localhost",
+            sender_id="@alice:localhost",
+            card_event_id="$approval",
+            status="approved",
+            authorize_responder=lambda _entity_name: True,
+        )
+        assert result.consumed is True
+        decision = await asyncio.wait_for(decision_task, timeout=_SETTLED_DECISION_WAIT_SECONDS)
+        assert decision.status == "approved"
+        # The decided-card send the commit started has finished too.
+        await asyncio.gather(*manager._decided_flushes)
+
+        assert sent == [
+            ("script-approval:run-1:call-1", DeliveryStage.INITIAL),
+            ("script-approval:run-1:call-1", DeliveryStage.FINAL),
+        ]
     finally:
         if not decision_task.done():
             decision_task.cancel()

@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from mindroom.approval.transport import ApprovalMatrixTransport
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalDeliveryView, RecordedApprovalDecision, ScheduledApprovalArmState
+    from mindroom.event_journal.approval_signals import DecidedCard
 
 _ApprovalStatus = Literal["approved", "denied", "expired"]
 _ResolutionStatus = Literal["approved", "denied"]
@@ -233,6 +234,8 @@ class ApprovalManager:
         init=False,
         repr=False,
     )
+    # The terminal edits of cards decided as they committed, wherever the decision was written.
+    _decided_flushes: set[asyncio.Task[bool]] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Attach recovery to its owning runtime after construction."""
@@ -931,14 +934,13 @@ class ApprovalManager:
         *,
         room_id: str | None = None,
     ) -> bool:
-        """Deliver one committed card decision, preserving INITIAL before FINAL."""
+        """Deliver one committed card decision, preserving INITIAL before FINAL; return whether the card retired."""
         assert self.cards is not None
         try:
             if card_event_id is None:
                 card_event_id = await self._worker().flush(delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
-                if card_event_id is None:
-                    return False
-            edit_event_id = await self._worker().flush(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
+            if card_event_id is not None:
+                await self._worker().flush(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
         except Exception:
             logger.warning(
                 "approval_terminal_delivery_deferred",
@@ -947,7 +949,9 @@ class ApprovalManager:
                 exc_info=True,
             )
             return False
-        return edit_event_id is not None and await self.cards.approvals.retire_approval_card(delivery_id=delivery_id)
+        # A card retires once its terminal edit is acknowledged, and one that another flush of the same decision
+        # already retired is delivered too.
+        return await self.cards.approvals.retire_approval_card(delivery_id=delivery_id)
 
     async def expire_continuation_cards(self, continuation_id: str, reason: str) -> bool:
         """Enqueue and flush expiry for every card owned by one failed continuation, with its failure's reason."""
@@ -1099,17 +1103,35 @@ class ApprovalManager:
         self._deadline_wakeup.set()
 
     async def _run_deadline_sweep(self) -> None:
-        while True:
-            self._deadline_wakeup.clear()
-            with suppress(TimeoutError):
-                await asyncio.wait_for(self._deadline_wakeup.wait(), timeout=_DEADLINE_SWEEP_SECONDS)
-            try:
-                await self.recover_cards_on_startup()
-            except Exception:
-                logger.warning("approval_deadline_sweep_failed", exc_info=True)
+        # While the sweep runs, a decision written outside the manager, such as a job's end or a departure, reaches
+        # Matrix as it commits instead of at the next sweep; one the manager writes itself is sent once all the same.
+        cards = self.cards
+        stop_following = None if cards is None else cards.approvals.signals.follow_decided_cards(self._card_decided)
+        try:
+            while True:
+                self._deadline_wakeup.clear()
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(self._deadline_wakeup.wait(), timeout=_DEADLINE_SWEEP_SECONDS)
+                try:
+                    await self.recover_cards_on_startup()
+                except Exception:
+                    logger.warning("approval_deadline_sweep_failed", exc_info=True)
+        finally:
+            if stop_following is not None:
+                stop_following()
+
+    def _card_decided(self, card: DecidedCard) -> None:
+        """Send the terminal edit of a card whose call was just decided."""
+        flush = asyncio.create_task(
+            self._flush_card_delivery(card.delivery_id, card.card_event_id, room_id=card.room_id),
+            name=f"approval_decided_card:{card.delivery_id}",
+            context=Context(),
+        )
+        self._decided_flushes.add(flush)
+        flush.add_done_callback(self._decided_flushes.discard)
 
     async def shutdown(self) -> None:
-        """Stop the domain deadline scanner; durable delivery debt remains in the outbox."""
+        """Stop the domain deadline scanner and decided-card sends; durable delivery debt remains in the outbox."""
         if self.recovery is not None:
             await self.recovery.close()
         task = self._deadline_task
@@ -1117,6 +1139,10 @@ class ApprovalManager:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        flushes = tuple(self._decided_flushes)
+        for flush in flushes:
+            flush.cancel()
+        await asyncio.gather(*flushes, return_exceptions=True)
 
     def _has_live_work(self) -> bool:
         """Report decisions currently committing in this process."""

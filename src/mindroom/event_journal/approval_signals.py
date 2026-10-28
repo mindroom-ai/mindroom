@@ -153,6 +153,11 @@ class _PausedReplyListener(_Listener):
 
 
 @dataclass(eq=False, slots=True)
+class _DecidedCardListener(_Listener):
+    decided: Callable[[DecidedCard], None] = field(kw_only=True)
+
+
+@dataclass(eq=False, slots=True)
 class _Wakeup:
     loop: asyncio.AbstractEventLoop
     event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -174,6 +179,7 @@ class ApprovalSignals:
 
     _paused: dict[str, dict[str, PausedReply]] = field(default_factory=dict, init=False, repr=False)
     _paused_listeners: dict[str, list[_PausedReplyListener]] = field(default_factory=dict, init=False, repr=False)
+    _decided_listeners: list[_DecidedCardListener] = field(default_factory=list, init=False, repr=False)
     # One wake-up per detached call someone waits on.
     _wakeups: dict[CallKey, _Wakeup] = field(default_factory=dict, init=False, repr=False)
     # Publication runs on the writer's loop; subscribers may sit on others.
@@ -207,7 +213,10 @@ class ApprovalSignals:
         wakeup = self._wakeups.get(signal.call)
         if wakeup is not None:
             wakeup.set()
-        return []
+        card = signal.card
+        if card is None:
+            return []
+        return [(listener, partial(listener.decided, card)) for listener in self._decided_listeners]
 
     def _add(self, reply: PausedReply) -> list[tuple[_Listener, Callable[[], None]]]:
         replies = self._paused.setdefault(reply.principal_id, {})
@@ -253,6 +262,20 @@ class ApprovalSignals:
                 listeners = self._paused_listeners.get(principal_id, [])
                 if listener in listeners:
                     listeners.remove(listener)
+
+        return stop
+
+    def follow_decided_cards(self, decided: Callable[[DecidedCard], None]) -> Callable[[], None]:
+        """Report each request card whose call is decided, as the decision commits; return how to stop listening."""
+        listener = _DecidedCardListener(asyncio.get_running_loop(), decided=decided)
+        with self._lock:
+            self._decided_listeners.append(listener)
+
+        def stop() -> None:
+            with self._lock:
+                listener.active = False
+                if listener in self._decided_listeners:
+                    self._decided_listeners.remove(listener)
 
         return stop
 
