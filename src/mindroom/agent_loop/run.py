@@ -108,9 +108,9 @@ def run_agent(
     share with the team run while their records store none of it.
     The returned stream yields the loop's events and finally ``RunFinished`` with the ``COMPLETED`` or ``PAUSED``
     record, after ``persist`` stored it. Cancellation stores a ``CANCELLED`` record and re-raises; closing the stream
-    before it finished stores one before ``aclose`` returns; any other exception stores an ``ERROR`` record whose
-    content is the exception's text when the model had said nothing, then re-raises. The ``ERROR`` record's
-    ``error`` holds the exception's text with credentials redacted.
+    before it finished stores one before ``aclose`` returns; any other exception stores an ``ERROR`` record, then
+    re-raises. The ``ERROR`` record's ``content`` keeps what the model wrote, and its ``error`` holds the exception's
+    text with credentials redacted.
     """
     record = RunRecord(
         **started_run_fields(ctx, spec.model, metadata=metadata),
