@@ -22,9 +22,11 @@ from tests.conftest import message_origin, unwrap_extracted_collaborator
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
 
+    from mindroom.approval.continuation_runner import ApprovalContinuationRunner
     from mindroom.bot import AgentBot
     from mindroom.event_journal import PrincipalStore
     from mindroom.llm.provider import ModelRequest
+    from mindroom.message_target import MessageTarget
 
 # The decided calls of a receipt that a test binds only to see which requests carry it, and its text.
 RECEIPT_CALLS = (
@@ -256,3 +258,14 @@ async def freeze_resume_final(
         ),
     )
     assert enqueued is not None
+
+
+async def dispatch_approval(
+    approvals: ApprovalContinuationRunner,
+    owned: ApprovalContinuation,
+    *,
+    target: MessageTarget,
+) -> str | None:
+    """Run the owning bot's source worker on a paused reply's source, as a woken source's dispatch does."""
+    request = approvals._approval_response_request(owned, target=target)
+    return await approvals.run_owned_approvals(owned, request=request, target=target)

@@ -2,22 +2,28 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from contextlib import contextmanager
+from dataclasses import replace
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom.approval import continuation_runner
 from mindroom.approval.recovery import ApprovalRecovery
-from mindroom.approval.response import ApprovalResponseCoordinator
-from mindroom.config.main import Config
 from mindroom.delivery_gateway import DeliveryGateway
-from mindroom.event_journal import ApprovalContinuation, EventJournalStore, PrincipalStore
+from mindroom.event_journal import ApprovalContinuation, ApprovalFailure, EventJournalStore, PrincipalStore
 from mindroom.event_journal.approval_store import ApprovalStore
+from mindroom.reply_lifecycle import ApprovalFailureKind
 from tests.approval_continuation_helpers import approval_continuation
-from tests.conftest import test_runtime_paths
+from tests.conftest import unwrap_extracted_collaborator
+from tests.response_runner_helpers import _bot
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Iterator
     from pathlib import Path
+
+    from mindroom.approval.continuation_runner import ApprovalContinuationRunner
 
 
 def _continuation() -> ApprovalContinuation:
@@ -30,16 +36,39 @@ def _continuation() -> ApprovalContinuation:
         requester_id="@human:test",
         response_event_id="$response",
         state="failing",
-        failure_reason="cancelled_by_user",
+        failure=ApprovalFailure(ApprovalFailureKind.USER_STOP),
     )
+
+
+@contextmanager
+def _settling(
+    tmp_path: Path,
+    continuation: ApprovalContinuation,
+    *,
+    finish: Callable[[str], Awaitable[bool]],
+    cancel: Callable[..., Awaitable[None]] | None = None,
+) -> Iterator[ApprovalContinuationRunner]:
+    """Run the paused reply's settlement over ``continuation``, which is already fenced and has its cards expired."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = MagicMock(spec=ApprovalStore)
+    store.approval_continuation = AsyncMock(return_value=continuation)
+    runner.deps = replace(runner.deps, approval_store=store)
+    with (
+        patch.object(runner._approvals, "_answer_stands", new=AsyncMock(return_value=False)),
+        patch(
+            "mindroom.approval.continuation_runner.prepare_approval_failure",
+            new=AsyncMock(return_value=continuation),
+        ),
+        patch("mindroom.approval.continuation_runner.cancel_approval_delegations", new=AsyncMock(side_effect=cancel)),
+        patch.object(runner.deps.replies, "finish_approval", new=AsyncMock(side_effect=finish)),
+    ):
+        yield runner._approvals
 
 
 @pytest.mark.asyncio
 async def test_source_failure_cancels_children_before_finishing(tmp_path: Path) -> None:
     """A stopped approval cannot leave paused child records after its source is released."""
     continuation = _continuation()
-    config = Config()
-    paths = test_runtime_paths(tmp_path)
     order: list[str] = []
 
     async def cancel(*_args: object, **_kwargs: object) -> None:
@@ -49,35 +78,17 @@ async def test_source_failure_cancels_children_before_finishing(tmp_path: Path) 
         order.append("source")
         return True
 
-    store = MagicMock(spec=ApprovalStore)
-    store.approval_continuation = AsyncMock(return_value=continuation)
-    coordinator = ApprovalResponseCoordinator(
-        config=lambda: config,
-        runtime_paths=paths,
-        store=store,
-        load_span=AsyncMock(return_value=None),
-        delivery_gateway=MagicMock(spec=DeliveryGateway),
-        retry_sources=lambda _room, _sources: None,
-        finish_approval=finish,
-        release_approval=AsyncMock(return_value=True),
-    )
-    with (
-        patch.object(coordinator, "successful_final_delivery", new=AsyncMock(return_value=None)),
-        patch("mindroom.approval.response.prepare_approval_failure", new=AsyncMock(return_value=continuation)),
-        patch(
-            "mindroom.approval.response.cancel_approval_delegations",
-            new=AsyncMock(side_effect=cancel),
-        ) as cancel_children,
-    ):
-        assert await coordinator.settle_failure(continuation, "cancelled_by_user")
+    with _settling(tmp_path, continuation, finish=finish, cancel=cancel) as approvals:
+        assert await approvals._settle(continuation, ApprovalFailure(ApprovalFailureKind.USER_STOP))
+        cancel_children = cast("AsyncMock", continuation_runner.cancel_approval_delegations)
+        cancel_children.assert_awaited_once_with(
+            continuation,
+            config=approvals.deps.runtime.config,
+            runtime_paths=approvals.deps.runtime_paths,
+            reason=ApprovalFailure(ApprovalFailureKind.USER_STOP).reason,
+        )
 
     assert order == ["children", "source"]
-    cancel_children.assert_awaited_once_with(
-        continuation,
-        config=config,
-        runtime_paths=paths,
-        reason="cancelled_by_user",
-    )
 
 
 @pytest.mark.asyncio
@@ -87,65 +98,38 @@ async def test_failure_reply_redacts_credentials_from_reason(tmp_path: Path) -> 
     api_key = "sk-" + "test" + "A1b2C3d4E5f6G7h8J9k0"
     password = "hunter" + "2secret"
     reason = f"Incorrect API key provided: {api_key} at https://user:{password}@mcp.internal/sse"
-    store = MagicMock(spec=ApprovalStore)
-    store.approval_continuation = AsyncMock(return_value=continuation)
-    finish_approval = AsyncMock(side_effect=[False, True])
-    gateway = MagicMock(spec=DeliveryGateway)
-    gateway.write_approval_failure_note = AsyncMock(return_value=True)
-    coordinator = ApprovalResponseCoordinator(
-        config=Config,
-        runtime_paths=test_runtime_paths(tmp_path),
-        store=store,
-        load_span=AsyncMock(return_value=None),
-        delivery_gateway=gateway,
-        retry_sources=lambda _room, _sources: None,
-        finish_approval=finish_approval,
-        release_approval=AsyncMock(return_value=True),
-    )
+    write_note = AsyncMock(return_value=True)
     with (
-        patch.object(coordinator, "successful_final_delivery", new=AsyncMock(return_value=None)),
-        patch("mindroom.approval.response.prepare_approval_failure", new=AsyncMock(return_value=continuation)),
-        patch("mindroom.approval.response.cancel_approval_delegations", new=AsyncMock()),
+        _settling(tmp_path, continuation, finish=AsyncMock(side_effect=[False, True])) as approvals,
+        patch.object(DeliveryGateway, "write_approval_failure_note", new=write_note),
     ):
-        assert await coordinator.settle_failure(continuation, reason)
+        assert await approvals._settle(continuation, ApprovalFailure(ApprovalFailureKind.ERROR, reason))
 
-    visible = gateway.write_approval_failure_note.await_args.kwargs["text"]
+    visible = write_note.await_args.kwargs["text"]
     assert api_key not in visible
     assert password not in visible
     assert "Incorrect API key provided" in visible
 
 
 @pytest.mark.parametrize(
-    ("reason", "note"),
-    [("cancelled_by_user", "cancelled"), ("Paused run is no longer available", "error")],
+    ("failure", "note"),
+    [
+        (ApprovalFailure(ApprovalFailureKind.USER_STOP), "cancelled"),
+        (ApprovalFailure(ApprovalFailureKind.ERROR, "Paused run is no longer available"), "error"),
+    ],
 )
 @pytest.mark.asyncio
-async def test_failure_reply_is_marked_interrupted(tmp_path: Path, reason: str, note: str) -> None:
+async def test_failure_reply_is_marked_interrupted(tmp_path: Path, failure: ApprovalFailure, note: str) -> None:
     """Clients and later turns treat a stopped or failed continuation as interrupted, not as a finished reply."""
     continuation = _continuation()
-    store = MagicMock(spec=ApprovalStore)
-    store.approval_continuation = AsyncMock(return_value=continuation)
-    finish_approval = AsyncMock(side_effect=[False, True])
-    gateway = MagicMock(spec=DeliveryGateway)
-    gateway.write_approval_failure_note = AsyncMock(return_value=True)
-    coordinator = ApprovalResponseCoordinator(
-        config=Config,
-        runtime_paths=test_runtime_paths(tmp_path),
-        store=store,
-        load_span=AsyncMock(return_value=None),
-        delivery_gateway=gateway,
-        retry_sources=lambda _room, _sources: None,
-        finish_approval=finish_approval,
-        release_approval=AsyncMock(return_value=True),
-    )
+    write_note = AsyncMock(return_value=True)
     with (
-        patch.object(coordinator, "successful_final_delivery", new=AsyncMock(return_value=None)),
-        patch("mindroom.approval.response.prepare_approval_failure", new=AsyncMock(return_value=continuation)),
-        patch("mindroom.approval.response.cancel_approval_delegations", new=AsyncMock()),
+        _settling(tmp_path, continuation, finish=AsyncMock(side_effect=[False, True])) as approvals,
+        patch.object(DeliveryGateway, "write_approval_failure_note", new=write_note),
     ):
-        assert await coordinator.settle_failure(continuation, reason)
+        assert await approvals._settle(continuation, failure)
 
-    assert gateway.write_approval_failure_note.await_args.kwargs["note"] == note
+    assert write_note.await_args.kwargs["note"] == note
 
 
 @pytest.mark.asyncio

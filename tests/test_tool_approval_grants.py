@@ -12,16 +12,16 @@ import pytest
 from mindroom.approval.inbound import parse_approval_response_event
 from mindroom.approval.manager import ApprovalActionResult, ApprovalManager
 from mindroom.approval.receipt import build_approval_receipt
-from mindroom.approval.response import ApprovalResponseCoordinator, plan_approval_calls
+from mindroom.approval.response import plan_approval_calls, publish_generation
 from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
 from mindroom.approval.transport import ApprovalMatrixTransport, _approval_delivery_content
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.main import Config
-from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.event_journal import (
     ApprovalCall,
     ApprovalCardView,
     ApprovalDecisionMetadata,
+    ApprovalFailure,
     BackgroundApprovalDecision,
     CallKey,
     DeliveryStage,
@@ -35,6 +35,7 @@ from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.large_messages import content_fits_normal_event
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
+from mindroom.reply_lifecycle import ApprovalFailureKind
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_approval_grants import AUTO_APPROVE_OPTIONS, ApprovalOperation, grant_operation
 from tests.approval_card_helpers import card_content, card_is_terminal, pending_card, resolve_card_event
@@ -145,16 +146,7 @@ async def test_only_policy_pause_offers_timed_approval(
     monkeypatch.setattr("mindroom.approval.manager._MANAGER", manager)
     responder = journal.principal("agent@code")
     config = Config(tool_approval=ToolApprovalConfig(default="require_approval"))
-    coordinator = ApprovalResponseCoordinator(
-        config=lambda: config,
-        runtime_paths=test_runtime_paths(tmp_path),
-        store=responder.approvals,
-        load_span=responder.replies.span,
-        delivery_gateway=MagicMock(spec=DeliveryGateway),
-        retry_sources=lambda _room, _sources: None,
-        finish_approval=AsyncMock(return_value=True),
-        release_approval=AsyncMock(return_value=True),
-    )
+    runtime_paths = test_runtime_paths(tmp_path)
     tool = ToolExecution(
         tool_call_id="call-authored",
         tool_name="shell",
@@ -164,8 +156,8 @@ async def test_only_policy_pause_offers_timed_approval(
     )
     plan = await plan_approval_calls(
         ((tool, "code"),),
-        config=coordinator.config(),
-        runtime_paths=coordinator.runtime_paths,
+        config=config,
+        runtime_paths=runtime_paths,
         requester_id="@human:test",
         toolkit_owners={("code", "shell"): "test_toolkit"},
         room_id="!room:test",
@@ -197,9 +189,13 @@ async def test_only_policy_pause_offers_timed_approval(
     )
     assert await paused_for_approval(responder, continuation) is not None
     try:
-        await coordinator.publish_generation(
+        await publish_generation(
             continuation,
             plan,
+            config=config,
+            runtime_paths=runtime_paths,
+            store=responder.approvals,
+            retry_sources=lambda _room, _sources: None,
             target=MessageTarget(
                 room_id="!room:test",
                 source_thread_id="$thread",
@@ -243,16 +239,7 @@ async def test_policy_pause_receipt_accepts_timed_authorization_without_claiming
     monkeypatch.setattr("mindroom.approval.manager._MANAGER", manager)
     responder = journal.principal("agent@code")
     config = Config(tool_approval=ToolApprovalConfig(default="require_approval"))
-    coordinator = ApprovalResponseCoordinator(
-        config=lambda: config,
-        runtime_paths=test_runtime_paths(tmp_path),
-        store=responder.approvals,
-        load_span=responder.replies.span,
-        delivery_gateway=MagicMock(spec=DeliveryGateway),
-        retry_sources=lambda _room, _sources: None,
-        finish_approval=AsyncMock(return_value=True),
-        release_approval=AsyncMock(return_value=True),
-    )
+    runtime_paths = test_runtime_paths(tmp_path)
     sent = []
 
     async def send(delivery: MatrixDelivery) -> str:
@@ -271,8 +258,8 @@ async def test_policy_pause_receipt_accepts_timed_authorization_without_claiming
             )
             plan = await plan_approval_calls(
                 ((tool, "code"),),
-                config=coordinator.config(),
-                runtime_paths=coordinator.runtime_paths,
+                config=config,
+                runtime_paths=runtime_paths,
                 requester_id="@human:test",
                 toolkit_owners={("code", "shell"): "test_toolkit"},
                 room_id="!room:test",
@@ -308,9 +295,13 @@ async def test_policy_pause_receipt_accepts_timed_authorization_without_claiming
                 ),
             )
             assert continuation is not None
-            await coordinator.publish_generation(
+            await publish_generation(
                 continuation,
                 plan,
+                config=config,
+                runtime_paths=runtime_paths,
+                store=responder.approvals,
+                retry_sources=lambda _room, _sources: None,
                 target=MessageTarget(
                     room_id="!room:test",
                     source_thread_id="$thread",
@@ -892,7 +883,7 @@ async def test_terminal_calls_win_over_grants(
         if terminal == "failing":
             await responder.approvals.request_approval_failure(
                 "second",
-                "execution binding changed",
+                ApprovalFailure(ApprovalFailureKind.ERROR, "execution binding changed"),
                 expected_state="waiting",
                 expected_generation=0,
                 expected_runtime_generation=None,
@@ -2097,7 +2088,7 @@ async def test_expiring_one_paused_replys_cards_leaves_the_others_waiting(
     try:
         await _card(journal, manager, "failed")
         await _card(journal, manager, "still-waiting")
-        assert await manager.expire_continuation_cards("failed")
+        assert await manager.expire_continuation_cards("failed", "The reply was stopped.")
         assert (await _call_row(journal, "failed"))[0] == "expired"
         assert await _call_row(journal, "still-waiting") == (None, None)
     finally:

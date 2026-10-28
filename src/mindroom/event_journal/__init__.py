@@ -29,9 +29,9 @@ from .approval_cards import (
     RecordedApprovalDecision,
 )
 from .approval_continuations import (
-    INTERRUPTED_FAILURE_REASON,
     ApprovalAdvance,
     ApprovalContinuation,
+    ApprovalFailure,
     ApprovalMemoryTurn,
 )
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
@@ -98,7 +98,6 @@ from .views import (
 )
 
 __all__ = [
-    "INTERRUPTED_FAILURE_REASON",
     "JOB_ENDED_REASON",
     "SCHEDULED_APPROVAL_WINDOW_NS",
     "TURN_BACKED_KINDS",
@@ -113,6 +112,7 @@ __all__ = [
     "ApprovalDecision",
     "ApprovalDecisionMetadata",
     "ApprovalDeliveryView",
+    "ApprovalFailure",
     "ApprovalMemoryTurn",
     "BackgroundApprovalDecision",
     "CallKey",

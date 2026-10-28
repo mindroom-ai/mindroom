@@ -7,9 +7,16 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING
 
-from mindroom.approval.failure import prepare_approval_failure
-from mindroom.event_journal import DeliveryStage
+from mindroom.approval.continuation_rules import (
+    DiscardUnavailable,
+    OwnerUnavailable,
+    continuation_facts,
+    next_step,
+)
+from mindroom.approval.failure import prepare_approval_failure, read_final
+from mindroom.event_journal import ApprovalFailure
 from mindroom.logging_config import get_logger
+from mindroom.reply_lifecycle import ApprovalFailureKind
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -107,11 +114,10 @@ class ApprovalRecovery:
         current = await store.approvals.approval_continuation(continuation.approval_id)
         if current is None:
             return True
-        final_delivery = await store.load_matrix_delivery(
-            delivery_id=current.source_event_ids[0],
-            stage=DeliveryStage.FINAL,
-        )
-        if final_delivery is not None:
+        final, final_span_outcome = await read_final(store, current)
+        facts = continuation_facts(current, runtime_generation=None, final=final, final_span_outcome=final_span_outcome)
+        if not isinstance(next_step(facts, OwnerUnavailable()), DiscardUnavailable):
+            # Its final answer is the entity's to recover, under the entity's own principal.
             return self.recover_unavailable_final is not None and await self.recover_unavailable_final(
                 principal_id,
                 current,
@@ -119,7 +125,7 @@ class ApprovalRecovery:
         manager = self.manager
         current = await prepare_approval_failure(
             current,
-            reason,
+            ApprovalFailure(ApprovalFailureKind.ERROR, reason),
             request_failure=partial(
                 store.approvals.request_approval_failure,
                 current.approval_id,

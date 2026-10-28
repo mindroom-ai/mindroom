@@ -883,7 +883,7 @@ def deny_for_departed_card_owner(
     transaction.execute(
         """
         UPDATE approval_continuations
-        SET state = 'failing', failure_reason = ?, runtime_generation = NULL
+        SET state = 'failing', failure_kind = 'error', failure_detail = ?, runtime_generation = NULL
         WHERE state IN ('waiting', 'ready')
           AND EXISTS (
               SELECT 1 FROM approval_cards AS cards

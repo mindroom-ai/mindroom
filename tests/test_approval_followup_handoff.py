@@ -24,7 +24,7 @@ from mindroom.event_journal import (
 from mindroom.llm.runs import ToolExecution
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.approval_continuation_helpers import approval_continuation, resumed_approval
+from tests.approval_continuation_helpers import approval_continuation, dispatch_approval, resumed_approval
 from tests.conftest import unwrap_extracted_collaborator
 from tests.reply_span_helpers import paused_for_approval
 from tests.response_runner_helpers import _bot, _plain_request, _target
@@ -32,7 +32,6 @@ from tests.response_runner_helpers import _bot, _plain_request, _target
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.approval.response import _ApprovalPausePlan
     from mindroom.bot import AgentBot
     from mindroom.message_target import MessageTarget
     from mindroom.response_runner import ResponseRequest, ResponseRunner, _EarlyPlaceholderState
@@ -151,7 +150,7 @@ async def test_final_approval_links_the_delivered_attempt(
                     request=_plain_request(target, source_event_id="$source"),
                     target=target,
                 )
-                await runner._approvals._recover_claimed_approval_lifecycle(claimed, target=target)
+                await dispatch_approval(runner._approvals, claimed, target=target)
             else:
                 await runner._approvals._run_claimed_approval_lifecycle(claimed, target=target)
 
@@ -326,16 +325,9 @@ async def test_human_approval_wait_releases_foreground_for_follow_up(tmp_path: P
             ),
         )
 
-    async def publish_cards(
-        continuation: ApprovalContinuation,
-        plan: _ApprovalPausePlan,
-        *,
-        target: MessageTarget,
-        failure_reason: str,
-    ) -> None:
+    async def publish_cards(continuation: ApprovalContinuation, *_args: object, **_kwargs: object) -> None:
         # Only external card publication is replaced: release its real journal
         # publication lease without granting the still-undecided tool call.
-        del plan, target, failure_reason
         assert all(call.decision is None for call in continuation.calls)
         activated = await runner.deps.approval_store.activate_approval_continuation(
             continuation.approval_id,
@@ -346,7 +338,7 @@ async def test_human_approval_wait_releases_foreground_for_follow_up(tmp_path: P
 
     with (
         patch.object(runner._approvals, "_continue_entity_call", new=continue_model),
-        patch.object(runner._approvals._approval_responses, "_publish_cards", new=publish_cards),
+        patch("mindroom.approval.response._publish_cards", new=publish_cards),
     ):
         original = asyncio.create_task(runner._approvals._resume_approval_source("$source"))
         follow_up: asyncio.Task[str | None] | None = None

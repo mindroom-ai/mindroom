@@ -995,15 +995,15 @@ class ApprovalManager:
             return False
         return edit_event_id is not None and await self.cards.approvals.retire_approval_card(delivery_id=delivery_id)
 
-    async def expire_continuation_cards(self, continuation_id: str) -> bool:
-        """Enqueue and flush expiry for every card owned by one failed continuation."""
+    async def expire_continuation_cards(self, continuation_id: str, reason: str) -> bool:
+        """Enqueue and flush expiry for every card owned by one failed continuation, with its failure's reason."""
         if self.cards is None:
             return False
         complete = True
         for room_id in await self.cards.approvals.pending_approval_room_ids():
             async for card in self._pending_cards(self.cards, room_id):
                 if card.owner_kind == "reply" and card.call.owner_id == continuation_id:
-                    complete = await self._expire_stored(card) and complete
+                    complete = await self._expire_stored(card, reason=reason) and complete
         return complete
 
     @staticmethod
@@ -1051,14 +1051,14 @@ class ApprovalManager:
             ],
         )
 
-    async def _expire_stored(self, card: ApprovalCardView) -> bool:
+    async def _expire_stored(self, card: ApprovalCardView, *, reason: str = _DEFAULT_TIMEOUT_REASON) -> bool:
         if self.cards is None or (card.card_event_id is None and card.decided):
             return False
         if card.card_event_id is None:
             recorded = await self.cards.approvals.resolve_approval_call(
                 card.call,
                 requested_status="expired",
-                reason=None,
+                reason=reason,
             )
             if recorded.recorded and recorded.continuation_ready:
                 await self._wake_continuation(recorded)
@@ -1070,7 +1070,7 @@ class ApprovalManager:
         return await self._record_and_flush_resolution(
             card,
             status="expired",
-            reason=_DEFAULT_TIMEOUT_REASON,
+            reason=reason,
             resolved_by=None,
         )
 

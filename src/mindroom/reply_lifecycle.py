@@ -112,7 +112,22 @@ class NoteKind(StrEnum):
 # What a reply ended by a state the rules do not model shows; the error note has no text of its own.
 _UNMODELED_ERROR_TEXT = "⚠️ Error: this reply could not continue. Please try again."
 
-FailureDisposition = Literal["cancelled_by_user", "failed"]
+
+class ApprovalFailureKind(StrEnum):
+    """Why a paused reply's approval failed, as its continuation stores it."""
+
+    ERROR = "error"
+    USER_STOP = "user_stop"
+    # A sync restart replaced the bot whose resume ran.
+    RESTART = "restart"
+    INTERRUPTED = "interrupted"
+    # A shutdown handed a resume to the next runtime, which replays its turn.
+    SHUTDOWN = "shutdown"
+
+
+# The failure detail of an approval whose reply ended in a way the approval cannot continue from.
+_APPROVAL_REPLY_ENDED = "The reply could not continue."
+
 
 # ---------------------------------------------------------------------------
 # Records
@@ -243,7 +258,9 @@ class FenceApproval:
     """
 
     approval_id: str
-    disposition: FailureDisposition
+    kind: ApprovalFailureKind
+    # What failed, for an ``ERROR``.
+    detail: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -503,7 +520,7 @@ def _unmodeled(reply: Reply, span: Span | None, *, reason: str, now_ns: int) -> 
         updated = _clear_current(updated, span.span_id)
         effects.append(CancelSpan(span.span_id))
     if reply.approval_id is not None:
-        effects.append(FenceApproval(reply.approval_id, "failed"))
+        effects.append(FenceApproval(reply.approval_id, ApprovalFailureKind.ERROR, _APPROVAL_REPLY_ENDED))
     else:
         effects.append(SettleSources(reply.last_span_id))
     owed = OwedWrite(reply.last_span_id, NoteKind.ERROR, _UNMODELED_ERROR_TEXT)
@@ -661,7 +678,8 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
             if reply is not None and reply.approval_id == request.approval_id:
                 return ended
             # The approval that asked to resume fails too, so its recovery does not retry it forever.
-            return replace(ended, effects=(*ended.effects, FenceApproval(request.approval_id, "failed")))
+            fence = FenceApproval(request.approval_id, ApprovalFailureKind.ERROR, _APPROVAL_REPLY_ENDED)
+            return replace(ended, effects=(*ended.effects, fence))
         span = _new_span(request, reply, SpanKind.APPROVAL_RESUME)
         return claimed(_make_current(_set_state(reply, ReplyState.ACTIVE, request.now_ns), span, request.now_ns), span)
 
@@ -902,13 +920,13 @@ def _failed_pause(reply: Reply, span: Span, *, now_ns: int) -> Transition:
     if reply.unapplied_stop:
         owed = OwedWrite(span.span_id, NoteKind.CANCELLED)
         updated = _set_state(_stop_applied(updated), ReplyState.CANCELLED, now_ns)
-        disposition: FailureDisposition = "cancelled_by_user"
+        fence = FenceApproval(reply.approval_id, ApprovalFailureKind.USER_STOP)
     else:
         owed = OwedWrite(span.span_id, NoteKind.APPROVAL_FAILED)
         updated = _set_state(updated, ReplyState.FAILED, now_ns)
-        disposition = "failed"
+        fence = FenceApproval(reply.approval_id, ApprovalFailureKind.ERROR, _APPROVAL_REPLY_ENDED)
     # Its cards are live: the approval runtime's failure settlement expires them.
-    effects.insert(0, FenceApproval(reply.approval_id, disposition))
+    effects.insert(0, fence)
     return Transition(
         outcome=Outcome.APPLIED,
         reply=replace(updated, owed_write=owed),
@@ -1226,13 +1244,13 @@ def approval_settled(
     *,
     approval_id: str,
     paused_span_id: str,
-    disposition: FailureDisposition | None,
+    failure_kind: ApprovalFailureKind | None,
     answers_turn: bool,
     now_ns: int,
 ) -> Transition:
     """Apply a continuation's finish, which settles the sources its pause held whatever the reply does.
 
-    ``disposition`` is how a failed continuation failed, or ``None`` for one
+    ``failure_kind`` is how a failed continuation failed, or ``None`` for one
     that finished. The turn stays unanswered when no owner is left to answer
     it (``answers_turn``); the store also leaves a deleted turn unanswered.
     """
@@ -1245,11 +1263,11 @@ def approval_settled(
     elif reply.terminal:
         # Its terminal row or note already ended the reply; the finish only settles the sources.
         decided = _unchanged(Outcome.DUPLICATE, reply)
-    elif disposition is None:
+    elif failure_kind is None:
         # A finished run's acknowledged answer already ended the reply.
         decided = _unchanged(Outcome.STALE, reply)
     else:
-        decided = _approval_failed(reply, last_span, approval_id=approval_id, disposition=disposition, now_ns=now_ns)
+        decided = _approval_failed(reply, last_span, approval_id=approval_id, failure_kind=failure_kind, now_ns=now_ns)
     settle = SettleSources(paused_span_id, answered=answers_turn)
     return replace(decided, effects=(settle, *decided.effects))
 
@@ -1259,7 +1277,7 @@ def _approval_failed(
     last_span: Span | None,
     *,
     approval_id: str,
-    disposition: FailureDisposition,
+    failure_kind: ApprovalFailureKind,
     now_ns: int,
 ) -> Transition:
     """End the reply a failed continuation held."""
@@ -1281,7 +1299,7 @@ def _approval_failed(
         or (reply.state is ReplyState.ACTIVE and (resumed or orphaned or approved_in_place))
     ):
         return _unchanged(Outcome.STALE, reply)
-    stopped_by_user = disposition == "cancelled_by_user" or reply.unapplied_stop
+    stopped_by_user = failure_kind is ApprovalFailureKind.USER_STOP or reply.unapplied_stop
     state = ReplyState.CANCELLED if stopped_by_user else ReplyState.FAILED
     spans: tuple[Span, ...] = ()
     updated = reply
@@ -1397,7 +1415,7 @@ def stop(reply: Reply, span: Span | None, facts: StopFacts, *, now_ns: int) -> T
         return Transition(
             outcome=Outcome.APPLIED,
             reply=recorded,
-            effects=(FenceApproval(reply.approval_id, "cancelled_by_user"), *cancel),
+            effects=(FenceApproval(reply.approval_id, ApprovalFailureKind.USER_STOP), *cancel),
         )
     if live is not None:
         return Transition(outcome=Outcome.APPLIED, reply=recorded, effects=(CancelSpan(live.span_id, by_stop=True),))
@@ -1545,7 +1563,7 @@ def sources_deleted(reply: Reply, span: Span | None, *, now_ns: int) -> Transiti
     ending = (
         SettleSources(reply.last_span_id, answered=False)
         if reply.approval_id is None
-        else FenceApproval(reply.approval_id, "cancelled_by_user")
+        else FenceApproval(reply.approval_id, ApprovalFailureKind.USER_STOP)
     )
     return Transition(outcome=Outcome.APPLIED, reply=_gone(updated, now_ns), spans=spans, effects=(*cancel, ending))
 

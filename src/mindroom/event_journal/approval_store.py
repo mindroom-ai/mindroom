@@ -31,7 +31,7 @@ if TYPE_CHECKING:
         ApprovalDecisionMetadata,
         RecordedApprovalDecision,
     )
-    from .approval_continuations import ApprovalContinuation, ApprovalContinuationState
+    from .approval_continuations import ApprovalContinuation, ApprovalContinuationState, ApprovalFailure
     from .backend import Backend, Transaction
     from .replies import AppliedTransition, PostCommitEffect, PreparedReplyRow, ReplyRowEnqueue, ReplyRowRequest
     from .scheduled_approvals import (
@@ -497,7 +497,7 @@ class ApprovalStore:
     async def request_approval_failure(
         self,
         approval_id: str,
-        reason: str,
+        failure: ApprovalFailure,
         *,
         expected_state: ApprovalContinuationState,
         expected_generation: int = 0,
@@ -509,7 +509,7 @@ class ApprovalStore:
                 transaction,
                 self._principal_id,
                 approval_id=approval_id,
-                reason=reason,
+                failure=failure,
                 expected_state=expected_state,
                 expected_generation=expected_generation,
                 expected_runtime_generation=expected_runtime_generation,

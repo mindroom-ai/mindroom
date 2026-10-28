@@ -79,6 +79,7 @@ Matrix sync callback
 | `event_journal/approval_grants.py` | Timed grants: the consent a card offers, the grant it originates, its batch, and revocation edits |
 | `event_journal/legacy_approval_records.py` | One-time conversion of an earlier release's per-kind approval tables to one row per call and card |
 | `event_journal/legacy_response_attempts.py` | One-time cancellation of the approvals an earlier release left pending, and removal of the tables that kept their reply identity |
+| `event_journal/legacy_approval_failures.py` | One-time conversion of the free-text failure reasons failing approval continuations stored into their failure kind and detail |
 | `event_journal/scheduled_approvals.py` | Stored scheduled tool calls and their one-shot approvals: binding, fire-time arming, withdrawal, claim with its receipt, and outcome |
 | `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish |
 | `pending_event_worker.py` | Decides when pending journal work runs, and wakes itself again whenever a pass stops early |
@@ -109,8 +110,9 @@ Matrix sync callback
 | `approval/receipt.py` | The trusted approval receipt: the text naming each decided call of one tool-approval continuation, and the request hook that adds it to a reader's messages before its first request |
 | `approval/receipt_readers.py` | Which runs read the bound approval receipt: the binding an approval continuation sets around itself, free of model-loop imports so work the loop starts can leave it |
 | `approval/tool_owners.py` | Recorded toolkit restoration and exact owner validation for saved approvals |
-| `approval/response.py` | Response-side native approval continuation persistence, card publication, and terminal settlement |
-| `approval/continuation_runner.py` | `ApprovalContinuationRunner`: a reply's approval lifecycle that `ResponseRunner` delegates to: pausing for approval, resuming the approved run in its reply, minimal-mode CLI waits, approval holds, and recovering a paused reply after a failure or restart |
+| `approval/response.py` | Which calls of a paused run need a person: the approval plan of a paused generation and the publication of its cards |
+| `approval/continuation_rules.py` | Pure rules for what a paused reply does next: `next_step` over its continuation's state, lease or claim holder, failure kind, claim outcome, and final answer, for each trigger (dispatch, a resume's end, an unavailable owner, a minimal-mode exit) |
+| `approval/continuation_runner.py` | `ApprovalContinuationRunner`: a reply's approval lifecycle that `ResponseRunner` delegates to: pausing for approval, resuming the approved run in its reply, minimal-mode CLI waits, approval holds, and running the steps `continuation_rules` decides, including failure settlement |
 | `approval/manager.py` | Matrix-backed tool approval runtime state: card publication, clicks, deadlines, and recovery over typed card reads |
 | `approval/auto_approve_windows.py` | Durable per-conversation `!auto_approve` windows that approve one requester's gated calls without cards |
 | `oauth/credential_binding.py` | Canonical OAuth provider and worker-target bindings for browser workflows |

@@ -23,6 +23,7 @@ from mindroom.event_journal import (
     ApprovalCardView,
     ApprovalDecision,
     ApprovalDecisionMetadata,
+    ApprovalFailure,
     CallKey,
     DeliveryStage,
     EventJournalStore,
@@ -30,6 +31,7 @@ from mindroom.event_journal import (
     ScheduledCallClaim,
     scheduled_approvals,
 )
+from mindroom.reply_lifecycle import ApprovalFailureKind
 from tests.approval_card_helpers import terminal_edit
 from tests.conftest import handle_card_response_for_test, postgres_journal_schema_url, test_runtime_paths
 
@@ -365,7 +367,8 @@ async def test_a_failing_reply_still_denies_its_pending_card(recorded_journal: C
         )
         assert recorded.resolution is not None
         assert recorded.resolution["status"] == "denied"
-        assert recorded.resolution["resolution_reason"] == "cancelled_by_user"
+        # The Stop's stored reason converts to its kind, whose reason the card now shows.
+        assert recorded.resolution["resolution_reason"] == ApprovalFailure(ApprovalFailureKind.USER_STOP).reason
     finally:
         await store.close()
 

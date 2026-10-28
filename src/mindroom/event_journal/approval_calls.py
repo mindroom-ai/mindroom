@@ -32,7 +32,6 @@ type _DecisionStatus = Literal["approved", "denied", "expired"]
 
 # What a job's pending cards say once the job ends without a decision, whether it was stopped or a restart ended it.
 JOB_ENDED_REASON = "The background job asking for this approval ended before a decision."
-_FAILED_REASON = "Tool approval continuation failed safely."
 
 
 class ApprovalDecision(StrEnum):
@@ -361,7 +360,8 @@ def resolve_call(
         """
         SELECT calls.expires_at_ns, calls.decision,
                continuations.principal_id AS continuation_principal_id, continuations.state,
-               continuations.generation AS continuation_generation, continuations.failure_reason
+               continuations.generation AS continuation_generation,
+               continuations.failure_kind, continuations.failure_detail
         FROM approval_calls AS calls
         LEFT JOIN approval_continuations AS continuations
           ON calls.owner_kind = 'reply' AND continuations.approval_id = calls.owner_id
@@ -384,12 +384,13 @@ def resolve_call(
         row["state"] not in {"waiting", "failing"} or int(row["continuation_generation"]) != call.generation
     ):
         return approval_cards.RecordedApprovalDecision(resolution=None, recorded=False)
+    failure = None if owner_kind != "reply" else approval_continuations.failure_of_row(row)
     now = time.time_ns()
     decision, decision_reason = _effective_decision(
         requested=requested,
         reason=reason,
         expired=now >= int(row["expires_at_ns"]),
-        failure_reason=(row["failure_reason"] or _FAILED_REASON) if row["state"] == "failing" else None,
+        failure_reason=None if failure is None else failure.reason,
     )
     decided_by = metadata.resolved_by if metadata is not None and decision == requested else None
     approved_scope = (
