@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.credentials.sync import get_api_key_for_provider, get_ollama_host
-from mindroom.embeddings.errors import embedder_request_error
+from mindroom.embeddings.errors import embedder_request_error, openai_embedder_error
 from mindroom.embeddings.factory import resolve_embedder_settings
 from mindroom.embeddings.signatures import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.embeddings.base import Embedder, EmbeddingPurpose
+    from mindroom.embeddings.errors import EmbedderRequestError
     from mindroom.llm.errors import ProviderError
 
 logger = get_logger(__name__)
@@ -93,29 +94,27 @@ def _ollama_failure(error: Exception) -> ProviderError | None:
     return provider_error(error, provider="ollama")
 
 
-def _sdk_failure(error: Exception) -> ProviderError | None:
-    """Return the typed provider error of a failure of another Mem0 embedder, most of which use the OpenAI SDK."""
-    from mindroom.providers.openai.errors import provider_error  # noqa: PLC0415 - loads the OpenAI SDK
-
-    return provider_error(error, provider="openai")
+def _ollama_embedder_error(error: Exception) -> EmbedderRequestError:
+    """Return the typed embedder error of a failure of Mem0's own Ollama embedder."""
+    return embedder_request_error(error, _ollama_failure(error))
 
 
 @dataclass(frozen=True)
 class _Mem0ClassifiedEmbedder:
     """Raise the failures of an embedder Mem0 builds itself as the typed embedder errors MindRoom's embedders raise.
 
-    ``classify`` maps one failure of the embedder's SDK; the wrapper sends what Mem0's embedder sends, so stored
-    memories keep matching their searches.
+    ``classify`` returns the typed error of one failure of the embedder's SDK; the wrapper sends what Mem0's embedder
+    sends, so stored memories keep matching their searches.
     """
 
     embedder: Any
-    classify: Callable[[Exception], ProviderError | None]
+    classify: Callable[[Exception], EmbedderRequestError]
 
     def embed(self, text: str, memory_action: Literal["add", "search", "update"] | None = None) -> list[float]:
         try:
             return self.embedder.embed(text, memory_action)
         except Exception as exc:
-            raise embedder_request_error(exc, self.classify(exc)) from exc
+            raise self.classify(exc) from exc
 
     def embed_batch(
         self,
@@ -125,7 +124,7 @@ class _Mem0ClassifiedEmbedder:
         try:
             return self.embedder.embed_batch(texts, memory_action)
         except Exception as exc:
-            raise embedder_request_error(exc, self.classify(exc)) from exc
+            raise self.classify(exc) from exc
 
 
 def _memory_collection_name(config: Config) -> str:
@@ -321,7 +320,8 @@ async def create_memory_instance(
         cast("Any", memory).embedding_model = _Mem0StrictOpenAIEmbedder(strict_embedder)
     else:
         # Every other embedder is Mem0's own, so its failures are classified here, where they leave it.
-        classify = _ollama_failure if config.memory.embedder.provider == "ollama" else _sdk_failure
+        # The embedders only Mem0 provides mostly use the OpenAI SDK.
+        classify = _ollama_embedder_error if config.memory.embedder.provider == "ollama" else openai_embedder_error
         cast("Any", memory).embedding_model = _Mem0ClassifiedEmbedder(memory.embedding_model, classify)
 
     logger.info("created_memory_instance", path=store_path)
