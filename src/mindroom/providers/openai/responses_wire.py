@@ -2,11 +2,11 @@
 """Responses API request bodies and event parsing for the OpenAI and Codex routes.
 
 Stored responses continue with ``previous_response_id`` while the conversation the chain holds is the one the request
-replays before that response. ``store: false`` responses and portable replay send the history explicitly, with
-ordered output items and encrypted reasoning so a later request can replay a tool loop exactly. A changed
-conversation on a stored route without portable replay resends the history rebuilt from its text and calls, without
-reasoning, because those responses record neither ordered output nor reasoning. A turn ends only when
-``response.completed`` or ``response.incomplete`` arrives.
+replays before that response. Any other request sends the history explicitly, each reply as the ordered output its
+response recorded when that carries encrypted reasoning, so a later request can replay a tool loop exactly
+(``response_replay``). ``store: false`` responses and portable replay ask for encrypted reasoning; a reply stored
+without portable replay has none, so a changed conversation on its route resends it rebuilt from its text and calls.
+A turn ends only when ``response.completed`` or ``response.incomplete`` arrives.
 """
 
 from __future__ import annotations
@@ -32,11 +32,7 @@ from mindroom.providers.errors import classify_provider_error
 from mindroom.providers.openai.chat_wire import function_definition, sdk_call_kwargs
 from mindroom.providers.openai.codex_auth import codex_installation_metadata, codex_session_headers
 from mindroom.providers.openai.media import responses_file_part, responses_image_part
-from mindroom.providers.openai.response_replay import (
-    RESPONSE_OUTPUT_KEY,
-    TOOL_SEARCH_ITEMS_KEY,
-    assistant_replay_items,
-)
+from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY, assistant_replay_items
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.settings import CODEX_REJECTED_FIELDS
 from mindroom.providers.openai.tool_ids import reformat_tool_call_ids
@@ -46,13 +42,7 @@ from mindroom.providers.tool_policy import disable_tool_selection
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from openai.types.responses import (
-        Response,
-        ResponseFunctionToolCall,
-        ResponseOutputItem,
-        ResponseStreamEvent,
-        ResponseUsage,
-    )
+    from openai.types.responses import Response, ResponseFunctionToolCall, ResponseStreamEvent, ResponseUsage
 
     from mindroom.llm.errors import ProviderError
     from mindroom.llm.messages import Message
@@ -78,7 +68,6 @@ _ENCRYPTED_REASONING = "reasoning.encrypted_content"
 _ENDED_EVENT_TYPES = frozenset({"response.completed", "response.incomplete"})
 # The events that end a response, a failed one included.
 _TERMINAL_EVENT_TYPES = _ENDED_EVENT_TYPES | {"response.failed"}
-_TOOL_SEARCH_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
 # The output items the model writes itself; every other item is a hosted tool's call or output.
 _MODEL_ITEM_TYPES = frozenset({"message", "reasoning", "function_call"})
 _STORED_KEY = "mindroom_response_stored"
@@ -442,11 +431,6 @@ class ResponsesTurnParts:
     incomplete_reason: str | None = None
 
 
-def _record_tool_search_item(parts: ResponsesTurnParts, item: ResponseOutputItem) -> None:
-    if item.type in _TOOL_SEARCH_ITEM_TYPES:
-        parts.provider_data.setdefault(TOOL_SEARCH_ITEMS_KEY, []).append(item.model_dump(exclude_none=True))
-
-
 def _function_call(item: ResponseFunctionToolCall) -> dict[str, Any]:
     """Return a function-call output item as the turn's tool call, with the ``call_`` id its result references."""
     return {
@@ -520,9 +504,7 @@ class ResponsesStream:
             self._tool_use["function"]["arguments"] += current.delta
         elif event.type == "response.output_item.done":
             events.extend(self._ready_call())
-            _record_tool_search_item(self.parts, current.item)
-            if self.store is False or self.portable_replay:
-                self._items[current.output_index] = current.item.model_dump(mode="json", exclude_none=True)
+            self._items[current.output_index] = current.item.model_dump(mode="json", exclude_none=True)
         elif event.type in _ENDED_EVENT_TYPES:
             # A call the response ended in the middle of is kept, as the ended response lists it too.
             events.extend(self._ready_call())
@@ -541,8 +523,10 @@ class ResponsesStream:
         """Record what the ended response says about its turn.
 
         A completed and an incomplete response both end the turn, and ``responses_stop_reason`` reads its stop from the
-        status and the incomplete reason. Both record the response id, its storage provenance, and the
-        ``conversation_digest`` of its request when stored; only a completed response's output is recorded for replay.
+        status and the incomplete reason. Both record the response id, its storage provenance, the
+        ``conversation_digest`` of its request when stored, and its ordered output for replay, which is the ended
+        response's or, when that lists none, the streamed items'. Only a completed response records its replay policy
+        and native-compaction state.
         """
         self.ended = True
         parts = self.parts
@@ -555,15 +539,19 @@ class ResponsesStream:
         parts.provider_data[_STORED_KEY] = self.store is not False
         if self.store is not False:
             parts.provider_data[_CONVERSATION_DIGEST_KEY] = self.conversation_digest
-        if response.status != "completed":
-            return
         items = [item.model_dump(mode="json", exclude_none=True) for item in response.output] or [
             self._items[index] for index in sorted(self._items)
         ]
+        # A checkpoint is native-compaction state, which only a completed response records.
+        output = [item for item in items if item.get("type") != "compaction"]
+        if response.status != "completed":
+            # An incomplete response's reasoning may lack the item that must follow it, so the turn replays rebuilt
+            # from its text and calls, after the searches it ran.
+            parts.provider_data[RESPONSE_OUTPUT_KEY] = [item for item in output if item.get("type") != "reasoning"]
+            return
         parts.provider_data[_PORTABLE_KEY] = self.portable_replay
         parts.provider_data[NATIVE_CHECKPOINT_KEY] = native_checkpoint_state(items, self.native_compaction)
-        if (self.store is False or self.portable_replay) and any(item.get("type") == "reasoning" for item in items):
-            parts.provider_data[RESPONSE_OUTPUT_KEY] = [item for item in items if item.get("type") != "compaction"]
+        parts.provider_data[RESPONSE_OUTPUT_KEY] = output
 
     def finish(self) -> ResponsesTurnParts:
         """Return the finished turn after the response ended."""
