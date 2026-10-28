@@ -534,6 +534,7 @@ visibility = [
     "mindroom.event_journal.legacy_response_attempts",
     "mindroom.approval.recovery",
     "mindroom.agent_reply_membership_sync",
+    "mindroom.approval.continuation_runner",
     "mindroom.approval.execution",
     "mindroom.approval.manager",
     "mindroom.approval.receipt",
@@ -555,7 +556,6 @@ visibility = [
     "mindroom.pending_event_worker",
     "mindroom.reaction_dispatch",
     "mindroom.reply_scope",
-    "mindroom.response_runner",
     "mindroom.thread_export.projected_history",
     "mindroom.tool_jobs.follow_ups",
     "mindroom.turn_controller",
@@ -834,6 +834,7 @@ visibility = [
     "mindroom.agent_cli.cli_approval_recovery",
     "mindroom.ai",
     "mindroom.api.openai_compat",
+    "mindroom.approval.continuation_runner",
     "mindroom.approval.execution",
     "mindroom.approval.resume",
     "mindroom.response_runner",
@@ -1351,7 +1352,7 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.agent_cli.approval",
 ]
-visibility = ["mindroom.response_runner"]
+visibility = ["mindroom.approval.continuation_runner"]
 
 [[modules]]
 path = "mindroom.approval.resume"
@@ -1439,8 +1440,8 @@ visibility = [
     "mindroom.approval.execution",
     "mindroom.approval.receipt",
     "mindroom.approval.resume",
+    "mindroom.approval.continuation_runner",
     "mindroom.delegation.execution",
-    "mindroom.response_runner",
     "mindroom.teams",
     "mindroom.tool_jobs.runtime",
 ]
@@ -1465,7 +1466,33 @@ depends_on = [
     "mindroom.tool_jobs.settings",
     "mindroom.tool_system.events",
 ]
-visibility = ["mindroom.response_runner", "mindroom.tool_jobs.approvals", "mindroom.delegation.job_approvals"]
+visibility = ["mindroom.approval.continuation_runner", "mindroom.tool_jobs.approvals", "mindroom.delegation.job_approvals"]
+
+[[modules]]
+path = "mindroom.approval.continuation_runner"
+depends_on = [
+    "mindroom.agent_cli.cli_approval_waits",
+    "mindroom.approval.execution",
+    "mindroom.approval.receipt_readers",
+    "mindroom.approval.response",
+    "mindroom.constants",
+    "mindroom.delivery_gateway",
+    "mindroom.event_journal",
+    "mindroom.hooks",
+    "mindroom.matrix.client_visible_messages",
+    "mindroom.orchestration.runtime",
+    "mindroom.post_response_effects",
+    "mindroom.reply_lifecycle",
+    "mindroom.reply_presentation",
+    "mindroom.reply_scope",
+    "mindroom.response_runner",
+    "mindroom.response_turn",
+    "mindroom.streaming",
+    "mindroom.teams",
+    "mindroom.tool_system.events",
+    "mindroom.tool_system.runtime_context",
+]
+visibility = ["mindroom.response_runner"]
 
 [[modules]]
 path = "mindroom.approval.auto_approve_windows"
@@ -3257,16 +3284,13 @@ depends_on = [
 [[modules]]
 path = "mindroom.response_runner"
 depends_on = [
-    "mindroom.agent_cli.cli_approval_waits",
     "mindroom.agent_modes",
     "mindroom.agent_run_context",
     "mindroom.agents",
     "mindroom.ai",
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
-    "mindroom.approval.execution",
-    "mindroom.approval.receipt_readers",
-    "mindroom.approval.response",
+    "mindroom.approval.continuation_runner",
     "mindroom.automations.steps",
     "mindroom.config.participation",
     "mindroom.constants",
@@ -3274,7 +3298,6 @@ depends_on = [
     "mindroom.delivery_gateway",
     "mindroom.entity_resolution",
     "mindroom.error_handling",
-    "mindroom.event_journal",
     "mindroom.history.interrupted_replay",
     "mindroom.history.runtime",
     "mindroom.history.storage",
@@ -3464,6 +3487,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.api.openai_compat",
+    "mindroom.approval.continuation_runner",
     "mindroom.bot",
     "mindroom.responder_availability",
     "mindroom.response_runner",
@@ -4342,6 +4366,7 @@ depends_on = [
 visibility = [
     "mindroom.matrix.room_history_reads",
     "mindroom.api.openai_request_parsing",
+    "mindroom.approval.continuation_runner",
     "mindroom.commands.handler",
     "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.matrix_room",
@@ -9328,7 +9353,7 @@ depends_on = [
     "mindroom.streaming",
 ]
 visibility = [
-    "mindroom.response_runner",
+    "mindroom.approval.continuation_runner",
 ]
 
 [[interfaces]]

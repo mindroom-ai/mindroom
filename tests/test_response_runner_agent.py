@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 import nio
 import pytest
 
+from mindroom.approval.continuation_runner import ApprovalContinuationRunner
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.config.agent import AgentConfig
@@ -70,13 +71,13 @@ from mindroom.response_payload_preparation import (
     ResponsePayloadPreparer,
 )
 from mindroom.response_runner import (
+    DeliveryProgress,
     ResponseRequest,
     ResponseRunner,
     _cached_room_display_name,
-    _DeliveryProgress,
-    _merge_response_extra_content,
     _ResponseGenerationOutcome,
     _with_matrix_message_target,
+    merge_response_extra_content,
 )
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
@@ -861,32 +862,32 @@ class TestAgentBot(AgentBotTestBase):
         sent_extra_content = mock_send_streaming_response.await_args.kwargs["extra_content"]
         assert sent_extra_content[ATTACHMENT_IDS_KEY] == attachment_ids
         # Metadata was populated during generator iteration (not synchronously),
-        # proving the mutable reference is preserved through _merge_response_extra_content.
+        # proving the mutable reference is preserved through merge_response_extra_content.
         assert sent_extra_content["io.mindroom.ai_run"]["version"] == 1
         # The stream sees the collector's live contents plus the human the reply was written for.
         assert dict(sent_extra_content) == {**captured_collector["ref"], ACTING_REQUESTER_KEY: "@user:localhost"}
 
     def test_merge_response_extra_content_preserves_mutable_reference(self) -> None:
-        """_merge_response_extra_content must return the SAME dict object when extra_content is provided."""
+        """merge_response_extra_content must return the SAME dict object when extra_content is provided."""
         collector: dict[str, Any] = {}
-        result = _merge_response_extra_content(collector, None)
+        result = merge_response_extra_content(collector, None)
         assert result is collector
 
     def test_merge_response_extra_content_returns_none_when_both_absent(self) -> None:
-        """_merge_response_extra_content returns None when no extra_content and no attachment_ids."""
-        assert _merge_response_extra_content(None, None) is None
-        assert _merge_response_extra_content(None, []) is None
+        """merge_response_extra_content returns None when no extra_content and no attachment_ids."""
+        assert merge_response_extra_content(None, None) is None
+        assert merge_response_extra_content(None, []) is None
 
     def test_merge_response_extra_content_merges_attachment_ids(self) -> None:
-        """_merge_response_extra_content merges attachment_ids into extra_content."""
+        """merge_response_extra_content merges attachment_ids into extra_content."""
         collector: dict[str, Any] = {}
-        result = _merge_response_extra_content(collector, ["att_1"])
+        result = merge_response_extra_content(collector, ["att_1"])
         assert result is collector
         assert result[ATTACHMENT_IDS_KEY] == ["att_1"]
 
     def test_merge_response_extra_content_creates_dict_for_attachment_ids_only(self) -> None:
-        """_merge_response_extra_content creates a dict when only attachment_ids are provided."""
-        result = _merge_response_extra_content(None, ["att_1"])
+        """merge_response_extra_content creates a dict when only attachment_ids are provided."""
+        result = merge_response_extra_content(None, ["att_1"])
         assert result is not None
         assert result[ATTACHMENT_IDS_KEY] == ["att_1"]
 
@@ -2252,7 +2253,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(ResponseRunner, "_process_and_respond", new=blocking),
             patch.object(ResponseRunner, "_process_and_respond_streaming", new=streaming),
             patch.object(ResponseRunner, "_run_cancellable_response", new=run_attempt),
-            patch.object(ResponseRunner, "_memory_persistence", return_value=None),
+            patch.object(ResponseRunner, "memory_persistence", return_value=None),
             patch(
                 "mindroom.delivery_gateway.DeliveryGateway.send_text",
                 new=AsyncMock(return_value="$thinking"),
@@ -2324,7 +2325,7 @@ class TestAgentBot(AgentBotTestBase):
                 typing_indicator=record_typing,
                 ai_response=mock_ai_response,
             ),
-            patch.object(ResponseRunner, "_memory_persistence", return_value=None),
+            patch.object(ResponseRunner, "memory_persistence", return_value=None),
             patch(
                 "mindroom.delivery_gateway.DeliveryGateway.send_text",
                 new=AsyncMock(return_value="$response"),
@@ -3277,7 +3278,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             on_no_response_handled=record_no_response,
         )
-        progress = _DeliveryProgress()
+        progress = DeliveryProgress()
         suppressed = FinalDeliveryOutcome(
             terminal_status="cancelled",
             event_id=None,
@@ -3289,7 +3290,7 @@ class TestAgentBot(AgentBotTestBase):
             progress.settle(suppressed)
 
         runner = unwrap_extracted_collaborator(bot._response_runner)
-        identity = runner._response_identity(request, response_kind="ai")
+        identity = runner.response_identity(request, response_kind="ai")
 
         async def finalize(outcome: FinalDeliveryOutcome, **_kwargs: object) -> FinalDeliveryOutcome:
             events.append("cleanup_complete")
@@ -3300,7 +3301,7 @@ class TestAgentBot(AgentBotTestBase):
         async with runner.deps.replies.span_scope():
             claimed = await runner._claim_reply_span(request, history_scope=runner.deps.state_writer.history_scope())
             assert claimed is not None
-            result = await runner._run_and_settle_locked_response(
+            result = await runner.run_and_settle_locked_response(
                 claimed,
                 target=claimed.response_envelope.target,
                 lifecycle=lifecycle,
@@ -3362,7 +3363,11 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch.object(ResponseRunner, "_run_cancellable_response", new=AsyncMock(side_effect=pause)),
-            patch.object(ResponseRunner, "_suspend_for_approval", new=AsyncMock(return_value=waiting)) as suspend,
+            patch.object(
+                ApprovalContinuationRunner,
+                "suspend_for_approval",
+                new=AsyncMock(return_value=waiting),
+            ) as suspend,
             patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
             patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock()) as effects,
         ):
@@ -3610,7 +3615,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
         memory_queued: list[str] = []
         monkeypatch.setattr(
             ResponseRunner,
-            "_memory_persistence",
+            "memory_persistence",
             lambda *_args, **_kwargs: lambda: memory_queued.append("stored"),
         )
 

@@ -27,7 +27,7 @@ from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
 from mindroom.reply_scope import ReplyRuntime
-from mindroom.response_runner import ResponseRunner, _DeliveryProgress
+from mindroom.response_runner import DeliveryProgress, ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
@@ -164,7 +164,7 @@ class _ApprovalCase:
         assert not await self.principal.is_pending("$edit")
         assert self.store.get_turn_record("$source").source_event_revisions == {"$source": (20, "$edit")}
         resumed = AsyncMock(side_effect=AssertionError("Stopped approval must not execute"))
-        with patch.object(self.runner, "_continue_entity_call", resumed):
+        with patch.object(self.runner._approvals, "_continue_entity_call", resumed):
             await self.runner.handoff_approval_source("$edit")
             await self.runner.wait_for_source_owned_inbox_responses()
         resumed.assert_not_awaited()
@@ -208,12 +208,14 @@ class _ApprovalCase:
             event_id="$final-edit",
             delivered_projections=(),
         )
-        assert await self.runner._recover_claimed_approval_lifecycle(claimed, target=self.target) == "$answer"
+        assert (
+            await self.runner._approvals._recover_claimed_approval_lifecycle(claimed, target=self.target) == "$answer"
+        )
         assert await self.principal.approvals.approval_continuation(claimed.approval_id) is None
 
     async def resume(self) -> None:
         result = AsyncMock(return_value=CompletedApprovalRun(response_text="Edited answer", metadata_content={}))
-        with patch.object(self.runner, "_continue_entity_call", result):
+        with patch.object(self.runner._approvals, "_continue_entity_call", result):
             assert await self.runner.handoff_approval_source("$edit") is False
             await self.runner.wait_for_source_owned_inbox_responses()
 
@@ -315,10 +317,10 @@ async def _paused_case(  # noqa: PLR0915
         ),
     )
     await runner.deps.replies.start()
-    runner._approval_responses.store = principal.approvals
-    runner._approval_responses.load_span = principal.replies.span
-    runner._approval_responses.delivery_gateway = gateway
-    runner._approval_responses.finish_approval = runner.deps.replies.finish_approval
+    runner._approvals._approval_responses.store = principal.approvals
+    runner._approvals._approval_responses.load_span = principal.replies.span
+    runner._approvals._approval_responses.delivery_gateway = gateway
+    runner._approvals._approval_responses.finish_approval = runner.deps.replies.finish_approval
     regenerator = unwrap_extracted_collaborator(bot._edit_regenerator)
     regenerator.deps = replace(
         regenerator.deps,
@@ -503,7 +505,10 @@ class TestEditApprovalOwnership:
         case.runner.deps.replies.retry_sources = lambda _room_id, sources: retried.append(sources)
         await case.dispatch_newer()
         assert await case.principal.approvals.approval_continuation_for_source("$newer-edit") is None
-        assert not await case.runner._approval_responses.settle_failure(claimed, "Paused run is no longer available")
+        assert not await case.runner._approvals._approval_responses.settle_failure(
+            claimed,
+            "Paused run is no longer available",
+        )
         final = await case.principal.load_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL)
         assert final is not None
         assert final.permanent_failure_reason is None
@@ -553,7 +558,7 @@ class TestEditApprovalOwnership:
         # An approval after the deletion runs nothing.
         await case.approve()
         resumed = AsyncMock(side_effect=AssertionError("A deleted message's approval must not execute"))
-        with patch.object(case.runner, "_continue_entity_call", resumed):
+        with patch.object(case.runner._approvals, "_continue_entity_call", resumed):
             await case.runner.handoff_approval_source("$edit")
             await case.runner.wait_for_source_owned_inbox_responses()
         resumed.assert_not_awaited()
@@ -620,11 +625,11 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
         edit_regeneration=True,
         sources=ResponseSources(("$edit",), ("$source",)),
     )
-    lifecycle = runner._build_lifecycle(
-        identity=runner._response_identity(request, response_kind="ai"),
+    lifecycle = runner.build_lifecycle(
+        identity=runner.response_identity(request, response_kind="ai"),
         request=request,
     )
-    progress = _DeliveryProgress()
+    progress = DeliveryProgress()
     pause = ResponsePausedForApproval(PausedAttempt(session_id="session", run_id="run", tools=(), toolkit_owners={}))
 
     async def fail_handoff(_paused: PausedAttempt) -> None:
@@ -641,7 +646,7 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
             logical_source_event_ids=("$source",),
             regenerated_event_id="$waiting",
         ):
-            await runner._run_and_settle_locked_response(
+            await runner.run_and_settle_locked_response(
                 request,
                 target=request.response_envelope.target,
                 lifecycle=lifecycle,

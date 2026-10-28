@@ -53,6 +53,7 @@ from structlog.testing import ReturnLoggerFactory
 from structlog.typing import BindableLogger, Context, Processor, WrappedLogger
 
 import mindroom.api.sandbox_exec as sandbox_exec_module
+import mindroom.approval.continuation_runner as continuation_runner_module
 import mindroom.approval.manager as approval_manager_module
 import mindroom.bot  # noqa: F401
 import mindroom.custom_tools.todo as todo_tool_module
@@ -160,10 +161,10 @@ from mindroom.response_payload_preparation import (
 )
 from mindroom.response_runner import (
     PostLockRequestPreparationError,
+    PreparedResponseRuntime,
     ResponseRequest,
     ResponseRunner,
     _agent_run_metadata,
-    _PreparedResponseRuntime,
     _ResponseGenerationOutcome,
 )
 from mindroom.response_sources import ResponseSources
@@ -569,7 +570,7 @@ async def prepare_agent_and_prompt_for_test(
 def agent_turn_recorder_for_test(
     runner: ResponseRunner,
     request: ResponseRequest,
-    runtime: _PreparedResponseRuntime,
+    runtime: PreparedResponseRuntime,
 ) -> TurnRecorder:
     """Return the recorder the runner gives an agent turn of ``request`` under ``runtime``."""
     return runner._build_turn_recorder(
@@ -2939,13 +2940,20 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
 
 @contextmanager
 def patch_response_runner_module(**changes: object) -> Generator[None, None, None]:
-    """Patch module-level response coordinator seams on the real current owner."""
+    """Patch module-level response coordinator seams on the real current owners.
+
+    A seam the approval lifecycle also imports is patched there too, so a resumed approval sees the replacement.
+    """
     with ExitStack() as stack:
         for name, replacement in changes.items():
-            module_name = (
-                "mindroom.response_lifecycle" if name == "apply_post_response_effects" else "mindroom.response_runner"
-            )
-            stack.enter_context(patch(f"{module_name}.{name}", new=replacement))
+            if name == "apply_post_response_effects":
+                module_names = ["mindroom.response_lifecycle"]
+            else:
+                module_names = ["mindroom.response_runner"]
+                if name in vars(continuation_runner_module):
+                    module_names.append("mindroom.approval.continuation_runner")
+            for module_name in module_names:
+                stack.enter_context(patch(f"{module_name}.{name}", new=replacement))
         yield
 
 

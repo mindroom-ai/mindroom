@@ -1449,7 +1449,7 @@ class TestAgentBot(AgentBotTestBase):
             await release_resume.wait()
             return False
 
-        with patch.object(bot._response_runner, "_resume_approval_source", new=resume):
+        with patch.object(bot._response_runner._approvals, "_resume_approval_source", new=resume):
             handoff = asyncio.create_task(
                 bot._journal_dispatcher.callbacks.on_approval_continuation("$source"),
             )
@@ -1579,7 +1579,7 @@ class TestAgentBot(AgentBotTestBase):
             async with first_runner.deps.replies.span_scope():
                 claimed_request = await first_runner._claim_reply_span(request, history_scope=history_scope)
                 assert claimed_request is not None
-                suspended = await first_runner._suspend_for_approval(
+                suspended = await first_runner._approvals.suspend_for_approval(
                     paused,
                     request=claimed_request,
                     target=target,

@@ -64,7 +64,7 @@ def _sent_bodies(bot: AgentBot) -> list[dict[str, object]]:
 async def _settle(bot: AgentBot, claimed: ApprovalContinuation) -> None:
     """Settle an active restart cancellation of the claimed approval."""
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    await runner._settle_failed_approval_outcome(
+    await runner._approvals._settle_failed_approval_outcome(
         claimed,
         FinalDeliveryOutcome(
             terminal_status="cancelled",
@@ -101,7 +101,7 @@ async def test_missing_approval_owner_does_not_edit_the_reply(
     """Successful no-op retirement is not evidence of a visible interruption."""
     bot, claimed = approval
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    failing = await runner._approval_responses.request_failure(claimed, "sync_restart_cancelled")
+    failing = await runner._approvals._approval_responses.request_failure(claimed, "sync_restart_cancelled")
     assert failing is not None
     await bot._journal_store.backend.write(lambda tx: tx.execute("DELETE FROM approval_continuations"))
     sends = bot.client.room_send.await_count

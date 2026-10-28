@@ -171,7 +171,7 @@ async def resumed_approval(bot: AgentBot, continuation: ApprovalContinuation) ->
     runner = unwrap_extracted_collaborator(bot._response_runner)
     await bot._reply_runtime.start()
     async with runner.deps.replies.span_scope() as slot:
-        claimed = await runner._claim_owned_approval(continuation, slot=slot)
+        claimed = await runner._approvals._claim_owned_approval(continuation, slot=slot)
         assert claimed is not None
         assert slot.handle is not None
         yield claimed

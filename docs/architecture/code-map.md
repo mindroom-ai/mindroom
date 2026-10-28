@@ -105,6 +105,7 @@ Matrix sync callback
 | `approval/receipt_readers.py` | Which runs read the bound approval receipt: the binding an approval continuation sets around itself, free of model-loop imports so work the loop starts can leave it |
 | `approval/tool_owners.py` | Recorded toolkit restoration and exact owner validation for saved approvals |
 | `approval/response.py` | Response-side native approval continuation persistence, card publication, and terminal settlement |
+| `approval/continuation_runner.py` | `ApprovalContinuationRunner`: a reply's approval lifecycle that `ResponseRunner` delegates to: pausing for approval, resuming the approved run in its reply, minimal-mode CLI waits, approval holds, and recovering a paused reply after a failure or restart |
 | `approval/manager.py` | Matrix-backed tool approval runtime state |
 | `approval/auto_approve_windows.py` | Durable per-conversation `!auto_approve` windows that approve one requester's gated calls without cards |
 | `oauth/credential_binding.py` | Canonical OAuth provider and worker-target bindings for browser workflows |
