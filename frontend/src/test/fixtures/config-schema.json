@@ -4577,6 +4577,40 @@
       "title": "SkillLearningConfig",
       "type": "object"
     },
+    "SlackConfig": {
+      "additionalProperties": false,
+      "description": "How Slack workspace members map to Matrix users.",
+      "properties": {
+        "email_domain": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Email domain of the Slack workspace's members, for example `example.com`; set with matrix_user_id_template",
+          "title": "Email Domain"
+        },
+        "matrix_user_id_template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Matrix user ID a member's email localpart maps to, with one `{localpart}`, for example `@{localpart}:example.org`; set with email_domain",
+          "title": "Matrix User Id Template"
+        }
+      },
+      "title": "SlackConfig",
+      "type": "object"
+    },
     "SpeechServiceConfig": {
       "additionalProperties": false,
       "description": "Configuration for one OpenAI-compatible speech service.",
@@ -5686,6 +5720,14 @@
         "max_pending_bytes": 67108864
       },
       "description": "Matrix event sync transport configuration"
+    },
+    "slack": {
+      "$ref": "#/$defs/SlackConfig",
+      "default": {
+        "email_domain": null,
+        "matrix_user_id_template": null
+      },
+      "description": "Slack integration: how Slack workspace members map to Matrix users"
     },
     "timezone": {
       "default": "UTC",

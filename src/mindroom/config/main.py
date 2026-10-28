@@ -84,6 +84,7 @@ from mindroom.config.runtime_overlays import (
     strip_runtime_approved_egress_overlay_from_dump,
 )
 from mindroom.config.schema_hints import DashboardJsonSchema, dashboard_hint, redact_config_for_display
+from mindroom.config.slack import SlackConfig
 from mindroom.config.tool_entries import raw_tool_entry_name_and_lazy_flag_fields, raw_tools_entries
 from mindroom.config.validation import TimezoneName  # noqa: TC001
 from mindroom.config.voice import VoiceConfig
@@ -522,6 +523,10 @@ class Config(BaseModel):
     matrix_sync: MatrixSyncConfig = Field(
         default_factory=MatrixSyncConfig,
         description="Matrix event sync transport configuration",
+    )
+    slack: SlackConfig = Field(
+        default_factory=SlackConfig,
+        description="Slack integration: how Slack workspace members map to Matrix users",
     )
     timezone: TimezoneName = Field(
         default="UTC",

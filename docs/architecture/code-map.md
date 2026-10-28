@@ -169,6 +169,7 @@ Matrix sync callback
 | `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |
 | `config/personal_rooms.py` | Opt-in personal-room settings and validation for commands, aliases, and message templates |
 | `config/personal_agents.py` | `personal_agents` templates, the roster store, and expansion of roster entries into ordinary agents before config validation |
+| `config/slack.py` | The top-level `slack:` section: the email domain and Matrix user ID template that map Slack workspace members to Matrix users |
 | `routing.py` | Intelligent responder selection when no agent or team is mentioned |
 | `routing_judgment.py` | Opt-in bounded System One or OpenAI Decisions responder selection, with explicit no-fit outcomes and existing LLM routing fallback |
 | `teams/formation.py` | Forming a team from one turn: who was asked, who is eligible, which members can be materialized, and the execution-time mode choice for an ad hoc team |
@@ -465,6 +466,7 @@ Matrix sync callback
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
 | `slack/` | Native Slack: the minimal Web API client, personal and project tools, events, and agent reply mirroring |
 | `slack/api.py` | Minimal async Slack Web API client over `httpx`, with Slack error and rate-limit mapping, and parsing of conversation, message, permalink, and user targets |
+| `slack/app.py` | The Slack app's workspace-wide credentials from the shared credential store, and the bot identity `auth.test` reports for them, cached per bot token |
 
 ## Persistent State
 

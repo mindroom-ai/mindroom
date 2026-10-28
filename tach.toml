@@ -9721,3 +9721,7 @@ visibility = ["mindroom.session_storage.legacy_agno3_schema"]
 [[modules]]
 path = "mindroom.slack.api"
 depends_on = []
+
+[[modules]]
+path = "mindroom.slack.app"
+depends_on = ["mindroom.slack.api"]
