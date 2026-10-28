@@ -16,7 +16,6 @@ import shutil
 import socket
 import threading
 from contextlib import asynccontextmanager, suppress
-from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlsplit
@@ -42,11 +41,13 @@ from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_agent_toolkit_worker_target,
     resolve_worker_key,
+    serialize_tool_execution_identity,
     tool_execution_identity,
 )
 from mindroom.worker_computer.sessions import ComputerError, ComputerTarget
 from mindroom.workers.backends.docker_config import DockerWorkerBackendConfig
 from mindroom.workers.models import WorkerSpec
+from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteRequest
 from mindroom.workers.runtime import bind_worker_launch_config_source, shutdown_primary_worker_manager
 
 if TYPE_CHECKING:
@@ -200,6 +201,29 @@ class Fixture:
                     raise ComputerError(403, "Fixture membership denied.")
         return self.target(requester)
 
+    def runner_request(
+        self,
+        tool: str,
+        function: str,
+        kwargs: dict[str, Any],
+        *,
+        user: str,
+        worker_key: str,
+    ) -> ExecuteRequest:
+        """Build the request a worker-routed call sends the runner, through the shared wire model."""
+        return ExecuteRequest(
+            protocol=WORKER_PROTOCOL_VERSION,
+            worker_key=worker_key,
+            worker_scope="user_agent",
+            routing_agent_name="writer",
+            execution_identity=serialize_tool_execution_identity(self.identity(user)),
+            private_agent_names=[],
+            tool_name=tool,
+            function_name=function,
+            kwargs=kwargs,
+            tool_config_overrides={"allow_private_networks": True} if tool in {"browser", "browser_mcp"} else {},
+        )
+
     async def reconcile_worker(self) -> WorkerHandle:
         """Exercise primary worker reconciliation before the next tool dispatch."""
         return await asyncio.to_thread(
@@ -249,23 +273,12 @@ class Fixture:
         (self.args.output / "container-security.json").write_text(
             json.dumps(self.container_security, indent=2, sort_keys=True) + "\n",
         )
-        payload = {
-            "tool_name": tool,
-            "function_name": function,
-            "worker_key": target.spec.worker_key,
-            "worker_scope": "user_agent",
-            "routing_agent_name": "writer",
-            "execution_identity": asdict(self.identity(user)),
-            "private_agent_names": [],
-            "kwargs": kwargs,
-        }
-        if tool in {"browser", "browser_mcp"}:
-            payload["tool_config_overrides"] = {"allow_private_networks": True}
+        request = self.runner_request(tool, function, kwargs, user=user, worker_key=target.spec.worker_key)
         async with httpx.AsyncClient(timeout=100) as client:
             response = await client.post(
                 handle.endpoint,
                 headers={"X-Mindroom-Sandbox-Token": handle.auth_token},
-                json=payload,
+                json=request.model_dump(mode="json"),
             )
             response.raise_for_status()
             return response.json()
