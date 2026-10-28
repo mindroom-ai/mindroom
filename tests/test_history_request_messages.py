@@ -76,13 +76,11 @@ def _stored_scope(golden: dict[str, Any]) -> HistoryScope:
     return HistoryScope(kind="agent", scope_id=session["agent_id"])
 
 
-def _as_replayed(stored: dict[str, Any]) -> dict[str, Any]:
+def _as_replayed(stored: dict[str, Any]) -> Message:
     """Return a stored message dict as history replays it: a history copy whose only media are viewed images."""
-    replayed = {key: value for key, value in stored.items() if key not in {"audio", "videos", "files", "images"}}
-    viewed = [image for image in stored.get("images", []) if image["id"].startswith(VIEWED_IMAGE_ID_PREFIX)]
-    if viewed:
-        replayed["images"] = viewed
-    return {**replayed, "from_history": True}
+    message = Message.from_dict(stored)
+    viewed = [image for image in message.images or () if image.id.startswith(VIEWED_IMAGE_ID_PREFIX)]
+    return replace(message, images=viewed or None, audio=None, videos=None, files=None, from_history=True)
 
 
 def _selection_cases() -> list[Any]:
@@ -127,7 +125,7 @@ def test_selection_matches_the_history_golden(golden_name: str, selection_name: 
         max_tool_calls_from_history=None,
     )
 
-    assert [message.to_dict() for message in history] == [_as_replayed(message) for message in selection["messages"]]
+    assert history == [_as_replayed(message) for message in selection["messages"]]
 
 
 @pytest.mark.parametrize(
@@ -157,7 +155,7 @@ def test_scoped_selection_matches_the_scoped_selection_golden(session_key: str, 
         max_tool_calls_from_history=None,
     )
 
-    assert [message.to_dict() for message in history] == [_as_replayed(message) for message in selection["messages"]]
+    assert history == [_as_replayed(message) for message in selection["messages"]]
 
 
 @pytest.mark.parametrize(("golden_name", "case_name"), _filter_cases())
@@ -171,7 +169,7 @@ def test_filter_tool_calls_matches_the_history_golden(golden_name: str, case_nam
 
     filtered = filter_tool_calls(copies, case["max_tool_calls"])
 
-    assert [message.to_dict() for message in filtered] == case["messages"]
+    assert filtered == [Message.from_dict(message) for message in case["messages"]]
 
 
 @pytest.mark.parametrize("golden_path", _HISTORY_GOLDENS, ids=lambda path: path.stem)
@@ -188,7 +186,7 @@ def test_replayed_history_limits_tool_calls_as_the_history_golden_does(golden_pa
         max_tool_calls_from_history=max_tool_calls,
     )
 
-    assert [message.to_dict() for message in history] == [_as_replayed(message) for message in expected]
+    assert history == [_as_replayed(message) for message in expected]
 
 
 def _exchange(prefix: str) -> list[Message]:
@@ -249,12 +247,9 @@ def _contents(messages: list[Message]) -> list[object]:
     return [message.content for message in messages]
 
 
-def _shape(messages: list[Message]) -> list[dict[str, Any]]:
-    """Return what the model reads of each message: its dict without the per-object id and timestamp."""
-    return [
-        {key: value for key, value in message.to_dict().items() if key not in {"id", "created_at"}}
-        for message in messages
-    ]
+def _shape(messages: list[Message]) -> list[Message]:
+    """Return what the model reads of each message: a copy without the per-object id and timestamp."""
+    return [replace(message, id="", created_at=0) for message in messages]
 
 
 def test_agent_scope_replays_only_its_own_finished_top_level_runs() -> None:
@@ -459,18 +454,21 @@ def test_new_request_orders_system_summary_history_context_prompt_then_transient
 
     request = _request(summary=_SUMMARY, history=history, turn=turn)
 
-    assert _shape(request) == [
-        {"role": "system", "content": "Be precise.", "from_history": False, "stop_after_tool_call": False},
-        {
-            "role": "user",
-            "content": _rendered_summary(_SUMMARY.text),
-            "provider_data": {"mindroom_compaction_summary": "scope"},
-            "from_history": True,
-            "stop_after_tool_call": False,
-        },
-        *_shape(history),
-        *_shape([*turn.context, turn.prompt, *turn.transient]),
-    ]
+    assert _shape(request) == _shape(
+        [
+            Message(role="system", content="Be precise."),
+            Message(
+                role="user",
+                content=_rendered_summary(_SUMMARY.text),
+                provider_data={"mindroom_compaction_summary": "scope"},
+                from_history=True,
+            ),
+            *history,
+            *turn.context,
+            turn.prompt,
+            *turn.transient,
+        ],
+    )
 
 
 def test_each_attempt_request_carries_its_media_on_a_copy_of_the_prompt() -> None:
