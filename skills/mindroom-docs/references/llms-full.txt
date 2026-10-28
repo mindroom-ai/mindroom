@@ -2514,7 +2514,7 @@ Each decision logs `Cold cache model selected` with a `reason`: `no_earlier_repl
 
 MindRoom retries a model request that fails with a rate limit, an overload, a server error (any 5xx status, a CDN's origin timeout included), a request timeout, or a dropped connection up to four times, as long as nothing was streamed yet and no provider-hosted tool had started.
 Before each retry it waits as long as the provider's `Retry-After` or Azure's `retry-after-ms` header asks, when that is at most a minute, and otherwise a delay that doubles with each retry.
-SDK retry settings in `client_params`, such as `max_retries` or Gemini's `http_options.retry_options`, have no effect, except that a Gemini file upload keeps the SDK's own fixed retries of its transfer.
+SDK retry settings in `client_params`, such as `max_retries` or Gemini's `http_options.retry_options`, have no effect; the Gemini SDK still resends on its own after a dropped connection and during a file upload's transfer.
 A request that still fails ends the turn with "⏱️ Rate limited. Please wait a moment and try again." for a rate limit, or "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly." otherwise.
 
 ## Stalled Streams

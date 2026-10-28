@@ -1,9 +1,10 @@
 """Bounded retries for transient provider failures, and the stream idle limit.
 
-This stage retries a failed model request; the SDK clients send each request once, except that google-genai retries a
-Gemini file upload's transfer a fixed number of times on its own. A failed request is reissued here until the attempt
-committed: produced output the caller could have shown, or started a hosted tool that acts or costs, which a retry would
-run again. A stall is decided the same way. Earlier tool calls and their results stay in the conversation; only the
+This stage retries a failed model request; MindRoom turns off the SDK clients' configurable retries, though google-genai
+still resends on its own in a few places it hardcodes, such as a Gemini file upload's transfer and a dropped connection.
+A failed request is reissued here until the attempt committed: produced output the caller could have shown, or started a
+hosted tool that acts or costs, which a retry would run again. A stall is decided the same way. Earlier tool calls and
+their results stay in the conversation; only the
 failed request repeats.
 
 The idle limit ends attempts whose provider sends no event for too long. Adapters report provider data
