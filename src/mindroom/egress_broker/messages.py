@@ -266,8 +266,9 @@ def refusal_body(
     adds `oauth_reuse: "off"` and says who may allow the account: on a shared agent its managers, unless it is the
     requester's own (`requester_owned`). A `read_only` (the `provider` account may only read) says who may allow
     writes the same way. `own_account` (the service's own account is not connected, or with `reuse_off` not allowed)
-    asks the user to connect it, or to connect and allow it, at `manage_url`. An `oauth_connection_required` without a connect link names only `manage_url`, and on a `shared`
-    agent its `managers` (or an administrator) as the ones who can reconnect, unless the account is `requester_owned`.
+    asks the user to connect it, or to connect and allow it, at `manage_url`. An `oauth_connection_required` without a
+    connect link names only `manage_url`, and on a `shared` agent its `managers` (or an administrator) as the ones who
+    can reconnect, unless the account is `requester_owned`.
     A personal scope without the personal page (`personal_page` false) has no page that sets its keys, accounts, or
     services: its texts say so and offer only a connect link, for `oauth_connection_required` too where `connectable`
     says the body carries one, and the body leaves out `manage_url`, which would be the dashboard.
