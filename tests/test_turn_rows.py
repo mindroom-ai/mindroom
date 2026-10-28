@@ -452,6 +452,20 @@ class TestRedactionGuard:
         )
 
         await redact(store, "$e1")
+        # Nothing newer is selected now, so only the redaction refuses a late write carrying E1.
+        late = turn(["$s"], prompts={"$s": "E1 text"}, revisions={"$s": (10, "$e1")})
+        assert isinstance(await pending(store, late), Accepted)
+        assert not await write(
+            store,
+            turn_rows.record_edit,
+            turn_key=key,
+            edited_event_id="$s",
+            prompt="E1 again",
+            revision=(10, "$e1"),
+        )
+        refused = await read(store, turn_rows.load_turn, key)
+        assert refused is not None
+        assert refused.source_event_prompts is None
         assert await write(
             store,
             turn_rows.record_edit,
@@ -460,7 +474,6 @@ class TestRedactionGuard:
             prompt="E2 text",
             revision=(20, "$e2"),
         )
-        late = turn(["$s"], prompts={"$s": "E1 text"}, revisions={"$s": (10, "$e1")})
         assert isinstance(await pending(store, late), Accepted)
         assert not await write(
             store,
