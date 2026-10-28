@@ -73,7 +73,7 @@ def _inputs(config: Config) -> HistoryPreparationInputs:
     """Resolve the configured test agent's history inputs for a 100-token static prompt."""
     return resolve_entity_preparation_inputs(
         entity_name="test_agent",
-        history_settings=config.resolve_entity("test_agent").history_settings,
+        history_settings=config.resolve_scope("test_agent").history_settings,
         config=config,
         runtime_paths=runtime_paths_for(config),
         static_prompt_tokens=100,
@@ -631,7 +631,7 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
     prepared = await prepare_bound_scope_history(
         model=leader,
         team_name="team",
-        history_settings=config.resolve_entity("team").history_settings,
+        history_settings=config.resolve_scope("team").history_settings,
         config=config,
         runtime_paths=paths,
         scope_context=ScopeSessionContext(

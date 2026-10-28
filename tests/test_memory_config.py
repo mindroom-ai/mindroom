@@ -1375,7 +1375,7 @@ class TestMemoryConfig:
         )
 
         assert config.memory.backend == "none"
-        assert config.resolve_entity("scratch").memory_backend == "none"
+        assert config.resolve_scope("scratch").memory_backend == "none"
         assert config.uses_file_memory() is False
 
     def test_config_accepts_per_agent_disabled_memory_backend(self) -> None:
@@ -1389,8 +1389,8 @@ class TestMemoryConfig:
             router=RouterConfig(model="default"),
         )
 
-        assert config.resolve_entity("general").memory_backend == "mem0"
-        assert config.resolve_entity("scratch").memory_backend == "none"
+        assert config.resolve_scope("general").memory_backend == "mem0"
+        assert config.resolve_scope("scratch").memory_backend == "none"
         assert config.uses_file_memory() is False
 
 
@@ -1425,7 +1425,7 @@ def test_agent_memory_search_override_merges_per_field() -> None:
         router=RouterConfig(model="default"),
     )
 
-    search = config.resolve_entity("openclaw").memory_search
+    search = config.resolve_scope("openclaw").memory_search
 
     assert search.mode == "semantic"
     assert search.include == ["memory/**/*.md"]
@@ -1455,7 +1455,7 @@ def test_agent_memory_search_can_override_include_patterns() -> None:
         router=RouterConfig(model="default"),
     )
 
-    search = config.resolve_entity("openclaw").memory_search
+    search = config.resolve_scope("openclaw").memory_search
 
     assert search.include == ["memory/**/*.md", "decisions/**/*.md"]
     assert search.include_entrypoint is True

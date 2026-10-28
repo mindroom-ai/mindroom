@@ -13,7 +13,7 @@ Every divergence between those copies was a bug class: a saved approval could au
 ## Decisions
 
 - **One record per entity, recomputed on demand.**
-  `Config.resolve_scope`, `resolve_entity`, and `resolve_agent` return frozen records built from small per-fact functions; validators and tolerant readers call the same functions.
+  `Config.resolve_scope` and `resolve_agent` return frozen records built from small per-fact functions; validators, tolerant readers, and callers that need one fact call the same functions.
   There is no cache: `model_copy` copies private attributes, and both production and tests mutate configs after validation, so a cached record would go stale without any signal.
   Building a full agent record costs about 35 microseconds; hot paths that need one fact, such as execution policy in `resolve_agent_execution`, call that fact's function (about 3 microseconds) instead of the whole record, which also keeps dedicated workers, whose configs carry no models, from evaluating facts they cannot answer.
 - **The turn's model has one owner.**

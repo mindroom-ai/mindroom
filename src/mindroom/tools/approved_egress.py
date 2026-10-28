@@ -17,6 +17,7 @@ from urllib import error, parse, request
 
 from agno.tools import Toolkit
 
+from mindroom.config.resolution import agent_policy
 from mindroom.egress.policy import (
     canonical_hostname,
     is_hostname_allowed,
@@ -201,7 +202,7 @@ def _effective_ttl_seconds(requested_ttl_seconds: int) -> int:
 
 def _grant_subject(context: ToolRuntimeContext) -> EgressGrantSubject:
     agent_name = context.agent_name
-    scope = context.config.resolve_agent(agent_name).policy.effective_execution_scope
+    scope = agent_policy(context.config, agent_name).effective_execution_scope
     execution_identity = build_execution_identity_from_runtime_context(context) if scope == "user_agent" else None
     return resolve_grant_subject(
         agent_name=agent_name,

@@ -144,7 +144,7 @@ def test_create_agent_builds_the_spec_prompt_store_and_owners(tmp_path: Path) ->
     assert build.spec.system_messages == ()
     assert [toolkit.name for toolkit in build.spec.toolkits] == ["calculator", "search_knowledge_base", "skills"]
     assert set(_offered(build)) == _CALCULATOR_FUNCTIONS | {"search_knowledge_base"} | SKILL_FUNCTION_NAMES
-    assert build.spec.max_tool_calls_per_turn == config.resolve_entity("assistant").max_tool_calls_per_turn
+    assert build.spec.max_tool_calls_per_turn == config.resolve_scope("assistant").max_tool_calls_per_turn
     assert _owners(build) == dict.fromkeys(_CALCULATOR_FUNCTIONS, "calculator")
     workspace = agent_workspace_root_path(runtime_paths.storage_root, "assistant")
     assert f"### {workspace / 'SOUL.md'}\nYou are calm and precise." in build.prompt.role
@@ -156,7 +156,7 @@ def test_create_agent_builds_the_spec_prompt_store_and_owners(tmp_path: Path) ->
     assert build.prompt.turn_context is not None
     assert build.prompt.turn_context.startswith("<mindroom_session_context>")
     assert build.request_template == ModelRequest(messages=())
-    assert build.history_settings == config.resolve_entity("assistant").history_settings
+    assert build.history_settings == config.resolve_scope("assistant").history_settings
     assert isinstance(build.store, ConversationStore)
     # Large CLI results and their media are saved in the agent's own workspace.
     assert build.surface.output_file_policy is not None

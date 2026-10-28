@@ -223,7 +223,7 @@ async def _run(
         scope_id="test_agent",
         is_team=False,
     )
-    settings = agent.config.resolve_entity("test_agent").history_settings
+    settings = agent.config.resolve_scope("test_agent").history_settings
     history = (
         scope_history_messages(
             session.runs,

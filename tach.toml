@@ -1940,6 +1940,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.client_visible_messages",
     "mindroom.tool_system.events",
+    "mindroom.config.resolution",
 ]
 
 [[modules]]
@@ -1986,6 +1987,7 @@ depends_on = [
     "mindroom.requester_identity",
     "mindroom.runtime_resolution",
     "mindroom.tool_system.worker_routing",
+    "mindroom.config.resolution",
 ]
 
 [[modules]]
@@ -3850,6 +3852,7 @@ depends_on = [
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.filters",
     "mindroom.tool_system.agent_tools",
+    "mindroom.config.resolution",
 ]
 visibility = ["mindroom.mcp.manager"]
 

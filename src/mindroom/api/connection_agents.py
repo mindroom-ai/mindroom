@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api.auth import require_same_origin
 from mindroom.authorization import is_sender_allowed_for_agent_credential_management, is_sender_allowed_for_responder
+from mindroom.config.resolution import agent_policy
 from mindroom.matrix.identity import try_parse_historical_matrix_user_id
 from mindroom.mcp_gateway.types import GatewayOwner
 from mindroom.origins import deployment_origin, is_local_origin
@@ -136,7 +137,7 @@ def resolve_connection_user(
     gateway = tuple(
         name
         for name in usable
-        if config.resolve_agent(name).policy.effective_execution_scope in {"user", "user_agent"}
+        if agent_policy(config, name).effective_execution_scope in {"user", "user_agent"}
         or config.agents[name].mcp_gateway_shared_credentials
     )
     return ConnectionUserContext(

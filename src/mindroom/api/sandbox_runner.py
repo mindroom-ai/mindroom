@@ -1127,6 +1127,11 @@ def _prepare_execute_request(
     call_environment: dict[str, str | None] = {name: execution_env[name] for name in kept_set_names}
     call_environment.update(dict.fromkeys(removed_names))
     request_workspace = _resolve_request_workspace(request, prepared, runtime_paths=runtime_paths, config=config)
+    tool_init_overrides = request.tool_init_overrides
+    if prepared is None and request.routing_agent_name is not None and "base_dir" in tool_init_overrides:
+        # A static runner works in the agent workspace it resolves in its own storage, which a Compose runner does not
+        # share with the primary, so the primary's path for it would not exist here.
+        tool_init_overrides = {**tool_init_overrides, "base_dir": str(request_workspace)}
     try:
         env_result = sandbox_env_assembly.build_request_execution_env(
             request_workspace=request_workspace,
@@ -1198,11 +1203,7 @@ def _prepare_execute_request(
         private_agent_names=list(request.private_agent_names) if request.private_agent_names is not None else None,
         credential_overrides=dict(credential_overrides),
         tool_config_overrides=dict(request.tool_config_overrides),
-        tool_init_overrides=_prepared_tool_init_overrides(
-            request.tool_name,
-            request.tool_init_overrides,
-            runtime_overrides,
-        ),
+        tool_init_overrides=_prepared_tool_init_overrides(request.tool_name, tool_init_overrides, runtime_overrides),
         execution_env=dict(execution_env),
         call_environment=call_environment,
         call_path_prepend=list(request.execution_path_prepend),

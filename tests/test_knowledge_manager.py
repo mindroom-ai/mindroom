@@ -415,7 +415,7 @@ async def test_cold_file_memory_overlay_waits_for_managed_content_before_publish
         scope_user_id=agent_scope_user_id("helper"),
         root=root,
         config=config,
-        search_config=config.resolve_entity("helper").memory_search,
+        search_config=config.resolve_scope("helper").memory_search,
     )
 
     empty_result = await refresh_knowledge_binding(

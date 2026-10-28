@@ -78,7 +78,6 @@ from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.config.resolution import (
     AuthoredOptionalModel,
     ResolvedAgent,
-    ResolvedEntity,
     ResolvedScope,
     agent_policy,
     agent_tool_facts,
@@ -87,7 +86,6 @@ from mindroom.config.resolution import (
     configured_entity,
     memory_backend,
     resolve_agent,
-    resolve_entity,
     resolve_scope,
     uses_knowledge_graph,
 )
@@ -1306,10 +1304,6 @@ class Config(BaseModel):
     def resolve_scope(self, entity_name: str | None) -> ResolvedScope:
         """Return what one agent, team, or the router shares with every scope; None is an ad hoc team's defaults."""
         return resolve_scope(self, entity_name)
-
-    def resolve_entity(self, entity_name: str) -> ResolvedEntity:
-        """Return what one configured agent, team, or the router gets; an unknown name raises."""
-        return resolve_entity(self, entity_name)
 
     def resolve_agent(self, agent_name: str) -> ResolvedAgent:
         """Return what one configured agent gets; an unknown name raises."""

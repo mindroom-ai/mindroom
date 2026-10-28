@@ -4496,8 +4496,8 @@ def test_config_resolves_per_agent_memory_backend_override() -> None:
         memory={"backend": "mem0"},
     )
 
-    assert config.resolve_entity("general").memory_backend == "mem0"
-    assert config.resolve_entity("writer").memory_backend == "file"
+    assert config.resolve_scope("general").memory_backend == "mem0"
+    assert config.resolve_scope("writer").memory_backend == "file"
 
 
 def test_config_reports_mixed_memory_backend_usage() -> None:
@@ -4511,8 +4511,8 @@ def test_config_reports_mixed_memory_backend_usage() -> None:
     )
 
     assert config.uses_file_memory() is True
-    assert config.resolve_entity("general").memory_backend == "file"
-    assert config.resolve_entity("writer").memory_backend == "mem0"
+    assert config.resolve_scope("general").memory_backend == "file"
+    assert config.resolve_scope("writer").memory_backend == "mem0"
 
 
 def test_config_rejects_memory_file_path_even_with_mem0_backend() -> None:

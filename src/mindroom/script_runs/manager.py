@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Protocol, TypedDict, cast, runtime_checkable
 from weakref import WeakValueDictionary
 
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
+from mindroom.config.resolution import agent_policy
 from mindroom.constants import CONTROL_STATE_PATH_ENV
 from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
@@ -1208,7 +1209,7 @@ def _require_supported_private_script_worker_scope(context: ToolRuntimeContext) 
     agent_config = context.config.get_agent(context.agent_name)
     if (
         agent_config.private is not None
-        and context.config.resolve_agent(context.agent_name).policy.effective_execution_scope != "user_agent"
+        and agent_policy(context.config, context.agent_name).effective_execution_scope != "user_agent"
     ):
         msg = "Background-script workers for private agents require private.per=user_agent."
         raise ScriptRunManagerError(msg)

@@ -28,7 +28,7 @@ from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, Ask, AutomationCo
 from mindroom.automations.threads import automations_tracking_root, record_automation_thread
 from mindroom.background_tasks import create_background_task
 from mindroom.config.automations import PluginAutomation
-from mindroom.config.resolution import memory_backend
+from mindroom.config.resolution import agent_automations, memory_backend
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
@@ -113,7 +113,7 @@ def _instances(config: Config, runtime_paths: RuntimePaths) -> list[_Instance]:
     return agent_instances(
         config,
         runtime_paths,
-        [agent_name for agent_name in config.agents if config.resolve_agent(agent_name).automations],
+        [agent_name for agent_name in config.agents if agent_automations(config, agent_name)],
     )
 
 

@@ -1,7 +1,9 @@
-"""Behavioral tests for the resolved per-entity config records: `resolve_scope`, `resolve_entity`, `resolve_agent`."""
+"""Behavioral tests for the resolved per-entity config records: `resolve_scope`, `resolve_agent`, `entity_model_name`."""
 # ruff: noqa: D103
 
 from __future__ import annotations
+
+from dataclasses import fields
 
 import pytest
 
@@ -16,7 +18,7 @@ from mindroom.config.models import (
     ModelConfig,
     ToolConfigEntry,
 )
-from mindroom.config.resolution import ResolvedAgent, ResolvedEntity
+from mindroom.config.resolution import ResolvedAgent, entity_model_name
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.history.types import HistoryPolicy
 from mindroom.tool_system.agent_tools import resolve_agent_tools
@@ -90,10 +92,10 @@ def _representative_config() -> Config:
 def test_history_settings_resolution() -> None:
     config = _representative_config()
 
-    assert config.resolve_entity("overriding_agent").history_settings.policy == HistoryPolicy(mode="runs", limit=7)
-    assert config.resolve_entity("overriding_agent").history_settings.max_tool_calls_from_history == 3
-    assert config.resolve_entity("overriding_team").history_settings.policy == HistoryPolicy(mode="messages", limit=11)
-    assert config.resolve_entity("overriding_team").history_settings.max_tool_calls_from_history == 9
+    assert config.resolve_scope("overriding_agent").history_settings.policy == HistoryPolicy(mode="runs", limit=7)
+    assert config.resolve_scope("overriding_agent").history_settings.max_tool_calls_from_history == 3
+    assert config.resolve_scope("overriding_team").history_settings.policy == HistoryPolicy(mode="messages", limit=11)
+    assert config.resolve_scope("overriding_team").history_settings.max_tool_calls_from_history == 9
     for inheriting_scope in ("inheriting_agent", "inheriting_team", ROUTER_AGENT_NAME, None):
         settings = config.resolve_scope(inheriting_scope).history_settings
         assert settings.policy == HistoryPolicy(mode="runs", limit=4)
@@ -103,7 +105,7 @@ def test_history_settings_resolution() -> None:
 def test_compaction_resolution() -> None:
     config = _representative_config()
 
-    merged = config.resolve_entity("overriding_agent").history_settings.compaction_config
+    merged = config.resolve_scope("overriding_agent").history_settings.compaction_config
     assert merged.enabled is True
     assert merged.threshold_tokens is None
     assert merged.threshold_percent == 0.6
@@ -112,7 +114,7 @@ def test_compaction_resolution() -> None:
     assert merged.model == "summary-model"
     assert merged.timeout_seconds == 75.0
 
-    disabled = config.resolve_entity("overriding_team").history_settings.compaction_config
+    disabled = config.resolve_scope("overriding_team").history_settings.compaction_config
     assert disabled.enabled is False
     assert disabled.threshold_tokens == 12_000
     assert disabled.timeout_seconds == 420.0
@@ -134,8 +136,8 @@ def test_compaction_resolution() -> None:
 def test_memory_resolution() -> None:
     config = _representative_config()
 
-    assert config.resolve_entity("overriding_agent").memory_backend == "file"
-    overridden_search = config.resolve_entity("overriding_agent").memory_search
+    assert config.resolve_scope("overriding_agent").memory_backend == "file"
+    overridden_search = config.resolve_scope("overriding_agent").memory_search
     assert overridden_search.mode == "semantic"
     assert overridden_search.include == ["notes/**/*.md"]
 
@@ -148,12 +150,12 @@ def test_memory_resolution() -> None:
 def test_model_name_resolution() -> None:
     config = _representative_config()
 
-    assert config.resolve_entity("overriding_agent").model_name == "summary-model"
-    assert config.resolve_entity("inheriting_agent").model_name == "default"
-    assert config.resolve_entity("overriding_team").model_name == "default"
-    assert config.resolve_entity(ROUTER_AGENT_NAME).model_name == "default"
+    assert entity_model_name(config, "overriding_agent") == "summary-model"
+    assert entity_model_name(config, "inheriting_agent") == "default"
+    assert entity_model_name(config, "overriding_team") == "default"
+    assert entity_model_name(config, ROUTER_AGENT_NAME) == "default"
     # The defaults scope of an ad hoc team has no authored model.
-    assert not isinstance(config.resolve_scope(None), ResolvedEntity)
+    assert "model_name" not in {field.name for field in fields(config.resolve_scope(None))}
 
 
 def test_tool_resolution() -> None:
@@ -228,7 +230,6 @@ def test_the_defaults_scope_has_no_agent_record() -> None:
 def test_a_team_has_no_agent_record() -> None:
     config = _representative_config()
 
-    assert not isinstance(config.resolve_entity("overriding_team"), ResolvedAgent)
     with pytest.raises(ValueError, match="Unknown agent: overriding_team"):
         config.resolve_agent("overriding_team")
 
@@ -240,7 +241,7 @@ def test_unknown_entity_raises() -> None:
     with pytest.raises(ValueError, match="Unknown entity: missing"):
         config.resolve_scope("missing")
     with pytest.raises(ValueError, match="Unknown entity: missing"):
-        config.resolve_entity("missing")
+        entity_model_name(config, "missing")
 
 
 def test_max_tool_calls_per_turn_resolution() -> None:
@@ -266,8 +267,8 @@ def test_max_tool_calls_per_turn_resolution() -> None:
         models={"default": ModelConfig(provider="openai", id="test-model")},
     )
 
-    assert config.resolve_entity("capped_agent").max_tool_calls_per_turn == 40
-    assert config.resolve_entity("capped_team").max_tool_calls_per_turn == 12
+    assert config.resolve_scope("capped_agent").max_tool_calls_per_turn == 40
+    assert config.resolve_scope("capped_team").max_tool_calls_per_turn == 12
     for inheriting_scope in ("inheriting_agent", "inheriting_team", ROUTER_AGENT_NAME, None):
         assert config.resolve_scope(inheriting_scope).max_tool_calls_per_turn == 90
 
@@ -291,9 +292,9 @@ def test_file_access_defaults_to_workspace_and_agent_overrides_it() -> None:
         },
     )
     assert config.resolve_scope(None).file_access == "workspace"
-    assert config.resolve_entity("plain").file_access == "workspace"
-    assert config.resolve_entity("admin").file_access == "unrestricted"
-    assert config.resolve_entity("crew").file_access == "workspace"
+    assert config.resolve_scope("plain").file_access == "workspace"
+    assert config.resolve_scope("admin").file_access == "unrestricted"
+    assert config.resolve_scope("crew").file_access == "workspace"
 
 
 def test_file_access_global_default_is_inherited() -> None:
@@ -306,8 +307,8 @@ def test_file_access_global_default_is_inherited() -> None:
             },
         },
     )
-    assert config.resolve_entity("plain").file_access == "unrestricted"
-    assert config.resolve_entity("boxed").file_access == "workspace"
+    assert config.resolve_scope("plain").file_access == "unrestricted"
+    assert config.resolve_scope("boxed").file_access == "workspace"
 
 
 def test_file_access_rejects_unknown_values() -> None:

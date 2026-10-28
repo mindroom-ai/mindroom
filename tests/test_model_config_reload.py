@@ -13,6 +13,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
+from mindroom.config.resolution import entity_model_name
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.runtime import resolve_entity_preparation_inputs
@@ -140,7 +141,7 @@ def _materialize(runtime: _MultiAgentOrchestrator) -> tuple[AgentBuild, AgentBui
         runtime_paths=runtime.runtime_paths,
         scope_context=unstored_team_scope_context(config, ["general"], team_name="team"),
         execution_identity=None,
-        model_name=config.resolve_entity("team").model_name,
+        model_name=entity_model_name(config, "team"),
         configured_team_name="team",
         timezone="UTC",
     )
@@ -160,7 +161,7 @@ def _history_plan(config: Config, runtime_paths: RuntimePaths, entity_name: str)
     model = resolve_turn_model(config, runtime_paths, ModelScope(entity=entity_name), None)
     return resolve_history_execution_plan(
         config=config,
-        history_settings=config.resolve_entity(entity_name).history_settings,
+        history_settings=config.resolve_scope(entity_name).history_settings,
         active_model_name=model.model_name,
         active_context_window=model.context_window,
         static_prompt_tokens=0,

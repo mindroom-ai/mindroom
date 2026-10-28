@@ -1,7 +1,7 @@
 """What one agent, team, or the defaults scope gets from the config, resolved once with every inherited value filled in.
 
 Each per-entity fact has one function here, in dependency order, so the config validators can call the ones they need;
-``resolve_scope``, ``resolve_entity``, and ``resolve_agent`` gather them into one frozen record. Hot-reload replaces the
+``resolve_scope`` and ``resolve_agent`` gather them into one frozen record. Hot-reload replaces the
 ``Config``, so a record never outlives the operation that resolved it, and nothing caches one.
 """
 
@@ -222,6 +222,16 @@ def automation_block_reason(config: Config, agent_name: str, automation: Automat
     return None
 
 
+def agent_automations(config: Config, agent_name: str) -> tuple[Automation, ...]:
+    """Return an agent's own automations, else the default automations nothing blocks for it."""
+    agent = config.get_agent(agent_name)
+    if agent.automations is not None:
+        return tuple(agent.automations)
+    return tuple(
+        entry for entry in config.defaults.automations if automation_block_reason(config, agent_name, entry) is None
+    )
+
+
 def cheap_model(config: Config, agent_name: str) -> str | None:
     """Return the agent's cheap model; an inherited default the agent already runs is no cheaper choice."""
     agent = config.get_agent(agent_name)
@@ -387,16 +397,10 @@ class ResolvedScope:
 
 
 @dataclass(frozen=True)
-class ResolvedEntity(ResolvedScope):
-    """What a configured agent, team, or the router gets, with its authored model."""
-
-    model_name: str
-
-
-@dataclass(frozen=True)
-class ResolvedAgent(ResolvedEntity):
+class ResolvedAgent(ResolvedScope):
     """What one configured agent gets."""
 
+    model_name: str
     cheap_model: str | None
     policy: ResolvedAgentPolicy
     tools: AgentToolFacts
@@ -404,7 +408,6 @@ class ResolvedAgent(ResolvedEntity):
     automations: tuple[Automation, ...]
     markdown: bool
     knowledge_graph: bool
-    knowledge_graph_edits: bool
 
 
 def resolve_scope(config: Config, name: str | None) -> ResolvedScope:
@@ -436,14 +439,6 @@ def entity_model_name(config: Config, name: str) -> str:
     raise ValueError(msg)
 
 
-def resolve_entity(config: Config, name: str) -> ResolvedEntity:
-    """Return what one configured agent, team, or the router gets."""
-    model_name = entity_model_name(config, name)
-    if name in config.agents:
-        return resolve_agent(config, name)
-    return ResolvedEntity(**vars(resolve_scope(config, name)), model_name=model_name)
-
-
 def agent_knowledge_base_ids(config: Config, agent_name: str) -> tuple[str, ...]:
     """Return the knowledge bases one agent searches: its authored ones, then its private base."""
     private_base = agent_policy(config, agent_name).private_knowledge_base_id
@@ -461,14 +456,7 @@ def resolve_agent(config: Config, name: str) -> ResolvedAgent:
         policy=policy,
         tools=agent_tool_facts(config, name, policy=policy),
         knowledge_base_ids=agent_knowledge_base_ids(config, name),
-        automations=tuple(
-            agent.automations
-            if agent.automations is not None
-            else (
-                entry for entry in config.defaults.automations if automation_block_reason(config, name, entry) is None
-            ),
-        ),
+        automations=agent_automations(config, name),
         markdown=agent.markdown if agent.markdown is not None else config.defaults.markdown,
         knowledge_graph=uses_knowledge_graph(config, name),
-        knowledge_graph_edits=edits_knowledge_graph(config, name),
     )

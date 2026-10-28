@@ -2060,9 +2060,9 @@ def test_subprocess_config_projection_keeps_agent_file_access(tool_name: str) ->
     subprocess_config = Config.model_validate(payload)
 
     assert payload["agents"]["admin"] == {"display_name": "Admin", "file_access": "unrestricted"}
-    assert subprocess_config.resolve_entity("admin").file_access == "unrestricted"
-    assert subprocess_config.resolve_entity("boxed").file_access == "workspace"
-    assert subprocess_config.resolve_entity("inherits").file_access == "unrestricted"
+    assert subprocess_config.resolve_scope("admin").file_access == "unrestricted"
+    assert subprocess_config.resolve_scope("boxed").file_access == "workspace"
+    assert subprocess_config.resolve_scope("inherits").file_access == "unrestricted"
     worker_target = resolve_worker_target("shared", "admin", execution_identity=None)
     assert metadata_module._managed_file_access(subprocess_config, worker_target) == "unrestricted"
 
@@ -2496,6 +2496,37 @@ def test_prepare_execute_request_preserves_dedicated_worker_runtime_contract(
     assert subprocess_context.subprocess_env is not None
     assert "MINDROOM_CONFIG_PATH" not in subprocess_context.subprocess_env
     assert "MINDROOM_STORAGE_PATH" not in subprocess_context.subprocess_env
+
+
+def test_a_static_runner_works_in_its_own_agent_workspace_not_the_primary_path(tmp_path: Path) -> None:
+    """An agent call without a worker key runs in the workspace the runner resolves, not the primary's path for it.
+
+    A Docker Compose runner does not share the primary's data volume, so the primary's workspace path does not exist
+    there.
+    """
+    runner_paths = resolve_runtime_paths(
+        config_path=tmp_path / "runner" / "config.yaml",
+        storage_path=tmp_path / "runner" / "storage",
+        process_env={"MINDROOM_SANDBOX_RUNNER_MODE": "true"},
+    )
+    config = Config.validate_with_runtime({"agents": {"general": {"display_name": "General"}}}, runner_paths)
+    primary_workspace = tmp_path / "primary" / "storage" / "agents" / "general" / "workspace"
+
+    prepared = sandbox_runner_module._prepare_execute_request(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="shell",
+            function_name="run_shell_command",
+            routing_agent_name="general",
+            tool_init_overrides={"base_dir": str(primary_workspace)},
+        ),
+        runner_paths,
+        config=config,
+    )
+
+    base_dir = Path(str(prepared.request.tool_init_overrides["base_dir"]))
+    assert base_dir != primary_workspace
+    assert base_dir.is_relative_to(runner_paths.storage_root)
+    assert base_dir.is_dir()
 
 
 def test_prepared_dedicated_shell_request_preserves_explicit_execution_env(tmp_path: Path) -> None:

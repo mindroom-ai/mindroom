@@ -133,7 +133,7 @@ class _Workspace:
         return (self.root / path).read_text(encoding="utf-8")
 
     def check(self) -> Ask | None:
-        (entry,) = self.config.resolve_entity("mind").automations
+        (entry,) = self.config.resolve_agent("mind").automations
         return check_dreaming(
             AutomationContext(
                 agent_name="mind",

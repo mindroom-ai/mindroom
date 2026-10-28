@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.config.resolution import edits_knowledge_graph
 
 _MODELS = {
     "default": ModelConfig(provider="openai", id="gpt-6-astra"),
@@ -59,10 +60,10 @@ def test_graph_edits_are_on_by_default_and_follow_defaults() -> None:
         models=_MODELS,
         knowledge_graph={"model": "luna"},
     )
-    assert config.resolve_agent("mind").knowledge_graph_edits
-    assert not config.resolve_agent("careful").knowledge_graph_edits
-    assert not config.resolve_agent("plain").knowledge_graph_edits
-    assert not _config(defaults=DefaultsConfig(knowledge_graph_edits=False)).resolve_agent("mind").knowledge_graph_edits
+    assert edits_knowledge_graph(config, "mind")
+    assert not edits_knowledge_graph(config, "careful")
+    assert not edits_knowledge_graph(config, "plain")
+    assert not edits_knowledge_graph(_config(defaults=DefaultsConfig(knowledge_graph_edits=False)), "mind")
 
 
 def test_graph_edits_need_a_graph() -> None:

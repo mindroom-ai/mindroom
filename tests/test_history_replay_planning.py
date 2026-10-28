@@ -59,7 +59,7 @@ from tests.history_helpers import (
 
 def _agent_settings(config: Config) -> ResolvedHistorySettings:
     """Return the test agent's resolved history settings, which hold its compaction config."""
-    return config.resolve_entity("test_agent").history_settings
+    return config.resolve_scope("test_agent").history_settings
 
 
 def _viewed_image_message(index: int) -> Message:

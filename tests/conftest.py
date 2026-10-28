@@ -734,7 +734,7 @@ async def prepare_history_for_run_for_test(
         config=config,
         runtime_paths=runtime_paths,
         entity_name=agent_name,
-        history_settings=history_settings or config.resolve_entity(agent_name).history_settings,
+        history_settings=history_settings or config.resolve_scope(agent_name).history_settings,
         active_model_name=active_model_name,
         active_context_window=active_context_window,
         static_prompt_tokens=static_prompt_tokens,

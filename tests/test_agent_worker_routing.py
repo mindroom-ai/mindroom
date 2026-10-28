@@ -271,24 +271,38 @@ async def test_toolkits_built_in_the_primary_are_never_worker_routed(tmp_path: P
     assert "- Worker-routed tools: `shell`, `calculator`." in agent.prompt.role
 
 
+_ROUTES_EVERY_TOOL = {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid"}
+_ROUTES_NO_TOOL = {
+    **_ROUTES_EVERY_TOOL,
+    "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
+    "MINDROOM_SANDBOX_PROXY_TOOLS": "",
+}
+
+
 @pytest.mark.usefixtures("proxy_targets")
 @pytest.mark.parametrize(
-    ("worker_tools", "expected"),
+    ("process_env", "worker_tools", "expected"),
     [
-        pytest.param(None, "worker:calculator", id="runtime-routes"),
-        pytest.param([], "local:calculator", id="agent-keeps-local"),
+        pytest.param(_ROUTES_EVERY_TOOL, None, "worker:calculator", id="runtime-routes"),
+        pytest.param(_ROUTES_EVERY_TOOL, [], "worker:calculator", id="agent-list-cannot-keep-it-local"),
+        pytest.param(_ROUTES_NO_TOOL, ["calculator"], "worker:calculator", id="agent-list-routes"),
+        pytest.param(_ROUTES_NO_TOOL, None, "local:calculator", id="runtime-keeps-local"),
     ],
 )
-def test_a_toolkit_built_without_a_placement_runs_where_its_agents_toolkits_run(
+def test_a_toolkit_built_without_a_placement_runs_in_a_worker_when_the_runtime_or_its_agent_routes_it(
     tmp_path: Path,
+    process_env: dict[str, str],
     worker_tools: list[str] | None,
     expected: str,
 ) -> None:
-    """A toolkit a tool builds for its agent, such as a plugin's sub-toolkit, follows that agent's worker_tools."""
+    """A toolkit a tool builds for its agent, such as a plugin's sub-toolkit, never runs looser than the runtime routes it.
+
+    The agent's explicit worker_tools can move it into a worker but not out of one, since the agent may not have it.
+    """
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
-        process_env={"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid"},
+        process_env=process_env,
     )
     agent: dict[str, object] = {"display_name": "Routing", "tools": ["calculator"], "include_default_tools": False}
     if worker_tools is not None:

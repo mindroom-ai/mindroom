@@ -31,6 +31,7 @@ from mindroom.approval.response import (
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_entity_replies_in_room
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
+from mindroom.config.resolution import cheap_model as agent_cheap_model
 from mindroom.config.resolution import entity_timezone, memory_backend, show_tool_calls
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -5633,7 +5634,7 @@ class ResponseRunner:
         resolved_model = runtime_model.model_name
         config = self.deps.runtime.config
         agent = config.agents.get(self.deps.agent_name)
-        cheap_model = config.resolve_agent(self.deps.agent_name).cheap_model if agent is not None else None
+        cheap_model = agent_cheap_model(config, self.deps.agent_name) if agent is not None else None
         if (
             agent is None
             or agent.cold_cache is None

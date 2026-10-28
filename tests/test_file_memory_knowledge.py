@@ -50,7 +50,7 @@ def test_memory_and_agent_resolvers_share_base_and_index_identity(tmp_path: Path
         runtime_paths,
     )
     root = agent_workspace_root_path(runtime_paths.storage_root, "alpha")
-    search_config = config.resolve_entity("alpha").memory_search
+    search_config = config.resolve_scope("alpha").memory_search
 
     memory_resolution = resolve_file_memory_knowledge(
         scope_user_id=agent_scope_user_id("alpha"),

@@ -641,14 +641,24 @@ def _constructing_agent_runs_in_worker(
     runtime_config: Config | None,
     worker_target: ResolvedWorkerTarget | None,
 ) -> bool:
-    """Place a toolkit a tool builds for its agent, such as a plugin's sub-toolkit, as that agent's toolkits are."""
+    """Place a toolkit a tool builds for its agent, such as a plugin's sub-toolkit.
+
+    It runs in a worker when the sandbox settings route it there, or when the agent's own toolkit of that name would:
+    an agent's explicit ``worker_tools`` can move it into a worker, never out of one, since the agent may not have
+    that toolkit itself.
+    """
     # Imported here: agent tool resolution validates tool settings through this module.
     from mindroom.tool_system.agent_tools import resolve_agent_tools  # noqa: PLC0415
 
+    placement = tool_placement(runtime_paths)
+    if placement.runs_in_worker(tool_name, None):
+        return True
     agent_name = worker_target.routing_agent_name if worker_target is not None else None
-    if runtime_config is not None and agent_name in runtime_config.agents:
-        return resolve_agent_tools(runtime_config, agent_name).runs_in_worker(tool_name, tool_placement(runtime_paths))
-    return tool_placement(runtime_paths).runs_in_worker(tool_name, None)
+    return (
+        runtime_config is not None
+        and agent_name in runtime_config.agents
+        and resolve_agent_tools(runtime_config, agent_name).runs_in_worker(tool_name, placement)
+    )
 
 
 def get_tool_by_name(
