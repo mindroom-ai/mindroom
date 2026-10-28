@@ -1841,23 +1841,21 @@ async def _drain_worker_progress_events(
         if streaming._warmup_state.apply_event(event):
             if pump.shutdown.is_set():
                 return
-            if streaming._warmup_state.needs_warmup_clear_edit:
-                _queue_delivery_request(
-                    delivery_queue,
-                    force_refresh=True,
-                    allow_empty_progress=not streaming.accumulated_text.strip(),
-                )
-                continue
             should_refresh = (
-                bool(streaming.accumulated_text.strip())
+                streaming._warmup_state.needs_warmup_clear_edit
+                or bool(streaming.accumulated_text.strip())
                 or bool(streaming._warmup_state.active_warmups)
                 or event.progress.phase == "failed"
             )
             if not should_refresh:
                 continue
-            if pump.shutdown.is_set():
-                return
-            _queue_delivery_request(delivery_queue, progress_hint=True)
+            # Shown at once rather than throttled: a backend reports only a few phases, so a notice the throttle
+            # dropped would stay hidden until the next phase, which for a Docker cold start is "ready".
+            _queue_delivery_request(
+                delivery_queue,
+                force_refresh=True,
+                allow_empty_progress=not streaming.accumulated_text.strip(),
+            )
 
 
 async def _shutdown_worker_progress_drain(

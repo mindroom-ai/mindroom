@@ -1468,6 +1468,7 @@ class TestAgentBot(AgentBotTestBase):
                     runtime_paths=self._runtime_paths(tmp_path),
                     api=True,
                     api_host="127.0.0.1",
+                    api_port=0,
                 ),
                 timeout=1,
             )
@@ -1478,7 +1479,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_warning.assert_called_once_with(
             "embedded_api_server_shutdown_timeout",
             host="127.0.0.1",
-            port=8765,
+            port=0,
             timeout_seconds=0.01,
         )
         mock_orchestrator.stop.assert_awaited_once()
@@ -1551,7 +1552,13 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator._run_api_server", side_effect=_api_requests_shutdown_then_finishes),
         ):
             main_task = asyncio.create_task(
-                main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=True),
+                main(
+                    log_level="INFO",
+                    runtime_paths=self._runtime_paths(tmp_path),
+                    api=True,
+                    api_host="127.0.0.1",
+                    api_port=0,
+                ),
             )
             try:
                 await asyncio.wait_for(api_shutdown_started.wait(), timeout=1)
@@ -1627,7 +1634,13 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             patch("mindroom.orchestrator._run_api_server", side_effect=_api_requests_shutdown),
         ):
-            await main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=True)
+            await main(
+                log_level="INFO",
+                runtime_paths=self._runtime_paths(tmp_path),
+                api=True,
+                api_host="127.0.0.1",
+                api_port=0,
+            )
 
         mock_orchestrator.stop.assert_awaited_once()
         mock_orchestrator.start.assert_awaited_once()
@@ -1767,7 +1780,13 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator._run_api_server", side_effect=_api_fails),
             pytest.raises(RuntimeError, match="Embedded API server exited unexpectedly"),
         ):
-            await main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=True)
+            await main(
+                log_level="INFO",
+                runtime_paths=self._runtime_paths(tmp_path),
+                api=True,
+                api_host="127.0.0.1",
+                api_port=0,
+            )
 
         mock_orchestrator.stop.assert_awaited_once()
 
