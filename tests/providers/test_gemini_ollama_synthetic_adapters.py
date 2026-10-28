@@ -455,6 +455,24 @@ async def test_gemini_settings_and_overrides_shape_the_generation_config(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_gemini_dedicated_settings_replace_authored_generation_config_keys_only_when_set(tmp_path: Path) -> None:
+    """An authored ``generation_config`` key is sent unless its dedicated setting or an override replaces it."""
+    authored_keys = {"temperature": 0.2, "top_k": 5, "seed": 3}
+    config = _config(GEMINI, generation_config=authored_keys, generative_model_kwargs={"top_p": 0.4}, seed=9)
+
+    authored, _ = await run_adapter(config, _request(), tmp_path, gemini_sse(_gemini_chunk({"text": "ok"})))
+    overridden, _ = await run_adapter(
+        config,
+        _request(overrides=RequestOverrides(temperature=0.7)),
+        tmp_path,
+        gemini_sse(_gemini_chunk({"text": "ok"})),
+    )
+
+    assert authored["body"]["generationConfig"] == {"temperature": 0.2, "topK": 5, "topP": 0.4, "seed": 9}
+    assert overridden["body"]["generationConfig"] == {"temperature": 0.7, "topK": 5, "topP": 0.4, "seed": 9}
+
+
+@pytest.mark.asyncio
 async def test_gemini_tool_history_keeps_valid_call_ids_and_drops_invalid_ones(tmp_path: Path) -> None:
     """Gemini matches each result to its call by id, so malformed ids are left out without shifting valid ones."""
     messages = (
