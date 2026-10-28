@@ -393,7 +393,7 @@ class TurnStateAdapter:
 
     async def pending_intent(self, event_id: str) -> bool:
         """Return whether the source owns an incomplete response attempt."""
-        return await self.store.has_pending_response_intent((event_id,))
+        return await self.store.deps.turn_records.read(turn_store._has_pending_response_intent, (event_id,))
 
     async def record_for_response(self, event_id: str) -> dict[str, Any] | None:
         """Return the turn whose visible response or echo is this event."""

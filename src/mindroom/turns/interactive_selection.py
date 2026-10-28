@@ -320,10 +320,10 @@ class InteractiveSelections:
             conversation_target=response_target,
         )
         pending_turn = await self.deps.turn_store.record_pending_turn(selection_handled_turn)
-        if pending_turn is None or await self.deps.turn_store.deleted_sources(pending_turn):
+        if pending_turn is None or pending_turn.deleted_sources:
             await self._require_durable_interactive_selection(room.room_id, source_event_id)
             return False
-        selection_handled_turn = pending_turn
+        selection_handled_turn = pending_turn.record
         # This acknowledgement is the placeholder the selection's answer then
         # edits, which is what its `interactive_span_id` below says, so it
         # is the turn's initial delivery and not its answer. Staging it that way

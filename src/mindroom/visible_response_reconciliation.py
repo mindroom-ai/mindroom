@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from mindroom.reply_scope import ReplyRuntime
     from mindroom.runtime_protocols import SupportsClientConfig
     from mindroom.turn_record import TurnRecord
-    from mindroom.turn_store import TurnStore
+    from mindroom.turn_store import PendingTurn, TurnStore
 
 
 @dataclass(frozen=True)
@@ -141,6 +141,23 @@ class VisibleResponseReconciler:
         await self.settle_source_events_ignored(handled_turn)
         return True
 
+    async def settle_deleted_sources(self, pending_turn: PendingTurn, *, room_id: str) -> bool:
+        """Settle what a deletion ended before a pending turn answers; return whether the caller must stop.
+
+        Only the deleted sources settle while others survive, and the survivors
+        answer as their own turn once the caller's claim releases.
+        """
+        deleted = pending_turn.deleted_sources
+        if not deleted:
+            return False
+        source_event_ids = pending_turn.record.source_event_ids
+        await self.deps.settle_ignored_sources(tuple(event_id for event_id in source_event_ids if event_id in deleted))
+        self.deps.turn_store.retry_when_claim_releases(
+            room_id,
+            tuple(event_id for event_id in source_event_ids if event_id not in deleted),
+        )
+        return True
+
     async def record_pending_visible_response(self, handled_turn: TurnRecord, response_event_id: str) -> None:
         """Durably bind one visible response to its incomplete turn before generation."""
         await self.deps.turn_store.record_placeholder(handled_turn, response_event_id)
@@ -249,9 +266,6 @@ class VisibleResponseReconciler:
         excluded_event_ids: Collection[str] = (),
     ) -> tuple[TurnRecord | None, str | None]:
         """Persist one non-model delivery intent and recover any visible event."""
-        reconcile_visible_response = await self.deps.turn_store.has_pending_response_intent(
-            handled_turn.source_event_ids,
-        )
         tracked_turn = self.deps.turn_store.attach_response_context(
             canonicalize_turn_record(
                 handled_turn,
@@ -261,18 +275,15 @@ class VisibleResponseReconciler:
             conversation_target=target,
         )
         pending_turn = await self.deps.turn_store.record_pending_turn(tracked_turn)
-        if pending_turn is None:
-            return None, None
-        if await self.deps.turn_store.deleted_sources(pending_turn):
-            await self.settle_source_events_ignored(pending_turn)
+        if pending_turn is None or await self.settle_deleted_sources(pending_turn, room_id=target.room_id):
             return None, None
         recovered_response_event_id = (
             await self.recovered_response_event_id(
-                pending_turn,
+                pending_turn.record,
                 room_id=target.room_id,
                 excluded_event_ids=excluded_event_ids,
             )
-            if reconcile_visible_response
+            if pending_turn.resumes_response
             else None
         )
-        return pending_turn, recovered_response_event_id
+        return pending_turn.record, recovered_response_event_id

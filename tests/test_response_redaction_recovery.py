@@ -208,8 +208,9 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
         history_scope=scope,
         source_event_prompts={SOURCE: "deleted prompt", "$survivor": "keep prompt"},
     )
-    stored = await store.record_pending_turn(turn)
-    assert stored is not None
+    pending = await store.record_pending_turn(turn)
+    assert pending is not None
+    stored = pending.record
     assert stored.turn_key is not None
     await admit_dispatch_event(initial_dispatcher, room, _redaction(), EventKind.REDACTION, EventClass.ACTIONABLE)
     assert await store.response_recovery_ready(turn)

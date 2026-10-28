@@ -279,7 +279,7 @@ async def test_crash_before_result_returns_uncertainty_without_success(tmp_path:
         USER,
         command,
         target=MessageTarget.resolve(ROOM, "$root", "$command"),
-        handled_turn=pending,
+        handled_turn=pending.record,
     )
     assert "uncertain" in harness.gateway.sent[0].response_text
     assert harness.gateway.sent[0].extra_content is None

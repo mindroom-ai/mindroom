@@ -197,7 +197,8 @@ async def test_an_edit_load_sees_a_write_already_queued_before_it(journal_store:
     recorded = await recording
 
     assert loaded is not None
-    assert loaded == recorded
+    assert recorded is not None
+    assert loaded == recorded.record
 
 
 def _seeded_storage(
@@ -382,10 +383,11 @@ async def test_an_answer_hands_over_every_source_its_turn_indexes(journal_store:
     principal = journal_store.principal("agent@alice")
     for event_id in ("$first", "$second", "$unrecorded"):
         await admit_room_event(principal, ROOM, event_id)
-    turn = await store.record_pending_turn(
+    pending = await store.record_pending_turn(
         _in_room(TurnRecord.create(["$first", "$second"], discovery_event_ids=["$relay"], completed=False)),
     )
-    assert turn is not None
+    assert pending is not None
+    turn = pending.record
 
     bound = await principal.enqueue_final_answer(
         delivery_id="$second",
@@ -587,7 +589,6 @@ async def test_pending_delivery_intent_does_not_require_model_history_scope(jour
     store = await _store(journal_store)
     source_event_ids = ("$source",)
     await store.record_visible_echo(ROOM, "$source", "$echo")
-    assert await store.has_pending_response_intent(source_event_ids) is False
 
     target = MessageTarget.resolve(ROOM, None, "$source")
     delivery_intent = store.attach_response_context(
@@ -595,9 +596,13 @@ async def test_pending_delivery_intent_does_not_require_model_history_scope(jour
         history_scope=None,
         conversation_target=target,
     )
-    await store.record_pending_turn(delivery_intent)
+    first = await store.record_pending_turn(delivery_intent)
+    retry = await store.record_pending_turn(delivery_intent)
 
-    assert await store.has_pending_response_intent(source_event_ids) is True
+    assert first is not None
+    assert first.resumes_response is False, "a visible echo alone owns no response"
+    assert retry is not None
+    assert retry.resumes_response is True
     record = await store.get_turn_record("$source")
     assert record is not None
     assert record.response_owner == "agent"
@@ -779,8 +784,9 @@ async def test_pending_coalesced_turn_can_reclaim_a_redacted_alias(journal_store
     stored = await store.record_pending_turn(pending)
     await _redact(journal_store, "$human-two")
 
+    assert stored is not None
     assert await store.is_handled(ROOM, "$human-two") is True
-    assert await store.deleted_sources(stored) == {"$relay-two"}
+    assert await store.deleted_sources(stored.record) == {"$relay-two"}
     claim = await store.claim(pending)
     assert isinstance(claim, TurnClaim)
     claim.release()
@@ -1349,8 +1355,8 @@ async def test_redaction_before_its_turn_registers_still_removes_the_replay(
         ),
     )
     assert pending is not None
-    assert await store.deleted_sources(pending) == {"$user_msg"}
-    assert pending.source_event_prompts is None
+    assert pending.deleted_sources == {"$user_msg"}
+    assert pending.record.source_event_prompts is None
 
     should_suppress = await _suppressed(store, target, ("$user_msg",))
     await remove_redacted_history_like_next_response(store, target, storage)
@@ -1429,10 +1435,10 @@ async def test_redaction_before_response_registration_tombstones_pending_coalesc
     )
 
     assert pending is not None
-    assert pending.completed is False
-    assert await store.deleted_sources(pending) == {"$first"}
-    assert pending.source_event_prompts == {"$second": "keep"}
-    assert pending.history_scope == team_scope
+    assert pending.record.completed is False
+    assert pending.deleted_sources == {"$first"}
+    assert pending.record.source_event_prompts == {"$second": "keep"}
+    assert pending.record.history_scope == team_scope
     assert await store.is_handled(target.room_id, "$first") is True
     assert await store.is_handled(target.room_id, "$second") is False
 
@@ -2908,8 +2914,8 @@ async def test_a_batch_source_ended_before_any_reply_leaves_its_sibling_owing_an
 
     preparation = await store.prepare_pending_response_source(
         target=target,
-        source_event_ids=pending.indexed_event_ids,
-        terminal_source_event_ids=pending.source_event_ids,
+        source_event_ids=pending.record.indexed_event_ids,
+        terminal_source_event_ids=pending.record.source_event_ids,
     )
 
     assert preparation.invalid == ("$s",)

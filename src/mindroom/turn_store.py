@@ -227,6 +227,21 @@ class _FinalizedVisibleEcho:
 
 
 @dataclass(frozen=True)
+class PendingTurn:
+    """A turn whose response context is stored, with what the caller must reconcile before it answers.
+
+    ``resumes_response`` means an earlier attempt of these sources already owned
+    a response, so a visible one may already exist. ``deleted_sources`` names the
+    sources deleted, directly or through the message they answer for, when the
+    context was stored.
+    """
+
+    record: TurnRecord
+    resumes_response: bool
+    deleted_sources: frozenset[str]
+
+
+@dataclass(frozen=True)
 class SourcePreparation:
     """Which of a pending response's sources became terminal while it waited, and which still owe an answer.
 
@@ -330,10 +345,6 @@ class TurnStore:
         """Return the durable turn that owns one visible response event."""
         return await self.deps.turn_records.read(turn_rows.turn_for_response_event, response_event_id)
 
-    async def has_pending_response_intent(self, source_event_ids: tuple[str, ...]) -> bool:
-        """Return whether these sources already own an incomplete response attempt."""
-        return await self.deps.turn_records.read(_has_pending_response_intent, source_event_ids)
-
     async def redacted_event_ids(self, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
         """Return which of a room's events are redacted, for readers of stored conversations outside a reply."""
         return await self.deps.turn_records.read(turn_rows.redacted_events, room_id, event_ids)
@@ -406,7 +417,7 @@ class TurnStore:
             room_id=_room_of(turn_record, room_id),
         )
 
-    async def record_pending_turn(self, turn_record: TurnRecord) -> TurnRecord | None:
+    async def record_pending_turn(self, turn_record: TurnRecord) -> PendingTurn | None:
         """Persist exact response context before generation reaches session storage; return the turn as stored.
 
         None means the caller stops without answering: the turn is already
@@ -418,13 +429,13 @@ class TurnStore:
         """
         room_id = _room_of(turn_record, None)
         result = await self.deps.turn_records.write(
-            turn_rows.record_pending_turn,
+            _record_pending_turn,
             canonicalize_turn_record(turn_record, completed=False),
             room_id=room_id,
         )
         if isinstance(result, turn_rows.Refused):
             self.retry_when_claim_releases(room_id, turn_record.source_event_ids)
-        return result.record if isinstance(result, turn_rows.Accepted) else None
+        return result if isinstance(result, PendingTurn) else None
 
     async def record_placeholder(self, turn_record: TurnRecord, response_event_id: str) -> None:
         """Record the visible message an unfinished turn's answer streams into or was recovered as."""
@@ -913,16 +924,37 @@ def _register_revisions(
     return turn_rows.load_turn(transaction, agent_name, turn_key)
 
 
+def _record_pending_turn(
+    transaction: Transaction,
+    agent_name: str,
+    record: TurnRecord,
+    *,
+    room_id: str,
+) -> PendingTurn | turn_rows.Answered | turn_rows.Refused:
+    resumes_response = _has_pending_response_intent(transaction, agent_name, record.source_event_ids)
+    result = turn_rows.record_pending_turn(transaction, agent_name, record, room_id=room_id)
+    if not isinstance(result, turn_rows.Accepted):
+        return result
+    return PendingTurn(
+        record=result.record,
+        resumes_response=resumes_response,
+        deleted_sources=_deleted_sources_of(transaction, agent_name, result.record),
+    )
+
+
 def _deleted_sources(transaction: Transaction, agent_name: str, turn_key: str) -> frozenset[str]:
-    deleted = turn_rows.deleted_sources(transaction, agent_name, turn_key)
     record = turn_rows.load_turn(transaction, agent_name, turn_key)
-    if record is None or record.conversation_target is None:
-        return deleted
-    mapped = {metadata.discovery_event_id for metadata in (record.source_event_metadata or {}).values()}
-    unmapped = [alias for alias in record.discovery_event_ids if alias not in mapped]
-    if turn_rows.redacted_events(transaction, agent_name, record.conversation_target.room_id, unmapped):
-        return frozenset(record.source_event_ids)
-    return deleted
+    return frozenset() if record is None else _deleted_sources_of(transaction, agent_name, record)
+
+
+def _deleted_sources_of(transaction: Transaction, agent_name: str, record: TurnRecord) -> frozenset[str]:
+    assert record.turn_key is not None
+    if record.conversation_target is not None:
+        mapped = {metadata.discovery_event_id for metadata in (record.source_event_metadata or {}).values()}
+        unmapped = [alias for alias in record.discovery_event_ids if alias not in mapped]
+        if turn_rows.redacted_events(transaction, agent_name, record.conversation_target.room_id, unmapped):
+            return frozenset(record.source_event_ids)
+    return turn_rows.deleted_sources(transaction, agent_name, record.turn_key)
 
 
 def _has_pending_response_intent(transaction: Transaction, agent_name: str, source_event_ids: tuple[str, ...]) -> bool:

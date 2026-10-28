@@ -120,7 +120,15 @@ from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy
 from mindroom.turn_record import TurnRecord
-from mindroom.turn_store import ClaimContended, ClaimRefused, TurnClaim, TurnStore, TurnStoreDeps
+from mindroom.turn_store import (
+    ClaimContended,
+    ClaimRefused,
+    PendingTurn,
+    TurnClaim,
+    TurnStore,
+    TurnStoreDeps,
+    _record_pending_turn,
+)
 from mindroom.turns.dispatch import TurnDispatchDeps, TurnDispatcher
 from mindroom.turns.ingress import TurnIngress, TurnIngressDeps
 from mindroom.turns.interactive_selection import (
@@ -1127,7 +1135,7 @@ async def test_recovery_prefers_untracked_terminal_fallback_over_persisted_place
         return_value=frozenset({"$fallback:localhost"}),
     ) as find_response_event_ids:
         recovered = await harness.dispatcher.deps.visible_responses.recovered_response_event_id(
-            pending_turn,
+            pending_turn.record,
             room_id=_ROOM_ID,
         )
 
@@ -1158,7 +1166,7 @@ async def test_recovery_lookup_excludes_visible_voice_echo(config: Config, tmp_p
         return_value=frozenset({"$voice-echo:localhost", "$relay:localhost"}),
     ):
         recovered = await harness.dispatcher.deps.visible_responses.recovered_response_event_id(
-            pending_turn,
+            pending_turn.record,
             room_id=_ROOM_ID,
             excluded_event_ids=("$voice-echo:localhost",),
         )
@@ -1216,13 +1224,11 @@ async def test_redacted_pending_turn_settles_deferred_source_before_response(
     event = _text_event("redact before response")
     real_record_pending = harness.turn_store.record_pending_turn
 
-    async def record_then_redact(turn_record: TurnRecord) -> TurnRecord | None:
-        pending_turn = await real_record_pending(turn_record)
-        assert pending_turn is not None
+    async def redact_then_record(turn_record: TurnRecord) -> PendingTurn | None:
         await _redact(harness, event.event_id, room.room_id)
-        return pending_turn
+        return await real_record_pending(turn_record)
 
-    monkeypatch.setattr(harness.turn_store, "record_pending_turn", record_then_redact)
+    monkeypatch.setattr(harness.turn_store, "record_pending_turn", redact_then_record)
 
     await harness.deliver(room, event)
 
@@ -1253,19 +1259,46 @@ async def test_a_batch_source_deleted_during_its_pending_write_leaves_the_rest_o
     )
     real_record_pending = harness.turn_store.record_pending_turn
 
-    async def record_then_redact(turn_record: TurnRecord) -> TurnRecord | None:
-        pending_turn = await real_record_pending(turn_record)
-        assert pending_turn is not None
+    async def redact_then_record(turn_record: TurnRecord) -> PendingTurn | None:
         await _redact(harness, events[0].event_id, room.room_id)
-        return pending_turn
+        return await real_record_pending(turn_record)
 
-    monkeypatch.setattr(harness.turn_store, "record_pending_turn", record_then_redact)
+    monkeypatch.setattr(harness.turn_store, "record_pending_turn", redact_then_record)
 
     await harness.dispatcher.handle_prepared_turn(turn)
 
     assert harness.runner.requests == []
     assert harness.ignored_dispatch_sources == [(events[0].event_id,)]
     assert harness.retried_dispatch_sources == [(events[1].event_id,)]
+
+
+@pytest.mark.asyncio
+async def test_a_non_model_delivery_batch_with_a_deleted_source_leaves_the_rest_owing_an_answer(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """A router relay or command over a batch settles only its deleted source; the other answers as its own turn."""
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    first, second = "$first:localhost", "$second:localhost"
+    batch = TurnRecord.create([first, second], completed=False, requester_id=_SENDER)
+    # The delivering dispatch holds the batch's claim until it ends.
+    claim = await harness.turn_store.claim(batch)
+    assert isinstance(claim, TurnClaim)
+    await _redact(harness, first, _ROOM_ID)
+
+    prepared = await harness.dispatcher.deps.visible_responses.prepare_visible_delivery_turn(
+        batch,
+        requester_id=_SENDER,
+        target=MessageTarget.resolve(_ROOM_ID, None, second),
+    )
+
+    assert prepared == (None, None)
+    assert harness.gateway.sent == []
+    assert harness.ignored_dispatch_sources == [(first,)]
+    assert harness.retried_dispatch_sources == [], "the survivor waits for the delivering dispatch's claim"
+    claim.release()
+    assert harness.retried_dispatch_sources == [(second,)]
+    assert not await harness.turn_store.is_handled(_ROOM_ID, second)
 
 
 @pytest.mark.asyncio
@@ -3559,7 +3592,7 @@ async def test_policy_decision_reserves_config_until_response_handoff(
     continue_pending_write = asyncio.Event()
     real_record_pending_turn = harness.turn_store.record_pending_turn
 
-    async def hold_pending_write(turn_record: TurnRecord) -> TurnRecord | None:
+    async def hold_pending_write(turn_record: TurnRecord) -> PendingTurn | None:
         pending_write_started.set()
         await continue_pending_write.wait()
         return await real_record_pending_turn(turn_record)
@@ -3703,7 +3736,7 @@ async def test_response_waits_for_pending_context_persistence_before_generation(
 
 def _is_pending_write_for(operation: object, args: tuple[object, ...], event_id: str) -> bool:
     """Return whether one turn-row write is the pending write of a turn that indexes this event."""
-    if operation is not turn_rows.record_pending_turn:
+    if operation is not _record_pending_turn:
         return False
     record = args[0]
     assert isinstance(record, TurnRecord)
@@ -4685,8 +4718,9 @@ async def test_process_shutdown_recovery_requires_exact_journal_or_outbox_owner(
     assert await store.response_recovery_ready(mixed_turn) is False
 
     outbox_source_id = "$outbox-owned:localhost"
-    outbox_turn = await harness.turn_store.record_pending_turn(_in_room(TurnRecord.create([outbox_source_id])))
-    assert outbox_turn is not None
+    outbox_pending = await harness.turn_store.record_pending_turn(_in_room(TurnRecord.create([outbox_source_id])))
+    assert outbox_pending is not None
+    outbox_turn = outbox_pending.record
     outbox_turn_id = outbox_turn.anchor_event_id
     assert outbox_turn_id is not None
     assert outbox_turn.turn_key is not None
@@ -4991,7 +5025,7 @@ async def test_process_shutdown_race_refuses_owner_without_leaking_response_coro
     event = _text_event("fence me while my pending turn commits")
     record_pending_turn = harness.turn_store.record_pending_turn
 
-    async def record_then_fence(turn: TurnRecord) -> TurnRecord | None:
+    async def record_then_fence(turn: TurnRecord) -> PendingTurn | None:
         pending_turn = await record_pending_turn(turn)
         harness.runner.process_shutdown_started = True
         return pending_turn
@@ -5369,8 +5403,8 @@ async def test_rejection_replay_adopts_durable_response(config: Config, tmp_path
         history_scope=None,
         conversation_target=target,
     )
-    pending_turn = await harness.turn_store.record_pending_turn(handled_turn)
-    assert pending_turn is not None
+    pending = await harness.turn_store.record_pending_turn(handled_turn)
+    assert pending is not None
 
     with patch.object(harness.turn_store, "record_responded_turn"):
         await harness.dispatcher._execute_response_action(
@@ -5381,7 +5415,7 @@ async def test_rejection_replay_adopts_durable_response(config: Config, tmp_path
             DispatchPayloadInputs((), (), ()),
             processing_log="rejecting",
             dispatch_started_at=0.0,
-            handled_turn=pending_turn,
+            handled_turn=pending.record,
         )
 
     pending_turn = await harness.turn_store.get_turn_record(event.event_id)
@@ -6813,7 +6847,7 @@ async def test_a_batch_source_ended_before_its_reply_hands_the_rest_back_once_th
     )
     assert pending is not None
     # The response task holds the batch's claim until it ends.
-    claim = await harness.turn_store.claim(pending)
+    claim = await harness.turn_store.claim(pending.record)
     assert isinstance(claim, TurnClaim)
     if ended_by == "deletion":
         await _redact(harness, first.event_id, _ROOM_ID)
@@ -6835,7 +6869,7 @@ async def test_a_batch_source_ended_before_its_reply_hands_the_rest_back_once_th
         DispatchPayloadInputs((), (), ()),
         processing_log="Processing",
         dispatch_started_at=0.0,
-        handled_turn=pending,
+        handled_turn=pending.record,
     )
 
     assert harness.ignored_dispatch_sources == [(first.event_id,)]

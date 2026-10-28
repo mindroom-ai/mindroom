@@ -530,9 +530,6 @@ class TurnDispatcher:
         response_action = plan.response_action
         assert response_action is not None
         self._ensure_response_admission_open()
-        reconcile_visible_response = await self.deps.turn_store.has_pending_response_intent(
-            prepared.handled_turn.source_event_ids,
-        )
         response_history_scope = (
             self.deps.turn_store.response_history_scope(
                 response_action,
@@ -555,17 +552,9 @@ class TurnDispatcher:
             conversation_target=prepared.dispatch.target,
         )
         pending_turn = await self.deps.turn_store.record_pending_turn(handled_turn)
-        if pending_turn is None:
+        if pending_turn is None or await visible_responses.settle_deleted_sources(pending_turn, room_id=room.room_id):
             return
-        if deleted := await self.deps.turn_store.deleted_sources(pending_turn):
-            surviving = tuple(event_id for event_id in pending_turn.source_event_ids if event_id not in deleted)
-            await self.deps.settle_dispatch_sources(
-                tuple(sorted(deleted)) if surviving else pending_turn.source_event_ids,
-            )
-            # The rest answer as their own turn once this dispatch lets their claim go.
-            self.deps.turn_store.retry_when_claim_releases(room.room_id, surviving)
-            return
-        handled_turn = pending_turn
+        handled_turn = pending_turn.record
 
         # The inbox handoff is complete once the runner takes the conversation's
         # response lock; the response itself keeps running on a runner-owned task.
@@ -582,7 +571,7 @@ class TurnDispatcher:
                 handled_turn=handled_turn,
                 matrix_run_metadata=self.deps.turn_store.build_run_metadata(handled_turn),
                 on_lifecycle_lock_acquired=response_started.set,
-                reconcile_visible_response=reconcile_visible_response,
+                reconcile_visible_response=pending_turn.resumes_response,
             ),
             name=f"inbox_response:{prepared.event.event_id}",
             room_id=room.room_id,

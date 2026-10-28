@@ -1850,7 +1850,7 @@ class TestTheTerminalRecordCommitsWithItsAcknowledgement:
         delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "answer"})
 
         with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
-            assert await self._send_final(gateway, "answer", turn_key=pending.turn_key) == "$sent"
+            assert await self._send_final(gateway, "answer", turn_key=pending.record.turn_key) == "$sent"
 
         record = await turn_store.get_turn_record("$cause")
         assert record is not None
@@ -2879,10 +2879,11 @@ class TestTurnDeliverySerialization:
         source_event_id = "$source"
         response_event_id = "$answer"
         turn_store = await _store(journal_store, agent_name="agent")
-        turn = await turn_store.record_pending_turn(
+        pending = await turn_store.record_pending_turn(
             _in_room(TurnRecord.create([source_event_id], completed=False), _ROOM_ID),
         )
-        assert turn is not None
+        assert pending is not None
+        turn = pending.record
         await alice.admit(
             InboundEvent(
                 event_id=source_event_id,
@@ -2958,7 +2959,7 @@ class TestTurnDeliverySerialization:
         placeholder_event_id = "$placeholder"
         final_edit_event_id = "$final-edit"
         turn_store = await _store(journal_store, agent_name="agent")
-        turn = await turn_store.record_pending_turn(
+        pending = await turn_store.record_pending_turn(
             _in_room(
                 TurnRecord.create(
                     [source_event_id],
@@ -2969,7 +2970,8 @@ class TestTurnDeliverySerialization:
                 _ROOM_ID,
             ),
         )
-        assert turn is not None
+        assert pending is not None
+        turn = pending.record
         await alice.admit(
             InboundEvent(
                 event_id=source_event_id,
@@ -3466,7 +3468,7 @@ async def test_a_recovered_answer_keeps_its_event_through_a_concurrent_redaction
     turn_store = await _store(journal_store, agent_name="agent")
     pending = await turn_store.record_pending_turn(_in_room(TurnRecord.create(["$source"], completed=False), _ROOM_ID))
     assert pending is not None
-    assert pending.turn_key is not None
+    assert pending.record.turn_key is not None
     await admit_room_event(alice, _ROOM_ID, "$source")
     gateway = _gateway(tmp_path, alice)
     enqueued = await alice.enqueue_final_answer(
@@ -3474,7 +3476,7 @@ async def test_a_recovered_answer_keeps_its_event_through_a_concurrent_redaction
         room_id=_ROOM_ID,
         thread_id=None,
         payload={"msgtype": "m.text", "body": "the answer"},
-        turn_key=pending.turn_key,
+        turn_key=pending.record.turn_key,
     )
     assert enqueued is not None
     send_started = asyncio.Event()

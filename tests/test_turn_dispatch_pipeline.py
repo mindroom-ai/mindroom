@@ -261,7 +261,7 @@ class TestAgentBot(AgentBotTestBase):
         )
         assert handled_turn is not None
         dispatcher = bot._turn_dispatcher
-        claim = await turn_store.claim(handled_turn)
+        claim = await turn_store.claim(handled_turn.record)
         assert isinstance(claim, TurnClaim)
         send_started = asyncio.Event()
         release_send = asyncio.Event()
@@ -283,7 +283,7 @@ class TestAgentBot(AgentBotTestBase):
                     DispatchPayloadInputs((), (), ()),
                     processing_log="processing",
                     dispatch_started_at=0.0,
-                    handled_turn=handled_turn,
+                    handled_turn=handled_turn.record,
                 ),
                 name="inbox_response:$event",
                 room_id=room.room_id,
@@ -382,7 +382,7 @@ class TestAgentBot(AgentBotTestBase):
                 DispatchPayloadInputs((), (), ()),
                 processing_log="processing",
                 dispatch_started_at=0.0,
-                handled_turn=handled_turn,
+                handled_turn=handled_turn.record,
             )
 
         await assert_no_turn_answered(bot)
