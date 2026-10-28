@@ -188,7 +188,7 @@ async def _checked_status(connection: Request | WebSocket, session: ComputerSess
     try:
         store.get(session.session_id)
         await _authorize(connection, session.target)
-        _config, paths = config_lifecycle.read_app_committed_runtime_config(connection.app)
+        paths = config_lifecycle.require_api_state(connection.app).snapshot.runtime_paths
         handle = await asyncio.to_thread(_resolve_worker, paths, session.target, start=False)
         if session.handle is None or not _same_worker(session.handle, handle):
             raise ComputerError(409, "Computer worker changed; create a new session.")  # noqa: TRY301 - revoke below
@@ -215,7 +215,7 @@ def _public_status(session: ComputerSession, status: ComputerStatus) -> dict[str
 async def create_session(payload: _CreateSession, request: Request) -> dict[str, str | float]:
     """Exchange configured-homeserver OpenID for a requester-bound computer viewer."""
     runtime = _runtime(request)
-    _config, paths = config_lifecycle.read_app_committed_runtime_config(request.app)
+    paths = config_lifecycle.require_api_state(request.app).snapshot.runtime_paths
     try:
         requester_id = await verify_matrix_openid(payload.openid_token, paths, request_origin=str(request.base_url))
     except MatrixOpenIDError as error:
