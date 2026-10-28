@@ -1571,6 +1571,16 @@ async def test_startup_revokes_inherited_authority_before_blocked_backend_acquis
         await runtime.shutdown()
 
 
+def _interrupting_reconcile(store: ScriptRunStore) -> AsyncMock:
+    """Finalize a revoked run as interrupted, as the manager does once its process and broker ownership are gone."""
+
+    def finish(*, run_id: str, broker_revoked: bool) -> ScriptRunRecord:
+        del broker_revoked
+        return store.transition_run(run_id, state=ScriptRunState.INTERRUPTED, error="Interrupted by reload.")
+
+    return AsyncMock(side_effect=finish)
+
+
 @pytest.mark.asyncio
 async def test_removed_agent_revokes_and_cancels_running_scripts(tmp_path: Path) -> None:
     """Removal records revocation before unavailable live runtime resolution."""
@@ -1587,7 +1597,7 @@ async def test_removed_agent_revokes_and_cancels_running_scripts(tmp_path: Path)
         request_revocation=MagicMock(side_effect=request_revocation),
         revoke=AsyncMock(return_value=run),
         reconcile_revoked_process=AsyncMock(return_value=run),
-        reconcile_durable=AsyncMock(),
+        reconcile_durable=_interrupting_reconcile(store),
     )
     resolver = SimpleNamespace(resolve=MagicMock(side_effect=_ScriptRuntimeUnavailableError("bot is gone")))
     old_config = _config()
@@ -1631,7 +1641,7 @@ async def test_removing_script_tool_revokes_and_cancels_running_scripts(tmp_path
         request_revocation=MagicMock(side_effect=request_revocation),
         revoke=AsyncMock(return_value=run),
         reconcile_revoked_process=AsyncMock(return_value=run),
-        reconcile_durable=AsyncMock(return_value=run),
+        reconcile_durable=_interrupting_reconcile(store),
     )
     old_config = _config()
     new_config = Config(
@@ -1675,7 +1685,7 @@ async def test_isolation_change_interrupts_running_script_without_replacing_serv
         request_revocation=MagicMock(return_value=run),
         revoke=AsyncMock(return_value=run),
         reconcile_revoked_process=AsyncMock(return_value=run),
-        reconcile_durable=AsyncMock(return_value=run),
+        reconcile_durable=_interrupting_reconcile(store),
     )
     resolver = SimpleNamespace(resolve=MagicMock(return_value=context))
     old_config = _config()
@@ -2048,7 +2058,7 @@ async def test_authorization_config_change_interrupts_unconfirmed_owner_before_c
         request_revocation=MagicMock(side_effect=request_revocation),
         revoke=AsyncMock(return_value=run),
         reconcile_revoked_process=AsyncMock(return_value=run),
-        reconcile_durable=AsyncMock(return_value=run),
+        reconcile_durable=_interrupting_reconcile(store),
     )
     resolver = SimpleNamespace(is_authorized=MagicMock(return_value=authorization_result))
     runtime = ScriptRuntimeLifecycle(
@@ -2202,6 +2212,36 @@ async def test_hung_broker_cleanup_cannot_delay_process_exit_recording(
 
 
 @pytest.mark.asyncio
+async def test_a_reload_that_cannot_stop_a_script_whose_authority_it_changed_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A worker the primary cannot reach keeps the script running with what the reload revokes, so it does not publish."""
+    runtime, store, run, lease, worker_client, old_config, new_config = _process_authority_change_scenario(
+        tmp_path,
+        run_id=f"script-{'4' * 32}",
+        approval_resolver=_ApprovalSettlementResolver(),
+    )
+
+    async def unreachable(*_args: object, **_kwargs: object) -> object:
+        message = "worker API unavailable"
+        raise ScriptWorkerError(message, failure_kind="worker")
+
+    def cannot_retire(_worker_key: str) -> None:
+        message = "cluster API unavailable"
+        raise WorkerBackendError(message)
+
+    monkeypatch.setattr(worker_client, "cancel", unreachable)
+    monkeypatch.setattr(worker_client, "status", unreachable)
+    monkeypatch.setattr(lease.manager, "retire_worker", cannot_retire)
+
+    with pytest.raises(_ScriptRuntimeLifecycleError, match="did not stop every background script"):
+        await runtime.apply_update_plan(_plan(old_config, new_config))
+
+    assert store.get_run(run.run_id).state is ScriptRunState.RUNNING
+
+
+@pytest.mark.asyncio
 async def test_transient_broker_failure_uses_successful_retry_for_process_authority_change(tmp_path: Path) -> None:
     """A successful current-state broker retry permits cleanup after a process-authority change."""
     resolver = _TransientApprovalSettlementResolver()
@@ -2223,8 +2263,8 @@ async def test_transient_broker_failure_uses_successful_retry_for_process_author
 
 
 @pytest.mark.asyncio
-async def test_reload_leaves_finalization_pending_while_broker_revocation_fails(tmp_path: Path) -> None:
-    """A run whose broker ownership stays open is not finalized until a later pass."""
+async def test_reload_fails_while_a_revoked_run_stays_unfinalized(tmp_path: Path) -> None:
+    """A run whose broker ownership stays open is not finalized, so the reload fails instead of publishing over it."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
     run = _stored_run(store, runtime_paths)
@@ -2251,7 +2291,8 @@ async def test_reload_leaves_finalization_pending_while_broker_revocation_fails(
         worker_lease_provider=lambda _locator: None,
     )
 
-    await runtime.apply_update_plan(_plan(config, Config(agents={}, defaults={"tools": []})))
+    with pytest.raises(_ScriptRuntimeLifecycleError, match="did not stop every background script"):
+        await runtime.apply_update_plan(_plan(config, Config(agents={}, defaults={"tools": []})))
 
     assert store.get_run(run.run_id).cancel_requested_at is not None
     assert manager.revoke.await_count == 2

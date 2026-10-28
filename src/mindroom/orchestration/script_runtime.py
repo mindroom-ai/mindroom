@@ -712,6 +712,12 @@ class ScriptRuntimeLifecycle:
         if plugins_changed and unfinished:
             msg = "Plugin reload did not interrupt every active background script."
             raise _ScriptRuntimeLifecycleError(msg)
+        # A worker run the reload could not stop keeps what the reload revokes, such as its knowledge mounts, so the
+        # reload fails instead of publishing over it.
+        affected_worker_run_ids = {run.run_id for run in affected if not run.local_unsafe}
+        if any(run.run_id in affected_worker_run_ids for run in unfinished):
+            msg = "Config reload did not stop every background script whose authority it changed."
+            raise _ScriptRuntimeLifecycleError(msg)
 
     def _run_matches_recovery_contract(self, run: ScriptRunRecord, *, config: Config) -> bool:
         """Return whether the current backend advertises this run as recoverable."""
