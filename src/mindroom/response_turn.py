@@ -26,9 +26,7 @@ from uuid import uuid4
 
 from mindroom import ai_runtime
 from mindroom.agent_cli.lifetime import CliTurnLifetime
-from mindroom.background_tasks import (
-    run_blocking_until_complete,
-)
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.cancellation import current_task_is_process_shutdown
 from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
