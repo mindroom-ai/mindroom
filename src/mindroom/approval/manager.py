@@ -12,6 +12,7 @@ from contextvars import Context
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
+from weakref import WeakValueDictionary
 
 from mindroom.approval.events import PendingApproval, parse_approval_datetime
 from mindroom.event_journal import (
@@ -243,6 +244,12 @@ class ApprovalManager:
     _live_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _deadline_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _deadline_wakeup: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
+    # Shared by every worker this manager builds, so the deadline sweep and another pass never send one delivery at once.
+    _delivery_locks: WeakValueDictionary[str, asyncio.Lock] = field(
+        default_factory=WeakValueDictionary,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         """Attach recovery to its owning runtime after construction."""
@@ -705,6 +712,7 @@ class ApprovalManager:
             ),
             sending_device_id=None if self.sending_device is None else self.sending_device(),
             resolve_delivered=self.resolve_delivery,
+            delivery_locks=self._delivery_locks,
         )
 
     async def handle_card_response(  # noqa: C901, PLR0911, PLR0912 - transport recovery and domain terminal states meet here

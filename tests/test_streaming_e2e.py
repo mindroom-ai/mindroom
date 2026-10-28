@@ -25,6 +25,7 @@ from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker
 from mindroom.workers.models import WorkerReadyProgress
 from tests.bot_helpers import make_test_agent_bot, owned_matrix_login
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -45,7 +46,7 @@ def _matrix_client_mock() -> AsyncMock:
 
 
 @pytest.mark.asyncio
-async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None:
+async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None:  # noqa: PLR0915
     """Worker warmup notices should edit the placeholder stream body and disappear before content arrives."""
     runtime_config = bind_runtime_paths(
         Config(
@@ -57,6 +58,7 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
     )
     client = _matrix_client_mock()
     deliveries: list[tuple[str, str]] = []
+    delivered = asyncio.Event()
 
     class FastProgressStreamingResponse(StreamingResponse):
         def __init__(self, **kwargs: object) -> None:
@@ -74,6 +76,7 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
         content: dict[str, object],
     ) -> DeliveredMatrixEvent:
         deliveries.append(("send", str(content["body"])))
+        delivered.set()
         return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
 
     async def record_edit(
@@ -84,16 +87,15 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
         new_text: str,
     ) -> DeliveredMatrixEvent:
         deliveries.append(("edit", new_text))
+        delivered.set()
         return DeliveredMatrixEvent(event_id="$stream_edit", content_sent=dict(new_content))
 
     async def stream() -> AsyncGenerator[object, None]:
         async def wait_for_delivery_count(expected_count: int) -> None:
-            for _ in range(200):
-                if len(deliveries) >= expected_count:
-                    return
-                await asyncio.sleep(0.001)
-            msg = f"Timed out waiting for {expected_count} streaming deliveries"
-            raise AssertionError(msg)
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                while len(deliveries) < expected_count:
+                    delivered.clear()
+                    await delivered.wait()
 
         yield ToolStarted(
             call=ToolExecution(tool_call_id="call-shell", tool_name="shell", tool_args={"cmd": "echo hello"}).call,

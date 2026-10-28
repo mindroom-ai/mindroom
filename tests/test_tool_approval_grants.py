@@ -1239,6 +1239,62 @@ async def test_grant_maintenance_preserves_revocation_debt_until_acknowledged(
         await manager.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_a_second_delivery_pass_waits_for_an_in_flight_send_instead_of_repeating_it(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deadline sweep and an explicit pass in one process send each delivery once."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    owner = journal.principal("router@shared")
+    revocation_sending = asyncio.Event()
+    release_revocation = asyncio.Event()
+    second_pass_listed = asyncio.Event()
+    revocations: list[MatrixDelivery] = []
+
+    async def send(delivery: MatrixDelivery) -> str:
+        if delivery.delivery_id.startswith("approval-grant-revoked:"):
+            revocations.append(delivery)
+            revocation_sending.set()
+            await release_revocation.wait()
+        return "$" + delivery.delivery_id
+
+    list_unacknowledged = type(owner).unacknowledged_matrix_deliveries
+
+    async def list_and_report(self: object, **kwargs: object) -> object:
+        batch = await list_unacknowledged(self, **kwargs)
+        # Set before this pass continues to its next await, so the test resumes only once the pass is
+        # either waiting for the in-flight send or claiming the same delivery itself.
+        if revocation_sending.is_set():
+            second_pass_listed.set()
+        return batch
+
+    manager.send_delivery = send
+    try:
+        card = await _card(journal, manager, "first")
+        await _approve(manager, card)
+        grant = await owner.approval_grant_for_card(room_id="!room:test", card_event_id=card)
+        assert grant is not None
+        assert await owner.revoke_approval_grant(
+            room_id="!room:test",
+            card_event_id=card,
+            sender_id="@human:test",
+            grant_id=grant.grant_id,
+        )
+        monkeypatch.setattr(type(owner), "unacknowledged_matrix_deliveries", list_and_report)
+        first_pass = asyncio.create_task(manager.recover_cards_on_startup())
+        await revocation_sending.wait()
+        second_pass = asyncio.create_task(manager.recover_cards_on_startup())
+        await second_pass_listed.wait()
+        release_revocation.set()
+        await asyncio.gather(first_pass, second_pass)
+        assert len(revocations) == 1
+    finally:
+        await manager.shutdown()
+
+
 async def _grant_payload(journal: EventJournalStore, grant_id: str) -> str:
     row = await journal.backend.read(
         lambda transaction: transaction.fetchone(
