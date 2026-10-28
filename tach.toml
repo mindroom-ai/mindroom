@@ -6656,6 +6656,7 @@ from = ["mindroom.config.memory"]
 [[interfaces]]
 expose = [
     "ConversationRef",
+    "MemoryAutoFlushService",
     "MemoryAutoFlushWorker",
     "MemoryPromptParts",
     "add_agent_memory",

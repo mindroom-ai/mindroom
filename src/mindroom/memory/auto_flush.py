@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, TypedDict
 from uuid import uuid4
 
 from mindroom.agent_loop.helper import complete_prompt
+from mindroom.background_tasks import SupervisedLoop
 from mindroom.constants import tracking_dir
 from mindroom.durable_write import write_json_file_durable
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
@@ -583,3 +584,39 @@ class MemoryAutoFlushWorker:
 
     async def _persist(self, state: _FlushState) -> None:
         await asyncio.to_thread(write_json_file_durable, self._state_path(), state)
+
+
+@dataclass
+class MemoryAutoFlushService:
+    """Run the auto-flush worker while the config enables auto-flush."""
+
+    name = "memory_auto_flush"
+    runtime_paths: RuntimePaths
+    config_provider: Callable[[], Config | None]
+    redacted_event_ids: RedactedEventIds
+    _loop: SupervisedLoop = field(init=False)
+
+    def __post_init__(self) -> None:
+        """Create the supervised worker loop."""
+        self._loop = SupervisedLoop("memory_auto_flush_worker", self._run_worker)
+
+    async def sync(self, config: Config) -> None:
+        """Start the worker when ``config`` enables auto-flush, and stop it otherwise."""
+        if auto_flush_enabled(config):
+            self._loop.start()
+        else:
+            await self.stop()
+
+    async def stop(self) -> None:
+        """Stop the worker without waiting for its pass."""
+        # A pass saves each conversation's progress and a retried note is never written twice, so cancelling loses
+        # nothing.
+        await self._loop.stop()
+
+    async def _run_worker(self) -> None:
+        worker = MemoryAutoFlushWorker(
+            runtime_paths=self.runtime_paths,
+            config_provider=self.config_provider,
+            redacted_event_ids=self.redacted_event_ids,
+        )
+        await worker.run()
