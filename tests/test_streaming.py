@@ -189,6 +189,30 @@ async def test_lifecycle_suspension_escapes_stream_delivery_unchanged(config: Co
 
 
 @pytest.mark.asyncio
+async def test_a_refused_flush_before_an_approval_pause_fails_under_its_stable_reason(config: Config) -> None:
+    """A pause whose unsent progress Matrix refuses fails the stream under the reason the reply's hooks report."""
+    suspension = StreamingLifecycleSuspensionError("paused")
+    gateway = _FakeGateway()
+
+    async def suspended_stream() -> AsyncIterator[object]:
+        yield TextDelta("I checked the input.")
+        await gateway.wait_for_ops(1)
+        yield TextDelta(" Then more.")
+        raise suspension
+
+    async def refuse_edit(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    with (
+        patch("mindroom.streaming.edit_message_result", new=refuse_edit),
+        pytest.raises(StreamingDeliveryError) as raised,
+    ):
+        await _run_stream(config, suspended_stream(), hooks=gateway.hooks())
+
+    assert raised.value.failure_reason == "suspension_presentation_delivery_failed"
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_clock")
 async def test_lifecycle_suspension_captures_last_committed_presentation(config: Config) -> None:
     """Approval handoff retains exactly the ordered body and trace that reached Matrix."""

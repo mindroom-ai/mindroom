@@ -1098,6 +1098,59 @@ class TestAgentBot(AgentBotTestBase):
         assert _visible_response_event_id(delivery) == "$terminal1"
         note = bot.client.room_send.await_args.kwargs["content"]["m.new_content"]["body"]
         assert note.endswith("**[Response interrupted by an error: boom]**")
+
+    @pytest.mark.asyncio
+    async def test_a_stream_failure_with_a_stable_name_reports_that_name(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A stream failure the streamer names, such as a refused flush before an approval pause, reports that name."""
+
+        async def mock_streaming_response() -> AsyncGenerator[str, None]:
+            yield "chunk"
+
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        # The reply's placeholder is the event its stream writes into.
+        unique_room_send_responses(bot.client, prefix="$terminal")
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+        mock_stream_agent_response = MagicMock(return_value=mock_streaming_response())
+        with (
+            patch(
+                "mindroom.delivery_gateway.send_streaming_response",
+                new_callable=AsyncMock,
+                side_effect=StreamingDeliveryError(
+                    RuntimeError("Stream suspension presentation delivery failed: refused"),
+                    failure_reason="suspension_presentation_delivery_failed",
+                ),
+            ),
+            patch_response_runner_module(
+                typing_indicator=_noop_typing_indicator,
+                stream_agent_response=mock_stream_agent_response,
+            ),
+        ):
+            delivery = await _respond(
+                bot,
+                _response_request(
+                    room_id="!test:localhost",
+                    prompt="Please continue",
+                    reply_to_event_id="$event-error",
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event-error",
+                        prompt="Please continue",
+                        user_id="@user:localhost",
+                    ),
+                ),
+                streaming=True,
+            )
+
+        assert delivery.terminal_status == "error"
+        assert delivery.failure_reason == "suspension_presentation_delivery_failed"
         # The span exit wrote the note over the placeholder.
         assert delivery.delivery_kind == "edited"
         assert "Response interrupted by an error" in delivery.response_text

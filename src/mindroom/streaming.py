@@ -166,11 +166,15 @@ def strip_matching_visible_tool_markers(text: str, tool_trace: Sequence[ToolTrac
 
 
 class StreamingDeliveryError(Exception):
-    """A stream that stopped on a failure, without writing an ending: the reply's span exit writes it."""
+    """A stream that stopped on a failure, without writing an ending: the reply's span exit writes it.
 
-    def __init__(self, error: BaseException) -> None:
+    ``failure_reason`` is what the reply's hooks report, the error's text unless the failure has a stable name.
+    """
+
+    def __init__(self, error: BaseException, *, failure_reason: str | None = None) -> None:
         super().__init__(str(error))
         self.error = error
+        self.failure_reason = failure_reason or str(error)
 
 
 def _raise_nonterminal_delivery_error(error: Exception) -> NoReturn:
@@ -2097,7 +2101,10 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                         suspension_error = RuntimeError(
                             f"Stream suspension presentation delivery failed: {delivery_error}",
                         )
-                        raise StreamingDeliveryError(suspension_error) from delivery_error
+                        raise StreamingDeliveryError(
+                            suspension_error,
+                            failure_reason="suspension_presentation_delivery_failed",
+                        ) from delivery_error
                 exc.capture_presentation(streaming.committed_presentation())
                 raise
             delivery_error = exc.error if isinstance(exc, _NonTerminalDeliveryError) else exc

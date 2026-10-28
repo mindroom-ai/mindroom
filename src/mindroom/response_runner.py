@@ -4279,7 +4279,8 @@ class ResponseRunner:
             # A failure before the participation decision stays quiet, wherever the stream failed.
             if skipped := _skip_unapproved_response(participation):
                 return skipped
-            return await self._end_failed_stream(runtime.resolved_target, failure_reason=str(error))
+            failure_reason = raised.failure_reason if isinstance(raised, StreamingDeliveryError) else str(error)
+            return await self._end_failed_stream(runtime.resolved_target, failure_reason=failure_reason)
 
         if participation is not None and participation.is_silent:
             return _skipped_participation_outcome()
