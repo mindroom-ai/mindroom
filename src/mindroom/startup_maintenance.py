@@ -21,11 +21,10 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-type _StartupBot = AgentBot
-type _SetupRooms = Callable[[list[_StartupBot]], Awaitable[None]]
+type _SetupRooms = Callable[[list[AgentBot]], Awaitable[None]]
 type _SyncRuntimeSupport = Callable[[Config], Awaitable[None]]
 type _MarkRuntimeSupportReady = Callable[[], Awaitable[None]]
-type _RunningBots = Callable[[], list[_StartupBot]]
+type _RunningBots = Callable[[], list[AgentBot]]
 
 
 @dataclass
@@ -38,7 +37,7 @@ class StartupMaintenanceController:
     task: asyncio.Task[None] | None = field(default=None, init=False)
     started: bool = field(default=False, init=False)
 
-    def start(self, bots: list[_StartupBot], config: Config) -> None:
+    def start(self, bots: list[AgentBot], config: Config) -> None:
         """Schedule detached startup maintenance for one startup generation."""
         self.started = True
         self.task = create_logged_task(
@@ -69,7 +68,7 @@ class StartupMaintenanceController:
             return
         self.start(bots, config)
 
-    async def _run(self, bots: list[_StartupBot], config: Config) -> None:
+    async def _run(self, bots: list[AgentBot], config: Config) -> None:
         await self._run_phase(
             "startup_maintenance.rooms_and_memberships",
             lambda: self.setup_rooms_and_memberships(bots),

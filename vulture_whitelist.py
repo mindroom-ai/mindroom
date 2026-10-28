@@ -425,4 +425,3 @@ delete_user_service_route  # FastAPI route (src/mindroom/api/egress_credentials.
 get_presets  # FastAPI route (src/mindroom/api/egress_broker.py, src/mindroom/api/egress_credentials.py)
 _._reject_non_finite_numbers  # Pydantic field validator (src/mindroom/api/script_gateway.py)
 _.audio_total_tokens  # Token counter read by name in the stored, reported, and published usage dicts (src/mindroom/llm/usage.py)
-_.conflicting_source_ids  # Refused write's conflicting sources, read by the turn-row integration (src/mindroom/event_journal/turn_rows.py)

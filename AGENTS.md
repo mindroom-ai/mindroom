@@ -178,7 +178,7 @@ Update that page in the same PR when a change alters the trust model or anything
 ### Step 4: Testing & Quality
 
 - **Test Before Committing**: **NEVER** claim a task is complete without running `pytest` to ensure all tests pass.
-- **Test at the Owning Seam**: New behavior tests target the collaborator seam that owns the behavior (`ResponseRunner`, `DeliveryGateway`, `TurnPolicy`, `TurnIngress`, `TurnDispatcher`, `CoalescingGate`, `IngressValidator`, `EditRegenerator`), not the `AgentBot`/`TeamBot` facade.
+- **Test at the Owning Seam**: New behavior tests target the collaborator seam that owns the behavior (`ResponseRunner`, `DeliveryGateway`, `TurnPolicy`, `TurnIngress`, `TurnDispatcher`, `CoalescingGate`, `IngressValidator`, `EditRegenerator`), not the `AgentBot` facade.
   Fake collaborators through the conftest seam installers (`install_generate_response_mock`, `install_send_response_mock`, `replace_edit_regenerator_deps`, and `install_model_providers` for models) or the `*Deps` dataclasses, never by assigning mocks onto bot attributes.
   A test needing more than 3 patches is a smell that it is testing through the wrong seam.
   Genuinely end-to-end tests belong in the slim integration files (`test_multi_agent_bot.py`, `test_threading_error.py`), which stay small by design.

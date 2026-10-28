@@ -149,7 +149,7 @@ class TestReshape:
         assert answered.record.revision_replay is not None
         assert answered.record.revision_replay["$e1"].response_event_id == "$r1"
         # A completed owner cannot be absorbed: a batch naming its source is refused.
-        assert await pending(store, turn(["$a", "$b"])) == Refused(("$a",))
+        assert await pending(store, turn(["$a", "$b"])) == Refused()
 
         regrouped = await accepted(store, turn(["$c"], prompts={"$c": "c"}))
         await write(store, turn_rows.record_revisions, turn_key=regrouped.turn_key, revisions=[("$ec", "$c", 30)])
@@ -244,8 +244,8 @@ class TestReshape:
         bound = await accepted(store, turn(["$bound"]))
         await write(store, turn_rows.bind_final_delivery, delivery_id="$bound", room_id=ROOM, turn_key=bound.turn_key)
 
-        assert await pending(store, turn(["$done", "$fresh"])) == Refused(("$done",))
-        assert await pending(store, turn(["$fresh", "$bound"])) == Refused(("$bound",))
+        assert await pending(store, turn(["$done", "$fresh"])) == Refused()
+        assert await pending(store, turn(["$fresh", "$bound"])) == Refused()
         answered = await pending(store, turn(["$done"]))
         assert isinstance(answered, Answered)
         # A bound turn is frozen: its own tuple is answered without a context change.
@@ -281,7 +281,7 @@ class TestReshape:
             await pending(store, turn(["$a"], target=MessageTarget.resolve(OTHER_ROOM, None, None)), OTHER_ROOM)
         # An answered turn elsewhere refuses a batch naming its source like any answered owner.
         await write(store, turn_rows.record_turn, TurnRecord.create(["$done"]), room_id=OTHER_ROOM)
-        assert await pending(store, turn(["$done", "$b"])) == Refused(("$done",))
+        assert await pending(store, turn(["$done", "$b"])) == Refused()
 
 
 class TestAliases:
@@ -331,9 +331,9 @@ class TestAliases:
         assert await read(store, turn_rows.handled_among, ROOM, ["$o", "$x"]) == {"$o"}
         # The original keeps its own physical turn, and its own later write is refused.
         assert await read(store, turn_rows.load_turn, original.turn_key) is not None
-        assert await pending(store, turn(["$o"])) == Refused(("$o",))
+        assert await pending(store, turn(["$o"])) == Refused()
         # Waiting in a batch beside a fresh source, the original refuses the batch so each source retries alone.
-        assert await pending(store, turn(["$o", "$fresh"])) == Refused(("$o",))
+        assert await pending(store, turn(["$o", "$fresh"])) == Refused()
         assert isinstance(await pending(store, turn(["$fresh"])), Accepted)
 
     async def test_a_relay_handed_to_its_final_delivery_also_refuses_a_batch_naming_its_original(
@@ -345,7 +345,7 @@ class TestAliases:
         relay = await accepted(store, turn(["$r"], aliases=["$o"]))
         await write(store, turn_rows.bind_final_delivery, delivery_id="$r", room_id=ROOM, turn_key=relay.turn_key)
 
-        assert await pending(store, turn(["$o", "$fresh"])) == Refused(("$o",))
+        assert await pending(store, turn(["$o", "$fresh"])) == Refused()
 
     async def test_without_a_completed_owner_the_physical_owner_then_the_newest_alias_owner_answer(
         self,
@@ -684,10 +684,8 @@ class TestFinalDelivery:
         bound = await accepted(store, turn(["$a"]))
         await write(store, turn_rows.bind_final_delivery, delivery_id="$a", room_id=ROOM, turn_key=bound.turn_key)
 
-        assert await pending(store, turn(["$a", "$b"])) == Refused(("$a",))
-        assert await write(store, turn_rows.record_turn, TurnRecord.create(["$b", "$a"]), room_id=ROOM) == Refused(
-            ("$a",),
-        )
+        assert await pending(store, turn(["$a", "$b"])) == Refused()
+        assert await write(store, turn_rows.record_turn, TurnRecord.create(["$b", "$a"]), room_id=ROOM) == Refused()
         assert await read(store, turn_rows.load_turn, bound.turn_key) is not None
 
 
@@ -815,19 +813,15 @@ class TestRetention:
 
 
 class TestReads:
-    """Readers that the runtime asks by conversation, response, or room."""
+    """Readers that the runtime asks by response or room."""
 
-    async def test_turns_for_a_session_and_the_owner_of_a_response(self, store: EventJournalStore) -> None:
-        """Turns for a session and the owner of a response."""
-        first = await accepted(store, turn(["$a"]))
+    async def test_the_owner_of_a_response(self, store: EventJournalStore) -> None:
+        """The owner of a response is the turn that recorded it."""
+        await accepted(store, turn(["$a"]))
         await write(store, turn_rows.record_responded_turn, turn(["$b"], response="$answer"), room_id=ROOM)
-        await accepted(store, turn(["$c"], target=MessageTarget.resolve(ROOM, "$other", None)))
 
-        session = await read(store, turn_rows.turns_for_session, TARGET.session_id)
         owner = await read(store, turn_rows.turn_for_response_event, "$answer")
 
-        assert [record.source_event_ids for record in session] == [("$a",), ("$b",)]
-        assert session[0].turn_key == first.turn_key
         assert owner is not None
         assert owner.source_event_ids == ("$b",)
 

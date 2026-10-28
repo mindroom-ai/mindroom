@@ -473,17 +473,6 @@ class PrincipalStore:
             ),
         )
 
-    async def redacted_event_ids(self, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
-        """Return which of these events were redacted in ``room_id``, as any Matrix login of this agent saw it."""
-        return await self._backend.read(
-            lambda transaction: turn_rows.redacted_events(
-                transaction,
-                turn_rows.agent_of_principal(self._principal_id),
-                room_id,
-                event_ids,
-            ),
-        )
-
     async def deleted_event_ids(self, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
         """Return which of these events are deleted: redacted, or answering for a relayed message that was."""
         return await self._backend.read(

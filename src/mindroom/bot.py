@@ -19,7 +19,6 @@ from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_live_bot
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
-from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal.legacy_turn_rows import legacy_responses_file_path
 from mindroom.event_journal.matrix_delivery import TurnHandoff
 from mindroom.hooks import (
@@ -644,10 +643,12 @@ class AgentBot:
                 on_job_follow_up=lambda event: self._response_runner.handoff_job_follow_up(event),
             ),
             room_for_id=self._room_for_journal_event,
-            schedule_trigger_sender_is_managed=lambda sender: entity_identity_registry(
-                self.config,
-                self.runtime_paths,
-            ).is_managed_user_id(sender),
+            # Resolved late: the ingress validator, which owns the trust rule, is built after the dispatcher.
+            schedule_trigger_sender_is_managed=lambda sender: (
+                self._ingress_validator.sender_is_trusted_for_ingress_metadata(
+                    sender,
+                )
+            ),
             runtime_generation=self._approval_runtime_generation,
         )
         self._turn_store = TurnStore(
@@ -656,7 +657,6 @@ class AgentBot:
                 turn_records=self._journal_store.turn_records(self.agent_name),
                 legacy_responses_file=legacy_responses_file_path(self.storage_path, self.agent_name),
                 state_writer=self._conversation_state_writer,
-                resolver=self._conversation_resolver,
                 tool_runtime=self._tool_runtime_support,
                 response_recovery_state=partial(principal.response_recovery_state, agent_name=self.agent_name),
                 retry_dispatch_sources=self._journal_dispatcher.retry_turn_sources,
@@ -821,7 +821,6 @@ class AgentBot:
         )
         self._interactive_selections = InteractiveSelections(
             InteractiveSelectionsDeps(
-                runtime=self._runtime_view,
                 logger=self.logger,
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,

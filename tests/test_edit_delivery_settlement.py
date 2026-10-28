@@ -67,7 +67,7 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
     bot.client.room_get_event.side_effect = read_delivered
     target = MessageTarget.resolve(room_id, None, source_id, room_mode=True)
     store = await _store(journal_store, agent_name="general")
-    store.deps = replace(store.deps, state_writer=bot._conversation_state_writer, resolver=bot._conversation_resolver)
+    store.deps = replace(store.deps, state_writer=bot._conversation_state_writer)
     record = TurnRecord.create(
         [source_id],
         response_event_id=answer_id,

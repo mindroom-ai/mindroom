@@ -224,7 +224,7 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
 
     # Mock methods
     with (
-        patch.object(TurnDispatcher, "_dispatch_text_turn", new_callable=AsyncMock) as mock_dispatch,
+        patch.object(TurnDispatcher, "dispatch_turn", new_callable=AsyncMock) as mock_dispatch,
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
     ):
         # Process the redelivered message

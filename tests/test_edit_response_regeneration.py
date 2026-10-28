@@ -2761,7 +2761,7 @@ async def test_on_message_routes_interactive_text_selection_through_turn_ingress
             new_callable=AsyncMock,
             return_value=thread_history_result([], is_full_history=True),
         ),
-        patch.object(TurnDispatcher, "_dispatch_text_turn", new_callable=AsyncMock) as mock_dispatch_text,
+        patch.object(TurnDispatcher, "dispatch_turn", new_callable=AsyncMock) as mock_dispatch_text,
     ):
         await bot._on_message(room, message_event)
         # The selection runs as a reaction's does, on a runner-owned task behind the conversation's earlier messages.

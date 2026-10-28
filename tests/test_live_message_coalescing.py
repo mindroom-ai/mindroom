@@ -681,7 +681,7 @@ async def test_single_message_dispatches_after_debounce_window(tmp_path: Path) -
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -720,7 +720,7 @@ async def test_two_rapid_text_messages_dispatch_one_combined_turn(tmp_path: Path
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -761,7 +761,7 @@ async def test_two_rapid_text_messages_forward_prompt_map_to_dispatch(tmp_path: 
     first = _text_event(event_id="$m1", body="first", server_timestamp=1000, thread_id="$thread")
     second = _text_event(event_id="$m2", body="second", server_timestamp=1001, thread_id="$thread")
 
-    with patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as mock_dispatch:
+    with patch.object(TurnDispatcher, "dispatch_turn", new=AsyncMock()) as mock_dispatch:
         await _enqueue_for_dispatch(
             bot,
             first,
@@ -810,7 +810,7 @@ async def test_image_and_text_coalesce_into_single_dispatch(tmp_path: Path) -> N
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -865,7 +865,7 @@ async def test_room_root_image_and_caption_coalesce_into_single_dispatch(tmp_pat
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await bot._turn_ingress.handle_media_event(room, image_event)
@@ -920,7 +920,7 @@ async def test_room_root_image_and_thread_caption_coalesce_into_single_thread_di
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await bot._turn_ingress.handle_media_event(room, image_event)
@@ -963,7 +963,7 @@ async def test_router_keeps_a_caption_that_names_an_agent_with_its_upload(
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await bot._turn_ingress.handle_media_event(room, image_event)
@@ -996,7 +996,7 @@ async def test_images_then_caption_coalesce_into_single_dispatch(tmp_path: Path)
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -1052,7 +1052,7 @@ async def test_each_thread_text_dispatches_immediately_as_own_turn(tmp_path: Pat
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -1102,7 +1102,7 @@ async def test_image_after_text_dispatch_is_a_second_batch(tmp_path: Path) -> No
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -1152,7 +1152,7 @@ async def test_different_senders_dispatch_separately(tmp_path: Path) -> None:
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -1292,7 +1292,7 @@ async def test_same_sender_different_threads_dispatch_separately(tmp_path: Path)
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -1353,7 +1353,7 @@ async def test_room_message_and_plain_reply_to_known_thread_do_not_coalesce_toge
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -1422,7 +1422,7 @@ async def test_plain_reply_with_unproven_root_is_not_admitted_under_guessed_key(
     with (
         patch.object(
             TurnDispatcher,
-            "_dispatch_text_turn",
+            "dispatch_turn",
             new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
         ),
         pytest.raises(RuntimeError, match="Could not resolve canonical coalescing thread"),
@@ -1461,7 +1461,7 @@ async def test_command_executes_immediately_while_text_batch_debounces(tmp_path:
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await bot._turn_ingress.handle_text_event(room, first)
@@ -1498,7 +1498,7 @@ async def test_command_during_media_debounce_executes_immediately(tmp_path: Path
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await bot._turn_ingress.handle_media_event(room, image_event)
@@ -1551,7 +1551,7 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
     with (
         patch.object(
             TurnDispatcher,
-            "_dispatch_text_turn",
+            "dispatch_turn",
             new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
         ),
         # The gate reads which conversations have a response running from the runner it was built with.
@@ -1615,7 +1615,7 @@ async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: P
         await idle.wait()
 
     with (
-        patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock(side_effect=record_dispatch)),
+        patch.object(TurnDispatcher, "dispatch_turn", new=AsyncMock(side_effect=record_dispatch)),
         # The gate reads which conversations have a response running from the runner it was built with.
         patch.object(
             bot._coalescing_gate,
@@ -1996,7 +1996,7 @@ async def test_slow_thread_lookup_active_follow_up_stays_before_later_follow_up(
             ),
             patch.object(
                 TurnDispatcher,
-                "_dispatch_text_turn",
+                "dispatch_turn",
                 new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
             ),
         ):
@@ -2087,7 +2087,7 @@ async def test_later_slow_thread_lookup_active_follow_up_lands_as_own_turn(tmp_p
             ),
             patch.object(
                 TurnDispatcher,
-                "_dispatch_text_turn",
+                "dispatch_turn",
                 new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
             ),
         ):
@@ -2470,7 +2470,7 @@ async def test_command_executes_immediately_despite_unresolved_ingress(tmp_path:
     try:
         with patch.object(
             TurnDispatcher,
-            "_dispatch_text_turn",
+            "dispatch_turn",
             new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
         ):
             await bot._turn_ingress.handle_text_event(room, command_event)
@@ -3143,7 +3143,7 @@ async def test_enqueue_for_dispatch_returns_while_drain_dispatch_blocks(tmp_path
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await asyncio.wait_for(
@@ -3213,7 +3213,7 @@ async def test_coalescing_exempt_source_kinds_bypass_gate(tmp_path: Path, source
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -3291,7 +3291,7 @@ async def test_untrusted_source_kind_content_does_not_bypass_or_promote(
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=record_dispatch),
     ):
         await _enqueue_for_dispatch(
@@ -3383,7 +3383,7 @@ async def test_overlapping_scheduled_checkins_coalesce(tmp_path: Path) -> None:
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -3440,7 +3440,7 @@ async def test_prepare_for_sync_shutdown_waits_for_active_flush_task(tmp_path: P
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -3486,7 +3486,7 @@ async def test_prepare_for_sync_shutdown_drains_pending_debounced_messages(tmp_p
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -3524,7 +3524,7 @@ async def test_prepare_for_sync_shutdown_drains_pending_media_debounce(tmp_path:
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -3571,7 +3571,7 @@ async def test_shutdown_during_in_flight_dispatch_flushes_remaining_without_wait
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -3636,7 +3636,7 @@ async def test_thread_followups_dispatch_while_first_turn_root_in_flight(tmp_pat
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         first_task = asyncio.create_task(
@@ -3924,7 +3924,7 @@ async def test_handle_prepared_turn_timing_events_include_dispatch_scope(tmp_pat
     )
 
     with (
-        patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()),
+        patch.object(TurnDispatcher, "dispatch_turn", new=AsyncMock()),
         patch("mindroom.turns.dispatch.emit_elapsed_timing") as mock_emit,
     ):
         await bot._turn_dispatcher.handle_prepared_turn(batch)
@@ -3960,7 +3960,7 @@ async def test_handle_prepared_turn_uses_batch_key_for_text_primary(tmp_path: Pa
         queues_other_run=nothing_else_queued,
     )
 
-    with patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as mock_dispatch:
+    with patch.object(TurnDispatcher, "dispatch_turn", new=AsyncMock()) as mock_dispatch:
         await bot._turn_dispatcher.handle_prepared_turn(batch)
 
     dispatched_event = mock_dispatch.await_args.args[0].event
@@ -4747,7 +4747,7 @@ async def test_stop_drains_pending_debounce_tasks(tmp_path: Path) -> None:
     event = _image_event(event_id="$m1")
 
     with (
-        patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as mock_dispatch,
+        patch.object(TurnDispatcher, "dispatch_turn", new=AsyncMock()) as mock_dispatch,
         patch("mindroom.bot.wait_for_background_tasks", new=AsyncMock()),
     ):
         await _enqueue_for_dispatch(
@@ -4838,7 +4838,7 @@ async def test_zero_debounce_dispatches_immediately(tmp_path: Path) -> None:
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -4877,7 +4877,7 @@ async def test_multiple_commands_each_dispatch_independently(tmp_path: Path) -> 
 
     with patch.object(
         TurnDispatcher,
-        "_dispatch_text_turn",
+        "dispatch_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await bot._turn_ingress.handle_text_event(room, first_cmd)
@@ -4896,7 +4896,7 @@ async def test_gate_entry_removed_after_dispatch_with_no_pending(tmp_path: Path)
     room = _make_room()
     event = _text_event(event_id="$m1", body="hello")
 
-    with patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()):
+    with patch.object(TurnDispatcher, "dispatch_turn", new=AsyncMock()):
         assert _coalescing_gate_is_idle(bot._coalescing_gate)
         await _enqueue_for_dispatch(
             bot,
@@ -7718,7 +7718,7 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
         ),
         patch.object(
             TurnDispatcher,
-            "_dispatch_text_turn",
+            "dispatch_turn",
             new=AsyncMock(side_effect=RuntimeError("dispatch failed")),
         ),
     ):

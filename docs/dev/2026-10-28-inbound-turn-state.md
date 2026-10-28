@@ -28,7 +28,7 @@ The code shows what each owner does; this record keeps why, what was rejected, a
 - The command is decided once after normalization, from the trace-stripped command text, by one predicate every stage calls.
 - Authorization is never frozen into provenance: it stays current under the admission fence.
 - Payload trust belongs to the normalized payload, not to the sender, because MindRoom produces voice metadata for a human's audio.
-- Only a single-source turn of an ordinary message (one a person typed, or one an agent wrote for a person) runs as a command.
+- Only a single-source turn of an ordinary message runs as a command, under its run requester's authority (a person, or the person an agent wrote it for).
   Hook, trigger, relay, schedule, selection, voice, media, and edit-regeneration text is conversation: a plugin or an agent can write it, yet it would run with a person's authority.
   This was the user's decision; only hook text changes in practice, because trigger and relay text begins with a mention.
 - Per-run scheduled settings keep their intent-based acceptance, because a schedule a managed agent created and the router routed among several responders carries no original sender.

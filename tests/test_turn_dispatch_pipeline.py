@@ -1169,7 +1169,7 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         with (
-            patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as mock_dispatch,
+            patch.object(TurnDispatcher, "dispatch_turn", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
             ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
@@ -1601,7 +1601,7 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_reserve_waiting_human_message,
             patch.object(
                 TurnDispatcher,
-                "_dispatch_text_turn",
+                "dispatch_turn",
                 new=AsyncMock(),
             ) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
@@ -1821,7 +1821,7 @@ class TestAgentBot(AgentBotTestBase):
                 "coalescing_thread_id",
                 new=AsyncMock(return_value=None),
             ),
-            patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as mock_dispatch,
+            patch.object(TurnDispatcher, "dispatch_turn", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
             await asyncio.wait_for(bot._on_message(room, event), timeout=0.05)
@@ -1992,7 +1992,7 @@ class TestAgentBot(AgentBotTestBase):
                 "coalescing_thread_id",
                 new=AsyncMock(return_value="$thread_root"),
             ),
-            patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as mock_dispatch,
+            patch.object(TurnDispatcher, "dispatch_turn", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
             ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
@@ -2104,7 +2104,7 @@ class TestAgentBot(AgentBotTestBase):
                 "reserve_waiting_human_message",
                 return_value=MagicMock(),
             ) as mock_reserve_waiting_human_message,
-            patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as mock_dispatch,
+            patch.object(TurnDispatcher, "dispatch_turn", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
             ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")

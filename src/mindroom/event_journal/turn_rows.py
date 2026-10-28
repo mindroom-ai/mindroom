@@ -56,7 +56,7 @@ _CHUNK = 500
 
 _TURN_COLUMNS = (
     "turn_key, anchor_event_id, room_id, completed, updated_at, response_event_id, final_delivery_id, "
-    "response_owner, requester_id, history_scope_json, conversation_target_json, session_id, "
+    "response_owner, requester_id, history_scope_json, conversation_target_json, "
     "command_execution_started, command_result_text, command_result_extra_content_json"
 )
 _SOURCE_COLUMNS = (
@@ -84,9 +84,7 @@ class Answered:
 
 @dataclass(frozen=True, slots=True)
 class Refused:
-    """An answered or delivery-bound turn of another key owns these candidate sources; nothing was written."""
-
-    conflicting_source_ids: tuple[str, ...]
+    """An answered or delivery-bound turn of another key owns a candidate source; nothing was written."""
 
 
 type ReshapeResult = Accepted | Answered | Refused
@@ -113,7 +111,6 @@ class _Turn:
     requester_id: str | None = None
     history_scope_json: str | None = None
     conversation_target_json: str | None = None
-    session_id: str | None = None
     command_execution_started: bool = False
     command_result_text: str | None = None
     command_result_extra_content_json: str | None = None
@@ -206,7 +203,6 @@ def _turn_from_row(row: Row) -> _Turn:
         requester_id=row["requester_id"],
         history_scope_json=row["history_scope_json"],
         conversation_target_json=row["conversation_target_json"],
-        session_id=row["session_id"],
         command_execution_started=bool(row["command_execution_started"]),
         command_result_text=row["command_result_text"],
         command_result_extra_content_json=row["command_result_extra_content_json"],
@@ -557,17 +553,6 @@ def handled_among(
     )
 
 
-def turns_for_session(transaction: Transaction, agent_name: str, session_id: str) -> tuple[TurnRecord, ...]:
-    """Return the turns recorded for one conversation, oldest first."""
-    rows = transaction.fetchall(
-        "SELECT turn_key FROM turns WHERE agent_name = ? AND session_id = ? ORDER BY updated_at, turn_key",
-        (agent_name, session_id),
-    )
-    keys = [str(row["turn_key"]) for row in rows]
-    records = _records(transaction, agent_name, keys)
-    return tuple(records[key] for key in keys)
-
-
 def turn_for_response_event(transaction: Transaction, agent_name: str, event_id: str) -> TurnRecord | None:
     """Return the sole turn whose visible response, or one of whose source echoes, is this event."""
     keys = {
@@ -620,7 +605,7 @@ def visible_echo(transaction: Transaction, agent_name: str, source_event_id: str
 def _insert_rows(transaction: Transaction, agent_name: str, rows: _Rows) -> None:
     turn = rows.turn
     transaction.execute(
-        f"INSERT INTO turns (agent_name, {_TURN_COLUMNS}) VALUES (?, {_placeholders(range(15))})",  # noqa: S608
+        f"INSERT INTO turns (agent_name, {_TURN_COLUMNS}) VALUES (?, {_placeholders(range(14))})",  # noqa: S608
         (
             agent_name,
             turn.turn_key,
@@ -634,7 +619,6 @@ def _insert_rows(transaction: Transaction, agent_name: str, rows: _Rows) -> None
             turn.requester_id,
             turn.history_scope_json,
             turn.conversation_target_json,
-            turn.session_id,
             turn.command_execution_started,
             turn.command_result_text,
             turn.command_result_extra_content_json,
@@ -1037,17 +1021,13 @@ def _reshape(
         if tuple(source.event_id for source in _load_rows(transaction, agent_name, (key,))[key].sources) == sources:
             target = turns[key]
     target_key = None if target is None else target.turn_key
-    conflicting = tuple(
-        source
+    if any(
+        turns[key].frozen
         for source in sources
-        if any(
-            turns[key].frozen
-            for key in {owners.get(source), *alias_owners.get(source, ())}
-            if key is not None and key != target_key
-        )
-    )
-    if conflicting:
-        return Refused(conflicting)
+        for key in {owners.get(source), *alias_owners.get(source, ())}
+        if key is not None and key != target_key
+    ):
+        return Refused()
     for key in set(owners.values()):
         _require_same_room(turns[key], room_id)
     if target is not None:
@@ -1118,7 +1098,6 @@ def _backfilled_turn(anchor_event_id: str, room_id: str, backfill: _Turn | None)
         turn.requester_id = backfill.requester_id
         turn.history_scope_json = backfill.history_scope_json
         turn.conversation_target_json = backfill.conversation_target_json
-        turn.session_id = backfill.session_id
         turn.command_execution_started = backfill.command_execution_started
         turn.command_result_text = backfill.command_result_text
         turn.command_result_extra_content_json = backfill.command_result_extra_content_json
@@ -1193,7 +1172,6 @@ class _Context:
 
     history_scope_json: str | None
     conversation_target_json: str | None
-    session_id: str | None
     command_result_extra_content_json: str | None
 
 
@@ -1207,7 +1185,6 @@ def _context(record: TurnRecord, room_id: str | None) -> _Context:
     return _Context(
         history_scope_json=None if scope is None else json.dumps(scope.to_metadata(), sort_keys=True),
         conversation_target_json=None if target is None else json.dumps(target.to_metadata(), sort_keys=True),
-        session_id=None if target is None else target.session_id,
         command_result_extra_content_json=(
             None if extra is None else json.dumps(command_result_content_to_dict(extra), sort_keys=True)
         ),
@@ -1225,7 +1202,6 @@ def _apply_context(transaction: Transaction, agent_name: str, turn: _Turn, candi
             requester_id = COALESCE(?, requester_id),
             history_scope_json = COALESCE(?, history_scope_json),
             conversation_target_json = COALESCE(?, conversation_target_json),
-            session_id = COALESCE(?, session_id),
             command_execution_started = (command_execution_started OR ?),
             command_result_extra_content_json = CASE WHEN command_result_text IS NULL
                 THEN ? ELSE command_result_extra_content_json END,
@@ -1239,7 +1215,6 @@ def _apply_context(transaction: Transaction, agent_name: str, turn: _Turn, candi
             candidate.requester_id,
             context.history_scope_json,
             context.conversation_target_json,
-            context.session_id,
             candidate.command_execution_started,
             context.command_result_extra_content_json,
             candidate.command_result_text,
@@ -1355,7 +1330,6 @@ def insert_turn(
         requester_id=record.requester_id,
         history_scope_json=context.history_scope_json,
         conversation_target_json=context.conversation_target_json,
-        session_id=context.session_id,
         command_execution_started=record.command_execution_started,
         command_result_text=record.command_result_text,
         command_result_extra_content_json=context.command_result_extra_content_json,
@@ -1816,6 +1790,5 @@ __all__ = [
     "scrub_redacted_event",
     "sources_deleted_by",
     "turn_for_response_event",
-    "turns_for_session",
     "visible_echo",
 ]

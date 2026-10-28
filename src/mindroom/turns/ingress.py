@@ -642,7 +642,7 @@ class TurnIngress:
             [pending_event],
             queues_other_run=partial(self.deps.coalescing_gate.queues_other_run, key),
         )
-        if await self.deps.dispatcher.dispatch_control_turn(replace(turn, claims=(ticket.take_claim(),))):
+        if await self.deps.dispatcher.dispatch_turn(replace(turn, claims=(ticket.take_claim(),))):
             return _IngressAdmissionOutcome.CONSUMED
         # Its claim was refused as a fresh claim of this turn would be now, so the callback ends as that refusal does:
         # a retry would only reach the same refusal.

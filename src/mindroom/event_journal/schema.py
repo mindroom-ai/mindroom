@@ -693,7 +693,6 @@ _TURN_ROW_TABLES = (
         requester_id TEXT,
         history_scope_json TEXT,
         conversation_target_json TEXT,
-        session_id TEXT,
         command_execution_started BOOLEAN NOT NULL,
         command_result_text TEXT,
         command_result_extra_content_json TEXT,
@@ -773,16 +772,10 @@ _TURN_ROW_TABLES = (
 
 _TURN_ROW_INDEXES = (
     """
-    CREATE INDEX IF NOT EXISTS turns_session ON turns (agent_name, session_id)
-    """,
-    """
     CREATE INDEX IF NOT EXISTS turns_response ON turns (agent_name, response_event_id)
     """,
     """
     CREATE INDEX IF NOT EXISTS turns_final_delivery ON turns (agent_name, final_delivery_id)
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS turn_sources_turn ON turn_sources (agent_name, turn_key)
     """,
     """
     CREATE INDEX IF NOT EXISTS turn_sources_selected_revision ON turn_sources (agent_name, selected_rev_id)
@@ -795,9 +788,6 @@ _TURN_ROW_INDEXES = (
     """,
     """
     CREATE INDEX IF NOT EXISTS turn_aliases_event ON turn_aliases (agent_name, event_id)
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS turn_revisions_revision ON turn_revisions (agent_name, revision_id)
     """,
 )
 

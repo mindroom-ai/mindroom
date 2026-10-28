@@ -244,7 +244,7 @@ async def _paused_case(  # noqa: PLR0915
     bot.client.room_send.return_value = nio.RoomSendResponse("$answer-edit", room_id)
     target = MessageTarget.resolve(room_id, None, source_id, room_mode=True)
     store = await _store(journal_store, agent_name="general")
-    store.deps = replace(store.deps, state_writer=bot._conversation_state_writer, resolver=bot._conversation_resolver)
+    store.deps = replace(store.deps, state_writer=bot._conversation_state_writer)
     await store.record_responded_turn(
         TurnRecord.create(
             (source_id,),

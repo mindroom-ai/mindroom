@@ -30,7 +30,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Sequence
     from pathlib import Path
 
-    from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
     from mindroom.event_journal.backend import Transaction
     from mindroom.event_journal.models import ResponseRecoveryState
@@ -62,7 +61,6 @@ class TurnStoreDeps:
     # that ignored it would re-answer the entire backlog on upgrade.
     legacy_responses_file: Path | None
     state_writer: ConversationStateWriter
-    resolver: ConversationResolver
     tool_runtime: ToolRuntimeSupport
     # One consistent read of everything that can still own a response after its
     # task exits: the journal, the outbox, reply rows, and the stored turns.

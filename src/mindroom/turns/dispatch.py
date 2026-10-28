@@ -294,7 +294,7 @@ class TurnDispatcher:
             dispatch_timing.mark("gate_exit")
         async with self.deps.resolver.turn_lookup_scope():
             dispatch_start = time.monotonic()
-            if not await self._dispatch_text_turn(turn):
+            if not await self.dispatch_turn(turn):
                 # Their callbacks deferred these sources to the gate, so they go back to the journal, whose ingress
                 # decides them one by one.
                 self.deps.retry_dispatch_sources(turn.room.room_id, turn.handled_turn.source_event_ids)
@@ -305,19 +305,15 @@ class TurnDispatcher:
                 timing_scope=timing_scope,
             )
 
-    async def dispatch_control_turn(self, turn: PreparedTurn) -> bool:
-        """Dispatch one command that bypassed the coalescing gate, under the claim its ingress handed over.
-
-        Returns False when that claim cannot cover the turn; its callback still owns the source then.
-        """
-        return await self._dispatch_text_turn(turn)
-
-    async def _dispatch_text_turn(self, turn: PreparedTurn) -> bool:
+    async def dispatch_turn(self, turn: PreparedTurn) -> bool:
         """Run the normal text or command dispatch pipeline for a prepared turn.
 
         The turn's per-event claims become one claim on the whole turn, which this
-        dispatch owns until a response task takes it. Returns False when they cannot,
-        because another live owner shares an event or a completed turn answered an alias.
+        dispatch owns until a response task takes it. A command that bypassed the
+        coalescing gate arrives here too, under the claim its ingress handed over.
+        Returns False when the claims cannot cover the turn, because another live
+        owner shares an event or a completed turn answered an alias; the caller
+        still owns the sources then.
         """
         claim = await self.deps.turn_store.merge_claims(turn.claims, turn.handled_turn)
         if claim is None:

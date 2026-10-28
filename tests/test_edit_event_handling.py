@@ -137,7 +137,7 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
                 facts=make_ingress_facts(edit_event.sender, requester_user_id="@user:example.com"),
             ),
         ),
-        patch.object(TurnDispatcher, "_dispatch_text_turn", new_callable=AsyncMock) as mock_dispatch,
+        patch.object(TurnDispatcher, "dispatch_turn", new_callable=AsyncMock) as mock_dispatch,
         patch.object(bot._edit_regenerator, "handle_message_edit", new_callable=AsyncMock) as mock_handle_edit,
     ):
         # Process the edit event - this should not re-enter normal dispatch.
@@ -395,7 +395,7 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
                 for edit_event in edit_events
             ],
         ),
-        patch.object(TurnDispatcher, "_dispatch_text_turn", new_callable=AsyncMock) as mock_dispatch,
+        patch.object(TurnDispatcher, "dispatch_turn", new_callable=AsyncMock) as mock_dispatch,
         patch.object(bot._edit_regenerator, "handle_message_edit", new_callable=AsyncMock) as mock_handle_edit,
     ):
         # Process all edit events

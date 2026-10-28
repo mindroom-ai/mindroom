@@ -29,7 +29,6 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
-    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.coalescing.batch import PreparedTurn
     from mindroom.coalescing.ingress_ticket import IngressTicket
     from mindroom.constants import RuntimePaths
@@ -64,7 +63,6 @@ class InteractiveSelectionDispatch:
 class InteractiveSelectionsDeps:
     """Collaborators needed to admit and run interactive selections."""
 
-    runtime: BotRuntimeView
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     agent_name: str

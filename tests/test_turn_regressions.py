@@ -448,7 +448,7 @@ async def test_on_message_claims_interactive_text_by_durable_source_event(
             new_callable=AsyncMock,
             return_value="$thread-root:localhost",
         ),
-        patch.object(TurnDispatcher, "_dispatch_text_turn", new_callable=AsyncMock) as mock_dispatch_text,
+        patch.object(TurnDispatcher, "dispatch_turn", new_callable=AsyncMock) as mock_dispatch_text,
     ):
         await bot._on_message(room, message_event)
         await _wait_for(lambda: mock_dispatch_text.await_count == 1)

@@ -111,10 +111,10 @@ def is_router_voice_echo(facts: IngressFacts, content: object) -> bool:
 def command_for(facts: IngressFacts, command_text: str, source_count: int = 1) -> Command | None:
     """Return the command one turn's text runs as, or None when the text is conversation.
 
-    Only a message a person typed, or one an agent wrote for a person, runs as a
-    command. Text an automation, a hook, a trigger, or a relay produced is
-    conversation: it can be written by an agent or a plugin yet would run with a
-    human's authority. ``command_text`` is ``dispatch_prompt_for_event`` of the
+    Only an ordinary message runs as a command, under its run requester's
+    authority. Text a schedule, a hook, a trigger, or a relay produced is
+    conversation: an agent or a plugin can write it, yet it would run with a
+    person's authority. ``command_text`` is ``dispatch_prompt_for_event`` of the
     event's logical content, so a finished reply's tool markers never hide a
     command. A turn of several sources carries no command.
     """

@@ -619,7 +619,6 @@ def _build_harness(
             turn_records=journal_store.turn_records(agent_name),
             legacy_responses_file=None,
             state_writer=state_writer,
-            resolver=resolver,
             tool_runtime=tool_runtime,
             response_recovery_state=partial(journal_principal.response_recovery_state, agent_name=agent_name),
             # Resolved late: the retry recorder is defined below, with the turn owners'.
@@ -713,7 +712,6 @@ def _build_harness(
     )
     selections = InteractiveSelections(
         InteractiveSelectionsDeps(
-            runtime=runtime,
             logger=logger,
             runtime_paths=runtime_paths,
             agent_name=agent_name,

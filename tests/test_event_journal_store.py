@@ -1129,7 +1129,11 @@ class TestRedaction:
         assert [event.event_id for event in await alice.pending()] == ["$redaction"]
         assert await bodies(alice) == []
 
-    async def test_a_redaction_outlives_leaving_and_rejoining_the_room(self, alice: PrincipalStore) -> None:
+    async def test_a_redaction_outlives_leaving_and_rejoining_the_room(
+        self,
+        journal_store: EventJournalStore,
+        alice: PrincipalStore,
+    ) -> None:
         """A rejoin that delivers the message again without its redaction still reads it deleted."""
         await admit_room_membership(alice, ROOM, "join")
         await admit(alice, "$original", content=text("secret"))
@@ -1139,7 +1143,9 @@ class TestRedaction:
 
         await admit(alice, "$original", ts=3_000, content=text("secret"))
 
-        assert await alice.redacted_event_ids(ROOM, ("$original",)) == {"$original"}
+        assert await journal_store.turn_records("agent").read(turn_rows.redacted_events, ROOM, ("$original",)) == {
+            "$original",
+        }
         assert not await alice.is_pending("$original")
         assert await bodies(alice) == []
 

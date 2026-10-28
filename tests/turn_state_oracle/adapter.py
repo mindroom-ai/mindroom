@@ -151,7 +151,6 @@ class TurnStateAdapter:
                 turn_records=self.journal.turn_records(AGENT),
                 legacy_responses_file=self.legacy_ledger,
                 state_writer=MagicMock(),
-                resolver=MagicMock(),
                 tool_runtime=MagicMock(),
                 response_recovery_state=AsyncMock(),
                 retry_dispatch_sources=MagicMock(),

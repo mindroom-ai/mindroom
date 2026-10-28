@@ -613,7 +613,7 @@ async def test_room_mode_root_batch_consumes_all_same_target_reservations(tmp_pa
         queues_other_run=nothing_else_queued,
     )
 
-    with patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()):
+    with patch.object(TurnDispatcher, "dispatch_turn", new=AsyncMock()):
         await bot._turn_dispatcher.handle_prepared_turn(batch)
 
     first_reservation.release.assert_called_once_with()
@@ -2765,7 +2765,7 @@ async def test_reserved_follow_up_cleanup_when_handle_prepared_turn_fails_before
         with (
             patch.object(
                 TurnDispatcher,
-                "_dispatch_text_turn",
+                "dispatch_turn",
                 new=AsyncMock(side_effect=RuntimeError("dispatch failed")),
             ),
             pytest.raises(RuntimeError, match="dispatch failed"),
@@ -2843,7 +2843,7 @@ async def test_coalesced_batch_consumes_queued_notice_for_batch_thread(tmp_path:
 
         with patch.object(
             TurnDispatcher,
-            "_dispatch_text_turn",
+            "dispatch_turn",
             new=AsyncMock(side_effect=prepared_turn_recorder(capture_dispatch)),
         ):
             await bot._turn_dispatcher.handle_prepared_turn(batch)
@@ -2910,7 +2910,7 @@ async def test_room_scoped_root_voice_consumes_final_target_queued_notice(tmp_pa
 
         with patch.object(
             TurnDispatcher,
-            "_dispatch_text_turn",
+            "dispatch_turn",
             new=AsyncMock(side_effect=prepared_turn_recorder(capture_dispatch)),
         ):
             await bot._turn_dispatcher.handle_prepared_turn(batch)

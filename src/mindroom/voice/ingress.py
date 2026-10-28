@@ -102,38 +102,26 @@ class VoiceIngress:
         ticket.admit_ready(admission_key, ready_task, source_event_id=event.event_id, source_kind=VOICE_SOURCE_KIND)
         return TurnDispatchOutcome.DEFERRED
 
-    @staticmethod
-    def _same_response_lifecycle_target(left: MessageTarget, right: MessageTarget) -> bool:
-        """Return whether two targets share the same response lifecycle lock."""
-        return left.lifecycle_key == right.lifecycle_key
-
-    def _voice_queued_notice_reservation(
+    def _final_queued_notice(
         self,
         *,
-        preliminary_target: MessageTarget | None,
         target: MessageTarget,
         envelope: MessageEnvelope,
-        queued_notice_reservation: QueuedHumanNoticeReservation | None,
+        reservation: QueuedHumanNoticeReservation | None,
     ) -> QueuedHumanNoticeReservation | None:
-        """Keep, replace, or cancel the queued notice once the voice target is final."""
-        if queued_notice_reservation is not None and (
-            preliminary_target is None
-            or not self._same_response_lifecycle_target(
-                preliminary_target,
-                target,
-            )
-        ):
-            queued_notice_reservation.release()
-            queued_notice_reservation = None
-        busy = self.deps.response_runner.has_active_response_for_target(target)
-        if queued_notice_reservation is not None:
-            if busy:
-                return queued_notice_reservation
-            queued_notice_reservation.release()
+        """Keep the queued notice while a response still holds the voice's conversation once readiness ends.
+
+        Release it if that conversation went idle while the voice was transcribed, or reserve one if it became busy.
+        """
+        if not self.deps.response_runner.has_active_response_for_target(target):
+            if reservation is not None:
+                reservation.release()
             return None
-        if not busy:
-            return None
-        return queued_notice_reservation_if_busy(self.deps.response_runner, target=target, envelope=envelope)
+        return reservation or queued_notice_reservation_if_busy(
+            self.deps.response_runner,
+            target=target,
+            envelope=envelope,
+        )
 
     async def _ready_voice_event(
         self,
@@ -168,13 +156,11 @@ class VoiceIngress:
                 requester_user_id=facts.lane_requester_id,
                 dispatch_timing=dispatch_timing,
             )
-            normalized_target = voice_target
-            envelope = self.deps.resolver.build_envelope(event=normalized_event, facts=facts, target=normalized_target)
-            queued_notice_reservation = self._voice_queued_notice_reservation(
-                preliminary_target=voice_target,
-                target=normalized_target,
+            envelope = self.deps.resolver.build_envelope(event=normalized_event, facts=facts, target=voice_target)
+            queued_notice_reservation = self._final_queued_notice(
+                target=voice_target,
                 envelope=envelope,
-                queued_notice_reservation=queued_notice_reservation,
+                reservation=queued_notice_reservation,
             )
             ready = ReadyPendingEvent(
                 pending_event=PendingEvent(
@@ -205,7 +191,7 @@ class VoiceIngress:
             raise IngressRetryError from exc
         else:
             reservation_released_or_handed_off = True
-            mark_waiting_for_approval(self.deps, room, event.source, normalized_target, envelope)
+            mark_waiting_for_approval(self.deps, room, event.source, voice_target, envelope)
             return ready
         finally:
             if not reservation_released_or_handed_off and queued_notice_reservation is not None:

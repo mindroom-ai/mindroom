@@ -46,7 +46,6 @@ async def _store(journal_store: EventJournalStore) -> TurnStore:
             turn_records=journal_store.turn_records("agent"),
             legacy_responses_file=None,
             state_writer=MagicMock(),
-            resolver=MagicMock(),
             tool_runtime=MagicMock(),
             response_recovery_state=MagicMock(),
             retry_dispatch_sources=MagicMock(),

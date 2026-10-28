@@ -41,10 +41,9 @@ SOURCE = "$deleted"
 REDACTION = "$redaction"
 
 
-def _redaction_callback_bot(journal_store: EventJournalStore, turn_store: TurnStore) -> AgentBot:
+def _redaction_callback_bot(journal_store: EventJournalStore) -> AgentBot:
     """Return the minimal bot whose redaction callback these tests hand the journal dispatcher."""
     bot = object.__new__(AgentBot)
-    bot._turn_store = turn_store
     # No reply runs here, so a deletion ends none and nothing owes debt.
     bot._reply_runtime = ReplyRuntime(
         store=journal_store.principal("agent@alice"),
@@ -93,7 +92,7 @@ async def test_a_redaction_admitted_during_an_interrupted_reply_releases_its_sou
     """Admission deletes the source and retires its generation; its callback only ends what the deletion ended."""
     principal = journal_store.principal("agent@alice")
     store = await _store(journal_store)
-    bot = _redaction_callback_bot(journal_store, store)
+    bot = _redaction_callback_bot(journal_store)
     dispatcher = _dispatcher(principal, MagicMock())
     dispatcher.callbacks = replace(dispatcher.callbacks, on_redaction=bot._on_redaction)
     room = nio.MatrixRoom(ROOM, "@bot:localhost")
@@ -216,7 +215,7 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
     assert await store.response_recovery_ready(turn)
     reopened = TurnStore(store.deps)
     await reopened.warm()
-    bot = _redaction_callback_bot(journal_store, reopened)
+    bot = _redaction_callback_bot(journal_store)
     requests: list[str] = []
     survivor_delivered = asyncio.Event()
 
@@ -285,7 +284,7 @@ async def test_a_redaction_proves_recovery_only_for_a_settled_source_in_its_own_
     """The agent's redaction of a source, in the room the turn names, is what hands a settled source off."""
     principal = journal_store.principal("agent@alice")
     store = await _store(journal_store)
-    bot = _redaction_callback_bot(journal_store, store)
+    bot = _redaction_callback_bot(journal_store)
     dispatcher = _dispatcher(principal, MagicMock())
     dispatcher.callbacks = replace(dispatcher.callbacks, on_redaction=bot._on_redaction)
     room = nio.MatrixRoom(ROOM, "@bot:localhost")
@@ -385,7 +384,7 @@ async def test_a_redaction_is_read_for_its_room_by_every_login_of_the_agent(
     )
     requested = (*tuple(f"$absent-{index}" for index in range(300)), deleted_id)
     expected = frozenset() if scope == "other_room" else frozenset({deleted_id})
-    assert await principal.redacted_event_ids(ROOM, requested) == expected
+    assert await store.redacted_event_ids(ROOM, requested) == expected
     preparation = await store.prepare_pending_response_source(
         target=target,
         source_event_ids=("$later",),

@@ -1669,7 +1669,7 @@ async def test_deep_hook_dispatch_stops_before_command_or_response_dispatch(tmp_
     )
     bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=_prepared_text_event(event))
     replace_turn_deps(bot, normalizer=bot._inbound_turn_normalizer)
-    with patch.object(TurnDispatcher, "_dispatch_text_turn", new_callable=AsyncMock) as mock_dispatch:
+    with patch.object(TurnDispatcher, "dispatch_turn", new_callable=AsyncMock) as mock_dispatch:
         outcome = await bot._turn_ingress.handle_text_event(room, event)
         await bot._coalescing_gate.drain_all()
 
@@ -1746,7 +1746,7 @@ async def test_deep_hook_dispatch_does_not_consume_interactive_answer_on_message
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=dispatch_context_result(_dispatch_context(bot)),
     )
-    with patch.object(TurnDispatcher, "_dispatch_text_turn", new_callable=AsyncMock) as mock_dispatch:
+    with patch.object(TurnDispatcher, "dispatch_turn", new_callable=AsyncMock) as mock_dispatch:
         await bot._on_message(room, event)
 
     interactive_questions.claim_interactive_text.assert_not_awaited()
@@ -1785,7 +1785,7 @@ async def test_first_hop_hook_dispatch_does_not_consume_interactive_answer_on_me
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=dispatch_context_result(_dispatch_context(bot)),
     )
-    with patch.object(TurnDispatcher, "_dispatch_text_turn", new_callable=AsyncMock) as mock_dispatch:
+    with patch.object(TurnDispatcher, "dispatch_turn", new_callable=AsyncMock) as mock_dispatch:
         await bot._on_message(room, event)
         await bot._coalescing_gate.drain_all()
 
@@ -1888,7 +1888,7 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
     interactive_questions = MagicMock()
     interactive_questions.claim_interactive_text = AsyncMock()
     replace_turn_deps(bot, interactive_questions=interactive_questions)
-    with patch.object(TurnDispatcher, "_dispatch_text_turn", new_callable=AsyncMock) as mock_dispatch:
+    with patch.object(TurnDispatcher, "dispatch_turn", new_callable=AsyncMock) as mock_dispatch:
         assert isinstance(sidecar_event, nio.RoomMessageFile)
         ticket = bot._turn_ingress.reserve_prompt_ingress_order(
             room,
@@ -1959,7 +1959,7 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
     interactive_questions = MagicMock()
     interactive_questions.claim_interactive_text = AsyncMock()
     replace_turn_deps(bot, interactive_questions=interactive_questions)
-    with patch.object(TurnDispatcher, "_dispatch_text_turn", new_callable=AsyncMock) as mock_dispatch:
+    with patch.object(TurnDispatcher, "dispatch_turn", new_callable=AsyncMock) as mock_dispatch:
         assert isinstance(sidecar_event, nio.RoomMessageFile)
         ticket = bot._turn_ingress.reserve_prompt_ingress_order(
             room,

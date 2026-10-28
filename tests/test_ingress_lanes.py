@@ -449,7 +449,7 @@ async def test_router_command_targeting_unresolved_conversation_fails_visibly(tm
             new=AsyncMock(side_effect=ThreadMembershipLookupError("unproven root")),
         ),
         patch.object(bot._delivery_gateway, "send_text", new=send_text_mock),
-        patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as dispatch_mock,
+        patch.object(TurnDispatcher, "dispatch_turn", new=AsyncMock()) as dispatch_mock,
     ):
         await bot._turn_ingress.handle_text_event(room, command_event)
 
@@ -498,7 +498,7 @@ async def test_unresolved_router_command_waits_for_reload_and_rechecks_authoriza
     with (
         patch.object(bot._conversation_resolver, "coalescing_thread_id", side_effect=unresolved_thread),
         patch.object(bot._delivery_gateway, "send_text", new_callable=AsyncMock, return_value="$notice") as send_text,
-        patch.object(TurnDispatcher, "_dispatch_text_turn", new_callable=AsyncMock) as dispatch,
+        patch.object(TurnDispatcher, "dispatch_turn", new_callable=AsyncMock) as dispatch,
     ):
         command_task = asyncio.create_task(bot._turn_ingress.handle_text_event(room, command_event))
         await asyncio.wait_for(lookup_started.wait(), timeout=1)
@@ -532,7 +532,7 @@ async def test_non_router_agent_settles_unresolvable_command_without_notice(tmp_
             new=AsyncMock(side_effect=ThreadMembershipLookupError("unproven root")),
         ),
         patch.object(bot._delivery_gateway, "send_text", new=send_text_mock),
-        patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as dispatch_mock,
+        patch.object(TurnDispatcher, "dispatch_turn", new=AsyncMock()) as dispatch_mock,
     ):
         await bot._turn_ingress.handle_text_event(room, command_event)
 
@@ -555,7 +555,7 @@ async def test_unresolvable_non_command_text_still_rejects_ingress(tmp_path: Pat
             "coalescing_thread_id",
             new=AsyncMock(side_effect=ThreadMembershipLookupError("unproven root")),
         ),
-        patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as dispatch_mock,
+        patch.object(TurnDispatcher, "dispatch_turn", new=AsyncMock()) as dispatch_mock,
         pytest.raises(ThreadMembershipLookupError),
     ):
         await bot._turn_ingress.handle_text_event(room, event)
@@ -647,7 +647,7 @@ async def test_unplaceable_event_settles_and_its_room_moves_on(
 
     with (
         patch.object(bot._conversation_resolver, "coalescing_thread_id", side_effect=unplaceable),
-        patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as dispatch_mock,
+        patch.object(TurnDispatcher, "dispatch_turn", new=AsyncMock()) as dispatch_mock,
     ):
         await admit_dispatch_event(dispatcher, room, poison, kind, EventClass.ACTIONABLE)
         await admit_dispatch_event(dispatcher, room, later, EventKind.MESSAGE, EventClass.ACTIONABLE)
@@ -676,7 +676,7 @@ async def test_transient_relation_lookup_failure_keeps_the_event_pending(
             "coalescing_thread_id",
             new=AsyncMock(side_effect=ThreadMembershipLookupError("homeserver unavailable")),
         ),
-        patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as dispatch_mock,
+        patch.object(TurnDispatcher, "dispatch_turn", new=AsyncMock()) as dispatch_mock,
     ):
         await admit_dispatch_event(dispatcher, room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
         await dispatcher.drain_once()
@@ -999,7 +999,7 @@ async def test_hung_voice_download_fallback_releases_later_sender_slot(
             patch("mindroom.voice.handler._download_audio", side_effect=hung_download),
             patch.object(
                 TurnDispatcher,
-                "_dispatch_text_turn",
+                "dispatch_turn",
                 new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
             ),
         ):
@@ -1435,7 +1435,7 @@ async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> N
         room_id="!room:example.org",
     )
     await asyncio.wait_for(response_running.wait(), timeout=1.0)
-    with patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock(side_effect=record_dispatch)):
+    with patch.object(TurnDispatcher, "dispatch_turn", new=AsyncMock(side_effect=record_dispatch)):
         for event_id, sender in (("$f1", "@alice:localhost"), ("$f2", "@bob:localhost")):
             await _enqueue_for_dispatch(
                 bot,
