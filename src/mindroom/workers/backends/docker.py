@@ -23,7 +23,7 @@ from mindroom.constants import (
     runtime_paths_with_config_path,
     runtime_paths_with_storage_root,
     sandbox_startup_manifest_path,
-    serialize_runtime_paths,
+    startup_manifest_sha256,
     write_startup_manifest,
 )
 from mindroom.credentials.manager import (
@@ -34,11 +34,7 @@ from mindroom.credentials.manager import (
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.redaction import redact_sensitive_text
-from mindroom.runtime_env_policy import (
-    SANDBOX_RUNTIME_ENV_BY_KEY,
-    SANDBOX_STARTUP_MANIFEST_PATH_ENV,
-    SHARED_CREDENTIALS_PATH_ENV,
-)
+from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 from mindroom.tool_system.worker_routing import (
     WORKER_SHARED_CREDENTIALS_DIRNAME,
@@ -54,7 +50,6 @@ from mindroom.workers.backend import (
     resolve_launch,
 )
 from mindroom.workers.backends._dedicated_worker_common import (
-    build_dedicated_worker_runtime_paths,
     plan_scoped_workspace_mounts,
     plan_shared_directory_mounts,
     resolve_state_scope_worker_key,
@@ -76,6 +71,11 @@ from mindroom.workers.backends._metadata_store import (
     load_worker_metadata,
     save_worker_metadata,
 )
+from mindroom.workers.backends.dedicated_launch import (
+    DedicatedWorkerLayout,
+    dedicated_worker_runner_env,
+    dedicated_worker_startup_runtime_paths,
+)
 from mindroom.workers.backends.docker_config import (
     DEFAULT_WORKER_PORT,
     DOCKER_HOST_ALIAS,
@@ -93,7 +93,7 @@ from mindroom.workers.backends.worker_security import (
     docker_worker_security_options,
     docker_worker_security_policy_signature,
 )
-from mindroom.workers.compatibility import worker_health_compatibility_error
+from mindroom.workers.compatibility import WorkerProtocolMismatch, ready_worker_protocol_mismatch
 from mindroom.workers.models import (
     ProgressSink,
     WorkerHandle,
@@ -161,13 +161,13 @@ _CONTAINER_LOG_EXCERPT_MAX_CHARS = 4096
 class _WorkerImageIncompatibleError(WorkerBackendError):
     """A ready worker answered the health check with another protocol."""
 
+    def __init__(self, mismatch: WorkerProtocolMismatch) -> None:
+        super().__init__(mismatch.error)
+        self.mismatch = mismatch
+
 
 _TOKEN_ENV_NAME = SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"]
-_RUNNER_PORT_ENV_NAME = SANDBOX_RUNTIME_ENV_BY_KEY["runner_port"]
-_STARTUP_RUNTIME_PATHS_ENV = "MINDROOM_RUNTIME_PATHS_JSON"
 _DEDICATED_WORKER_KEY_ENV = SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]
-_DEDICATED_WORKER_ROOT_ENV = SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]
-_SHARED_STORAGE_ROOT_ENV = SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"]
 
 # Worker containers get a read-only root filesystem. The image's /app tree stays
 # owned by the runtime user so trusted primaries can install tool extras into it,
@@ -244,6 +244,18 @@ def _docker_security_options_match(value: object) -> bool:
     if len(no_new_privileges_options) != 1:
         return False
     return _docker_seccomp_profile_matches(options)
+
+
+def _protected_runtime_env_names(runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return the primary's secret-path variables, whose worker-side values operator env must not replace."""
+    protected_names = {
+        env_name
+        for env_name in {*runtime_paths.process_env, *runtime_paths.env_file_values}
+        if env_name.endswith("_FILE")
+    }
+    if runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS"):
+        protected_names.add("GOOGLE_APPLICATION_CREDENTIALS")
+    return frozenset(protected_names)
 
 
 def _runtime_namespace_for_workers_root(workers_root: Path) -> str:
@@ -374,6 +386,8 @@ class _DockerWorkerMetadata:
     failure_count: int = 0
     failure_reason: str | None = None
     launch_config_hash: str | None = None
+    # The container's startup manifest is written once, when it is created, so its hash tells whether it is current.
+    startup_manifest_hash: str | None = None
 
 
 def _set_docker_request_timeout(client: _DockerClient, timeout_seconds: float) -> None:
@@ -478,6 +492,11 @@ class DockerWorkerBackend:
             )
 
         self.config = config
+        self._worker_layout = DedicatedWorkerLayout(
+            dedicated_root=config.storage_mount_path,
+            config_path=config.config_path,
+            worker_port=config.worker_port,
+        )
         self._current_launch = current_launch
         self.auth_token = auth_token
         self.idle_timeout_seconds = config.idle_timeout_seconds
@@ -655,9 +674,9 @@ class DockerWorkerBackend:
                         paths,
                         spec=spec,
                         launch_config=launch_config,
-                        stale_error=stale_error,
+                        mismatch=stale_error.mismatch,
                     )
-                    endpoint = self._wait_for_ready(container)
+                    endpoint = self._wait_for_ready(container, replacing=True)
             except Exception as exc:
                 failure_reason = str(exc)
                 self._record_failure_locked(paths, metadata, failure_reason, now=timestamp, stop_container=True)
@@ -1082,7 +1101,7 @@ class DockerWorkerBackend:
         if not self._container_env_matches(
             container,
             expected_env=self._container_env(metadata.worker_key),
-        ):
+        ) or metadata.startup_manifest_hash != self._startup_manifest_hash(spec):
             return None
 
         mount_checks = list(self._worker_root_mount_specs(paths.state))
@@ -1137,7 +1156,7 @@ class DockerWorkerBackend:
                     raise WorkerBackendError(msg) from exc
 
         if container is None:
-            self._write_startup_manifest(paths, spec=spec)
+            metadata.startup_manifest_hash = self._write_startup_manifest(paths, spec=spec)
             volumes = self._container_volumes(paths, spec=spec)
             self._prepare_nested_storage_mount_targets(paths, (volume.rsplit(":", 2)[1] for volume in volumes))
             security_kwargs = (
@@ -1178,26 +1197,27 @@ class DockerWorkerBackend:
         *,
         spec: WorkerSpec,
         launch_config: _DockerLaunchConfig,
-        stale_error: WorkerBackendError,
+        mismatch: WorkerProtocolMismatch,
     ) -> tuple[_DockerContainer, _DockerLaunchConfig]:
-        """Pull the configured image once and relaunch after a protocol mismatch.
+        """Relaunch once after a protocol mismatch, first pulling the configured image when the worker is older.
 
         A stale local image otherwise fails every worker start until someone
         pulls by hand, since tag references like ``:latest`` keep resolving to
-        the local image.
+        the local image. A newer worker needs a newer runtime, which no pull provides.
         """
-        try:
-            pulled_image = self._client.images.pull(self.config.image)
-        except self._docker_errors.DockerException as exc:
-            msg = f"{stale_error} Pulling '{self.config.image}' failed: {exc}"
-            raise WorkerBackendError(msg) from exc
-        launch_config = self._launch_config_from_image_identity(
-            pulled_image.id,
-            image_resolved=True,
-            tool_snapshot_digest=launch_config.tool_snapshot_digest,
-        )
-        metadata.launch_config_hash = launch_config.launch_config_hash
-        self._save_metadata(paths, metadata)
+        if not mismatch.worker_is_newer:
+            try:
+                pulled_image = self._client.images.pull(self.config.image)
+            except self._docker_errors.DockerException as exc:
+                msg = f"{mismatch.error} Pulling '{self.config.image}' failed: {exc}"
+                raise WorkerBackendError(msg) from exc
+            launch_config = self._launch_config_from_image_identity(
+                pulled_image.id,
+                image_resolved=True,
+                tool_snapshot_digest=launch_config.tool_snapshot_digest,
+            )
+            metadata.launch_config_hash = launch_config.launch_config_hash
+            self._save_metadata(paths, metadata)
         container = self._require_owned_container(metadata.worker_key)
         self._stop_container(container)
         self._remove_container(container)
@@ -1218,7 +1238,7 @@ class DockerWorkerBackend:
             msg = f"Failed to refresh Docker worker state: {exc}"
             raise WorkerBackendError(msg) from exc
 
-    def _wait_for_ready(self, container: _DockerContainer) -> str:
+    def _wait_for_ready(self, container: _DockerContainer, *, replacing: bool = False) -> str:
         host_port = self._container_host_port(container)
         if host_port is None:
             msg = "Docker worker is missing a published port."
@@ -1240,13 +1260,14 @@ class DockerWorkerBackend:
                     response = None
 
                 if response is not None and 200 <= response.status_code < 300:
-                    compatibility_error = worker_health_compatibility_error(
+                    mismatch = ready_worker_protocol_mismatch(
                         response,
                         backend_label="Docker",
                         image=self.config.image,
+                        replacing=replacing,
                     )
-                    if compatibility_error is not None:
-                        raise _WorkerImageIncompatibleError(compatibility_error)
+                    if mismatch is not None:
+                        raise _WorkerImageIncompatibleError(mismatch)
                     return f"{endpoint_root}/api/sandbox-runner/execute"
 
                 if time.time() >= deadline:
@@ -1288,45 +1309,35 @@ class DockerWorkerBackend:
         ).hexdigest()
 
     def _container_env(self, worker_key: str) -> dict[str, str]:
-        dedicated_root = Path(self.config.storage_mount_path)
-        startup_runtime_paths = self._worker_runtime_paths(
-            worker_key=worker_key,
-            dedicated_root=dedicated_root,
-        )
-        # Docker bind-mounts canonical agent state under the same root used as
-        # MINDROOM_STORAGE_PATH. Keep the runner's shared-storage root aligned
-        # so agent workspaces resolve to mounted host files, not an empty worker
-        # state directory.
-        shared_storage_root = self.config.storage_mount_path
-        env = {
-            SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]: "true",
-            SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"]: "forkserver",
-            _RUNNER_PORT_ENV_NAME: str(self.config.worker_port),
-            _STARTUP_RUNTIME_PATHS_ENV: json.dumps(
-                serialize_runtime_paths(startup_runtime_paths),
-                separators=(",", ":"),
-                sort_keys=True,
-            ),
-            "MINDROOM_STORAGE_PATH": self.config.storage_mount_path,
-            _SHARED_STORAGE_ROOT_ENV: shared_storage_root,
-            SHARED_CREDENTIALS_PATH_ENV: f"{self.config.storage_mount_path}/{WORKER_SHARED_CREDENTIALS_DIRNAME}",
-            _DEDICATED_WORKER_KEY_ENV: worker_key,
-            _DEDICATED_WORKER_ROOT_ENV: self.config.storage_mount_path,
-            "HOME": self._container_home_path(worker_key),
-            _TOKEN_ENV_NAME: self._control_token(worker_key),
-        }
-        if self.config.host_config_path is not None:
-            env["MINDROOM_CONFIG_PATH"] = self.config.config_path
-        env.update(self.config.extra_env)
-        env[SANDBOX_STARTUP_MANIFEST_PATH_ENV] = str(sandbox_startup_manifest_path(dedicated_root))
-        return env
+        env = dedicated_worker_runner_env(self._worker_layout, worker_key=worker_key)
+        if self.config.host_config_path is None:
+            # Nothing is mounted at the config path without a host config, so only the startup manifest names it.
+            del env["MINDROOM_CONFIG_PATH"]
+        env["HOME"] = self._container_home_path(worker_key)
+        env[_TOKEN_ENV_NAME] = self._control_token(worker_key)
+        # Operator env never replaces a backend-owned variable; the config rejects the names it could collide on.
+        return {**self.config.extra_env, **env}
 
-    def _write_startup_manifest(self, paths: _DockerWorkerPaths, *, spec: WorkerSpec) -> None:
-        """Persist primary validation state before creating one Docker worker."""
-        dedicated_root = Path(self.config.storage_mount_path)
+    def _write_startup_manifest(self, paths: _DockerWorkerPaths, *, spec: WorkerSpec) -> str:
+        """Persist primary validation state before creating one Docker worker, and return the manifest's hash."""
+        runtime_paths = self._worker_runtime_paths(spec.worker_key)
+        tool_validation_snapshot = required_launch(spec).tool_validation_snapshot
         write_startup_manifest(
             paths.state.root,
-            self._worker_runtime_paths(worker_key=spec.worker_key, dedicated_root=dedicated_root),
+            runtime_paths,
+            tool_validation_snapshot=tool_validation_snapshot,
+            public_runtime=True,
+        )
+        return startup_manifest_sha256(
+            runtime_paths,
+            tool_validation_snapshot=tool_validation_snapshot,
+            public_runtime=True,
+        )
+
+    def _startup_manifest_hash(self, spec: WorkerSpec) -> str:
+        """Return the hash of the startup manifest a worker created now for ``spec`` would boot from."""
+        return startup_manifest_sha256(
+            self._worker_runtime_paths(spec.worker_key),
             tool_validation_snapshot=required_launch(spec).tool_validation_snapshot,
             public_runtime=True,
         )
@@ -1355,24 +1366,17 @@ class DockerWorkerBackend:
             actual_env[name] = value
         return all(actual_env.get(name) == value for name, value in expected_env.items())
 
-    def _worker_runtime_config_path(self) -> Path:
-        return Path(self.config.config_path)
-
-    def _worker_runtime_paths(
-        self,
-        *,
-        worker_key: str,
-        dedicated_root: Path,
-    ) -> RuntimePaths:
-        return build_dedicated_worker_runtime_paths(
-            runtime_paths=self._runtime_paths,
+    def _worker_runtime_paths(self, worker_key: str) -> RuntimePaths:
+        validate_dedicated_worker_extra_env(
+            self.config.extra_env,
             backend_name="Docker",
+            extra_reserved_names=_protected_runtime_env_names(self._runtime_paths),
+        )
+        return dedicated_worker_startup_runtime_paths(
+            self._worker_layout,
             worker_key=worker_key,
-            config_path=self._worker_runtime_config_path(),
-            dedicated_root=dedicated_root,
-            worker_port=self.config.worker_port,
-            shared_storage_root=self.config.storage_mount_path,
-            extra_env=self.config.extra_env,
+            process_env={**self._runtime_paths.process_env, **self.config.extra_env},
+            env_file_values=self._runtime_paths.env_file_values,
         )
 
     def _container_home_path(self, worker_key: str) -> str:

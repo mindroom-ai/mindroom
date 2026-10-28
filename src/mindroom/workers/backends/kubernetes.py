@@ -33,8 +33,16 @@ from mindroom.workers.backends._dedicated_worker_common import (
     plan_scoped_workspace_mounts,
     resolve_state_scope_worker_key,
 )
-from mindroom.workers.backends._lifecycle import mark_worker_failed, mark_worker_idle, touch_worker_lifecycle
-from mindroom.workers.compatibility import worker_health_compatibility_error
+from mindroom.workers.backends._lifecycle import (
+    WorkerLifecycleState,
+    initial_worker_lifecycle_state,
+    mark_worker_failed,
+    mark_worker_idle,
+    mark_worker_ready,
+    prepare_worker_ensure_lifecycle,
+    touch_worker_lifecycle,
+)
+from mindroom.workers.compatibility import ready_worker_protocol_mismatch
 from mindroom.workers.models import (
     ProgressSink,
     WorkerHandle,
@@ -481,25 +489,18 @@ class KubernetesWorkerBackend:
         existing = self._resources.read_deployment(worker_id)
         current_handle = self._handle_from_deployment(existing, now=timestamp) if existing is not None else None
         should_restart = current_handle is None or current_handle.status in {"idle", "failed"}
-        startup_count = (current_handle.startup_count if current_handle is not None else 0) + int(
-            should_restart,
+        lifecycle = prepare_worker_ensure_lifecycle(
+            initial_worker_lifecycle_state(now=timestamp)
+            if existing is None
+            else resources.lifecycle_from_annotations(dict(existing.metadata.annotations or {}), now=timestamp),
+            now=timestamp,
+            should_restart=should_restart,
+            reapplying=True,
         )
-        created_at = current_handle.created_at if current_handle is not None else timestamp
-        if should_restart:
-            last_started_at = timestamp
-        else:
-            assert current_handle is not None
-            last_started_at = current_handle.last_started_at
         annotations = resources.metadata_annotations(
             worker_key=worker_key,
             state_subpath=state_subpath,
-            created_at=created_at,
-            last_used_at=timestamp,
-            last_started_at=last_started_at,
-            startup_count=startup_count,
-            failure_count=current_handle.failure_count if current_handle is not None else 0,
-            failure_reason=None,
-            status="starting",
+            state=lifecycle,
         )
         should_report_progress = should_restart or existing is None or not self._deployment_ready(existing)
         poll_reporter: Callable[[float], None] | None = None
@@ -546,17 +547,11 @@ class KubernetesWorkerBackend:
                     )
                     should_report_progress = True
                 if deployment_apply.recreated and (replacing_stale_worker or not should_restart):
-                    startup_count += 1
+                    lifecycle = prepare_worker_ensure_lifecycle(lifecycle, now=timestamp, should_restart=True)
                     annotations = resources.metadata_annotations(
                         worker_key=worker_key,
                         state_subpath=state_subpath,
-                        created_at=created_at,
-                        last_used_at=timestamp,
-                        last_started_at=timestamp,
-                        startup_count=startup_count,
-                        failure_count=current_handle.failure_count if current_handle is not None else 0,
-                        failure_reason=None,
-                        status="starting",
+                        state=lifecycle,
                     )
                     self._resources.patch_deployment(worker_id, annotations=annotations)
                 self._sync_shared_credentials(spec)
@@ -573,8 +568,11 @@ class KubernetesWorkerBackend:
                 # the template is unchanged, so only a new pod pulls the tag again under `Always`.
                 replacing_stale_worker = True
             destructive_failure_allowed = False
-            final_annotations = dict(annotations)
-            final_annotations[resources.ANNOTATION_WORKER_STATUS] = "ready"
+            final_annotations = resources.metadata_annotations(
+                worker_key=worker_key,
+                state_subpath=state_subpath,
+                state=mark_worker_ready(lifecycle, now=timestamp),
+            )
             self._resources.patch_deployment(worker_id, annotations=final_annotations)
         except Exception as exc:
             failure_reason = str(exc)
@@ -613,17 +611,16 @@ class KubernetesWorkerBackend:
 
     def _ready_worker_needs_replacement(self, worker_id: str, *, is_replacement: bool) -> bool:
         """Return whether the ready worker speaks another protocol, refusing a replacement that still does."""
-        compatibility_error = worker_health_compatibility_error(
+        mismatch = ready_worker_protocol_mismatch(
             self._resources.read_worker_health(worker_id, timeout_seconds=self.config.ready_timeout_seconds),
             backend_label="Kubernetes",
             image=self.config.image,
+            replacing=is_replacement,
             # Under `Always` kubelet resolves the tag on every start, so no node can serve an older cached copy.
             older_worker_hint=None if self.config.image_pull_policy == "Always" else _CACHED_IMAGE_HINT,
             newer_worker_hint=_RESTART_RUNTIME_HINT,
         )
-        if compatibility_error is not None and is_replacement:
-            raise WorkerBackendError(compatibility_error)
-        return compatibility_error is not None
+        return mismatch is not None
 
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Refresh last-used metadata for one existing worker."""
@@ -1060,13 +1057,28 @@ class KubernetesWorkerBackend:
         return self._patch_cached_worker_usage(entry, now=now)
 
     def _patch_cached_worker_usage(self, entry: _ReadyWorkerCacheEntry, *, now: float) -> WorkerHandle | None:
-        handle = replace(entry.handle, last_used_at=now, status="ready", failure_reason=None)
+        # A cached worker was ready when cached, so its touch writes it as ready without reading its Deployment.
+        lifecycle = touch_worker_lifecycle(
+            WorkerLifecycleState(
+                created_at=entry.handle.created_at,
+                last_used_at=entry.handle.last_used_at,
+                status=entry.handle.status,
+                failure_reason=entry.handle.failure_reason,
+            ),
+            now=now,
+        )
+        handle = replace(
+            entry.handle,
+            last_used_at=lifecycle.last_used_at,
+            status=lifecycle.status,
+            failure_reason=lifecycle.failure_reason,
+        )
         exists = self._resources.patch_deployment_annotations(
             handle.worker_id,
             annotations={
-                resources.ANNOTATION_LAST_USED_AT: str(now),
-                resources.ANNOTATION_WORKER_STATUS: "ready",
-                resources.ANNOTATION_FAILURE_REASON: "",
+                resources.ANNOTATION_LAST_USED_AT: str(lifecycle.last_used_at),
+                resources.ANNOTATION_WORKER_STATUS: lifecycle.status,
+                resources.ANNOTATION_FAILURE_REASON: lifecycle.failure_reason or "",
             },
         )
         if not exists:

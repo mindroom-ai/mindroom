@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION
 
 if TYPE_CHECKING:
@@ -29,16 +30,26 @@ def worker_health_payload(*, mindroom_version: str) -> _WorkerHealthPayload:
     )
 
 
-def worker_health_compatibility_error(
+@dataclass(frozen=True, slots=True)
+class WorkerProtocolMismatch:
+    """A ready worker that answered its health check with another worker protocol."""
+
+    error: str
+    worker_is_newer: bool
+
+
+def ready_worker_protocol_mismatch(
     response: httpx.Response,
     *,
     backend_label: str,
     image: str,
+    replacing: bool,
     older_worker_hint: str | None = None,
     newer_worker_hint: str | None = None,
-) -> str | None:
-    """Return an actionable error when a ready worker's health check reports another protocol.
+) -> WorkerProtocolMismatch | None:
+    """Return why a ready worker must be replaced, or None when it speaks this runtime's protocol.
 
+    A backend replaces a mismatched worker once: a worker started as that replacement raises its mismatch instead.
     ``older_worker_hint`` is appended only when the worker reports an older or no protocol,
     and ``newer_worker_hint`` only when it reports a newer one.
     """
@@ -73,4 +84,7 @@ def worker_health_compatibility_error(
     else:
         advice = f"{mismatch} Use a worker image built for this MindRoom release."
         hint = older_worker_hint
-    return advice if hint is None else f"{advice} {hint}"
+    error = advice if hint is None else f"{advice} {hint}"
+    if replacing:
+        raise WorkerBackendError(error)
+    return WorkerProtocolMismatch(error=error, worker_is_newer=newer_worker)

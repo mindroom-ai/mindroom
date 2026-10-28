@@ -41,7 +41,7 @@ from mindroom.tool_system.runtime_context import ToolDispatchContext, tool_runti
 from mindroom.tool_system.tool_environment import ToolEnvironment
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.workers.backends import local as local_workers
-from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
+from mindroom.workers.backends.dedicated_launch import DedicatedWorkerLayout, dedicated_worker_startup_runtime_paths
 from mindroom.workers.models import WorkerHandle
 from mindroom.workers.protocol import CallEnvironment
 from tests.api.sandbox_runner_support import execute_call
@@ -397,15 +397,12 @@ async def test_a_hook_s_path_keeps_the_entries_a_dedicated_worker_adds(tmp_path:
     config_path = tmp_path / "config.yaml"
     _write_general_agent_config(config_path)
     worker_key = "v1:default:unscoped:code"
-    worker_runtime = build_dedicated_worker_runtime_paths(
-        runtime_paths=resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage"),
-        backend_name="Docker",
+    primary_runtime = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
+    worker_runtime = dedicated_worker_startup_runtime_paths(
+        DedicatedWorkerLayout(dedicated_root=str(tmp_path / "worker"), config_path=str(config_path), worker_port=8766),
         worker_key=worker_key,
-        config_path=config_path,
-        dedicated_root=tmp_path / "worker",
-        worker_port=8766,
-        shared_storage_root=str(tmp_path / "shared-storage"),
-        extra_env={},
+        process_env=primary_runtime.process_env,
+        env_file_values=primary_runtime.env_file_values,
     )
     worker_paths = local_workers.local_worker_state_paths_for_root(tmp_path / "worker-root")
     venv_tool = worker_paths.venv_dir / "bin" / "worker-venv-tool"

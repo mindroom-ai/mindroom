@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from types import MappingProxyType
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
-from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
-from mindroom.constants import RuntimePaths, deserialize_runtime_paths, serialize_public_runtime_paths
+from mindroom.constants import serialize_public_runtime_paths
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.private_storage.alias_paths import private_scope_alias_paths
@@ -19,7 +17,6 @@ from mindroom.shared_directories.store import (
     shared_directory_relative_path,
 )
 from mindroom.tool_system.worker_routing import (
-    WORKER_SHARED_CREDENTIALS_DIRNAME,
     normalize_worker_key_part,
     private_instance_scope_root_path,
     private_instances_root_path,
@@ -36,18 +33,16 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.agent_policy import ResolvedAgentPolicy
-    from mindroom.tool_system.worker_routing import WorkerScope
+    from mindroom.constants import RuntimePaths
 
 __all__ = [
     "ScopedWorkspaceMount",
     "SharedDirectoryMount",
     "agent_names_addressed_by_worker_key",
     "build_backend_config_signature",
-    "build_dedicated_worker_runtime_paths",
     "plan_scoped_workspace_mounts",
     "plan_shared_directory_mounts",
     "resolve_state_scope_worker_key",
-    "resolved_agent_policies_from_config_data",
     "stable_signature_json",
     "validate_dedicated_worker_extra_env",
     "validate_private_user_agent_visibility",
@@ -139,17 +134,6 @@ def validate_dedicated_worker_extra_env(
     raise WorkerBackendError(msg)
 
 
-def _protected_dedicated_worker_env_names(runtime_paths: RuntimePaths) -> frozenset[str]:
-    protected_names = {
-        env_name
-        for env_name in {*runtime_paths.process_env, *runtime_paths.env_file_values}
-        if env_name.endswith("_FILE")
-    }
-    if runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS"):
-        protected_names.add("GOOGLE_APPLICATION_CREDENTIALS")
-    return frozenset(protected_names)
-
-
 def build_backend_config_signature(
     *,
     prefix_parts: tuple[str, ...],
@@ -163,90 +147,6 @@ def build_backend_config_signature(
         stable_signature_json(serialize_public_runtime_paths(runtime_paths)),
         *(stable_signature_json(value) for value in json_values),
         *suffix_parts,
-    )
-
-
-def _default_worker_scope_from_config_data(config_data: Mapping[str, object]) -> WorkerScope | None:
-    raw_defaults = config_data.get("defaults")
-    if not isinstance(raw_defaults, dict):
-        return None
-    raw_worker_scope = cast("dict[str, object]", raw_defaults).get("worker_scope")
-    if isinstance(raw_worker_scope, str) and raw_worker_scope in {
-        "shared",
-        "user",
-        "user_agent",
-    }:
-        return cast("WorkerScope", raw_worker_scope)
-    return None
-
-
-def resolved_agent_policies_from_config_data(
-    config_data: Mapping[str, object],
-) -> dict[str, ResolvedAgentPolicy]:
-    """Resolve worker isolation policy from raw config data."""
-    raw_agents = config_data.get("agents")
-    if not isinstance(raw_agents, dict):
-        return {}
-
-    agent_mappings = {
-        agent_name: cast("dict[str, object]", raw_agent)
-        for agent_name, raw_agent in raw_agents.items()
-        if isinstance(agent_name, str) and isinstance(raw_agent, dict)
-    }
-    if not agent_mappings:
-        return {}
-
-    seeds = build_agent_policy_seeds(
-        agent_mappings,
-        default_worker_scope=_default_worker_scope_from_config_data(config_data),
-    )
-    return resolve_agent_policy_index(seeds).policies
-
-
-def build_dedicated_worker_runtime_paths(
-    *,
-    runtime_paths: RuntimePaths,
-    backend_name: str,
-    worker_key: str,
-    config_path: Path,
-    dedicated_root: Path,
-    worker_port: int,
-    shared_storage_root: str,
-    extra_env: Mapping[str, str],
-) -> RuntimePaths:
-    """Build worker-visible runtime paths for one dedicated worker."""
-    validate_dedicated_worker_extra_env(
-        extra_env,
-        backend_name=backend_name,
-        extra_reserved_names=_protected_dedicated_worker_env_names(runtime_paths),
-    )
-
-    public_runtime_paths = deserialize_runtime_paths(serialize_public_runtime_paths(runtime_paths))
-    process_env = dict(public_runtime_paths.process_env)
-    env_file_values = dict(public_runtime_paths.env_file_values)
-
-    process_env.update(
-        {
-            SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]: "true",
-            SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"]: "forkserver",
-            SANDBOX_RUNTIME_ENV_BY_KEY["runner_port"]: str(worker_port),
-            "MINDROOM_CONFIG_PATH": str(config_path),
-            "MINDROOM_STORAGE_PATH": str(dedicated_root),
-            SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"]: shared_storage_root,
-            SHARED_CREDENTIALS_PATH_ENV: f"{dedicated_root}/{WORKER_SHARED_CREDENTIALS_DIRNAME}",
-            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]: worker_key,
-            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]: str(dedicated_root),
-        },
-    )
-    process_env.update(extra_env)
-
-    return RuntimePaths(
-        config_path=config_path,
-        config_dir=config_path.parent,
-        env_path=config_path.parent / ".env",
-        storage_root=dedicated_root.resolve(),
-        process_env=MappingProxyType(process_env),
-        env_file_values=MappingProxyType(env_file_values),
     )
 
 

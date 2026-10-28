@@ -95,7 +95,7 @@ from mindroom.tool_system.worker_routing import (
     worker_root_path,
 )
 from mindroom.workers.backends import local as local_workers_module
-from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
+from mindroom.workers.backends.dedicated_launch import DedicatedWorkerLayout, dedicated_worker_startup_runtime_paths
 from mindroom.workers.backends.kubernetes_resources import worker_auth_token
 from mindroom.workers.models import WorkerHandle, WorkerSpec
 from mindroom.workers.protocol import (
@@ -489,36 +489,6 @@ def test_startup_manifest_rewritten_after_startup_changes_nothing(
     assert runtime_paths.config_path == payload_runtime.config_path
     assert sandbox_exec_module.runner_uses_subprocess(runtime_paths)
     assert sandbox_runner_module.app_runtime_config(app) is startup_config
-
-
-def test_startup_runtime_accepts_runtime_paths_json_without_manifest(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Docker workers should boot from the runtime payload passed by run-sandbox-runner.sh."""
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
-        encoding="utf-8",
-    )
-    payload_runtime = resolve_primary_runtime_paths(
-        config_path=config_path,
-        storage_path=tmp_path / "storage",
-        process_env={
-            "MINDROOM_NAMESPACE": "alpha1234",
-            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "worker-1",
-        },
-    )
-    monkeypatch.delenv("MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH", raising=False)
-    monkeypatch.setenv("MINDROOM_RUNTIME_PATHS_JSON", json.dumps(serialize_runtime_paths(payload_runtime)))
-    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "from-env")
-
-    startup_runtime, _startup_config = sandbox_runner_module.load_config_from_startup_runtime()
-
-    assert startup_runtime.config_path == payload_runtime.config_path
-    assert startup_runtime.storage_root == payload_runtime.storage_root
-    assert startup_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
-    assert startup_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
 
 
 def test_startup_runner_token_is_removed_from_process_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2456,15 +2426,11 @@ def test_prepare_execute_request_preserves_dedicated_worker_runtime_contract(
         storage_path=tmp_path / "storage",
         process_env={},
     )
-    worker_runtime = build_dedicated_worker_runtime_paths(
-        runtime_paths=runtime_paths,
-        backend_name="Docker",
+    worker_runtime = dedicated_worker_startup_runtime_paths(
+        DedicatedWorkerLayout(dedicated_root="/app/worker", config_path="/app/config.yaml", worker_port=8766),
         worker_key="v1:default:shared:code",
-        config_path=Path("/app/config.yaml"),
-        dedicated_root=Path("/app/worker"),
-        worker_port=8766,
-        shared_storage_root="/app/shared-storage",
-        extra_env={},
+        process_env=runtime_paths.process_env,
+        env_file_values=runtime_paths.env_file_values,
     )
 
     worker_paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker-root")
@@ -2523,15 +2489,11 @@ def test_prepared_dedicated_shell_request_preserves_explicit_execution_env(tmp_p
         storage_path=tmp_path / "storage",
         process_env={},
     )
-    worker_runtime = build_dedicated_worker_runtime_paths(
-        runtime_paths=runtime_paths,
-        backend_name="Docker",
+    worker_runtime = dedicated_worker_startup_runtime_paths(
+        DedicatedWorkerLayout(dedicated_root="/app/worker", config_path="/app/config.yaml", worker_port=8766),
         worker_key="v1:default:unscoped:code",
-        config_path=Path("/app/config.yaml"),
-        dedicated_root=Path("/app/worker"),
-        worker_port=8766,
-        shared_storage_root="/app/shared-storage",
-        extra_env={},
+        process_env=runtime_paths.process_env,
+        env_file_values=runtime_paths.env_file_values,
     )
     worker_paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker-root")
     prepared_worker = sandbox_runner_module.sandbox_worker_prep.PreparedWorkerRequest(

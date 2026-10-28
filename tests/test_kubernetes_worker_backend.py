@@ -4185,11 +4185,10 @@ def test_kubernetes_maintenance_reconciles_against_the_launch_it_is_given(tmp_pa
     assert [worker.worker_key for worker in reconciled] == [_TEST_SCOPED_WORKER_KEY_A]
     assert apps_api.deleted_names == [handle.worker_id]
     recreated_annotations = apps_api.created_bodies[1]["spec"]["template"]["metadata"]["annotations"]
-    dedicated_root = Path(f"/app/worker/{backend._state_subpath(_TEST_SCOPED_WORKER_KEY_A)}")
     assert recreated_annotations[_ANNOTATION_STARTUP_MANIFEST_HASH] == startup_manifest_sha256(
         backend._resources._worker_runtime_paths(
             worker_key=_TEST_SCOPED_WORKER_KEY_A,
-            dedicated_root=dedicated_root,
+            state_subpath=backend._state_subpath(_TEST_SCOPED_WORKER_KEY_A),
         ),
         tool_validation_snapshot=updated_snapshot,
         public_runtime=True,

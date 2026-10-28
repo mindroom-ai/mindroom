@@ -142,7 +142,6 @@ _SUBPROCESS_WORKER_ARG = "--sandbox-subprocess-worker"
 _PROGRESS_FD_ARG = "--progress-fd"
 # How often a spawn-per-call wait looks up from its child to notice a stop or its deadline.
 _SPAWN_POLL_SECONDS = 1.0
-_STARTUP_RUNTIME_PATHS_JSON_ENV = "MINDROOM_RUNTIME_PATHS_JSON"
 
 
 def _startup_manifest_path_from_env() -> Path:
@@ -162,21 +161,11 @@ def _startup_manifest_from_env() -> dict[str, object]:
 
 
 def _startup_runtime_payload_from_env() -> tuple[RuntimePaths, dict[str, ToolValidationInfo]]:
-    """Read the startup runtime and primary tool validation snapshot once, from the manifest or runtime JSON."""
-    if os.environ.get(SANDBOX_STARTUP_MANIFEST_PATH_ENV, "").strip():
-        startup_runtime_paths, tool_validation_snapshot = constants.deserialize_startup_manifest(
-            _startup_manifest_from_env(),
-        )
-        return startup_runtime_paths, deserialize_tool_validation_snapshot(tool_validation_snapshot)
-
-    raw_runtime_paths = os.environ.get(_STARTUP_RUNTIME_PATHS_JSON_ENV, "").strip()
-    if not raw_runtime_paths:
-        msg = (
-            f"{SANDBOX_STARTUP_MANIFEST_PATH_ENV} or {_STARTUP_RUNTIME_PATHS_JSON_ENV} "
-            "must be set for sandbox runner startup."
-        )
-        raise RuntimeError(msg)
-    return constants.deserialize_runtime_paths(json.loads(raw_runtime_paths)), {}
+    """Read the startup runtime and primary tool validation snapshot once, from the startup manifest."""
+    startup_runtime_paths, tool_validation_snapshot = constants.deserialize_startup_manifest(
+        _startup_manifest_from_env(),
+    )
+    return startup_runtime_paths, deserialize_tool_validation_snapshot(tool_validation_snapshot)
 
 
 def _committed_startup_runtime_paths(startup_runtime_paths: RuntimePaths) -> RuntimePaths:

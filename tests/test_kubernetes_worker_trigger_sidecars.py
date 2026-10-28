@@ -97,7 +97,6 @@ def _pod_template(
         worker_key="v1:tenant-123:shared:general",
         worker_id="mindroom-worker-test",
         state_subpath="workers/test",
-        startup_manifest_path="/app/worker/workers/test/.mindroom-startup.json",
         startup_manifest_hash="startup-hash",
         launch=build_worker_launch_config(Config(), tool_validation_snapshot={}),
         private_agent_names=None,
