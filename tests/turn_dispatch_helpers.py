@@ -24,9 +24,9 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from mindroom.dispatch_handoff import MediaDispatchEvent
-    from mindroom.ingress_facts import IngressFacts
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.turn_controller import TurnController
+    from mindroom.turns.facts import IngressFacts
 
 
 def _prepared_ingress(

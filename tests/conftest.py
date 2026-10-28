@@ -131,7 +131,6 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
-from mindroom.ingress_facts import IngressFacts
 from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata
 from mindroom.interactive_models import InteractivePrompt, interactive_prompt_content
@@ -175,6 +174,7 @@ from mindroom.turn_controller import TurnController, _DispatchPreparation, _Repl
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_store import TurnClaim, TurnStore, _ClaimRegistry, _reset_turn_claim_registries
+from mindroom.turns.facts import IngressFacts
 from mindroom.usage.storage import quote_identifier
 from mindroom.user_stop_reconciliation import UserStopReconciler
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
@@ -2909,7 +2909,6 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         "ingress_hook_runner": "_ingress_hook_runner",
         "response_runner": "_response_runner",
         "delivery_gateway": "_delivery_gateway",
-        "tool_runtime": "_tool_runtime_support",
         "turn_store": "_turn_store",
         "edit_regenerator": "_edit_regenerator",
         "visible_responses": "_visible_responses",

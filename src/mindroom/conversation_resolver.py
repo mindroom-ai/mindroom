@@ -56,11 +56,11 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.dispatch_handoff import DispatchEvent, DispatchPayloadMetadata
     from mindroom.hooks import MessageEnvelope
-    from mindroom.ingress_facts import IngressFacts
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
     from mindroom.matrix.relation_lookup import RelationLookup
+    from mindroom.turns.facts import IngressFacts
 
 
 def _should_skip_mentions(event_source: dict[str, Any]) -> bool:

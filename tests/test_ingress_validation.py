@@ -39,9 +39,9 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
 from mindroom.entity_resolution import mindroom_user_id
-from mindroom.ingress_facts import command_for, is_router_voice_echo
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.turn_origin import TurnIntent
+from mindroom.turns.facts import command_for, is_router_voice_echo
 from tests.access_schema_support import with_current_room_member_access
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import entity_ids

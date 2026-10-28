@@ -33,13 +33,13 @@ if TYPE_CHECKING:
     from mindroom.event_journal import PrincipalStore
     from mindroom.hooks import MessageEnvelope
     from mindroom.hooks.ingress import IngressHookRunner
-    from mindroom.ingress_facts import IngressFacts
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.event_info import EventInfo
     from mindroom.message_target import MessageTarget
     from mindroom.reply_lifecycle import Reply
     from mindroom.turn_record import SourceEventRevision, TurnRecord
     from mindroom.turn_store import TurnStore
+    from mindroom.turns.facts import IngressFacts
 
 
 logger = get_logger(__name__)

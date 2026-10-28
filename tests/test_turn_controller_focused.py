@@ -146,13 +146,13 @@ if TYPE_CHECKING:
 
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
     from mindroom.hooks import MessageEnvelope
-    from mindroom.ingress_facts import IngressFacts
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.event_info import EventInfo
     from mindroom.matrix.thread_history_result import ThreadHistoryResult
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
     from mindroom.turn_policy import _ResponderAvailability as ResponderAvailability
+    from mindroom.turns.facts import IngressFacts
 
 _ROOM_ID = "!focused:localhost"
 _SENDER = "@user:localhost"
@@ -682,7 +682,6 @@ def _build_harness(
             runtime_paths=runtime_paths,
             agent_name=agent_name,
             matrix_id=matrix_id,
-            relations=make_relation_lookup(),
             pending_turns=journal_principal,
             interactive_questions=cast("PrincipalStore", AsyncMock()),
             resolver=resolver,
@@ -692,7 +691,6 @@ def _build_harness(
             ingress_hook_runner=IngressHookRunner(hook_context=hook_context),
             response_runner=cast("ResponseRunner", runner),
             delivery_gateway=cast("DeliveryGateway", gateway),
-            tool_runtime=tool_runtime,
             turn_store=turn_store,
             coalescing_gate=gate,
             edit_regenerator=_UnusedEditRegenerator(),

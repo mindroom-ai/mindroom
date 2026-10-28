@@ -130,8 +130,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
-    from mindroom.ingress_facts import IngressFacts
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.turns.facts import IngressFacts
 
 
 def _coalescing_gate_is_idle(gate: CoalescingGate) -> bool:

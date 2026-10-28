@@ -64,7 +64,6 @@ from mindroom.inbound_turn_normalizer import (
     InboundTurnNormalizer,
     TextNormalizationRequest,
 )
-from mindroom.ingress_facts import command_for, is_router_voice_echo
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.client_visible_messages import extract_visible_edit_body
 from mindroom.matrix.conversation_reads import ThreadReadMode
@@ -111,6 +110,7 @@ from mindroom.timing import (
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
+from mindroom.turns.facts import command_for, is_router_voice_echo
 from mindroom.voice.readiness import VoiceReadiness
 
 if TYPE_CHECKING:
@@ -125,17 +125,15 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.event_journal import PendingTurnView, PrincipalStore
     from mindroom.hooks.ingress import IngressHookRunner
-    from mindroom.ingress_facts import IngressFacts
     from mindroom.ingress_validation import IngressValidator
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
-    from mindroom.matrix.relation_lookup import RelationLookup
     from mindroom.message_target import MessageTarget
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
     from mindroom.teams.spec import TeamMode
-    from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_store import SourcePreparation, TurnStore
+    from mindroom.turns.facts import IngressFacts
     from mindroom.visible_response_reconciliation import VisibleResponseReconciler
     from mindroom.voice.visible_voice_echo import VisibleVoiceEchoLifecycle
 
@@ -274,7 +272,6 @@ class TurnControllerDeps:
     runtime_paths: RuntimePaths
     agent_name: str
     matrix_id: MatrixID
-    relations: RelationLookup
     pending_turns: PendingTurnView
     interactive_questions: PrincipalStore
     resolver: ConversationResolver
@@ -284,7 +281,6 @@ class TurnControllerDeps:
     ingress_hook_runner: IngressHookRunner
     response_runner: ResponseRunner
     delivery_gateway: DeliveryGateway
-    tool_runtime: ToolRuntimeSupport
     turn_store: TurnStore
     coalescing_gate: CoalescingGate
     edit_regenerator: _EditRegenerator

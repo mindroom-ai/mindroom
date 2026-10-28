@@ -39,7 +39,7 @@ from tests.conftest import make_ingress_facts
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
 
-    from mindroom.ingress_facts import IngressFacts
+    from mindroom.turns.facts import IngressFacts
 
 pytestmark = pytest.mark.asyncio
 

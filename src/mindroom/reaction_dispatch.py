@@ -24,11 +24,11 @@ if TYPE_CHECKING:
     from mindroom.coalescing.ingress_ticket import IngressTicket
     from mindroom.commands.config_confirmation import ConfigConfirmationContext
     from mindroom.constants import RuntimePaths
-    from mindroom.ingress_facts import IngressFacts
     from mindroom.ingress_validation import IngressValidator
     from mindroom.journal_dispatch import JournalDispatcher
     from mindroom.runtime_protocols import SupportsClientConfigOrchestrator
     from mindroom.turn_policy import TurnPolicy
+    from mindroom.turns.facts import IngressFacts
     from mindroom.user_stop_reconciliation import UserStopReconciler
 
 

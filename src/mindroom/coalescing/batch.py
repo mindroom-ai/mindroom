@@ -21,20 +21,20 @@ from mindroom.dispatch_source import (
     MEDIA_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
-from mindroom.ingress_facts import command_for
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 from mindroom.turn_record import SourceEventMetadata, TurnRecord
+from mindroom.turns.facts import command_for
 
 if TYPE_CHECKING:
     import nio
 
     from mindroom.commands.parsing import Command
-    from mindroom.ingress_facts import IngressFacts
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.turn_controller import InteractiveSelectionDispatch
     from mindroom.turn_store import TurnClaim
+    from mindroom.turns.facts import IngressFacts
 
 
 @dataclass(frozen=True)

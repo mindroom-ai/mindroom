@@ -5,16 +5,16 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from typing import TYPE_CHECKING, cast
 
-from mindroom.ingress_facts import command_for, is_router_voice_echo
 from mindroom.tool_system.events import body_without_tool_markers
+from mindroom.turns.facts import command_for, is_router_voice_echo
 
 if TYPE_CHECKING:
     import structlog
 
     from mindroom.dispatch_handoff import PreparedIngress
     from mindroom.event_journal import JournalEvent, PendingTurnView
-    from mindroom.ingress_facts import IngressFacts
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+    from mindroom.turns.facts import IngressFacts
 
 # Classify a stored item from its sender and Matrix source the way ingress classifies a live event.
 type _Classify = Callable[[str, Mapping[str, object]], IngressFacts]

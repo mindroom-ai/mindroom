@@ -25,7 +25,6 @@ from mindroom.dispatch_source import (
     source_kind_from_content,
 )
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.ingress_facts import IngressFacts
 from mindroom.matrix.event_info import EventInfo, reply_to_event_id_from_content
 from mindroom.requester_identity import (
     is_access_checked_requester_id,
@@ -34,6 +33,7 @@ from mindroom.requester_identity import (
 )
 from mindroom.turn_origin import requester_id_from_trusted_original_sender
 from mindroom.turn_record import TurnRecord
+from mindroom.turns.facts import IngressFacts
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

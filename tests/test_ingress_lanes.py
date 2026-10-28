@@ -65,7 +65,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.coalescing.batch import PreparedTurn
     from mindroom.event_journal import EventJournalStore
-    from mindroom.ingress_facts import IngressFacts
+    from mindroom.turns.facts import IngressFacts
 
 
 def _room(room_id: str = "!room:localhost") -> nio.MatrixRoom:
