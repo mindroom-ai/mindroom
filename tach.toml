@@ -808,8 +808,8 @@ visibility = [
     "mindroom.matrix_rtc.call_tools",
 ]
 
-# The shared response-turn drivers own the turn lifecycle for both the agent
-# and (after adoption) team envelopes; entity modules inject adapters.
+# The single response-turn driver owns the turn lifecycle for both the agent
+# and team envelopes; entity modules inject adapters.
 [[modules]]
 path = "mindroom.response_turn"
 depends_on = [

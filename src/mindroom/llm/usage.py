@@ -151,7 +151,8 @@ def _merge_numeric(target: dict[str, Any], source: Mapping[str, Any] | None) -> 
 class MessageMetrics(_Counts):
     """Usage one provider request reported; stored on the assistant message.
 
-    ``duration`` covers the same work as the counters: every attempt of a retried request.
+    ``duration`` is the finishing attempt's: a retried request's counters also hold the tokens its failed attempts
+    reported, but its duration times only the attempt that finished.
     """
 
     duration: float | None = None

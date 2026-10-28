@@ -352,7 +352,7 @@ class ResponseTurnContext:
 
 @dataclass(frozen=True)
 class TurnSinks:
-    """Mutable turn outputs owned by the caller and updated by the driver.
+    """Mutable turn outputs owned by the caller and updated by the turn's one driver.
 
     ``on_completed`` receives the attempt that completes the turn; ``on_failed`` the error of a turn that ended with
     the failure's message instead.
