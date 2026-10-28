@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import httpx
 import pytest
@@ -19,7 +19,7 @@ from mindroom.slack.app import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
 _BOT_TOKEN = "xoxb-test-token"  # noqa: S105
@@ -51,7 +51,7 @@ def _credentials(bot_token: str = _BOT_TOKEN) -> SlackAppCredentials:
     return SlackAppCredentials(bot_token=bot_token, signing_secret=_SIGNING_SECRET, app_token=None)
 
 
-def _client(handler: Any) -> httpx.AsyncClient:  # noqa: ANN401
+def _client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False, timeout=10.0)
 
 
@@ -177,3 +177,16 @@ async def test_failed_identity_lookup_recovers_on_next_call() -> None:
         assert await slack_bot_identity(client, _credentials()) == _IDENTITY
 
     assert calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["team_id", "user_id", "url"])
+async def test_incomplete_auth_test_response_is_an_error_and_not_cached(missing: str) -> None:
+    """An `ok` answer without the team, user or URL is reported as `invalid_response`, not a KeyError."""
+    body = {key: value for key, value in _AUTH_TEST_BODY.items() if key != missing}
+
+    async with _client(lambda _request: httpx.Response(200, json=body)) as client:
+        with pytest.raises(SlackApiError, match="invalid_response"):
+            await slack_bot_identity(client, _credentials())
+
+    assert cached_slack_bot_identity(_credentials()) is None

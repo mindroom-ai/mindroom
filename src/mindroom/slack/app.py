@@ -6,7 +6,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.slack.api import slack_call
+from mindroom.slack.api import SlackApiError, slack_call
 
 if TYPE_CHECKING:
     import httpx
@@ -67,6 +67,9 @@ async def slack_bot_identity(client: httpx.AsyncClient, credentials: SlackAppCre
     key = _identity_key(credentials)
     if (identity := _IDENTITIES.get(key)) is None:
         body = await slack_call(client, "auth.test", credentials.bot_token)
+        if not all(isinstance(body.get(key), str) and body[key] for key in ("team_id", "user_id", "url")):
+            error = "invalid_response"
+            raise SlackApiError(error)
         identity = SlackBotIdentity(team_id=body["team_id"], bot_user_id=body["user_id"], workspace_url=body["url"])
         _IDENTITIES[key] = identity
     return identity
