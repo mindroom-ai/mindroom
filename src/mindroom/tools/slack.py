@@ -82,6 +82,7 @@ if TYPE_CHECKING:
     ),
     function_names=(
         "slack_search",
+        "slack_recent",
         "slack_read",
         "slack_download",
         "slack_post",
