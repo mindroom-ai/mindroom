@@ -9,12 +9,15 @@ error reply see one rule with one precedence.
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING
 
 import httpx
 
 from mindroom.failure_text import failure_text
 from mindroom.llm.errors import (
+    MISSING_API_KEY,
     TRANSPORT_TIMEOUT,
     AuthenticationFailed,
     ContextWindowExceeded,
@@ -25,22 +28,25 @@ from mindroom.llm.errors import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
 
 __all__ = [
     "CliLoginError",
     "classify_provider_error",
     "is_context_window_error",
-    "is_credential_error",
+    "missing_api_key_error",
     "provider_failure",
-    "whole_words",
+    "retry_after_seconds",
 ]
 
 _RATE_LIMIT_STATUS = 429
 _UNAUTHORIZED_STATUS = 401
-# Statuses after which an unchanged request can succeed: 409 is OpenAI's transient conflict, and 529 is
-# Anthropic's overloaded model, which the error message reports as temporary unavailability, not as a rate limit.
-_TRANSIENT_STATUSES = frozenset({408, 409, 500, 502, 503, 504, 529})
+# Statuses after which an unchanged request can succeed, the ones the OpenAI and Claude SDKs retried: a request
+# timeout, OpenAI's transient conflict (409), and every server error, among them Anthropic's overloaded model (529),
+# which the error message reports as temporary unavailability rather than a rate limit, and a CDN's origin failures
+# (520 to 524) in front of a custom endpoint.
+_TRANSIENT_CLIENT_STATUSES = frozenset({408, 409})
+_SERVER_ERROR_RANGE = range(500, 600)
 _INVALID_REQUEST_STATUSES = frozenset({400, 404, 413, 422})
 _HTTP_CLIENT_ERROR_RANGE = range(400, 500)
 # The names providers give a throttled request: Anthropic's error type and the Responses code.
@@ -64,20 +70,13 @@ _TRANSIENT_NAMES = frozenset(
 )
 
 
-def whole_words(*words: str) -> re.Pattern[str]:
-    """Return a pattern that finds any of ``words``, expressions over lowercase text, as a whole word.
-
-    A word is not part of a longer run of letters or digits, so ``_``, ``-``, spaces, and punctuation separate
-    words: ``invalid_auth`` holds ``auth`` and ``HTTP 429`` holds ``429``, while ``author`` holds no ``auth`` and
-    ``generate`` no ``rate``.
-    """
-    return re.compile(rf"(?<![a-z0-9])(?:{'|'.join(words)})(?![a-z0-9])")
-
-
 # Wording of a rejection that names the credentials without a 401 status, such as Gemini's 400 "API key not valid",
 # Anthropic's 403 permission error that names the API key, and a 403 "not authorized": an API key, or a word of the
-# auth family in either spelling, so text that names an ``author`` property, an ``authority``, or ``oauth`` is not one.
-_CREDENTIAL_WORDING = whole_words(r"(?:un)?auth(?:enticat[a-z]*|ori[sz][a-z]*)?", r"api[ _]?keys?")
+# auth family in either spelling. Each is a whole word of the lowercased text, one not inside a longer run of letters or
+# digits, so ``invalid_auth`` holds ``auth`` while an ``author`` property, an ``authority``, or ``oauth`` holds none.
+_CREDENTIAL_WORDING = re.compile(
+    r"(?<![a-z0-9])(?:(?:un)?auth(?:enticat[a-z]*|ori[sz][a-z]*)?|api[ _]?keys?)(?![a-z0-9])",
+)
 
 # Wording providers use when a request does not fit the model's context window, such as the payload-size wording of
 # OpenAI-compatible servers and Anthropic, older Claude models' "input length and `max_tokens` exceed context limit",
@@ -113,11 +112,6 @@ class CliLoginError(ValueError):
         self.status_code = status_code
 
 
-def is_credential_error(message: str) -> bool:
-    """Return whether an error's wording names the credentials: an API key, or a word of the auth family."""
-    return _CREDENTIAL_WORDING.search(message.casefold()) is not None
-
-
 def is_context_window_error(message: str, *, code: str | None = None) -> bool:
     """Return whether an error's code or wording says the request does not fit the context window."""
     if code == "context_length_exceeded":
@@ -133,15 +127,17 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
     status_code: int | None = None,
     code: str | None = None,
     error_type: str | None = None,
+    retry_after_seconds: float | None = None,
 ) -> ProviderError:
     """Return the normalized error of one failed provider response; the first rule that matches decides.
 
     ``status_code`` is the HTTP status. An error event inside a stream that already succeeded has none, and a
     numeric ``code``, as OpenAI-compatible servers send in one, counts as its status. ``code`` and ``error_type``
-    name the failure as the provider does, such as ``rate_limit_error`` or ``server_error``.
+    name the failure as the provider does, such as ``rate_limit_error`` or ``server_error``; the error keeps ``code``
+    as its ``provider_code``. ``retry_after_seconds`` is the response's ``Retry-After`` hint.
 
     1. A 429 status or a rate-limit name is ``RateLimited``.
-    2. A transient status is ``ProviderUnavailable``.
+    2. A transient status, 408, 409, or any 5xx, is ``ProviderUnavailable``.
     3. A 401 status or Anthropic's ``authentication_error`` is ``AuthenticationFailed``.
     4. Wording or a code that names the context window, on a client error or an event without a status, is
        ``ContextWindowExceeded``: a retry cannot make the request fit. A 5xx that mentions it stays transient.
@@ -157,11 +153,17 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
     client_side = status is None or status in _HTTP_CLIENT_ERROR_RANGE
 
     def typed(kind: type[ProviderError]) -> ProviderError:
-        return kind(message, provider=provider, status_code=status_code, code=code)
+        return kind(
+            message,
+            provider=provider,
+            status_code=status_code,
+            provider_code=code,
+            retry_after_seconds=retry_after_seconds,
+        )
 
     if status == _RATE_LIMIT_STATUS or names & _RATE_LIMIT_NAMES:
         return typed(RateLimited)
-    if status in _TRANSIENT_STATUSES:
+    if status in _TRANSIENT_CLIENT_STATUSES or status in _SERVER_ERROR_RANGE:
         return typed(ProviderUnavailable)
     if status == _UNAUTHORIZED_STATUS or _AUTHENTICATION_ERROR_TYPE in names:
         return typed(AuthenticationFailed)
@@ -169,11 +171,49 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
         return typed(ContextWindowExceeded)
     if names & _TRANSIENT_NAMES or _OVERLOADED_ERROR_TYPE in lowered:
         return typed(ProviderUnavailable)
-    if client_side and is_credential_error(message):
+    if client_side and _CREDENTIAL_WORDING.search(lowered):
         return typed(AuthenticationFailed)
     if status in _INVALID_REQUEST_STATUSES:
         return typed(InvalidRequest)
     return typed(ProviderError)
+
+
+def retry_after_seconds(headers: Mapping[str, str], *, now: datetime | None = None) -> float | None:
+    """Return a response's ``Retry-After`` hint in seconds, read as the SDKs read it.
+
+    Azure's ``retry-after-ms`` wins, then a number of seconds in ``Retry-After``, then an HTTP date there, counted from
+    ``now``. A negative number is no hint, and a date already past is no wait. Header names match in any case.
+    """
+    by_name = {name.casefold(): value for name, value in headers.items()}
+    for name, divisor in (("retry-after-ms", 1000.0), ("retry-after", 1.0)):
+        raw_value = by_name.get(name)
+        if raw_value is None:
+            continue
+        try:
+            seconds = float(raw_value.strip()) / divisor
+        except ValueError:
+            continue
+        return seconds if seconds >= 0 else None
+    return _seconds_until(by_name.get("retry-after"), now=now)
+
+
+def _seconds_until(http_date: str | None, *, now: datetime | None) -> float | None:
+    """Return the seconds from ``now`` until an HTTP date, zero for one already past, or None for no date."""
+    if http_date is None:
+        return None
+    try:
+        when = parsedate_to_datetime(http_date)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return max((when - (now or datetime.now(UTC))).total_seconds(), 0.0)
+
+
+def missing_api_key_error(env_var: str, *, provider: str) -> AuthenticationFailed:
+    """Return the error for a route that has no API key, which the reply turns into how to connect one."""
+    message = f"{env_var} not set. Please set the {env_var} environment variable."
+    return AuthenticationFailed(message, provider=provider, status_code=401, code=MISSING_API_KEY)
 
 
 def provider_failure(error: BaseException, *, provider: str) -> ProviderError | None:
