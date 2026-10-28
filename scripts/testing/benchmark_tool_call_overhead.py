@@ -234,7 +234,7 @@ def _run_docker_shell_benchmark(image: str, iterations: int, warmup: int) -> lis
             auth_token=secrets.token_urlsafe(32),
             current_launch=lambda: launch,
         )
-        spec = WorkerSpec("v1:default:unscoped:benchmark", launch=launch, mirror_grantable_credentials=False)
+        spec = WorkerSpec("v1:default:unscoped:benchmark", mirror_grantable_credentials=False)
         proxy = WorkerProxyClientConfig(
             proxy_url=None,
             proxy_token=None,

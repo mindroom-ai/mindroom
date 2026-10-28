@@ -34,7 +34,7 @@ From protocol 6 on, a worker or shared runner refuses a request naming another p
 The runner prepares every route in one step with one workspace rule, chosen after characterization tests showed that every request whose `base_dir` is the calling agent's workspace gets the same answer from all six former resolvers; the rule changes answers only where the former resolvers disagreed with one another.
 An explicit `base_dir` that fails confinement is refused, never replaced by a fallback.
 
-A worker counts a failure against itself only when its own typed answer says so, or when no typed answer arrived (transport errors, a missing route, a rejected token, a malformed answer); timeouts never do.
+A worker counts a failure against itself only when its own typed answer says so, or when no typed answer arrived (transport errors, a missing route, a rejected token, a malformed answer); the primary's own request timeouts never do, while a call the runner itself stops at its subprocess deadline answers as a worker failure, as before.
 Before, the client guessed from HTTP status codes and response details.
 
 Rejected: sending the call's own environment as explicit values applied last on the worker.
