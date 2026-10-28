@@ -15,6 +15,7 @@ import httpx
 
 from mindroom.failure_text import failure_text
 from mindroom.llm.errors import (
+    MISSING_API_KEY,
     TRANSPORT_TIMEOUT,
     AuthenticationFailed,
     ContextWindowExceeded,
@@ -31,9 +32,8 @@ __all__ = [
     "CliLoginError",
     "classify_provider_error",
     "is_context_window_error",
-    "is_credential_error",
+    "missing_api_key_error",
     "provider_failure",
-    "whole_words",
 ]
 
 _RATE_LIMIT_STATUS = 429
@@ -64,20 +64,13 @@ _TRANSIENT_NAMES = frozenset(
 )
 
 
-def whole_words(*words: str) -> re.Pattern[str]:
-    """Return a pattern that finds any of ``words``, expressions over lowercase text, as a whole word.
-
-    A word is not part of a longer run of letters or digits, so ``_``, ``-``, spaces, and punctuation separate
-    words: ``invalid_auth`` holds ``auth`` and ``HTTP 429`` holds ``429``, while ``author`` holds no ``auth`` and
-    ``generate`` no ``rate``.
-    """
-    return re.compile(rf"(?<![a-z0-9])(?:{'|'.join(words)})(?![a-z0-9])")
-
-
 # Wording of a rejection that names the credentials without a 401 status, such as Gemini's 400 "API key not valid",
 # Anthropic's 403 permission error that names the API key, and a 403 "not authorized": an API key, or a word of the
-# auth family in either spelling, so text that names an ``author`` property, an ``authority``, or ``oauth`` is not one.
-_CREDENTIAL_WORDING = whole_words(r"(?:un)?auth(?:enticat[a-z]*|ori[sz][a-z]*)?", r"api[ _]?keys?")
+# auth family in either spelling. Each is a whole word of the lowercased text, one not inside a longer run of letters or
+# digits, so ``invalid_auth`` holds ``auth`` while an ``author`` property, an ``authority``, or ``oauth`` holds none.
+_CREDENTIAL_WORDING = re.compile(
+    r"(?<![a-z0-9])(?:(?:un)?auth(?:enticat[a-z]*|ori[sz][a-z]*)?|api[ _]?keys?)(?![a-z0-9])",
+)
 
 # Wording providers use when a request does not fit the model's context window, such as the payload-size wording of
 # OpenAI-compatible servers and Anthropic, older Claude models' "input length and `max_tokens` exceed context limit",
@@ -113,11 +106,6 @@ class CliLoginError(ValueError):
         self.status_code = status_code
 
 
-def is_credential_error(message: str) -> bool:
-    """Return whether an error's wording names the credentials: an API key, or a word of the auth family."""
-    return _CREDENTIAL_WORDING.search(message.casefold()) is not None
-
-
 def is_context_window_error(message: str, *, code: str | None = None) -> bool:
     """Return whether an error's code or wording says the request does not fit the context window."""
     if code == "context_length_exceeded":
@@ -138,7 +126,8 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
 
     ``status_code`` is the HTTP status. An error event inside a stream that already succeeded has none, and a
     numeric ``code``, as OpenAI-compatible servers send in one, counts as its status. ``code`` and ``error_type``
-    name the failure as the provider does, such as ``rate_limit_error`` or ``server_error``.
+    name the failure as the provider does, such as ``rate_limit_error`` or ``server_error``; the error keeps ``code``
+    as its ``provider_code``.
 
     1. A 429 status or a rate-limit name is ``RateLimited``.
     2. A transient status is ``ProviderUnavailable``.
@@ -157,7 +146,7 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
     client_side = status is None or status in _HTTP_CLIENT_ERROR_RANGE
 
     def typed(kind: type[ProviderError]) -> ProviderError:
-        return kind(message, provider=provider, status_code=status_code, code=code)
+        return kind(message, provider=provider, status_code=status_code, provider_code=code)
 
     if status == _RATE_LIMIT_STATUS or names & _RATE_LIMIT_NAMES:
         return typed(RateLimited)
@@ -169,11 +158,17 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
         return typed(ContextWindowExceeded)
     if names & _TRANSIENT_NAMES or _OVERLOADED_ERROR_TYPE in lowered:
         return typed(ProviderUnavailable)
-    if client_side and is_credential_error(message):
+    if client_side and _CREDENTIAL_WORDING.search(lowered):
         return typed(AuthenticationFailed)
     if status in _INVALID_REQUEST_STATUSES:
         return typed(InvalidRequest)
     return typed(ProviderError)
+
+
+def missing_api_key_error(env_var: str, *, provider: str) -> AuthenticationFailed:
+    """Return the error for a route that has no API key, which the reply turns into how to connect one."""
+    message = f"{env_var} not set. Please set the {env_var} environment variable."
+    return AuthenticationFailed(message, provider=provider, status_code=401, code=MISSING_API_KEY)
 
 
 def provider_failure(error: BaseException, *, provider: str) -> ProviderError | None:

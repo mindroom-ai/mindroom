@@ -719,13 +719,15 @@ def test_owned_timeout_classification_does_not_depend_on_message_text() -> None:
     assert is_summary_timeout(error)
 
 
-def test_a_compaction_failure_is_a_timeout_by_its_type_or_a_providers_own_words() -> None:
-    """A transport timeout counts by its code, a provider's own timeout by its text, and no other error by wording."""
+def test_a_compaction_failure_is_a_timeout_by_its_type_alone() -> None:
+    """A transport timeout counts by MindRoom's marker, and no error by its wording or the code a provider sent."""
     timed_out = provider_failure(httpx.PoolTimeout(""), provider="fake")
     assert timed_out is not None
     assert is_summary_timeout(timed_out)
-    provider_side = classify_provider_error("upstream request timed out", provider="fake", status_code=504)
-    assert is_summary_timeout(provider_side)
+    assert not is_summary_timeout(
+        classify_provider_error("upstream request timed out", provider="fake", status_code=504),
+    )
+    assert not is_summary_timeout(classify_provider_error("busy", provider="fake", status_code=500, code="timeout"))
     refused = provider_failure(httpx.ConnectError("connection refused"), provider="fake")
     assert refused is not None
     assert not is_summary_timeout(refused)

@@ -22,6 +22,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.llm.errors import (
+    MISSING_API_KEY,
     AuthenticationFailed,
     ContextWindowExceeded,
     InvalidRequest,
@@ -445,6 +446,20 @@ async def test_a_mid_stream_error_event_is_classified_by_its_error_type(
 
     assert type(raised.value) is expected
     assert (raised.value.status_code, raised.value.retryable) == (None, expected is not ProviderError)
+
+
+@pytest.mark.asyncio
+async def test_a_direct_route_without_any_credential_fails_as_a_missing_key(tmp_path: Path) -> None:
+    """With no key or token anywhere the SDK looks, the request fails unsent and the reply says how to connect one."""
+    wire = Wire(sse_reply([{"type": "text", "text": "unreachable"}]))
+
+    with isolated_provider_environment():
+        provider = provider_for({"provider": "anthropic", "id": "claude-sonnet-5-5"}, tmp_path, wire.client)
+        with pytest.raises(AuthenticationFailed) as raised:
+            await claude_turn(provider, ModelRequest(messages=_user()))
+
+    assert (raised.value.code, raised.value.provider, wire.requests) == (MISSING_API_KEY, "Anthropic", [])
+    assert "Connect your AI provider" in get_user_friendly_error_message(raised.value)
 
 
 @pytest.mark.asyncio

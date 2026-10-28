@@ -130,9 +130,7 @@ def _names_capability_gap(error: ProviderError, kinds: frozenset[MediaKind]) -> 
     if status is not None and (status == _PAYLOAD_TOO_LARGE_STATUS or status >= _SERVER_ERROR_STATUS):
         return False
     text = str(error).lower()
-    if f"error code: {_PAYLOAD_TOO_LARGE_STATUS}" in text or any(
-        marker in text for marker in _INPUT_SPECIFIC_ERROR_MARKERS
-    ):
+    if any(marker in text for marker in _INPUT_SPECIFIC_ERROR_MARKERS):
         return False
     return _CAPABILITY_GAP_ERROR.search(text) is not None
 

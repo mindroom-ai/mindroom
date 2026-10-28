@@ -33,6 +33,7 @@ from anthropic.types.beta import (
     BetaToolUseBlock,
 )
 
+from mindroom.constants import PROVIDER_ENV_KEYS
 from mindroom.credentials.sync import get_secret_from_env
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import (
@@ -87,7 +88,7 @@ from mindroom.providers.anthropic.wire import (
 from mindroom.providers.assistant_turn import stamp_finished_turn
 from mindroom.providers.claude_wire_blocks import SERVER_TOOL_USE_BLOCK_TYPE, as_dict
 from mindroom.providers.credentials import model_api_key
-from mindroom.providers.errors import classify_provider_error, provider_failure
+from mindroom.providers.errors import classify_provider_error, missing_api_key_error, provider_failure
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.google_adc import load_ambient_google_credentials, with_runtime_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
@@ -553,6 +554,9 @@ _USAGE_EVENT_TYPES = frozenset({"message_start", "message_delta"})
 _PROVIDER_EVENT_TYPES = frozenset({"content_block_start", "content_block_delta", "content_block_stop"})
 # The HTTP status the SDK reports for an ``error`` event that arrives after the stream started.
 _COMMITTED_STREAM_STATUS = 200
+# How the SDK's ``TypeError`` begins when a direct-API client has no credential at all: no key or token in the config,
+# the dashboard, or the variables the SDK reads, and no other credential source it discovers.
+_NO_CREDENTIALS_ERROR = '"Could not resolve authentication method.'
 # The blocks the model writes itself; every other block is a server tool's call or result.
 _MODEL_BLOCK_TYPES = frozenset({"text", "thinking", "redacted_thinking", "tool_use"})
 
@@ -572,8 +576,11 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
     """Return the shared error for an SDK, transport, or Google token failure; any other exception propagates.
 
     The Vertex client mints its Google access token inside the request. An ``error`` event inside the stream arrives
-    with the stream's committed 200 status, so its error type classifies it.
+    with the stream's committed 200 status, so its error type classifies it. The SDK finds a client's credentials
+    only when it sends, so a client without any fails then, as the missing key it is.
     """
+    if isinstance(error, TypeError) and str(error).startswith(_NO_CREDENTIALS_ERROR):
+        return missing_api_key_error(PROVIDER_ENV_KEYS["anthropic"], provider=provider)
     if (failure := provider_failure(error, provider=provider)) is not None:
         return failure
     if isinstance(error, anthropic.APIStatusError) and error.status_code == _COMMITTED_STREAM_STATUS:

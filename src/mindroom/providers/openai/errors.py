@@ -10,11 +10,10 @@ from collections.abc import Mapping
 from typing import Any, cast
 
 from mindroom.failure_text import failure_text
-from mindroom.llm.errors import MISSING_API_KEY, AuthenticationFailed, ProviderError
+from mindroom.llm.errors import ProviderError
 from mindroom.providers.errors import classify_provider_error, provider_failure
 
 __all__ = [
-    "missing_api_key_error",
     "provider_error",
     "sdk_failures",
 ]
@@ -59,9 +58,3 @@ def provider_error(error: Exception, *, provider: str) -> ProviderError:
         message, code, error_type = _error_fields(error.body)
         return classify_provider_error(message or error.message, provider=provider, code=code, error_type=error_type)
     return ProviderError(failure_text(error), provider=provider)
-
-
-def missing_api_key_error(env_var: str, *, provider: str) -> AuthenticationFailed:
-    """Return the error for a route that has no API key, which the reply turns into how to connect one."""
-    message = f"{env_var} not set. Please set the {env_var} environment variable."
-    return AuthenticationFailed(message, provider=provider, status_code=401, code=MISSING_API_KEY)

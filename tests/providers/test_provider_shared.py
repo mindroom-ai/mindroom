@@ -61,8 +61,21 @@ def test_statuses_and_wording_classify_the_same_for_every_family(
     error = classify_provider_error(message, provider="Test", status_code=status, code=code)
 
     assert type(error) is expected
-    assert (error.retryable, error.status_code, error.code, error.provider) == (retryable, status, code, "Test")
+    assert (error.retryable, error.status_code, error.provider_code, error.provider) == (
+        retryable,
+        status,
+        code,
+        "Test",
+    )
+    assert error.code is None
     assert str(error) == message
+
+
+def test_a_code_the_provider_sent_never_reads_as_a_mindroom_marker() -> None:
+    """A server that names its failure ``timeout`` sent no transport timeout, which only MindRoom's marker reports."""
+    error = classify_provider_error("upstream busy", provider="Test", status_code=500, code=TRANSPORT_TIMEOUT)
+
+    assert (type(error), error.code, error.provider_code) == (ProviderUnavailable, None, TRANSPORT_TIMEOUT)
 
 
 @pytest.mark.parametrize(
@@ -106,7 +119,7 @@ def test_an_error_event_without_a_status_is_classified_by_its_name_and_wording(
     error = classify_provider_error(message, provider="Test", code=code, error_type=error_type)
 
     assert type(error) is expected
-    assert (error.status_code, error.code) == (None, code)
+    assert (error.status_code, error.code, error.provider_code) == (None, None, code)
 
 
 def test_context_window_detection_reads_the_code_and_the_wording() -> None:

@@ -374,8 +374,8 @@ def _read_timeout() -> Exception:
 class Row:
     """One route and failure, and how the owned pipeline ends it.
 
-    ``requests`` counts HTTP requests, the SDK's retries included; ``code`` pins the error's code where later
-    handling reads it.
+    ``requests`` counts HTTP requests, the SDK's retries included; ``code`` pins the MindRoom marker that later handling
+    reads.
     """
 
     route: str
@@ -931,7 +931,6 @@ _RESPONSES_CASES = [
         ProviderUnavailable,
         UNAVAILABLE,
         1,
-        code="server_error",
     ),
     _Case(
         "reset_after_visible_output",
@@ -955,7 +954,7 @@ _RESPONSES_CASES = [
         )
         for tool, started in _RESPONSES_HOSTED_TOOLS.items()
         for failure, reply, code in (
-            ("event", _responses_stream(started, _response_error("server_error")), "server_error"),
+            ("event", _responses_stream(started, _response_error("server_error")), None),
             ("stall", _then_silent(_responses_stream(started)), STREAM_STALLED),
         )
     ),
@@ -964,7 +963,7 @@ _RESPONSES_CASES = [
         _Case(f"{failure}_after_{name}", reply, ProviderUnavailable, UNAVAILABLE, requests, code=code)
         for name, started in (("tool_search", _TOOL_SEARCH_STARTED), ("compaction", _COMPACTION_STARTED))
         for failure, reply, requests, code in (
-            ("event", _responses_stream(started, _response_error("server_error")), _PIPELINE, "server_error"),
+            ("event", _responses_stream(started, _response_error("server_error")), _PIPELINE, None),
             ("stall", _then_silent(_responses_stream(started)), _STALLED, STREAM_STALLED),
         )
     ),

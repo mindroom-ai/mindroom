@@ -764,7 +764,7 @@ async def test_a_context_window_error_inside_a_stream_is_typed(tmp_path: Path) -
     with pytest.raises(ContextWindowExceeded, match="maximum context length") as info:
         await _adapter_turn(built, ModelRequest(messages=[_user()]))
 
-    assert (info.value.code, info.value.retryable) == ("context_length_exceeded", False)
+    assert (info.value.provider_code, info.value.retryable) == ("context_length_exceeded", False)
 
 
 @pytest.mark.asyncio
@@ -911,7 +911,7 @@ async def test_responses_error_event_is_classified_by_its_code(tmp_path: Path) -
     with pytest.raises(ProviderUnavailable) as info:
         await _adapter_turn(built, ModelRequest(messages=[_user()]))
 
-    assert (info.value.status_code, info.value.code, str(info.value)) == (None, "server_error", "boom")
+    assert (info.value.status_code, info.value.provider_code, str(info.value)) == (None, "server_error", "boom")
     assert info.value.provider == "OpenAI Responses"
 
 

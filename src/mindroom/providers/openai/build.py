@@ -27,7 +27,7 @@ from mindroom.model_defaults import (
     openai_rejects_sampling_controls,
 )
 from mindroom.providers.credentials import model_api_key, own_api_key, uses_alternative_auth
-from mindroom.providers.errors import CliLoginError, provider_failure
+from mindroom.providers.errors import CliLoginError, missing_api_key_error, provider_failure
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_keys
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import provider_route
@@ -40,7 +40,6 @@ from mindroom.providers.openai.codex_auth import (
     borrow_codex_key,
     normalize_codex_model_id,
 )
-from mindroom.providers.openai.errors import missing_api_key_error
 from mindroom.providers.openai.kimi_auth import KIMI_BASE_URL, KimiAuthError, borrow_kimi_token, normalize_kimi_model_id
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import ResponsesWire
