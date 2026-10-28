@@ -11,9 +11,11 @@ from typing import TYPE_CHECKING, Protocol
 
 from mindroom.agent_cli.events import emit_cli_suspension
 from mindroom.agent_cli.lifetime import current_cli_lifetime
+from mindroom.approval.failure import response_failure
 from mindroom.event_journal import ApprovalDecision
 from mindroom.orchestration.runtime import (
     cancel_failure_reason,
+    cancel_source_from_failure_reason,
     classify_cancel_source,
     current_task_is_process_shutdown,
 )
@@ -33,6 +35,7 @@ if TYPE_CHECKING:
 
 class _ApprovalProgress(Protocol):
     failure_reason: str | None
+    cancelled: bool
     delivery_outcome: FinalDeliveryOutcome | None
 
     def note_task_cancelled(self, failure_reason: str) -> None: ...
@@ -93,8 +96,10 @@ class CliApprovalWaits:
             if current is None or current.state not in {"waiting", "ready"}:
                 # A failed publication records its cause; report that, not the lost ownership it implies.
                 msg = (
-                    current.failure_reason if current is not None else None
-                ) or "CLI approval lost its source ownership"
+                    "CLI approval lost its source ownership"
+                    if current is None or current.failure is None
+                    else current.failure.reason
+                )
                 raise RuntimeError(msg)
             lifetime = current_cli_lifetime()
             deadline = lifetime.grant_expires_at_ns if lifetime is not None else None
@@ -211,15 +216,20 @@ class CliApprovalWaits:
                 # A Stop or failure fenced the wait before an answer: its settlement expires the cards before it
                 # ends the reply, which approval recovery does instead after a shutdown.
                 if not current_task_is_process_shutdown():
-                    await self.responses.settle_failure(
-                        current,
-                        current.failure_reason or "CLI approval response ended before final delivery.",
-                    )
+                    assert current.failure is not None, "a failing continuation holds its failure"
+                    await self.responses.settle_failure(current, current.failure)
             elif final is not None and not final.permanently_failed:
                 await self.responses.finish_approval(current.approval_id)
             elif not current_task_is_process_shutdown():
                 # No answer reached the room, including one Matrix refused for good: the approval fails.
                 await self.responses.request_failure(
                     current,
-                    progress.failure_reason or "CLI approval response ended before final delivery.",
+                    response_failure(
+                        # The response's progress records a cancellation as its canonical failure reason.
+                        cancel_source=cancel_source_from_failure_reason(progress.failure_reason)
+                        if progress.cancelled
+                        else None,
+                        reason=progress.failure_reason,
+                        default="CLI approval response ended before final delivery.",
+                    ),
                 )

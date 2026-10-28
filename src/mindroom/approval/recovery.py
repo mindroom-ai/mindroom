@@ -8,8 +8,9 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.approval.failure import prepare_approval_failure
-from mindroom.event_journal import DeliveryStage
+from mindroom.event_journal import ApprovalFailure, DeliveryStage
 from mindroom.logging_config import get_logger
+from mindroom.reply_lifecycle import ApprovalFailureKind
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -119,7 +120,7 @@ class ApprovalRecovery:
         manager = self.manager
         current = await prepare_approval_failure(
             current,
-            reason,
+            ApprovalFailure(ApprovalFailureKind.ERROR, reason),
             request_failure=partial(
                 store.approvals.request_approval_failure,
                 current.approval_id,

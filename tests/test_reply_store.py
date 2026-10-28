@@ -14,6 +14,7 @@ import pytest
 from mindroom import reply_lifecycle as rl
 from mindroom import reply_scope
 from mindroom.event_journal import (
+    ApprovalFailure,
     DeliveryStage,
     DepartureSource,
     EventKind,
@@ -34,6 +35,7 @@ from mindroom.event_journal.replies import (
 )
 from mindroom.handled_turns import HandledTurnLedger, TurnRecordCodec
 from mindroom.reply_lifecycle import (
+    ApprovalFailureKind,
     ClaimContext,
     ClaimRequest,
     OwedWrite,
@@ -1252,7 +1254,11 @@ async def test_discarding_an_unavailable_owners_approval_ends_the_reply_it_pause
     paused = await alice.replies.span(continuation.span_id)
     assert paused is not None
     assert (
-        await alice.approvals.request_approval_failure("approval-1", "agent removed", expected_state="waiting")
+        await alice.approvals.request_approval_failure(
+            "approval-1",
+            ApprovalFailure(ApprovalFailureKind.ERROR, "agent removed"),
+            expected_state="waiting",
+        )
         is not None
     )
     router = journal_store.principal("router@alice")
@@ -1374,7 +1380,7 @@ async def test_an_approval_whose_sources_were_deleted_leaves_its_turn_unanswered
     failing = await alice.approvals.approval_continuation("approval-1")
     assert failing is not None
     assert failing.state == "failing"
-    assert failing.failure_reason == "cancelled_by_user"
+    assert failing.failure == ApprovalFailure(ApprovalFailureKind.USER_STOP)
     assert await alice.approvals.finish_approval_continuation("approval-1") is not None
     assert not await alice.is_pending("$source-1")
     assert not await _answered(journal_store, "$source-1")

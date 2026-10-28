@@ -42,6 +42,7 @@ from mindroom.event_journal import (
     ApprovalContinuation,
     ApprovalDecision,
     ApprovalDecisionMetadata,
+    ApprovalFailure,
     ConversationCursor,
     DeliveryAcknowledgement,
     DeliveryStage,
@@ -78,6 +79,7 @@ from mindroom.event_journal.schema import (
 from mindroom.event_journal.sqlite_backend import SqliteBackend
 from mindroom.handled_turns import TurnRecordCodec
 from mindroom.interactive_models import InteractivePrompt
+from mindroom.reply_lifecycle import ApprovalFailureKind
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 from tests.approval_continuation_helpers import advance_continuation, approval_continuation, claim_continuation
@@ -6651,7 +6653,7 @@ class TestApprovalContinuations:
         loaded = await reopened.approvals.approval_continuation("approval-1")
         assert loaded is not None
         assert loaded.continuation_count == 2
-        assert loaded.state == "ready", loaded.failure_reason
+        assert loaded.state == "ready", loaded.failure
         claimed = await claim_continuation(reopened, "approval-1", runtime_generation="runtime-a")
         assert claimed is not None
         advanced = await advance_continuation(
@@ -7026,7 +7028,7 @@ class TestApprovalContinuations:
 
         await alice.approvals.request_approval_failure(
             waiting.approval_id,
-            "make it runnable",
+            ApprovalFailure(ApprovalFailureKind.ERROR, "make it runnable"),
             expected_state="waiting",
         )
         failing = await alice.pending(room_id=room_id, runtime_generation="runtime-a")
@@ -7515,7 +7517,7 @@ class TestApprovalContinuations:
             failure = asyncio.create_task(
                 rival_stores.second.principal(principal_id).approvals.request_approval_failure(
                     "approval-1",
-                    "publication failed",
+                    ApprovalFailure(ApprovalFailureKind.ERROR, "publication failed"),
                     expected_state="waiting",
                     expected_generation=0,
                     expected_runtime_generation="runtime-a",
@@ -7573,7 +7575,7 @@ class TestApprovalContinuations:
             backend=_PausingBackend(
                 rival_stores.first.backend,
                 pause_after_continuation_read,
-                statement_matches=lambda sql: "SELECT principal_id, state, generation, failure_reason" in sql,
+                statement_matches=lambda sql: "SELECT principal_id, state, generation, failure_kind" in sql,
             ),
         ).principal("router@shared")
         decision = asyncio.create_task(
@@ -7590,7 +7592,7 @@ class TestApprovalContinuations:
             failure = asyncio.create_task(
                 rival_stores.second.principal(principal_id).approvals.request_approval_failure(
                     "approval-1",
-                    "response failed",
+                    ApprovalFailure(ApprovalFailureKind.ERROR, "response failed"),
                     expected_state="waiting",
                     expected_generation=0,
                     expected_runtime_generation=None,
@@ -7699,19 +7701,19 @@ class TestApprovalContinuations:
 
         stale = await alice.approvals.request_approval_failure(
             "approval-1",
-            "stale recovery",
+            ApprovalFailure(ApprovalFailureKind.ERROR, "stale recovery"),
             expected_state="waiting",
         )
         failing = await alice.approvals.request_approval_failure(
             "approval-1",
-            "entity is unavailable",
+            ApprovalFailure(ApprovalFailureKind.ERROR, "entity is unavailable"),
             expected_state="ready",
         )
 
         assert stale is None
         assert failing is not None
         assert failing.state == "failing"
-        assert failing.failure_reason == "entity is unavailable"
+        assert failing.failure == ApprovalFailure(ApprovalFailureKind.ERROR, "entity is unavailable")
 
     async def test_failure_request_cannot_fence_a_claim_after_final_delivery_is_enqueued(
         self,
@@ -7732,7 +7734,7 @@ class TestApprovalContinuations:
 
         refused = await alice.approvals.request_approval_failure(
             "approval-1",
-            "entity is unavailable",
+            ApprovalFailure(ApprovalFailureKind.ERROR, "entity is unavailable"),
             expected_state="claimed",
             expected_generation=claimed.generation,
             expected_runtime_generation="runtime-a",
@@ -7765,7 +7767,7 @@ class TestApprovalContinuations:
 
         failing = await alice.approvals.request_approval_failure(
             "approval-1",
-            "final Matrix delivery was permanently refused",
+            ApprovalFailure(ApprovalFailureKind.ERROR, "final Matrix delivery was permanently refused"),
             expected_state="claimed",
             expected_generation=claimed.generation,
             expected_runtime_generation="runtime-a",
@@ -8010,7 +8012,10 @@ class TestApprovalContinuations:
             sending_device_id="OLDDEVICE",
         )
 
-        recorded = await router.approvals.expire_unacknowledged_approval_card(delivery_id="approval-card-1")
+        recorded = await router.approvals.expire_unacknowledged_approval_card(
+            delivery_id="approval-card-1",
+            reason="Tool approval request timed out.",
+        )
 
         assert recorded.recorded is True
         assert recorded.resolution is not None
@@ -8058,7 +8063,7 @@ class TestApprovalContinuations:
         await self.remember_card(alice)
         failing = await alice.approvals.request_approval_failure(
             waiting.approval_id,
-            "Approval publication failed safely.",
+            ApprovalFailure(ApprovalFailureKind.ERROR, "Approval publication failed safely."),
             expected_state="waiting",
         )
         assert failing is not None
@@ -8183,7 +8188,7 @@ class TestApprovalContinuations:
         )
         failing = await alice.approvals.request_approval_failure(
             "approval-1",
-            "interrupted",
+            ApprovalFailure(ApprovalFailureKind.INTERRUPTED),
             expected_state="claimed",
             expected_generation=claimed.generation,
             expected_runtime_generation="runtime-a",
@@ -8213,7 +8218,7 @@ class TestApprovalContinuations:
         assert claimed is not None
         failing = await alice.approvals.request_approval_failure(
             "approval-1",
-            "interrupted",
+            ApprovalFailure(ApprovalFailureKind.INTERRUPTED),
             expected_state="claimed",
             expected_generation=claimed.generation,
             expected_runtime_generation="runtime-a",
@@ -8332,7 +8337,7 @@ class TestApprovalContinuations:
 
         failing = await alice.approvals.request_approval_failure(
             "approval-1",
-            "agent removed",
+            ApprovalFailure(ApprovalFailureKind.ERROR, "agent removed"),
             expected_state="waiting",
         )
         assert failing is not None
@@ -8396,7 +8401,7 @@ class TestApprovalContinuations:
         assert (
             await responder.approvals.request_approval_failure(
                 "approval-1",
-                "agent removed",
+                ApprovalFailure(ApprovalFailureKind.ERROR, "agent removed"),
                 expected_state="waiting",
                 expected_runtime_generation=None,
             )
@@ -8468,7 +8473,7 @@ class TestApprovalContinuations:
         assert (
             await alice.approvals.request_approval_failure(
                 "approval-1",
-                "agent removed",
+                ApprovalFailure(ApprovalFailureKind.ERROR, "agent removed"),
                 expected_state="waiting",
             )
             is not None
@@ -8524,7 +8529,7 @@ class TestApprovalContinuations:
         assert (
             await alice.approvals.request_approval_failure(
                 "approval-1",
-                "agent removed",
+                ApprovalFailure(ApprovalFailureKind.ERROR, "agent removed"),
                 expected_state="waiting",
             )
             is not None
@@ -8921,7 +8926,7 @@ class TestApprovalContinuations:
         continuation = await alice.approvals.approval_continuation("approval-1")
         assert continuation is not None
         assert continuation.state == "failing"
-        assert continuation.failure_reason == "Approval transport left the room."
+        assert continuation.failure == ApprovalFailure(ApprovalFailureKind.ERROR, "Approval transport left the room.")
         assert continuation.calls[0].decision is ApprovalDecision.DENIED
         assert continuation.calls[0].reason == "Approval transport left the room."
         assert [event.event_id for event in await alice.pending(runtime_generation="replacement-runtime")] == [

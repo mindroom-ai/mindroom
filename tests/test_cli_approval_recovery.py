@@ -38,7 +38,7 @@ from mindroom.approval import tool_owners as approval_tools
 from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
-from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
+from mindroom.event_journal import ApprovalCall, ApprovalDecision, ApprovalFailure, approval_arguments_digest
 from mindroom.history.types import HistoryScope
 from mindroom.knowledge.read_protocol import SearchHit
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
@@ -47,6 +47,7 @@ from mindroom.llm.media import Audio, Image
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.media_inputs import MediaInputs
+from mindroom.reply_lifecycle import ApprovalFailureKind
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import (
     CompletedApprovalRun,
@@ -1382,7 +1383,7 @@ async def test_a_cli_wait_a_stop_fenced_settles_through_failure_so_its_cards_exp
     continuation = SimpleNamespace(
         approval_id="approval-1",
         state="failing",
-        failure_reason="cancelled_by_user",
+        failure=ApprovalFailure(ApprovalFailureKind.USER_STOP),
         runtime_generation=None,
         cli_call={"kind": "agent_cli"},
         room_id="!room",
@@ -1419,7 +1420,7 @@ async def test_a_cli_wait_a_stop_fenced_settles_through_failure_so_its_cards_exp
         # Approval recovery settles it at the next start.
         responses.settle_failure.assert_not_awaited()
     else:
-        responses.settle_failure.assert_awaited_once_with(continuation, "cancelled_by_user")
+        responses.settle_failure.assert_awaited_once_with(continuation, ApprovalFailure(ApprovalFailureKind.USER_STOP))
 
 
 @pytest.mark.parametrize("permanently_failed", [False, True])
@@ -1447,7 +1448,7 @@ async def test_a_cli_wait_fails_an_approval_whose_final_matrix_refused(*, perman
         claim=AsyncMock(),
         advance=AsyncMock(),
     )
-    progress = SimpleNamespace(failure_reason=None, delivery_outcome=None)
+    progress = SimpleNamespace(failure_reason=None, cancelled=False, delivery_outcome=None)
 
     await waits._settle("$source", suspended=False, progress=progress, settle_terminal=True)  # type: ignore[arg-type]
 

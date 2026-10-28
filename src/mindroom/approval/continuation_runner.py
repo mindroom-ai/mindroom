@@ -14,6 +14,7 @@ from uuid import uuid4
 from mindroom import reply_lifecycle as rl
 from mindroom.agent_cli.cli_approval_waits import CliApprovalWaits
 from mindroom.approval.execution import AgentApprovalExecution
+from mindroom.approval.failure import cancelled_failure, response_failure
 from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.approval.response import (
     ApprovalResponseCoordinator,
@@ -36,9 +37,9 @@ from mindroom.delivery_gateway import (
     SendTextRequest,
 )
 from mindroom.event_journal import (
-    INTERRUPTED_FAILURE_REASON,
     ApprovalAdvance,
     ApprovalContinuation,
+    ApprovalFailure,
     ApprovalMemoryTurn,
     MatrixDelivery,
 )
@@ -51,12 +52,11 @@ from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.presence import should_use_streaming
 from mindroom.orchestration.runtime import (
-    cancel_failure_reason,
-    cancel_source_from_failure_reason,
     classify_cancel_source,
     current_task_is_process_shutdown,
 )
 from mindroom.post_response_effects import ResponseOutcome
+from mindroom.reply_lifecycle import ApprovalFailureKind
 from mindroom.reply_presentation import (
     AGENT_PLACEHOLDER,
     TEAM_PLACEHOLDER,
@@ -73,7 +73,6 @@ from mindroom.reply_scope import (
     SpanSlot,
     current_span,
     initial_write,
-    interruption_note,
     pause_decision,
     pause_write,
 )
@@ -122,12 +121,11 @@ _APPROVAL_HOLD_RECHECK_SECONDS = 30.0
 _UNANSWERED_RESUME_OUTCOMES = frozenset({rl.SpanOutcome.FAILED, rl.SpanOutcome.CANCELLED, rl.SpanOutcome.SUPPRESSED})
 
 
-def _approval_interruption_cancel_source(reason: str) -> Literal["sync_restart", "interrupted"] | None:
-    """Recover the cancellation provenance persisted for an interrupted approval."""
-    cancel_source = cancel_source_from_failure_reason(reason)
-    if cancel_source == "user_stop" or cancel_failure_reason(cancel_source) != reason:
-        return None
-    return cancel_source
+_SHUTDOWN = ApprovalFailure(ApprovalFailureKind.SHUTDOWN)
+
+
+def _error(detail: str) -> ApprovalFailure:
+    return ApprovalFailure(ApprovalFailureKind.ERROR, detail)
 
 
 def _terminal_status_of_span(span: rl.Span) -> Literal["completed", "cancelled", "error"]:
@@ -305,12 +303,12 @@ class ApprovalContinuationRunner:
         error: BaseException,
     ) -> FinalDeliveryOutcome | None:
         """Return suspension ownership only after failure intent is durable."""
-        reason = (
+        detail = (
             "Tool approval suspension was cancelled."
             if isinstance(error, asyncio.CancelledError)
             else str(error) or "Tool approval suspension failed."
         )
-        continuation = await self._approval_responses.fail_publication(approval_id, reason=reason)
+        continuation = await self._approval_responses.fail_publication(approval_id, failure=_error(detail))
         if continuation is None or continuation.state != "failing":
             return None
         response_event_id = continuation.response_event_id
@@ -977,17 +975,13 @@ class ApprovalContinuationRunner:
         continuation: ApprovalContinuation,
         outcome: FinalDeliveryOutcome,
     ) -> None:
-        """Preserve partial text for interrupted continuations, but not explicit stops."""
-        reason = outcome.failure_reason or "Tool approval continuation failed safely."
-        cancel_source = _approval_interruption_cancel_source(reason)
-        if outcome.terminal_status == "cancelled" and cancel_source is not None:
-            await self._settle_interrupted_approval_recovery(
-                continuation,
-                reason=cancel_failure_reason(cancel_source),
-                cancel_source=cancel_source,
-            )
-        else:
-            await self._approval_responses.settle_failure(continuation, reason)
+        """Settle a resume that ended failed or cancelled with that failure; a hook's suppression is an error."""
+        failure = response_failure(
+            cancel_source=None if outcome.suppressed else outcome.resolved_cancel_source,
+            reason=outcome.failure_reason,
+            default="Tool approval continuation failed safely.",
+        )
+        await self._approval_responses.settle_failure(continuation, failure)
 
     async def _approval_outcome_from_delivery(self, delivery: MatrixDelivery) -> FinalDeliveryOutcome:
         """Restore semantic lifecycle facts from one frozen approval FINAL and the reply it answered."""
@@ -1031,18 +1025,15 @@ class ApprovalContinuationRunner:
             return event_id
         final_delivery = await self._approval_responses.final_delivery(claimed)
         if final_delivery is not None and final_delivery.permanently_failed:
-            settled = await self._approval_responses.settle_failure(
-                claimed,
-                INTERRUPTED_FAILURE_REASON,
-            )
+            settled = await self._approval_responses.settle_failure(claimed, _SHUTDOWN)
             return claimed.response_event_id if settled else None
-        return await self._release_interrupted_approval(claimed, reason=INTERRUPTED_FAILURE_REASON)
+        return await self._release_interrupted_approval(claimed, failure=_SHUTDOWN)
 
     async def _release_interrupted_approval(
         self,
         continuation: ApprovalContinuation,
         *,
-        reason: str,
+        failure: ApprovalFailure,
     ) -> str | None:
         """Release an approved run a restart cut short, so replay continues its reply or its Stop ends it.
 
@@ -1062,34 +1053,10 @@ class ApprovalContinuationRunner:
         # A resume that already ended without its answer has nothing for a replay to continue.
         resume_ended = claim_span is not None and claim_span.outcome in _UNANSWERED_RESUME_OUTCOMES
         if resume_ended or await self._approval_responses.final_delivery(continuation) is not None:
-            settled = await self._approval_responses.settle_failure(continuation, reason)
+            settled = await self._approval_responses.settle_failure(continuation, failure)
             return continuation.response_event_id if settled else None
-        await self._approval_responses.release_to_replay(continuation, reason)
+        await self._approval_responses.release_to_replay(continuation, failure)
         return None
-
-    async def _settle_interrupted_approval_recovery(
-        self,
-        continuation: ApprovalContinuation,
-        *,
-        reason: str,
-        cancel_source: Literal["sync_restart", "interrupted"],
-    ) -> bool:
-        """Fence an uncertain stale claim and settle it with the interruption its reply shows."""
-        failing = continuation
-        if failing.state != "failing":
-            requested = await self._approval_responses.request_failure(
-                failing,
-                reason,
-            )
-            if requested is None:
-                return False
-            failing = requested
-        # The reply's records know what it showed; Matrix is not read back.
-        return await self._approval_responses.settle_failure(
-            failing,
-            reason,
-            interruption=interruption_note(cancel_source),
-        )
 
     async def _recover_frozen_approval_final(
         self,
@@ -1133,7 +1100,7 @@ class ApprovalContinuationRunner:
         claimed: ApprovalContinuation,
         *,
         target: MessageTarget,
-        reason: str,
+        failure: ApprovalFailure,
     ) -> tuple[bool, str | None, ApprovalContinuation | None]:
         """Recover frozen success, or durably fence the observed claim after a recovery error."""
         try:
@@ -1144,7 +1111,7 @@ class ApprovalContinuationRunner:
                 approval_id=claimed.approval_id,
             )
             owns_final, event_id = False, None
-        failing = None if owns_final else await self._approval_responses.request_failure(claimed, reason)
+        failing = None if owns_final else await self._approval_responses.request_failure(claimed, failure)
         return owns_final, event_id, failing
 
     def _approval_response_request(
@@ -1457,11 +1424,11 @@ class ApprovalContinuationRunner:
         self,
         continuation: ApprovalContinuation,
     ) -> str | None:
-        reason = "Current authorization no longer permits this tool approval continuation."
-        failing = await self._approval_responses.request_failure(continuation, reason)
+        failure = _error("Current authorization no longer permits this tool approval continuation.")
+        failing = await self._approval_responses.request_failure(continuation, failure)
         if failing is None:
             return None
-        settled = await self._approval_responses.settle_failure(failing, reason)
+        settled = await self._approval_responses.settle_failure(failing, failure)
         return continuation.response_event_id if settled else None
 
     async def _run_owned_approval_continuation(
@@ -1478,29 +1445,27 @@ class ApprovalContinuationRunner:
             # runtime to hand back to replay. Read here: the detached task that
             # ends the span is no shutdown task.
             process_shutdown = current_task_is_process_shutdown()
-            reason = (
-                INTERRUPTED_FAILURE_REASON if process_shutdown else cancel_failure_reason(classify_cancel_source(error))
-            )
+            failure = _SHUTDOWN if process_shutdown else cancelled_failure(classify_cancel_source(error))
             if not process_shutdown:
                 await run_coroutine_until_complete(self._end_live_resume_span())
             owns_final, event_id, _failing = await run_coroutine_until_complete(
                 self._recover_or_request_claimed_failure(
                     claimed,
                     target=target,
-                    reason=reason,
+                    failure=failure,
                 ),
             )
             if owns_final:
                 return event_id
             raise
         except Exception as error:
-            reason = str(error) or "Tool approval continuation failed safely."
+            failure = _error(str(error) or "Tool approval continuation failed safely.")
             if not current_task_is_process_shutdown():
                 await self._end_live_resume_span()
             owns_final, event_id, failing = await self._recover_or_request_claimed_failure(
                 claimed,
                 target=target,
-                reason=reason,
+                failure=failure,
             )
             if owns_final:
                 return event_id
@@ -1509,7 +1474,7 @@ class ApprovalContinuationRunner:
                 approval_id=claimed.approval_id,
             )
             if failing is not None:
-                settled = await self._approval_responses.settle_failure(failing, reason)
+                settled = await self._approval_responses.settle_failure(failing, failure)
                 event_id = claimed.response_event_id if settled else None
             else:
                 event_id = None
@@ -1608,8 +1573,8 @@ class ApprovalContinuationRunner:
             if delivery is None:
                 return False
             if delivery.permanently_failed:
-                reason = delivery.permanent_failure_reason or "Final Matrix delivery was permanently refused."
-                return await self._approval_responses.settle_failure(continuation, reason)
+                detail = delivery.permanent_failure_reason or "Final Matrix delivery was permanently refused."
+                return await self._approval_responses.settle_failure(continuation, _error(detail))
             if delivery.acknowledged_event_id is None:
                 return False
             if await self._approval_responses.successful_final_delivery(continuation) is None:
@@ -1637,10 +1602,10 @@ class ApprovalContinuationRunner:
         """Recover a non-ready owner, leaving ready execution to the caller."""
         if owned.state == "waiting":
             if owned.runtime_generation is not None:
-                reason = "Tool approval card publication was interrupted and denied safely."
-                failing = await self._approval_responses.request_failure(owned, reason)
+                failure = _error("Tool approval card publication was interrupted and denied safely.")
+                failing = await self._approval_responses.request_failure(owned, failure)
                 if failing is not None:
-                    settled = await self._approval_responses.settle_failure(failing, reason)
+                    settled = await self._approval_responses.settle_failure(failing, failure)
                     return True, owned.response_event_id if settled else None
             return True, None
         if owned.state == "claimed":
@@ -1659,17 +1624,8 @@ class ApprovalContinuationRunner:
         if await self._approval_responses.successful_final_delivery(failing, recover=True) is not None:
             owns_final, event_id = await self._recover_frozen_approval_final(failing, target=target)
             return event_id if owns_final else None
-        reason = failing.failure_reason or "Tool approval continuation failed safely."
-        if reason == INTERRUPTED_FAILURE_REASON:
-            return await self._release_interrupted_approval(failing, reason=reason)
-        cancel_source = _approval_interruption_cancel_source(reason)
-        settled = (
-            await self._settle_interrupted_approval_recovery(
-                failing,
-                reason=reason,
-                cancel_source=cancel_source,
-            )
-            if cancel_source is not None
-            else await self._approval_responses.settle_failure(failing, reason)
-        )
+        assert failing.failure is not None, "a failing continuation holds its failure"
+        if failing.failure.kind is ApprovalFailureKind.SHUTDOWN:
+            return await self._release_interrupted_approval(failing, failure=failing.failure)
+        settled = await self._approval_responses.settle_failure(failing, failing.failure)
         return failing.response_event_id if settled else None

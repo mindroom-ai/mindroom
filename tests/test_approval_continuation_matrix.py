@@ -22,9 +22,9 @@ from mindroom.approval.recovery import ApprovalRecovery
 from mindroom.cancellation import request_task_cancel
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.event_journal import (
-    INTERRUPTED_FAILURE_REASON,
     ApprovalCall,
     ApprovalDecision,
+    ApprovalFailure,
     DeliveryStage,
     EventClass,
     EventKind,
@@ -33,7 +33,7 @@ from mindroom.event_journal import (
 )
 from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowRequest
 from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.reply_lifecycle import NoteKind, ReplyState
+from mindroom.reply_lifecycle import ApprovalFailureKind, NoteKind, ReplyState
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
 from mindroom.response_runner import DeliveryProgress
 from tests.approval_continuation_helpers import (
@@ -63,6 +63,11 @@ _UNAUTHORIZED = "Current authorization no longer permits this tool approval cont
 _CLI_ENDED = "CLI approval response ended before final delivery."
 # The bot instance a restart replaced, which published or claimed the paused reply before it.
 _PREVIOUS = "previous-runtime"
+_STOP = ApprovalFailure(ApprovalFailureKind.USER_STOP)
+_RESTART = ApprovalFailure(ApprovalFailureKind.RESTART)
+_INTERRUPTED = ApprovalFailure(ApprovalFailureKind.INTERRUPTED)
+_SHUTDOWN = ApprovalFailure(ApprovalFailureKind.SHUTDOWN)
+_HTTP_502 = ApprovalFailure(ApprovalFailureKind.ERROR, "The model provider returned HTTP 502.")
 
 
 @dataclass(frozen=True)
@@ -72,7 +77,7 @@ class Outcome:
     # The paused reply's continuation state afterwards, or ``None`` once it ended.
     continuation: str | None
     # The failure the continuation is fenced with, while it is kept failing.
-    failure: str | None = None
+    failure: ApprovalFailure | None = None
     # How many times the reply's response lifecycle was finalized (post-response effects and hooks), live or recovered.
     finalized: int = 0
     # The notes the settlement wrote below the reply, with the error note's text.
@@ -160,7 +165,7 @@ async def _outcome(bot: AgentBot, observer: _Observer, approval_id: str = "appro
     assert reply is not None
     return Outcome(
         continuation=None if current is None else current.state,
-        failure=None if current is None or current.state != "failing" else current.failure_reason,
+        failure=None if current is None else current.failure,
         finalized=observer.lifecycle.finalize.await_count,
         notes=tuple(observer.notes),
         expired=observer.expire.await_count > 0,
@@ -201,10 +206,10 @@ async def _claimed(bot: AgentBot, *, by: str) -> ApprovalContinuation:
     return await _paused(bot, state="claimed", runtime_generation=by)
 
 
-async def _fence(bot: AgentBot, continuation: ApprovalContinuation, reason: str) -> ApprovalContinuation:
+async def _fence(bot: AgentBot, continuation: ApprovalContinuation, failure: ApprovalFailure) -> ApprovalContinuation:
     failing = await _store(bot).approvals.request_approval_failure(
         continuation.approval_id,
-        reason,
+        failure,
         expected_state=continuation.state,
         expected_generation=continuation.generation,
         expected_runtime_generation=continuation.runtime_generation,
@@ -331,7 +336,7 @@ async def _claimed_span_ended(bot: AgentBot) -> ApprovalContinuation:
 
 async def _failing(
     bot: AgentBot,
-    reason: str,
+    failure: ApprovalFailure,
     *,
     final: str | None = None,
     span_ended: bool = False,
@@ -341,12 +346,12 @@ async def _failing(
         await _end_claim_span(bot, claimed)
     if final is not None:
         await _final(bot, claimed, final)
-    return await _fence(bot, claimed, reason)
+    return await _fence(bot, claimed, failure)
 
 
-async def _failing_waiting(bot: AgentBot, reason: str) -> ApprovalContinuation:
+async def _failing_waiting(bot: AgentBot, failure: ApprovalFailure) -> ApprovalContinuation:
     waiting = await _waiting(bot, None)
-    return await _fence(bot, waiting, reason)
+    return await _fence(bot, waiting, failure)
 
 
 _SETTLED_ERROR = Outcome(continuation=None, expired=True, source_pending=False, reply=ReplyState.FAILED)
@@ -380,7 +385,7 @@ DISPATCH_CASES = (
     _DispatchCase(
         "claimed_whose_resume_ended_unanswered_settles_shutdown",
         _claimed_span_ended,
-        replace(_SETTLED_ERROR, notes=((NoteKind.ERROR, INTERRUPTED_FAILURE_REASON),)),
+        replace(_SETTLED_ERROR, notes=((NoteKind.ERROR, _SHUTDOWN.reason),)),
     ),
     _DispatchCase(
         "claimed_with_pending_final_waits",
@@ -405,7 +410,7 @@ DISPATCH_CASES = (
     ),
     _DispatchCase(
         "failing_user_stop_settles_cancelled",
-        lambda bot: _failing_waiting(bot, "cancelled_by_user"),
+        lambda bot: _failing_waiting(bot, _STOP),
         Outcome(
             continuation=None,
             notes=((NoteKind.CANCELLED, None),),
@@ -416,7 +421,7 @@ DISPATCH_CASES = (
     ),
     _DispatchCase(
         "failing_restart_settles_restart_note",
-        lambda bot: _failing(bot, "sync_restart_cancelled"),
+        lambda bot: _failing(bot, _RESTART),
         Outcome(
             continuation=None,
             notes=((NoteKind.RESTART, None),),
@@ -427,7 +432,7 @@ DISPATCH_CASES = (
     ),
     _DispatchCase(
         "failing_interrupted_settles_interrupted_note",
-        lambda bot: _failing(bot, "interrupted"),
+        lambda bot: _failing(bot, _INTERRUPTED),
         Outcome(
             continuation=None,
             notes=((NoteKind.INTERRUPTED, None),),
@@ -438,18 +443,18 @@ DISPATCH_CASES = (
     ),
     _DispatchCase(
         "failing_error_settles_its_text",
-        lambda bot: _failing_waiting(bot, "The model provider returned HTTP 502."),
-        replace(_SETTLED_ERROR, notes=((NoteKind.ERROR, "The model provider returned HTTP 502."),)),
+        lambda bot: _failing_waiting(bot, _HTTP_502),
+        replace(_SETTLED_ERROR, notes=((NoteKind.ERROR, _HTTP_502.reason),)),
     ),
     _DispatchCase(
         "failing_shutdown_without_final_releases_to_replay",
-        lambda bot: _failing(bot, INTERRUPTED_FAILURE_REASON),
+        lambda bot: _failing(bot, _SHUTDOWN),
         Outcome(continuation=None, expired=True, reply=ReplyState.ACTIVE),
     ),
     _DispatchCase(
         "failing_shutdown_whose_resume_ended_unanswered_settles_shutdown",
-        lambda bot: _failing(bot, INTERRUPTED_FAILURE_REASON, span_ended=True),
-        replace(_SETTLED_ERROR, notes=((NoteKind.ERROR, INTERRUPTED_FAILURE_REASON),)),
+        lambda bot: _failing(bot, _SHUTDOWN, span_ended=True),
+        replace(_SETTLED_ERROR, notes=((NoteKind.ERROR, _SHUTDOWN.reason),)),
     ),
     _DispatchCase(
         "failing_with_answered_final_finishes_and_finalizes",
@@ -469,7 +474,7 @@ DISPATCH_CASES = (
     _DispatchCase(
         "failing_with_pending_answer_waits",
         lambda bot: _failing_with_final(bot, "pending"),
-        Outcome(continuation="failing", failure="The model provider returned HTTP 502.", reply=ReplyState.COMPLETED),
+        Outcome(continuation="failing", failure=_HTTP_502, reply=ReplyState.COMPLETED),
         stall_final=True,
     ),
 )
@@ -478,7 +483,7 @@ DISPATCH_CASES = (
 async def _failing_with_final(bot: AgentBot, final: str) -> ApprovalContinuation:
     """Fence a claim with an error, then give it its final answer, as a failure racing a resume's answer."""
     claimed = await _claimed(bot, by=_PREVIOUS)
-    failing = await _fence(bot, claimed, "The model provider returned HTTP 502.")
+    failing = await _fence(bot, claimed, _HTTP_502)
     await _final(bot, claimed, final)
     return failing
 
@@ -781,11 +786,11 @@ async def test_resumed_cancelled_in_its_run_settles_with_its_note(
 @pytest.mark.parametrize(
     ("cancel_source", "process_shutdown", "before_run", "failure"),
     [
-        ("user_stop", False, True, "cancelled_by_user"),
-        ("sync_restart", False, True, "sync_restart_cancelled"),
-        (None, False, True, "interrupted"),
-        ("sync_restart", True, True, INTERRUPTED_FAILURE_REASON),
-        ("sync_restart", True, False, INTERRUPTED_FAILURE_REASON),
+        ("user_stop", False, True, _STOP),
+        ("sync_restart", False, True, _RESTART),
+        (None, False, True, _INTERRUPTED),
+        ("sync_restart", True, True, _SHUTDOWN),
+        ("sync_restart", True, False, _SHUTDOWN),
     ],
     ids=["user_stop", "restart", "interrupted", "shutdown_before_run", "shutdown_in_run"],
 )
@@ -794,7 +799,7 @@ async def test_resumed_cancelled_outside_its_run_fences_its_kind_and_reraises(
     cancel_source: str | None,
     process_shutdown: bool,
     before_run: bool,
-    failure: str,
+    failure: ApprovalFailure,
 ) -> None:
     """A resume cancelled outside its run, or by a shutdown, fences the observed claim and re-raises; dispatch settles."""
     bot = _new_bot(tmp_path)
@@ -951,15 +956,19 @@ async def _cli(
     return continuation
 
 
-async def _cli_failing(bot: AgentBot, reason: str, *, final: str | None = None) -> ApprovalContinuation:
+async def _cli_failing(bot: AgentBot, failure: ApprovalFailure, *, final: str | None = None) -> ApprovalContinuation:
     claimed = await _cli(bot, by=_self(bot))
-    failing = await _fence(bot, claimed, reason)
+    failing = await _fence(bot, claimed, failure)
     if final is not None:
         await _final(bot, claimed, final)
     return failing
 
 
-_FENCED_CLI = Outcome(continuation="failing", failure=_CLI_ENDED, reply=ReplyState.ACTIVE)
+_FENCED_CLI = Outcome(
+    continuation="failing",
+    failure=ApprovalFailure(ApprovalFailureKind.ERROR, _CLI_ENDED),
+    reply=ReplyState.ACTIVE,
+)
 
 CLI_CASES = (
     _CliCase(
@@ -993,7 +1002,7 @@ CLI_CASES = (
     ),
     _CliCase(
         "failing_settles_with_its_failure",
-        lambda bot: _cli_failing(bot, "cancelled_by_user"),
+        lambda bot: _cli_failing(bot, _STOP),
         Outcome(
             continuation=None,
             notes=((NoteKind.CANCELLED, None),),
@@ -1004,13 +1013,13 @@ CLI_CASES = (
     ),
     _CliCase(
         "failing_during_shutdown_leaves_it_to_recovery",
-        lambda bot: _cli_failing(bot, "The model provider returned HTTP 502."),
-        Outcome(continuation="failing", failure="The model provider returned HTTP 502.", reply=ReplyState.ACTIVE),
+        lambda bot: _cli_failing(bot, _HTTP_502),
+        Outcome(continuation="failing", failure=_HTTP_502, reply=ReplyState.ACTIVE),
         shutting_down=True,
     ),
     _CliCase(
         "failing_with_answered_final_finishes",
-        lambda bot: _cli_failing(bot, "The model provider returned HTTP 502.", final="answered"),
+        lambda bot: _cli_failing(bot, _HTTP_502, final="answered"),
         Outcome(continuation=None, source_pending=False, reply=ReplyState.COMPLETED),
     ),
     _CliCase(
@@ -1038,8 +1047,8 @@ CLI_CASES = (
     _CliCase(
         "claimed_without_final_fences_with_the_response_failure",
         lambda bot: _cli(bot, by=_self(bot)),
-        replace(_FENCED_CLI, failure="The model provider returned HTTP 502."),
-        failure_reason="The model provider returned HTTP 502.",
+        replace(_FENCED_CLI, failure=_HTTP_502),
+        failure_reason=_HTTP_502.detail,
         wakes=(("$source",),),
     ),
     _CliCase(
@@ -1120,7 +1129,11 @@ async def test_owner_unavailable_without_final_discards_with_a_notice(tmp_path: 
     notice.assert_awaited_once()
     assert notice.await_args.args[1] == _UNAVAILABLE
     recover_final.assert_not_awaited()
-    assert await _outcome(bot, observer) == Outcome(continuation="failing", failure=_UNAVAILABLE, expired=True)
+    assert await _outcome(bot, observer) == Outcome(
+        continuation="failing",
+        failure=ApprovalFailure(ApprovalFailureKind.ERROR, _UNAVAILABLE),
+        expired=True,
+    )
 
 
 @pytest.mark.parametrize("final", ["pending", "answered", "ended", "refused"])
@@ -1177,5 +1190,5 @@ async def test_settle_leaves_a_reply_whose_answer_stands(tmp_path: Path) -> None
     bot = _new_bot(tmp_path)
     continuation = await _claimed_with_final(bot, "answered")
     with _observed(bot) as observer:
-        assert not await _runner(bot)._approvals._approval_responses.settle_failure(continuation, "boom")
+        assert not await _runner(bot)._approvals._approval_responses.settle_failure(continuation, _HTTP_502)
     assert await _outcome(bot, observer) == Outcome(continuation="claimed", reply=ReplyState.COMPLETED)

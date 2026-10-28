@@ -11,8 +11,9 @@ from mindroom.approval.recovery import ApprovalRecovery
 from mindroom.approval.response import ApprovalResponseCoordinator
 from mindroom.config.main import Config
 from mindroom.delivery_gateway import DeliveryGateway
-from mindroom.event_journal import ApprovalContinuation, EventJournalStore, PrincipalStore
+from mindroom.event_journal import ApprovalContinuation, ApprovalFailure, EventJournalStore, PrincipalStore
 from mindroom.event_journal.approval_store import ApprovalStore
+from mindroom.reply_lifecycle import ApprovalFailureKind
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import test_runtime_paths
 
@@ -30,7 +31,7 @@ def _continuation() -> ApprovalContinuation:
         requester_id="@human:test",
         response_event_id="$response",
         state="failing",
-        failure_reason="cancelled_by_user",
+        failure=ApprovalFailure(ApprovalFailureKind.USER_STOP),
     )
 
 
@@ -69,14 +70,14 @@ async def test_source_failure_cancels_children_before_finishing(tmp_path: Path) 
             new=AsyncMock(side_effect=cancel),
         ) as cancel_children,
     ):
-        assert await coordinator.settle_failure(continuation, "cancelled_by_user")
+        assert await coordinator.settle_failure(continuation, ApprovalFailure(ApprovalFailureKind.USER_STOP))
 
     assert order == ["children", "source"]
     cancel_children.assert_awaited_once_with(
         continuation,
         config=config,
         runtime_paths=paths,
-        reason="cancelled_by_user",
+        reason=ApprovalFailure(ApprovalFailureKind.USER_STOP).reason,
     )
 
 
@@ -107,7 +108,7 @@ async def test_failure_reply_redacts_credentials_from_reason(tmp_path: Path) -> 
         patch("mindroom.approval.response.prepare_approval_failure", new=AsyncMock(return_value=continuation)),
         patch("mindroom.approval.response.cancel_approval_delegations", new=AsyncMock()),
     ):
-        assert await coordinator.settle_failure(continuation, reason)
+        assert await coordinator.settle_failure(continuation, ApprovalFailure(ApprovalFailureKind.ERROR, reason))
 
     visible = gateway.write_approval_failure_note.await_args.kwargs["text"]
     assert api_key not in visible
@@ -116,11 +117,14 @@ async def test_failure_reply_redacts_credentials_from_reason(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize(
-    ("reason", "note"),
-    [("cancelled_by_user", "cancelled"), ("Paused run is no longer available", "error")],
+    ("failure", "note"),
+    [
+        (ApprovalFailure(ApprovalFailureKind.USER_STOP), "cancelled"),
+        (ApprovalFailure(ApprovalFailureKind.ERROR, "Paused run is no longer available"), "error"),
+    ],
 )
 @pytest.mark.asyncio
-async def test_failure_reply_is_marked_interrupted(tmp_path: Path, reason: str, note: str) -> None:
+async def test_failure_reply_is_marked_interrupted(tmp_path: Path, failure: ApprovalFailure, note: str) -> None:
     """Clients and later turns treat a stopped or failed continuation as interrupted, not as a finished reply."""
     continuation = _continuation()
     store = MagicMock(spec=ApprovalStore)
@@ -143,7 +147,7 @@ async def test_failure_reply_is_marked_interrupted(tmp_path: Path, reason: str, 
         patch("mindroom.approval.response.prepare_approval_failure", new=AsyncMock(return_value=continuation)),
         patch("mindroom.approval.response.cancel_approval_delegations", new=AsyncMock()),
     ):
-        assert await coordinator.settle_failure(continuation, reason)
+        assert await coordinator.settle_failure(continuation, failure)
 
     assert gateway.write_approval_failure_note.await_args.kwargs["note"] == note
 

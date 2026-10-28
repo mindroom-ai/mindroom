@@ -74,6 +74,7 @@ Matrix sync callback
 | `event_journal/replies.py` | `ReplyStore`: reply rules applied inside journal transactions, with their in-transaction effects |
 | `event_journal/approval_store.py` | `ApprovalStore`: one principal's approval cards, grants, background and scheduled calls, and paused-run continuations |
 | `event_journal/legacy_response_attempts.py` | One-time cancellation of the approvals an earlier release left pending, and removal of the tables that kept their reply identity |
+| `event_journal/legacy_approval_failures.py` | One-time conversion of the free-text failure reasons failing approval continuations stored into their failure kind and detail |
 | `event_journal/scheduled_approvals.py` | Stored scheduled tool calls and their one-shot approvals: binding, fire-time arming, withdrawal, claim with its receipt, and outcome |
 | `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish |
 | `pending_event_worker.py` | Decides when pending journal work runs, and wakes itself again whenever a pass stops early |

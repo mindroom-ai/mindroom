@@ -48,6 +48,7 @@ from mindroom.event_journal import (
     ApprovalCall,
     ApprovalCardReservation,
     ApprovalContinuation,
+    ApprovalFailure,
     DeliveryAcknowledgement,
     DeliveryStage,
     DepartureSource,
@@ -66,6 +67,7 @@ from mindroom.matrix.large_messages import (
     content_fits_normal_event,
 )
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content
+from mindroom.reply_lifecycle import ApprovalFailureKind
 from mindroom.response_sources import ResponseSources
 from mindroom.tools import approved_egress as _approved_egress  # noqa: F401 - registers the approval exemption
 from mindroom.tools import config_manager as _config_manager  # noqa: F401 - registers the approval exemptions
@@ -1027,7 +1029,10 @@ async def test_deadline_sweep_expires_an_unacknowledged_card_and_wakes_its_conti
 
     assert await manager._expire_stored("!room:localhost", stored) is False
 
-    cards.approvals.expire_unacknowledged_approval_card.assert_awaited_once_with(delivery_id="approval-card-1")
+    cards.approvals.expire_unacknowledged_approval_card.assert_awaited_once_with(
+        delivery_id="approval-card-1",
+        reason="Tool approval request timed out.",
+    )
     wake.assert_awaited_once_with("code", "!room:example.org", ("$source",))
 
 
@@ -1393,7 +1398,7 @@ async def test_removed_owner_cleanup_recovers_notice_after_matrix_device_change(
             ),
         ),
         state="failing",
-        failure_reason=reason,
+        failure=ApprovalFailure(ApprovalFailureKind.ERROR, reason),
     )
     assert await paused_for_approval(principal, continuation) == continuation
     notice_content = build_message_content(
@@ -1520,7 +1525,7 @@ async def test_removed_owner_cleanup_retries_a_stale_notice_in_current_membershi
             ),
         ),
         state="failing",
-        failure_reason=reason,
+        failure=ApprovalFailure(ApprovalFailureKind.ERROR, reason),
     )
     assert await paused_for_approval(principal, continuation) == continuation
     stale_delivery_id = await notice_store.approvals.enqueue_unavailable_approval_notice(
@@ -1625,7 +1630,7 @@ async def test_removed_owner_notice_refusal_remains_durable_and_rearms_retry(tmp
             ),
         ),
         state="failing",
-        failure_reason="Requesting agent 'removed' is no longer available.",
+        failure=ApprovalFailure(ApprovalFailureKind.ERROR, "Requesting agent 'removed' is no longer available."),
     )
     assert await paused_for_approval(principal, continuation) == continuation
     await notice_store.admit(

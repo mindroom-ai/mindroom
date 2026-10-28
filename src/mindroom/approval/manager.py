@@ -1010,8 +1010,8 @@ class ApprovalManager:
             card_event_id=card_event_id,
         )
 
-    async def expire_continuation_cards(self, continuation_id: str) -> bool:
-        """Enqueue and flush expiry for every card owned by one failed continuation."""
+    async def expire_continuation_cards(self, continuation_id: str, reason: str) -> bool:
+        """Enqueue and flush expiry for every card owned by one failed continuation, with its failure's reason."""
         if self.cards is None:
             return False
         complete = True
@@ -1022,7 +1022,7 @@ class ApprovalManager:
                         complete = False
                     continue
                 if stored.target_kind == "continuation" and stored.continuation_id == continuation_id:
-                    complete = await self._expire_stored(room_id, stored) and complete
+                    complete = await self._expire_stored(room_id, stored, reason=reason) and complete
         return complete
 
     @staticmethod
@@ -1079,11 +1079,20 @@ class ApprovalManager:
                 event_ids.append(stored.card_event_id)
         return tuple(event_ids)
 
-    async def _expire_stored(self, room_id: str, stored: StoredApprovalCard) -> bool:
+    async def _expire_stored(
+        self,
+        room_id: str,
+        stored: StoredApprovalCard,
+        *,
+        reason: str = _DEFAULT_TIMEOUT_REASON,
+    ) -> bool:
         if self.cards is None or (stored.card_event_id is None and stored.resolution is not None):
             return False
         if stored.card_event_id is None:
-            recorded = await self.cards.approvals.expire_unacknowledged_approval_card(delivery_id=stored.delivery_id)
+            recorded = await self.cards.approvals.expire_unacknowledged_approval_card(
+                delivery_id=stored.delivery_id,
+                reason=reason,
+            )
             if recorded.recorded and recorded.continuation_ready:
                 await self._wake_continuation(recorded)
             return False
@@ -1100,7 +1109,7 @@ class ApprovalManager:
             pending,
             stored,
             status="expired",
-            reason=_DEFAULT_TIMEOUT_REASON,
+            reason=reason,
             resolved_by=None,
         )
 

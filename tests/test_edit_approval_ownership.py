@@ -16,7 +16,7 @@ from mindroom import reply_lifecycle as rl
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.event_journal import DeliveryStage, EventClass, EventKind
+from mindroom.event_journal import ApprovalFailure, DeliveryStage, EventClass, EventKind
 from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowRequest
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.history.types import HistoryScope
@@ -26,6 +26,7 @@ from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
+from mindroom.reply_lifecycle import ApprovalFailureKind
 from mindroom.reply_scope import ReplyRuntime
 from mindroom.response_runner import DeliveryProgress, ResponseRunner
 from mindroom.response_sources import ResponseSources
@@ -475,7 +476,7 @@ class TestEditApprovalOwnership:
         failing = await case.principal.approvals.approval_continuation(case.approval.approval_id)
         assert failing is not None
         assert failing.state == "failing"
-        assert failing.failure_reason == "cancelled_by_user"
+        assert failing.failure == ApprovalFailure(ApprovalFailureKind.USER_STOP)
         # The regeneration waits for the approval's settlement, which the Stop woke.
         assert await case.principal.is_pending("$newer-edit")
         assert ("$newer-edit",) not in retried
@@ -554,7 +555,7 @@ class TestEditApprovalOwnership:
         failing = await case.principal.approvals.approval_continuation(case.approval.approval_id)
         assert failing is not None
         assert failing.state == "failing"
-        assert failing.failure_reason == "cancelled_by_user"
+        assert failing.failure == ApprovalFailure(ApprovalFailureKind.USER_STOP)
         # An approval after the deletion runs nothing.
         await case.approve()
         resumed = AsyncMock(side_effect=AssertionError("A deleted message's approval must not execute"))

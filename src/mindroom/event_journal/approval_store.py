@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from mindroom.tool_approval_grants import ApprovalGrant, ApprovalGrantRevocation, ApprovalGrantScope
 
     from .approval_card_state import ApprovalCardReservation, ApprovalDecisionMetadata, RecordedApprovalDecision
-    from .approval_continuations import ApprovalContinuation, ApprovalContinuationState
+    from .approval_continuations import ApprovalContinuation, ApprovalContinuationState, ApprovalFailure
     from .approvals import StoredApprovalCard, UnreadableApprovalCard
     from .backend import Backend, Transaction
     from .background_approvals import BackgroundApprovalDecision
@@ -333,15 +333,16 @@ class ApprovalStore:
         self,
         *,
         delivery_id: str,
+        reason: str,
     ) -> RecordedApprovalDecision:
-        """Atomically expire a due call whose attempted card still lacks an event ID."""
+        """Atomically expire a due call whose attempted card still lacks an event ID, with ``reason``."""
         return await self._backend.write(
             lambda transaction: approvals.resolve_card(
                 transaction,
                 self._principal_id,
                 card_event_id=None,
                 requested_status="expired",
-                reason=None,
+                reason=reason,
                 metadata=None,
                 delivery_id=delivery_id,
             ),
@@ -558,7 +559,7 @@ class ApprovalStore:
     async def request_approval_failure(
         self,
         approval_id: str,
-        reason: str,
+        failure: ApprovalFailure,
         *,
         expected_state: ApprovalContinuationState,
         expected_generation: int = 0,
@@ -570,7 +571,7 @@ class ApprovalStore:
                 transaction,
                 self._principal_id,
                 approval_id=approval_id,
-                reason=reason,
+                failure=failure,
                 expected_state=expected_state,
                 expected_generation=expected_generation,
                 expected_runtime_generation=expected_runtime_generation,

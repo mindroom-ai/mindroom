@@ -21,6 +21,7 @@ from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.event_journal import (
     ApprovalCall,
     ApprovalDecisionMetadata,
+    ApprovalFailure,
     BackgroundApprovalDecision,
     DeliveryStage,
     EventClass,
@@ -34,6 +35,7 @@ from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.large_messages import content_fits_normal_event
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
+from mindroom.reply_lifecycle import ApprovalFailureKind
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_approval_grants import AUTO_APPROVE_OPTIONS, ApprovalOperation, grant_operation
 from tests.approval_continuation_helpers import approval_continuation
@@ -870,7 +872,7 @@ async def test_terminal_calls_win_over_grants(
         if terminal == "failing":
             await responder.approvals.request_approval_failure(
                 "second",
-                "execution binding changed",
+                ApprovalFailure(ApprovalFailureKind.ERROR, "execution binding changed"),
                 expected_state="waiting",
                 expected_generation=0,
                 expected_runtime_generation=None,

@@ -400,7 +400,9 @@ _TABLES = (
         state TEXT NOT NULL CHECK (state IN ('waiting', 'ready', 'failing')),
         generation BIGINT NOT NULL DEFAULT 0,
         runtime_generation TEXT,
-        failure_reason TEXT,
+        -- Why a failing continuation failed, and what failed for an 'error'.
+        failure_kind TEXT,
+        failure_detail TEXT,
         context_json TEXT NOT NULL,
         created_at_ns BIGINT NOT NULL,
         PRIMARY KEY (principal_id, approval_id)

@@ -50,9 +50,9 @@ from mindroom.approval.tool_approval import (
 from mindroom.config.main import Config
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.event_journal import (
-    INTERRUPTED_FAILURE_REASON,
     ApprovalDecision,
     ApprovalDecisionMetadata,
+    ApprovalFailure,
     DeliveryStage,
     EventClass,
     EventJournalStore,
@@ -65,6 +65,7 @@ from mindroom.event_journal import (
 from mindroom.event_journal.schema import SQLITE_DIALECT, schema_statements
 from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.message_builder import build_thread_relation
+from mindroom.reply_lifecycle import ApprovalFailureKind
 from mindroom.response_sources import ResponseSources
 from mindroom.session_ids import create_session_id
 from mindroom.tool_approval_grants import ANY_ARGUMENTS, canonical_arguments, grant_operation
@@ -391,14 +392,14 @@ class _Recording:
         assert stopped
         await self.responder.settle(stop_event_id)
 
-    async def fail(self, name: str, reason: str) -> None:
+    async def fail(self, name: str, failure: ApprovalFailure) -> None:
         """Fence the continuation ``name`` for failure in the state it holds, as its owner does."""
         self.clock.advance()
         current = await self.responder.approvals.approval_continuation(name)
         assert current is not None
         failing = await self.responder.approvals.request_approval_failure(
             name,
-            reason,
+            failure,
             expected_state=current.state,
             expected_generation=current.generation,
             expected_runtime_generation=current.runtime_generation,
@@ -674,28 +675,34 @@ async def _failing(run: _Recording) -> None:
     await run.stop("stopped")
     # Resumes cut short after their call was approved: a sync restart, a cancellation of unknown origin, and a
     # shutdown that left the run for the next instance.
-    for name, reason in (
-        ("sync-restart", "sync_restart_cancelled"),
-        ("interrupted", "interrupted"),
-        ("shutdown", INTERRUPTED_FAILURE_REASON),
+    for name, kind in (
+        ("sync-restart", ApprovalFailureKind.RESTART),
+        ("interrupted", ApprovalFailureKind.INTERRUPTED),
+        ("shutdown", ApprovalFailureKind.SHUTDOWN),
     ):
         await run.pause(name, _push())
         await run.decide(_card(f"{name}-0-0"), "approved")
         await run.claim(name)
-        await run.fail(name, reason)
+        await run.fail(name, ApprovalFailure(kind))
     # A ready run its owner could not resume, failed with the error it met.
     await run.pause("errored", _push())
     await run.decide(_card("errored-0-0"), "approved")
-    await run.fail("errored", "Tool approval resume failed: the model provider returned HTTP 502.")
-    for name, reason in (
-        ("stopped", "cancelled_by_user"),
-        ("sync-restart", "sync_restart_cancelled"),
-        ("interrupted", "interrupted"),
-        ("shutdown", INTERRUPTED_FAILURE_REASON),
+    await run.fail(
+        "errored",
+        ApprovalFailure(
+            ApprovalFailureKind.ERROR,
+            "Tool approval resume failed: the model provider returned HTTP 502.",
+        ),
+    )
+    for name, kind in (
+        ("stopped", ApprovalFailureKind.USER_STOP),
+        ("sync-restart", ApprovalFailureKind.RESTART),
+        ("interrupted", ApprovalFailureKind.INTERRUPTED),
+        ("shutdown", ApprovalFailureKind.SHUTDOWN),
     ):
         continuation = await run.responder.approvals.approval_continuation(name)
         assert continuation is not None
-        assert (continuation.state, continuation.failure_reason) == ("failing", reason)
+        assert (continuation.state, continuation.failure) == ("failing", ApprovalFailure(kind))
 
 
 @_scenario("07_chained_generation")

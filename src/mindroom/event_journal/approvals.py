@@ -342,7 +342,7 @@ def _resolve_continuation(
     generation = int(generation_value)
     continuation = transaction.fetchone(
         """
-        SELECT principal_id, state, generation, failure_reason
+        SELECT principal_id, state, generation, failure_kind, failure_detail
         FROM approval_continuations WHERE approval_id = ?
         """,
         (continuation_id,),
@@ -367,7 +367,7 @@ def _resolve_continuation(
     )
     if call is None:
         return RecordedApprovalDecision(resolution=None, recorded=False)
-    failure_reason = cast("str | None", continuation["failure_reason"])
+    failure = approval_continuations.failure_of_row(continuation)
     expired = time.time_ns() >= int(call["expires_at_ns"])
     if metadata is None and not expired:
         return RecordedApprovalDecision(resolution=None, recorded=False)
@@ -375,9 +375,7 @@ def _resolve_continuation(
         requested_status=requested_status,
         requested_reason=reason,
         expired=expired,
-        failure_reason=(failure_reason or "Tool approval continuation failed safely.")
-        if continuation["state"] == "failing"
-        else None,
+        failure_reason=None if failure is None else failure.reason,
     )
     stored_resolution = approval_card_state.stored_resolution(
         card,
@@ -453,7 +451,10 @@ def _effective_continuation_decision(
     failure_reason: str | None,
 ) -> tuple[Literal["approved", "denied", "expired"], str | None]:
     """Apply deadline and failure fences to one requested decision."""
-    if requested_status == "expired" or expired:
+    if requested_status == "expired":
+        # A failed continuation ends its cards with its failure's reason.
+        return "expired", requested_reason or approval_card_state.TIMEOUT_REASON
+    if expired:
         return "expired", approval_card_state.TIMEOUT_REASON
     if requested_status == "approved" and failure_reason is not None:
         return "denied", failure_reason
@@ -590,7 +591,7 @@ def fail_continuations_for_departed_card_owner(
     transaction.execute(
         """
         UPDATE approval_continuations
-        SET state = 'failing', failure_reason = ?, runtime_generation = NULL
+        SET state = 'failing', failure_kind = 'error', failure_detail = ?, runtime_generation = NULL
         WHERE state IN ('waiting', 'ready')
           AND EXISTS (
               SELECT 1 FROM approval_cards AS cards

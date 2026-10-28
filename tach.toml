@@ -532,6 +532,7 @@ depends_on = [
 visibility = [
     "mindroom.agent_cli.delegation",
     "mindroom.event_journal.legacy_response_attempts",
+    "mindroom.approval.failure",
     "mindroom.approval.recovery",
     "mindroom.agent_reply_membership_sync",
     "mindroom.approval.continuation_runner",
@@ -1452,7 +1453,6 @@ depends_on = [
     "mindroom.response_sources",
     "mindroom.approval.failure",
     "mindroom.approval.manager",
-    "mindroom.cancellation",
     "mindroom.constants",
     "mindroom.delegation.recovery",
     "mindroom.delegation.state",
@@ -1473,6 +1473,7 @@ path = "mindroom.approval.continuation_runner"
 depends_on = [
     "mindroom.agent_cli.cli_approval_waits",
     "mindroom.approval.execution",
+    "mindroom.approval.failure",
     "mindroom.approval.receipt_readers",
     "mindroom.approval.response",
     "mindroom.constants",
@@ -7877,12 +7878,17 @@ depends_on = ["mindroom.cli.api", "mindroom.cli.config", "mindroom.config.legacy
 
 [[modules]]
 path = "mindroom.approval.failure"
-depends_on = []
-visibility = ["mindroom.approval.recovery", "mindroom.approval.response"]
+depends_on = ["mindroom.event_journal", "mindroom.reply_lifecycle"]
+visibility = [
+    "mindroom.agent_cli.cli_approval_waits",
+    "mindroom.approval.continuation_runner",
+    "mindroom.approval.recovery",
+    "mindroom.approval.response",
+]
 
 [[modules]]
 path = "mindroom.approval.recovery"
-depends_on = ["mindroom.approval.failure", "mindroom.event_journal", "mindroom.logging_config"]
+depends_on = ["mindroom.approval.failure", "mindroom.event_journal", "mindroom.logging_config", "mindroom.reply_lifecycle"]
 visibility = ["mindroom.orchestrator"]
 
 [[modules]]
@@ -9346,6 +9352,7 @@ path = "mindroom.agent_cli.cli_approval_waits"
 depends_on = [
     "mindroom.agent_cli.events",
     "mindroom.agent_cli.lifetime",
+    "mindroom.approval.failure",
     "mindroom.event_journal",
     "mindroom.orchestration.runtime",
     "mindroom.response_turn",

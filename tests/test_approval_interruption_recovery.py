@@ -9,7 +9,9 @@ import pytest
 import pytest_asyncio
 
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
+from mindroom.event_journal import ApprovalFailure
 from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.reply_lifecycle import ApprovalFailureKind
 from mindroom.runtime_shutdown import ENTITY_REMOVED_SHUTDOWN
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
 from tests.approval_continuation_helpers import approval_continuation, resumed_approval
@@ -101,7 +103,10 @@ async def test_missing_approval_owner_does_not_edit_the_reply(
     """Successful no-op retirement is not evidence of a visible interruption."""
     bot, claimed = approval
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    failing = await runner._approvals._approval_responses.request_failure(claimed, "sync_restart_cancelled")
+    failing = await runner._approvals._approval_responses.request_failure(
+        claimed,
+        ApprovalFailure(ApprovalFailureKind.RESTART),
+    )
     assert failing is not None
     await bot._journal_store.backend.write(lambda tx: tx.execute("DELETE FROM approval_continuations"))
     sends = bot.client.room_send.await_count

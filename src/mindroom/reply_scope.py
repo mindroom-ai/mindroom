@@ -940,7 +940,7 @@ class _NotedEnd:
     note: Segment
 
 
-def interruption_note(cancel_source: CancelSource) -> NoteKind:
+def _interruption_note(cancel_source: CancelSource) -> NoteKind:
     """Return the note a reply shows below what it showed when a restart or another cancellation cut it short."""
     return NoteKind.RESTART if cancel_source == "sync_restart" else NoteKind.INTERRUPTED
 
@@ -971,5 +971,5 @@ def interrupted_end(
         )
     if reply.event_id is None:
         return None
-    note = note_segment(interruption_note(cancel_source))
+    note = note_segment(_interruption_note(cancel_source))
     return _NotedEnd(rl.ReplyState.FAILED if delivery_started else rl.ReplyState.ACTIVE, note)

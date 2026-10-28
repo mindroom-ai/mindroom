@@ -10,7 +10,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.history.types import HistoryScope
-from mindroom.reply_lifecycle import ReplyState
+from mindroom.reply_lifecycle import ApprovalFailureKind, ReplyState
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload, serialize_tool_execution_identity
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
@@ -31,7 +31,7 @@ type ApprovalContinuationState = Literal["waiting", "ready", "claimed", "failing
 
 _CONTINUATION_COLUMNS = """
     approval_id, span_id, claim_span_id, state, generation,
-    runtime_generation, failure_reason, context_json
+    runtime_generation, failure_kind, failure_detail, context_json
 """
 
 # A continuation holds the pending sources of the span whose pause created it.
@@ -62,9 +62,35 @@ def holds_source_in_room(alias: str) -> str:
     """  # noqa: S608 - a fixed alias, not input
 
 
-# The failure reason of a resume a shutdown cut short, which the next instance
-# hands back to replay.
-INTERRUPTED_FAILURE_REASON = "Tool approval continuation was interrupted before final delivery and denied safely."
+# What a failure with no detail of its own says, as an approval's cards and its reply's error note show it.
+_FAILURE_REASONS = {
+    ApprovalFailureKind.ERROR: "Tool approval continuation failed safely.",
+    ApprovalFailureKind.USER_STOP: "Tool approval request ended because the reply was stopped.",
+    ApprovalFailureKind.RESTART: "Tool approval request ended because MindRoom restarted.",
+    ApprovalFailureKind.INTERRUPTED: "Tool approval request ended because the reply was interrupted.",
+    ApprovalFailureKind.SHUTDOWN: "Tool approval continuation was interrupted before final delivery and denied safely.",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalFailure:
+    """Why a paused reply's approval failed: its kind, and what failed for an ``ERROR``."""
+
+    kind: ApprovalFailureKind
+    detail: str | None = None
+
+    @property
+    def reason(self) -> str:
+        """Return the text that explains the failure: its cards' denial reason, and an error note's text."""
+        return self.detail or _FAILURE_REASONS[self.kind]
+
+
+def failure_of_row(row: Row) -> ApprovalFailure | None:
+    """Decode the failure an ``approval_continuations`` row stores."""
+    kind = cast("str | None", row["failure_kind"])
+    return (
+        None if kind is None else ApprovalFailure(ApprovalFailureKind(kind), cast("str | None", row["failure_detail"]))
+    )
 
 
 def _unavailable_notice_delivery_id(approval_id: str, membership_epoch: int) -> str:
@@ -217,7 +243,8 @@ class ApprovalContinuation:
     # The bot instance publishing a waiting generation's cards, or the one
     # whose span runs a claimed continuation.
     runtime_generation: str | None = None
-    failure_reason: str | None = None
+    # Why a failing continuation failed; every failing continuation has one.
+    failure: ApprovalFailure | None = None
     generation: int = 0
     cli_call: dict[str, object] | None = None
     continuation_count: int = 0
@@ -406,7 +433,7 @@ def _from_rows(
             if claimed
             else cast("str | None", row["runtime_generation"])
         ),
-        failure_reason=cast("str | None", row["failure_reason"]),
+        failure=failure_of_row(row),
         generation=generation,
         span_id=cast("str | None", row["span_id"]),
         claim_span_id=claim_span_id,
@@ -486,9 +513,9 @@ def create(
     inserted = transaction.fetchone(
         """
         INSERT INTO approval_continuations (
-            principal_id, approval_id, span_id, state,
-            generation, runtime_generation, failure_reason, context_json, created_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            principal_id, approval_id, span_id, state, generation,
+            runtime_generation, failure_kind, failure_detail, context_json, created_at_ns
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (approval_id) DO NOTHING
         RETURNING approval_id
         """,
@@ -499,7 +526,8 @@ def create(
             continuation.state,
             continuation.generation,
             continuation.runtime_generation,
-            continuation.failure_reason,
+            None if continuation.failure is None else continuation.failure.kind.value,
+            None if continuation.failure is None else continuation.failure.detail,
             _json(_context(continuation)),
             time.time_ns(),
         ),
@@ -661,7 +689,7 @@ class ApprovalAdvance:
             ),
             state=state,
             runtime_generation=publication_owner,
-            failure_reason=None,
+            failure=None,
             generation=next_generation,
             cli_call=self.cli_call,
         )
@@ -669,7 +697,7 @@ class ApprovalAdvance:
             """
             UPDATE approval_continuations
             SET state = ?, generation = ?, runtime_generation = ?, claim_span_id = NULL,
-                failure_reason = NULL, context_json = ?
+                failure_kind = NULL, failure_detail = NULL, context_json = ?
             WHERE principal_id = ? AND approval_id = ?
               AND state = 'ready' AND claim_span_id IS NOT NULL AND generation = ?
             RETURNING approval_id
@@ -735,7 +763,7 @@ def request_failure(
     principal_id: str,
     *,
     approval_id: str,
-    reason: str,
+    failure: ApprovalFailure,
     expected_state: ApprovalContinuationState,
     expected_generation: int,
     expected_runtime_generation: str | None,
@@ -756,13 +784,14 @@ def request_failure(
     updated = transaction.fetchone(
         """
         UPDATE approval_continuations
-        SET state = 'failing', failure_reason = ?
+        SET state = 'failing', failure_kind = ?, failure_detail = ?
         WHERE principal_id = ? AND approval_id = ? AND state = ? AND generation = ?
           AND runtime_generation IS NOT DISTINCT FROM ? AND claim_span_id IS NOT DISTINCT FROM ?
         RETURNING approval_id
         """,
         (
-            reason,
+            failure.kind.value,
+            failure.detail,
             principal_id,
             approval_id,
             "ready" if claimed else expected_state,
@@ -779,7 +808,7 @@ def fence(
     principal_id: str,
     *,
     approval_id: str,
-    reason: str,
+    failure: ApprovalFailure,
 ) -> ApprovalContinuation | None:
     """Fence a continuation for failure on behalf of its reply, in whatever state it holds.
 
@@ -792,11 +821,11 @@ def fence(
     updated = transaction.fetchone(
         """
         UPDATE approval_continuations
-        SET state = 'failing', failure_reason = ?
+        SET state = 'failing', failure_kind = ?, failure_detail = ?
         WHERE principal_id = ? AND approval_id = ? AND state IN ('waiting', 'ready')
         RETURNING approval_id
         """,
-        (reason, principal_id, approval_id),
+        (failure.kind.value, failure.detail, principal_id, approval_id),
     )
     return None if updated is None else get(transaction, principal_id, approval_id=approval_id)
 

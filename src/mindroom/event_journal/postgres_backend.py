@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, LiteralString, cast
 import psycopg
 from psycopg.rows import dict_row
 
+from .legacy_approval_failures import upgrade_failure_kind
 from .legacy_response_attempts import upgrade_continuation_identity
 from .legacy_schema import (
     upgrade_hydration_walk_version,
@@ -185,6 +186,7 @@ class PostgresBackend:
             )
             continuation_columns = frozenset(str(row["column_name"]) for row in cursor.fetchall())
             upgrade_continuation_identity(_PostgresTransaction(cursor), existing_tables, continuation_columns)
+            upgrade_failure_kind(_PostgresTransaction(cursor), continuation_columns)
             for statement in schema_statements(POSTGRES_DIALECT):
                 cursor.execute(cast("LiteralString", statement))
         self._writer.commit()

@@ -76,12 +76,12 @@ from mindroom.dispatch_source import (
 )
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.event_journal import (
-    INTERRUPTED_FAILURE_REASON,
     ApprovalCall,
     ApprovalCardReservation,
     ApprovalContinuation,
     ApprovalDecision,
     ApprovalDecisionMetadata,
+    ApprovalFailure,
     DeliveryStage,
     EventClass,
     EventKind,
@@ -1603,7 +1603,7 @@ async def test_failing_continuation_recovers_frozen_success_before_failure_settl
     assert claimed is not None
     failing = await store.approvals.request_approval_failure(
         claimed.approval_id,
-        "entity removed",
+        ApprovalFailure(rl.ApprovalFailureKind.ERROR, "entity removed"),
         expected_state="claimed",
         expected_generation=claimed.generation,
         expected_runtime_generation=claimed.runtime_generation,
@@ -1638,13 +1638,13 @@ async def test_failing_continuation_recovers_frozen_success_before_failure_settl
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "failure_reason",
-    [None, INTERRUPTED_FAILURE_REASON],
+    "failure",
+    [None, ApprovalFailure(rl.ApprovalFailureKind.SHUTDOWN)],
     ids=["stale_claim", "handoff_fence"],
 )
 async def test_restart_interrupted_approval_hands_its_turn_back_to_replay(
     tmp_path: Path,
-    failure_reason: str | None,
+    failure: ApprovalFailure | None,
 ) -> None:
     """An approved run a restart cut short ends its cards and leaves its reply and source for replay to continue."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
@@ -1660,10 +1660,10 @@ async def test_restart_interrupted_approval_hands_its_turn_back_to_replay(
         runtime_generation="previous-runtime",
     )
     assert owned is not None
-    if failure_reason is not None:
+    if failure is not None:
         owned = await store.approvals.request_approval_failure(
             continuation.approval_id,
-            failure_reason,
+            failure,
             expected_state="claimed",
             expected_runtime_generation="previous-runtime",
         )
@@ -1686,7 +1686,10 @@ async def test_restart_interrupted_approval_hands_its_turn_back_to_replay(
     assert recovered
     assert event_id is None
     edit_text.assert_not_awaited()
-    expire_cards.assert_awaited_once_with(continuation.approval_id)
+    expire_cards.assert_awaited_once_with(
+        continuation.approval_id,
+        ApprovalFailure(rl.ApprovalFailureKind.SHUTDOWN).reason,
+    )
     assert await store.approvals.approval_continuation(continuation.approval_id) is None
     assert await store.is_pending("$source")
 
@@ -1729,14 +1732,17 @@ async def test_restart_hand_back_retries_cards_that_did_not_expire(tmp_path: Pat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("handed_off", "failure_reason"),
-    [(True, INTERRUPTED_FAILURE_REASON), (False, "sync_restart_cancelled")],
+    ("handed_off", "failure"),
+    [
+        (True, ApprovalFailure(rl.ApprovalFailureKind.SHUTDOWN)),
+        (False, ApprovalFailure(rl.ApprovalFailureKind.RESTART)),
+    ],
     ids=["handed_to_successor", "cancelled_in_place"],
 )
 async def test_cancelled_claimed_approval_records_whether_a_successor_takes_it(
     tmp_path: Path,
     handed_off: bool,
-    failure_reason: str,
+    failure: ApprovalFailure,
 ) -> None:
     """A run handed to a successor runtime is fenced as restart-interrupted; any other cancellation keeps its provenance."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
@@ -1776,35 +1782,39 @@ async def test_cancelled_claimed_approval_records_whether_a_successor_takes_it(
     failing = await store.approvals.approval_continuation(continuation.approval_id)
     assert failing is not None
     assert failing.state == "failing"
-    assert failing.failure_reason == failure_reason
+    assert failing.failure == failure
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure_reason", ["cancelled_by_user", "suppressed_by_hook"])
+@pytest.mark.parametrize(
+    ("failure_reason", "suppressed", "failure"),
+    [
+        ("cancelled_by_user", False, ApprovalFailure(rl.ApprovalFailureKind.USER_STOP)),
+        ("suppressed_by_hook", True, ApprovalFailure(rl.ApprovalFailureKind.ERROR, "suppressed_by_hook")),
+    ],
+)
 async def test_claimed_approval_non_interruption_uses_ordinary_settlement(
     tmp_path: Path,
     failure_reason: str,
+    suppressed: bool,
+    failure: ApprovalFailure,
 ) -> None:
     """User stops and hook suppression must not be relabeled as interruptions."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     continuation = MagicMock(spec=ApprovalContinuation)
     settle_failure = AsyncMock()
-    restart_recovery = AsyncMock()
     outcome = FinalDeliveryOutcome(
         terminal_status="cancelled",
         event_id="$waiting",
         failure_reason=failure_reason,
+        suppressed=suppressed,
         is_visible_response=True,
     )
 
-    with (
-        patch.object(runner._approvals._approval_responses, "settle_failure", new=settle_failure),
-        patch.object(runner._approvals, "_settle_interrupted_approval_recovery", new=restart_recovery),
-    ):
+    with patch.object(runner._approvals._approval_responses, "settle_failure", new=settle_failure):
         await runner._approvals._settle_failed_approval_outcome(continuation, outcome)
 
-    settle_failure.assert_awaited_once_with(continuation, failure_reason)
-    restart_recovery.assert_not_awaited()
+    settle_failure.assert_awaited_once_with(continuation, failure)
 
 
 def test_a_replay_account_lists_finished_and_running_tools_without_team_chrome(tmp_path: Path) -> None:
@@ -2480,7 +2490,10 @@ async def test_ready_approval_replay_rechecks_current_authorization(
     failing = replace(
         continuation,
         state="failing",
-        failure_reason="Current authorization no longer permits this tool approval continuation.",
+        failure=ApprovalFailure(
+            rl.ApprovalFailureKind.ERROR,
+            "Current authorization no longer permits this tool approval continuation.",
+        ),
     )
 
     with (
@@ -2530,7 +2543,10 @@ async def test_ready_approval_replay_rechecks_current_authorization(
     request_failure.assert_awaited_once()
     settle_failure.assert_awaited_once_with(
         failing,
-        "Current authorization no longer permits this tool approval continuation.",
+        ApprovalFailure(
+            rl.ApprovalFailureKind.ERROR,
+            "Current authorization no longer permits this tool approval continuation.",
+        ),
     )
     execute.assert_not_awaited()
 
@@ -2564,7 +2580,10 @@ async def test_ready_team_approval_rechecks_every_persisted_member(tmp_path: Pat
     failing = replace(
         continuation,
         state="failing",
-        failure_reason="Current authorization no longer permits this tool approval continuation.",
+        failure=ApprovalFailure(
+            rl.ApprovalFailureKind.ERROR,
+            "Current authorization no longer permits this tool approval continuation.",
+        ),
     )
 
     with (
@@ -4434,7 +4453,7 @@ async def test_original_owner_recovery_retires_acknowledged_failure_without_succ
     continuation = approval_continuation(
         approval_id="approval-failure-final",
         state="failing",
-        failure_reason="Tool approval continuation failed safely.",
+        failure=ApprovalFailure(rl.ApprovalFailureKind.ERROR),
     )
     assert await paused_for_approval(store, continuation) == continuation
     await store.enqueue_matrix_delivery(
@@ -8081,10 +8100,13 @@ async def test_cli_approval_scope_retains_only_shutdown_waits(tmp_path: Path, ca
         "claimed" if cancel_source == "rival" else "waiting" if cancel_source == "shutdown" else "failing"
     )
     assert (
-        current.failure_reason
-        == {"shutdown": None, "rival": None, "user_stop": "cancelled_by_user", "interrupted": "interrupted"}[
-            cancel_source
-        ]
+        current.failure
+        == {
+            "shutdown": None,
+            "rival": None,
+            "user_stop": ApprovalFailure(rl.ApprovalFailureKind.USER_STOP),
+            "interrupted": ApprovalFailure(rl.ApprovalFailureKind.INTERRUPTED),
+        }[cancel_source]
     )
 
 

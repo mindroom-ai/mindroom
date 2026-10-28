@@ -17,7 +17,6 @@ from mindroom.approval.tool_approval import (
     evaluate_tool_approval,
     resolve_tool_approval_approver,
 )
-from mindroom.cancellation import cancel_source_from_failure_reason
 from mindroom.constants import (
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_PENDING,
@@ -25,11 +24,17 @@ from mindroom.constants import (
 from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.delegation.state import member_slot_id, pending_call_slot
 from mindroom.delivery_gateway import DeliveryStage
-from mindroom.event_journal import ApprovalAdvance, ApprovalCall, ApprovalContinuation, approval_arguments_digest
+from mindroom.event_journal import (
+    ApprovalAdvance,
+    ApprovalCall,
+    ApprovalContinuation,
+    ApprovalFailure,
+    approval_arguments_digest,
+)
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
 from mindroom.message_target import MessageTarget
 from mindroom.redaction import redact_sensitive_text
-from mindroom.reply_lifecycle import NoteKind, SpanOutcome
+from mindroom.reply_lifecycle import ApprovalFailureKind, NoteKind, SpanOutcome
 from mindroom.tool_approval_grants import grant_operation
 from mindroom.tool_system.events import tool_markers_match_trace
 from mindroom.turn_origin import TurnIntent
@@ -55,6 +60,13 @@ if TYPE_CHECKING:
     from mindroom.tool_approval_grants import ApprovalOperation
     from mindroom.tool_system.events import ToolTraceEntry
 
+
+# The note a settled failure shows below its reply; an error's carries its reason.
+_FAILURE_NOTES = {
+    ApprovalFailureKind.USER_STOP: NoteKind.CANCELLED,
+    ApprovalFailureKind.RESTART: NoteKind.RESTART,
+    ApprovalFailureKind.INTERRUPTED: NoteKind.INTERRUPTED,
+}
 
 # Records a chained pause's advance with the reply's pause row; returns the
 # advanced continuation and whether the row reached Matrix.
@@ -413,7 +425,7 @@ class ApprovalResponseCoordinator:
                 failure_reason=failure_reason,
             )
         except (asyncio.CancelledError, Exception):
-            await self.request_failure(publishing, failure_reason)
+            await self.request_failure(publishing, ApprovalFailure(ApprovalFailureKind.ERROR, failure_reason))
             raise
         return _ApprovalPausePresentation(
             response_text=visible_text,
@@ -424,12 +436,12 @@ class ApprovalResponseCoordinator:
     async def request_failure(
         self,
         continuation: ApprovalContinuation,
-        reason: str,
+        failure: ApprovalFailure,
     ) -> ApprovalContinuation | None:
         """Fence exactly the state a failed lifecycle observed and wake settlement."""
         failing = await self.store.request_approval_failure(
             continuation.approval_id,
-            reason,
+            failure,
             expected_state=continuation.state,
             expected_generation=continuation.generation,
             expected_runtime_generation=continuation.runtime_generation,
@@ -438,54 +450,51 @@ class ApprovalResponseCoordinator:
             self.retry_sources(failing.room_id, failing.source_event_ids)
         return failing
 
-    async def fail_publication(self, approval_id: str, *, reason: str) -> ApprovalContinuation | None:
+    async def fail_publication(self, approval_id: str, *, failure: ApprovalFailure) -> ApprovalContinuation | None:
         """Fence a born continuation whose card publication did not finish."""
         continuation = await self.store.approval_continuation(approval_id)
-        return None if continuation is None else await self.request_failure(continuation, reason)
+        return None if continuation is None else await self.request_failure(continuation, failure)
 
-    async def settle_failure(
-        self,
-        continuation: ApprovalContinuation,
-        reason: str,
-        *,
-        interruption: NoteKind | None = None,
-    ) -> bool:
+    async def settle_failure(self, continuation: ApprovalContinuation, failure: ApprovalFailure) -> bool:
         """Settle cards and the failure outcome from the owning source worker.
 
-        ``interruption`` names the note the reply shows below its content.
+        The reply shows the failure's note below its content.
         """
         current = await self.store.approval_continuation(continuation.approval_id)
         if current is None:
             return True
         if await self.successful_final_delivery(current) is not None:
             return False
-        current = await self._prepare_failure(current, reason)
+        current = await self._prepare_failure(current, failure)
         if current is None:
             return False
         if await self.finish_approval(current.approval_id):
             return True
-        user_stop = cancel_source_from_failure_reason(reason) == "user_stop"
         written = await self.delivery_gateway.write_approval_failure_note(
             current.response_event_id,
             approval_id=current.approval_id,
-            note=interruption or (NoteKind.CANCELLED if user_stop else NoteKind.ERROR),
-            text=redact_sensitive_text(reason),
+            note=_FAILURE_NOTES.get(failure.kind, NoteKind.ERROR),
+            text=redact_sensitive_text(failure.reason),
             target=continuation_target(current),
         )
         # The reply's records show the note; the finish ends the reply.
         return written and await self.finish_approval(current.approval_id)
 
-    async def release_to_replay(self, continuation: ApprovalContinuation, reason: str) -> bool:
+    async def release_to_replay(self, continuation: ApprovalContinuation, failure: ApprovalFailure) -> bool:
         """End an interrupted continuation's cards and release it: its sources go back to replay unless a Stop ends the reply."""
-        current = await self._prepare_failure(continuation, reason)
+        current = await self._prepare_failure(continuation, failure)
         return current is not None and await self.release_approval(current.approval_id, current.generation)
 
-    async def _prepare_failure(self, continuation: ApprovalContinuation, reason: str) -> ApprovalContinuation | None:
+    async def _prepare_failure(
+        self,
+        continuation: ApprovalContinuation,
+        failure: ApprovalFailure,
+    ) -> ApprovalContinuation | None:
         """Fence a continuation for failure, expire its cards, and cancel its delegations; ``None`` when that failed."""
         manager = approval_manager.get_approval_store()
         current = await prepare_approval_failure(
             continuation,
-            reason,
+            failure,
             request_failure=partial(self.request_failure, continuation),
             expire_cards=None if manager is None else manager.expire_continuation_cards,
         )
@@ -495,7 +504,7 @@ class ApprovalResponseCoordinator:
             current,
             config=self.config(),
             runtime_paths=self.runtime_paths,
-            reason=reason,
+            reason=failure.reason,
         )
         return current
 

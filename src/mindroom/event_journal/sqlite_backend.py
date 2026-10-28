@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.file_locks import release_file_lock, try_exclusive_file_lock
 from mindroom.logging_config import get_logger
 
+from .legacy_approval_failures import upgrade_failure_kind
 from .legacy_response_attempts import upgrade_continuation_identity
 from .legacy_schema import (
     upgrade_hydration_walk_version,
@@ -211,6 +212,7 @@ class SqliteBackend:
                 str(row[1]) for row in connection.execute("PRAGMA table_info(approval_continuations)")
             )
             upgrade_continuation_identity(_SqliteTransaction(connection), existing_tables, continuation_columns)
+            upgrade_failure_kind(_SqliteTransaction(connection), continuation_columns)
             for statement in schema_statements(SQLITE_DIALECT):
                 connection.execute(statement)
             connection.execute("COMMIT")
