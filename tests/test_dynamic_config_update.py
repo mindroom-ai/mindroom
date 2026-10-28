@@ -336,6 +336,21 @@ class TestDynamicConfigUpdate:
         assert router_bot.config == updated_config
         assert router_bot.config.defaults.enable_streaming is False
 
+    def test_reloaded_config_decides_streaming(self, tmp_path: Path) -> None:
+        """A bot's runtime reads streaming from its live config, so a reload copies no separate flag."""
+        runtime = BotRuntimeState(
+            client=None,
+            config=Config(defaults={"enable_streaming": True}),
+            runtime_paths=orchestrator_runtime_paths(tmp_path),
+            agent_reply_memberships=AgentReplyMembershipIndex(),
+            orchestrator=None,
+        )
+        assert runtime.enable_streaming is True
+
+        runtime.config = Config(defaults={"enable_streaming": False})
+
+        assert runtime.enable_streaming is False
+
     @pytest.mark.asyncio
     async def test_thread_summary_threshold_defaults_update_existing_bots_without_restart(
         self,
