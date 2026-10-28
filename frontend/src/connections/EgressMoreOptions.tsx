@@ -219,7 +219,9 @@ export function MoreOptions({
         hint={
           sharedTarget
             ? "Accounts cannot be connected on a shared agent. Use an API key."
-            : "Users can connect an account of this kind instead of an API key. Leave it empty to use an API key."
+            : form.separateAccount
+              ? "Users can connect an account of this kind."
+              : "Users can connect an account of this kind instead of an API key. Leave it empty to use an API key."
         }
         error={problemAt("oauthProvider")}
       >
@@ -328,7 +330,8 @@ export function MoreOptions({
         </p>
       </div>
 
-      {loginField}
+      {/* A service with its own account uses only that account, so no key is there to connect one instead of. */}
+      {!(preset?.oauth_provider && form.separateAccount) && loginField}
 
       {offersSeparateAccount(
         form,

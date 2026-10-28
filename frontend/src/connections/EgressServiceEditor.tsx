@@ -206,8 +206,8 @@ export function EgressServiceEditor({
   // running may already have written this name into the page's own list.
   const [openedWithNames] = useState(takenNames);
   const addingLimit = initialRestrictOnly && !editing;
-  // A new service is named after its preset or host until the user types a
-  // name; a new limit's name counts as typed.
+  // A new service is named after its display name, preset or host until the
+  // user types a name; a new limit's name counts as typed.
   const [nameTyped, setNameTyped] = useState(addingLimit);
   const [form, setForm] = useState(() => {
     if (addingLimit)
@@ -382,7 +382,7 @@ export function EgressServiceEditor({
       : "Add service";
   const note =
     context === "personal" && agentName !== undefined
-      ? scopeNote(scope, agentName, scopeAgents)
+      ? scopeNote(scope, agentName, scopeAgents, form.separateAccount)
       : null;
   // Deleting takes the service from everyone the store serves, so say who that is.
   const deleteNote =
@@ -397,6 +397,11 @@ export function EgressServiceEditor({
   const overlaps = limiting
     ? []
     : overlapWarnings(form, preset, agentServices, name);
+  // A request picks a service with its own account by the header its box names, so one note stands in for the warnings.
+  const headerNote =
+    form.separateAccount && overlaps.length > 0
+      ? "Without this service's header, the usual routing order applies."
+      : null;
   // Another service of the user's with rules on the hosts a limit, or the
   // repositories applied to this service, cover.
   const overlapHosts = !limiting
@@ -572,11 +577,17 @@ export function EgressServiceEditor({
               <RuleSendFields {...ruleEditing(0, primaryRule)} />
             </div>
           )}
-          {overlaps.map((warning) => (
-            <p key={warning} role="status" className={warningClass}>
-              {warning}
+          {headerNote ? (
+            <p role="status" className="text-xs text-muted-foreground">
+              {headerNote}
             </p>
-          ))}
+          ) : (
+            overlaps.map((warning) => (
+              <p key={warning} role="status" className={warningClass}>
+                {warning}
+              </p>
+            ))
+          )}
         </>
       )}
       <Field

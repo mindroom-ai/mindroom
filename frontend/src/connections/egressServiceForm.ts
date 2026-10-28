@@ -338,31 +338,42 @@ export function splitHostInput(value: string): { host: string; path: string } {
 
 export const MAX_NAME_LENGTH = 63;
 
-/** `text` as a service name: lowercase, spaces as `_`, and what a name cannot hold dropped. */
+/**
+ * `text` as a service name: accents folded (`é` gives `e`), lowercase, spaces
+ * as `_`, what a name cannot hold dropped, and each run of `-` and `_` cut to
+ * its first, with none at either end. Letters that NFKD does not decompose,
+ * such as `ß`, `ø`, `æ`, and `ł`, are dropped, and the user can edit the name.
+ */
 function asName(text: string): string {
   return text
+    .normalize("NFKD")
+    .replace(/\p{M}/gu, "")
     .trim()
     .toLowerCase()
     .replace(/\s+/g, "_")
     .replace(/[^a-z0-9_-]/g, "")
-    .replace(/^[-_]+/, "")
-    .slice(0, MAX_NAME_LENGTH);
+    .replace(/([-_])[-_]+/g, "$1")
+    .slice(0, MAX_NAME_LENGTH)
+    .replace(/^[-_]+|[-_]+$/g, "");
 }
 
 /**
  * The name a new service gets until the user types one: its display name
- * (`Team calendar` gives `team_calendar`), else the preset's id, else the
- * first label of the first rule's host (`httpbin.org` gives `httpbin`).
- * When `takenNames` has it, the first free `{base}-2` or `{base}-3` instead;
- * with all three taken it stays the base, so saving names the clash.
+ * (`Team calendar` gives `team_calendar`) when that leaves a letter, else the
+ * preset's id, else the first label of the first rule's host (`httpbin.org`
+ * gives `httpbin`). When `takenNames` has it, the first free `{base}-2` or
+ * `{base}-3` instead; with all three taken it stays the base, so saving names
+ * the clash.
  */
 export function suggestedName(
   form: EgressServiceForm,
   takenNames: readonly string[] = [],
 ): string {
   const host = (form.rules[0]?.host ?? "").trim().toLowerCase();
+  // Digits alone, such as the `2` that `カレンダー 2` leaves, say nothing about the service.
+  const label = asName(form.displayName);
   const base =
-    asName(form.displayName) ||
+    (/[a-z]/.test(label) ? label : "") ||
     form.preset ||
     asName(host.replace(/^\*\./, "").split(/[.:/]/)[0]);
   if (base === "") return "";

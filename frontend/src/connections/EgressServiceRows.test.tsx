@@ -27,6 +27,7 @@ import type {
   EgressOAuthStatus,
   EgressRuleAuthType,
   EgressRuleSummary,
+  EgressScope,
 } from "./types";
 
 type RowsProps =
@@ -589,6 +590,37 @@ describe("connected accounts", () => {
     await expectNoAction(/Use an API key instead/);
   });
 
+  it("offers no key on a service with its own account, which uses only that account", async () => {
+    const own = { separate_account: true };
+    renderRows([withAccount({}, own)]);
+    expect(
+      screen.getByRole("button", {
+        name: "Connect GitHub for Agent Keys for GitHub",
+      }),
+    ).toBeEnabled();
+    await expectNoAction(/Use an API key instead/);
+    cleanup();
+    // Not even as the main action where its account cannot be connected.
+    renderRows([withAccount({ can_connect: false }, own)]);
+    await expectNoAction(/^(Set|Replace|Remove) key for /);
+    await expectNoAction(/Use an API key instead/);
+    cleanup();
+    renderRows([
+      withAccount(
+        { connected: true, account_label: "octocat" },
+        { ...own, configured: true, active_source: "oauth" },
+      ),
+    ]);
+    await expectNoAction(/Use an API key instead/);
+    await expectNoAction(/^(Set|Replace|Remove) key for /);
+  });
+
+  it("says a service's own account is not connected yet, not that it is not set", () => {
+    renderRows([withAccount({}, { separate_account: true })]);
+    expect(within(row("GitHub")).getByText("Not connected")).toBeVisible();
+    expect(screen.queryByText("Not set")).toBeNull();
+  });
+
   it("lets a user without key rights connect a requester-scoped account", async () => {
     renderRows([withAccount({}, { is_shared: true, can_manage: false })], {
       agentName: "shared_dev",
@@ -854,6 +886,33 @@ describe("connected accounts", () => {
         }),
       );
     });
+
+    it.each<[EgressScope, boolean]>([
+      ["user_agent", false],
+      ["user", true],
+    ])(
+      "says what allowing a service's own account does on a %s agent, covering other agents only where they share it",
+      async (scope, coversOthers) => {
+        const own = { ...toolsOnly, separate_account: true };
+        renderRows([own], {
+          agent: {
+            displayName: "Personal Mind",
+            shared: false,
+            scope,
+            services: [own],
+          },
+        });
+        fireEvent.click(
+          screen.getByRole("button", { name: "Use account for GitHub" }),
+        );
+        const dialog = await screen.findByRole("dialog");
+        expect(dialog).toHaveTextContent(approvalBypass);
+        const covers =
+          "This covers each of your agents whose GitHub service uses this account.";
+        if (coversOthers) expect(dialog).toHaveTextContent(covers);
+        else expect(dialog).not.toHaveTextContent("This covers");
+      },
+    );
 
     it("says a service's own account is not used yet, never that the tools use it", () => {
       renderRows([{ ...toolsOnly, separate_account: true }]);
@@ -2337,6 +2396,32 @@ describe("what a row says about how the key is sent", () => {
     renderRows([
       custom([rule("api.github.com", "bearer")], {
         oauth: { ...githubAccount, ...account },
+      }),
+    ]);
+    expect(within(row("httpbin.org")).getByText(note)).toBeVisible();
+  });
+
+  it.each<[string, Partial<EgressOAuthStatus>, string]>([
+    [
+      "its own account to connect",
+      {},
+      "Requests are refused until its own account is connected.",
+    ],
+    [
+      "its own account, connected but not used yet",
+      toolsOnly,
+      "Requests are refused until this account is used for Agent Keys.",
+    ],
+    [
+      "its own account that cannot be connected here",
+      { can_connect: false },
+      "Requests are refused until its own account is connected.",
+    ],
+  ])("never names a key for a service with %s", (_, account, note) => {
+    renderRows([
+      custom([rule("api.github.com", "bearer")], {
+        oauth: { ...githubAccount, ...account },
+        separate_account: true,
       }),
     ]);
     expect(within(row("httpbin.org")).getByText(note)).toBeVisible();

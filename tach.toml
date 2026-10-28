@@ -1167,6 +1167,7 @@ expose = [
     "flag_folded",
     "is_removed",
     "persist_to",
+    "report_created_row",
     "runs_without",
     "seen_event_ids",
     "set_visible_messages",
@@ -1174,6 +1175,7 @@ expose = [
     "store_fold",
     "summary_event_sets",
     "upsert_run",
+    "watch_session_row",
     "write_with_session_state",
 ]
 
@@ -3266,6 +3268,7 @@ depends_on = [
     "mindroom.automations.steps",
     "mindroom.config.participation",
     "mindroom.constants",
+    "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
     "mindroom.entity_resolution",
     "mindroom.error_handling",
@@ -3354,9 +3357,7 @@ depends_on = [
     "mindroom.tool_jobs.control",
     "mindroom.mid_turn",
     "mindroom.ai_runtime",
-    "mindroom.hooks",
     "mindroom.post_response_effects",
-    "mindroom.tool_system.runtime_context",
     "mindroom.turn_origin",
 ]
 visibility = [
@@ -4783,8 +4784,11 @@ depends_on = [
     "mindroom.constants",
     "mindroom.history.session_context",
     "mindroom.history.types",
+    "mindroom.hooks",
     "mindroom.runtime_protocols",
     "mindroom.session_storage.lanes",
+    "mindroom.session_storage.store",
+    "mindroom.tool_system.runtime_context",
 ]
 
 [[modules]]

@@ -131,16 +131,7 @@ class _ReservationLike(Protocol):
 
 class _NoopResponseLifecycle:
     def __init__(self) -> None:
-        self.session_thread_ids: list[str | None] = []
-
-    async def setup_session_watch(self, **kwargs: object) -> object:
-        thread_id = kwargs["thread_id"]
-        assert isinstance(thread_id, str) or thread_id is None
-        self.session_thread_ids.append(thread_id)
-        return object()
-
-    async def emit_session_started(self, _watch: object) -> None:
-        return
+        self.identity = SimpleNamespace(correlation_id="$event", response_kind="ai")
 
     async def finalize(
         self,
@@ -1858,7 +1849,6 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
     assert result == "$response"
     assert [target.resolved_thread_id for target in observed_run_targets] == [None]
     assert [target.resolved_thread_id for target in observed_delivery_targets] == [None]
-    assert lifecycle.session_thread_ids == [None]
     lock_keys = set(coordinator._lifecycle_coordinator._response_lifecycle_locks)
     assert ResponseLifecycleKey(room_id="!room:localhost", thread_id=None) in lock_keys
     assert ResponseLifecycleKey(room_id="!room:localhost", thread_id="$plain_root") not in lock_keys
@@ -1944,7 +1934,6 @@ async def test_generate_team_response_keeps_locked_target_when_payload_preparati
     assert result == "$response"
     assert observed_run_targets == [stable_target]
     assert observed_delivery_targets == [stable_target]
-    assert lifecycle.session_thread_ids == [None]
     lock_keys = set(coordinator._lifecycle_coordinator._response_lifecycle_locks)
     assert ResponseLifecycleKey(room_id="!room:localhost", thread_id=None) in lock_keys
     assert ResponseLifecycleKey(room_id="!room:localhost", thread_id="$other_thread") not in lock_keys

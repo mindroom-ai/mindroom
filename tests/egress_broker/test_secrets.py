@@ -333,6 +333,34 @@ def test_service_status_prefers_the_key_over_oauth(
     assert "secret-value" not in repr(status)
 
 
+@pytest.mark.parametrize(("oauth_connected", "active_source"), [(True, "oauth"), (False, None)])
+def test_service_status_reports_no_key_for_a_service_with_its_own_account(
+    oauth_connected: bool,
+    active_source: str | None,
+    manager: CredentialsManager,
+) -> None:
+    """Such a service uses only its own account, as the broker does, so a key stored under its name is no source."""
+    target = _claims(worker_scope="user_agent").to_worker_target()
+    save_secret(manager, target, "mine", "secret-value")
+    service = EgressService(rules=_RULES, oauth_provider="github", oauth_separate_account=True)
+
+    status = service_status(
+        manager,
+        target,
+        service,
+        "mine",
+        oauth_status=lambda *_: _oauth(connected=oauth_connected),
+    )
+
+    assert status == EgressServiceStatus(
+        configured=active_source is not None,
+        active_source=active_source,  # type: ignore[arg-type]
+        key_configured=False,
+        key_updated_at=None,
+        oauth=_oauth(connected=oauth_connected),
+    )
+
+
 def test_service_status_without_oauth_provider_skips_oauth(manager: CredentialsManager) -> None:
     """A service without an OAuth provider reports only its key and never asks for OAuth status."""
 

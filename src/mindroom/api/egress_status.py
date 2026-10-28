@@ -54,7 +54,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-RESTRICT_ONLY_KEY_REFUSAL = "This service only limits paths and never sends a key, so it cannot store one"
+_RESTRICT_ONLY_KEY_REFUSAL = "This service only limits paths and never sends a key, so it cannot store one"
+_OWN_ACCOUNT_KEY_REFUSAL = "This service uses only its own account and never sends a key, so it cannot store one"
 _READ_ONLY_UNSUPPORTED = "This service does not offer read-only access"
 
 # Service status loads that may run at once on one event loop, across every egress listing on it. A load can hold an
@@ -343,6 +344,15 @@ class OAuthReuseRequest(BaseModel):
     access: OAuthAccess = "read_write"
 
 
+def key_refusal(service: EgressService) -> str | None:
+    """Return why `service` cannot store a key, or None: a limit sends nothing, and an own-account service its account."""
+    if service.restrict_only:
+        return _RESTRICT_ONLY_KEY_REFUSAL
+    if service.oauth_separate_account:
+        return _OWN_ACCOUNT_KEY_REFUSAL
+    return None
+
+
 def require_access_offered(
     service: EgressService,
     access: OAuthAccess,
@@ -358,6 +368,7 @@ class EgressSourceStatus(BaseModel):
 
     `configured` is true when either source is available. `active_source` says which source the broker uses: an
     explicit key wins over an OAuth connection, which counts only once Agent Keys may use it (`oauth.reuse_enabled`).
+    A service with its own account (`oauth_separate_account`) never has a key.
     """
 
     configured: bool

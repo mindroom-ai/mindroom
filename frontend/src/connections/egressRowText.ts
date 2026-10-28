@@ -116,7 +116,8 @@ export function statusLabel(service: EgressCredentialService): string {
       return service.separate_account
         ? "Connected, not used for Agent Keys yet"
         : "Connected for tools only";
-    return oauth.reset_required ? "Reset required" : "Not set";
+    if (oauth.reset_required) return "Reset required";
+    return service.separate_account ? "Not connected" : "Not set";
   }
   if (!service.configured) return "Not set";
   return keySavedLabel(service.key_updated_at);
@@ -171,6 +172,11 @@ export function unsetNote(service: EgressCredentialService): string | null {
   if (service.configured || service.restrict_only || service.rules.length === 0)
     return null;
   const oauth = service.oauth;
+  // A service with its own account takes no key, only that account.
+  if (service.separate_account)
+    return oauth?.connected && !oauth.reset_required
+      ? "Requests are refused until this account is used for Agent Keys."
+      : "Requests are refused until its own account is connected.";
   // An account Agent Keys can use stops refusals as well as a key does. A service account is
   // never one, but a personal account connected before it still is.
   if (oauth) {

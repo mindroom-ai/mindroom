@@ -682,7 +682,12 @@ def test_unreadable_connection_requires_reset(
     result = _resolve(config, runtime_paths, manager, target)
     status = _status(config, runtime_paths, manager, target)
 
-    assert result == SecretNeedsReconnect(provider="github", connect_url=None, reset_required=True)
+    assert result == SecretNeedsReconnect(
+        provider="github",
+        connect_url=None,
+        reset_required=True,
+        requester_owned=True,
+    )
     assert status is not None
     assert (status.connected, status.reset_required) == (False, True)
 
@@ -1247,7 +1252,7 @@ def test_an_opt_in_unlocks_only_the_connection_it_was_given_for(
     switched = _resolve_mine(config, runtime_paths, manager, separate_account=not own_first)
 
     assert allowed == Secret("own-access" if own_first else "tools-access")
-    assert switched == SecretMissing(provider="demo", reuse_off=True)
+    assert switched == SecretMissing(provider="demo", reuse_off=True, own_account=not own_first)
 
 
 @pytest.mark.usefixtures("demo_registry")
@@ -1268,7 +1273,11 @@ def test_an_opt_in_without_a_credential_service_counts_for_the_tools_connection_
     )
 
     assert _resolve_mine(config, runtime_paths, manager, separate_account=False) == Secret("tools-access")
-    assert _resolve_mine(config, runtime_paths, manager) == SecretMissing(provider="demo", reuse_off=True)
+    assert _resolve_mine(config, runtime_paths, manager) == SecretMissing(
+        provider="demo",
+        reuse_off=True,
+        own_account=True,
+    )
 
 
 @pytest.mark.usefixtures("demo_registry")

@@ -25,7 +25,6 @@ from mindroom.api.connection_agents import (
     require_connections_same_origin,
 )
 from mindroom.api.egress_status import (
-    RESTRICT_ONLY_KEY_REFUSAL,
     AuditLogsResponse,
     EgressRuleSummary,
     EgressSourceStatus,
@@ -36,6 +35,7 @@ from mindroom.api.egress_status import (
     effective_services,
     egress_oauth_status,
     egress_service_status,
+    key_refusal,
     load_concurrently,
     oauth_provider_of_service,
     presets_response,
@@ -441,12 +441,12 @@ def put_egress_secret(
     body: PutSecretRequest,
     requester_id: _EgressUser,
 ) -> None:
-    """Set or replace an egress service secret for one agent; a `restrict_only` service takes no key (422)."""
+    """Set or replace an egress service secret for one agent; a service that takes no key (`key_refusal`) is a 422."""
     _require_egress_same_origin(request)
 
     agent, egress_service = _resolve_agent_and_service(request, requester_id, agent_name, service)
-    if egress_service.restrict_only:
-        raise _unprocessable(RESTRICT_ONLY_KEY_REFUSAL)
+    if (refusal := key_refusal(egress_service)) is not None:
+        raise _unprocessable(refusal)
 
     try:
         save_secret(agent.manager, agent.target, service, body.secret)

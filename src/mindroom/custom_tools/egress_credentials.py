@@ -73,8 +73,8 @@ class EgressCredentialsTools(Toolkit):
         nothing configured also says whether the user can connect an account instead of adding a key
         (`can_connect_account`), with the account's
         `provider` when it can or when the account still needs allowing. `separate_account: true` marks a service
-        of the user's own with an account of its own, which a request uses by naming it in an `X-Agent-Keys-Service`
-        header.
+        of the user's own that takes no API key, only an account of its own, which a request uses by naming it in an
+        `X-Agent-Keys-Service` header.
         The result carries the link
         where the user connects and allows accounts and adds or replaces keys. Never ask the user to paste a key
         into the chat; send them to the link instead.
@@ -201,7 +201,8 @@ class EgressCredentialsTools(Toolkit):
         return (
             "Services with `configured: false` have neither an API key nor a connected account Agent Keys may use in "
             "this agent's scope, so brokered requests to them fail with `credential_not_configured`. "
-            "`active_source` names what a configured service uses; an API key wins over a connected account. "
+            "`active_source` names what a configured service uses; an API key wins over a connected account, but "
+            "a `separate_account: true` service takes no API key, only its own account. "
             "`source` is `config` for a service the administrator defined and `user` for one the user added themselves. "
             f"{fix}"
             '`oauth_access: "read"` means Agent Keys may use the account only to read, so writes fail with `read_only` '

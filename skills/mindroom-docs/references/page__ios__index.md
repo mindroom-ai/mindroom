@@ -21,10 +21,10 @@ When the homeserver advertises a handoff page, the app instead sends the Access 
 
 With the steps below in place, the sign-in screen asks for the organization's sign-in first, then shows the usual sign-in options.
 When the Access session ends, the bar at the top asks for that sign-in again.
+The organization's sign-in, and SSO sign-in to the homeserver, run in a private browser session, because Safari's cross-site tracking protection breaks the Access login in one that shares Safari's cookies.
+So with SSO the organization's full login comes up twice when adding the account (the organization's sign-in, then the SSO one), and it comes up once each time the Access session ends.
 An Access session revoked before it expires shows as a lost connection until the token's expiry time.
 Calls need `/.well-known/matrix/client`, which these steps leave behind Access, so calls do not work on iOS for such a homeserver.
-The sign-in sheet shares Safari's cookies, so if it ends on Cloudflare's "Invalid session" page, delete the website data for `cloudflareaccess.com` and the homeserver's domain, then sign in again.
-That data is under Settings › Apps › Safari › Advanced › Website Data, or Settings › Safari › Advanced › Website Data on iOS 17 and earlier.
 Push notifications for such a homeserver carry no message content and read "New message".
 The public push gateway still receives the event and room IDs, the unread count and the device's push token, and each push tells it that the homeserver is active; the advert can turn push off instead.
 

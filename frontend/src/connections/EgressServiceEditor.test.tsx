@@ -593,7 +593,7 @@ describe("the editor form", () => {
     });
   });
 
-  it("names the preset's login by its display name, and the header once beside its own account", async () => {
+  it("names the preset's login by its display name, and the header instead of the overlaps beside its own account", async () => {
     const calendar = credentialService({
       name: "google_calendar",
       display_name: "Google Calendar",
@@ -607,22 +607,56 @@ describe("the editor form", () => {
       ],
     });
     await renderEditor({
-      service: { preset: "google_calendar", oauth_separate_account: true },
+      service: { preset: "google_calendar" },
       name: "team_calendar",
       agentServices: [
         calendar,
         { ...calendar, name: "events", display_name: "Events" },
       ],
     });
+    openMoreOptions();
+    const instead =
+      "Users can connect an account (Google Calendar) instead of an API key.";
+    expect(screen.getByText(instead)).toBeVisible();
+    expect(screen.getAllByText(/already sends a key/)).toHaveLength(2);
+    // Its own account is all it uses, so there is no key to connect one instead of.
+    fireEvent.click(
+      screen.getByLabelText(
+        "Use its own account, not the one the agent's tools use",
+      ),
+    );
+    expect(screen.queryByText(instead)).toBeNull();
+    // A request picks it by the header, so one note replaces the warnings,
+    // and the box's own hint stays the one place that names the header.
+    expect(screen.queryByText(/already sends a key/)).toBeNull();
     expect(
       screen.getByText(
-        "Users can connect an account (Google Calendar) instead of an API key.",
+        "Without this service's header, the usual routing order applies.",
       ),
     ).toBeVisible();
-    expect(screen.getAllByText(/already sends a key/)).toHaveLength(2);
     expect(
       screen.getAllByText(/X-Agent-Keys-Service: team_calendar/),
     ).toHaveLength(1);
+  });
+
+  it("drops the API key from a custom service's login hint while it uses its own account", async () => {
+    await renderEditor();
+    type("Name", "mine");
+    type("Website", "www.googleapis.com");
+    openMoreOptions();
+    const keyHint =
+      "Users can connect an account of this kind instead of an API key. Leave it empty to use an API key.";
+    expect(screen.getByText(keyHint)).toBeInTheDocument();
+    type("Account login (optional)", "google_calendar");
+    fireEvent.click(
+      screen.getByLabelText(
+        "Use its own account, not the one the agent's tools use",
+      ),
+    );
+    expect(screen.queryByText(keyHint)).toBeNull();
+    expect(
+      screen.getByText("Users can connect an account of this kind."),
+    ).toBeInTheDocument();
   });
 
   it("keeps a replaced login across a switch to another preset and back, so the box and the save agree", async () => {
@@ -2143,6 +2177,29 @@ describe("the note on whose service this is", () => {
       screen.getByText(
         "All your agents that share your personal workspace use this service and its key: Code Helper, Research.",
       ),
+    ).toBeInTheDocument();
+  });
+
+  it("speaks of its account, not a key, for a service with its own account", async () => {
+    await renderEditor({
+      scope: "user_agent",
+      agentName: "Code Helper",
+      scopeAgents: [],
+      service: { preset: "google_calendar", oauth_separate_account: true },
+      name: "team_calendar",
+    });
+    expect(
+      screen.getByText(
+        "Only your Code Helper uses this service and its account.",
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByLabelText(
+        "Use its own account, not the one the agent's tools use",
+      ),
+    );
+    expect(
+      screen.getByText("Only your Code Helper uses this service and its key."),
     ).toBeInTheDocument();
   });
 

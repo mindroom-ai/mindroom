@@ -261,6 +261,7 @@ For each request the broker picks the secret in this order:
 
 1. The API key stored for the scope, if there is one.
    An explicit key always wins over a connected account, and removing the key falls back to the account.
+   A service with [its own account](#a-services-own-account) skips this step.
 2. Otherwise, the connected account's access token, if Agent Keys may use the account for the service; the primary refreshes the token when it is near expiry.
 3. Otherwise, a 403 `credential_not_configured`, with `oauth_reuse: "off"` when nobody allowed the account, or a connect link when the user can connect an account Agent Keys may use (see [Error responses](#error-responses)).
 
@@ -419,7 +420,7 @@ A shadowed entry becomes active again if the config service is removed.
   Saving one with another host or a wildcard is refused with a message that names the allowed hosts, and a provider no preset is bound to, such as `google_cloud`, is refused on every host.
   Services in `config.yaml` and user services that use an API key are not limited this way.
 
-**Keys.** A new service never inherits an old key stored under its name, editing a service keeps its key, a limit never keeps one, and deleting a service deletes its key unless a config service now shadows the entry.
+**Keys.** A new service never inherits an old key stored under its name, editing a service keeps its key, a limit or a service with [its own account](#a-services-own-account) never keeps one, and deleting a service deletes its key unless a config service now shadows the entry.
 
 **Placeholder variables.** A user service's placeholder names must look like credential variable names, such as `MY_API_KEY`, and values are short plain strings such as `mindroom-brokered`; the editor says why a name or value is refused.
 When a config service sets the same variable, the config value wins, and the editor warns about it.
@@ -429,8 +430,8 @@ When a config service sets the same variable, the config value wins, and the edi
 A user service that signs in with a connected account on a `user` or `user_agent` agent can set `oauth_separate_account: true` (in the editor, **Use its own account, not the one the agent's tools use**), for example to use a second Google account for a shared mailbox or another calendar from the agent's commands.
 A GitHub or Atlassian login cannot, because those accounts belong to each user rather than to one agent.
 A row's **Add another account** opens **Add service** with that row's preset and **Use its own account** ticked: save it, then use **Connect** on the new row.
-Its row then connects, allows, and disconnects an account of its own, which shows as "Connected, not used for Agent Keys yet" until it is allowed, and the agent's tools and every other service keep the account they use.
-Until its own account is connected the service has none: it never uses the tools' account instead.
+That service's row then connects, allows, and disconnects an account of its own, which shows as "Connected, not used for Agent Keys yet" until it is allowed, and the agent's tools and every other service keep the account they use.
+It uses only that account, so it takes no key and its row offers none: until the account is connected the service has none, and it never uses the tools' account instead.
 Deleting the service, unticking the box, or changing its account login also removes its own account and its opt-in.
 
 Such a service usually covers the same hosts and paths as a service of your administrator's, which wins a tie, so a request picks it by name with the `X-Agent-Keys-Service` header:
@@ -642,7 +643,7 @@ The broker returns these errors to worker code:
 | Unmatched host under `deny` policy | 403 JSON `{"error": "host_not_allowed", "services": [...], "message": "..."}` with the operator's service names as a hint |
 | Request that an account allowed read only may not make (see [Read-only accounts](#read-only-accounts)) | 403 JSON `{"error": "read_only", "service": "<name>", "provider": "<id>", "manage_url": "<link>", "message": "..."}`; allow read and write at `manage_url` |
 | Matched service, no key, and an account provider nobody allowed Agent Keys to use | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "provider": "<id>", "oauth_reuse": "off", "manage_url": "<link>", "message": "..."}` with no `connect_url`; add a key or allow the account at `manage_url` |
-| Matched service whose [own account](#a-services-own-account) is not connected | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "manage_url": "<link>", "message": "..."}` with no `connect_url`; connect the service's own account at `manage_url` |
+| Matched service whose [own account](#a-services-own-account) is not connected or not allowed | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "manage_url": "<link>", "message": "..."}` with no `connect_url`, plus `"provider": "<id>"` and `"oauth_reuse": "off"` while nobody allowed it; connect and allow the service's own account at `manage_url` |
 | Matched service, no key and no connected account in scope | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "manage_url": "<link>", "message": "..."}`, plus `"provider": "<id>"` and `"connect_url": "<link>"` when the user can connect an account that is not shared by everyone using the agent |
 | Connected account revoked, rejected by the provider, or unreadable | 403 JSON `{"error": "oauth_connection_required", "service": "<name>", "provider": "<id>", "connect_url": "<link>", "manage_url": "<link>", "message": "..."}`; `connect_url` is `null` for a shared connection, and an unreadable stored credential adds `"reset_required": true` and has a `null` `connect_url` until it is reset |
 | Provider outage, timeout, or network failure while refreshing the account's token | 503 JSON `{"error": "oauth_refresh_failed", "service": "<name>", "provider": "<id>", "manage_url": "<link>", "message": "..."}`; retry later, do not reconnect |

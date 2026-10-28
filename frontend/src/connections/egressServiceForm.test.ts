@@ -562,7 +562,29 @@ describe("suggesting a name", () => {
     );
     // Nothing left of it: the preset or the host, as without one.
     expect(suggestedName(labelled("!?"))).toBe("google_calendar");
-    expect(suggestedName(labelled("Ü", ""))).toBe("httpbin");
+    expect(suggestedName(labelled("✓", ""))).toBe("httpbin");
+  });
+
+  it("folds accents, joins separators, and trims them at either end of a display name", () => {
+    const labelled = (displayName: string) => ({
+      ...form("google_calendar", "httpbin.org"),
+      displayName,
+    });
+    expect(suggestedName(labelled("Café ✓"))).toBe("cafe");
+    expect(suggestedName(labelled("Kalender für Büro"))).toBe(
+      "kalender_fur_buro",
+    );
+    expect(suggestedName(labelled("Inbox – Shared"))).toBe("inbox_shared");
+    expect(suggestedName(labelled("-Team_ - calendar_"))).toBe("team_calendar");
+  });
+
+  it("takes the preset or host for a display name that leaves no letter", () => {
+    const labelled = (displayName: string, preset = "google_calendar") => ({
+      ...form(preset, "httpbin.org"),
+      displayName,
+    });
+    expect(suggestedName(labelled("カレンダー 2"))).toBe("google_calendar");
+    expect(suggestedName(labelled("カレンダー 2", ""))).toBe("httpbin");
   });
 });
 

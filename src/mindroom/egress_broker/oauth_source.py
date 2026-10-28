@@ -152,6 +152,7 @@ def resolve_oauth_token(  # noqa: PLR0911 - checks in order
             provider=provider.id,
             reuse_off=True,
             requester_owned=provider.requester_scoped_credentials,
+            own_account=separate_account,
         )
     if level == "read" and not read_only_allows(read_only, request):
         return SecretReadOnly(provider=provider.id, requester_owned=provider.requester_scoped_credentials)
@@ -335,12 +336,14 @@ def _refreshed_credentials(
             gate.failed_at = None
             return credentials
     _log_token_unavailable(service, context.provider, terminal)
+    requester_owned = context.provider.requester_scoped_credentials
     if isinstance(terminal, OAuthCredentialUnreadableError):
         # Unreadable state must be reset from the dashboard before a new connection can be stored.
-        return SecretNeedsReconnect(provider=context.provider.id, reset_required=True)
+        return SecretNeedsReconnect(provider=context.provider.id, reset_required=True, requester_owned=requester_owned)
     return SecretNeedsReconnect(
         provider=context.provider.id,
         connect_url=_connect_url(context, OAUTH_REFRESH_REJECTED_REASON) if linked else None,
+        requester_owned=requester_owned,
     )
 
 

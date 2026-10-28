@@ -27,6 +27,7 @@ from mindroom.session_storage.store import (
     delete_runs_in_transaction,
     ensure_session_row,
     is_removed,
+    report_created_row,
     seen_event_ids,
     source_event_ids,
     store_fold,
@@ -142,6 +143,7 @@ def append_summary(
     the empty session row the append creates first when no write has yet, as a first turn's fold needs when its
     summary call reported no usage. ``session``, when given, then holds the runs and summary a load returns.
     """
+    created = None
     with _write_transaction(storage, session_id, session) as (connection, tables):
         latest = _rows(connection, tables, session_id=session_id, scope_key=scope_key, latest_only=True)
         through = latest[-1].through if latest else 0
@@ -165,9 +167,9 @@ def append_summary(
             # The running run's events count even when it later ends paused, cancelled, or failed.
             run_metadata.append(live)
             provenance = (fold.run.run_id, _encoded(source_event_ids(live)), _encoded(seen_event_ids(live)))
-        if initial_session is not None:
-            # The summary row references the session row, which a first turn's fold may be the first to need.
-            ensure_session_row(connection, tables.names, initial_session)
+        # The summary row references the session row, which a first turn's fold may be the first to need.
+        if initial_session is not None and ensure_session_row(connection, tables.names, initial_session) is not None:
+            created = initial_session
         event_ids, seen = summary_event_sets(run_metadata)
         (row_id,) = connection.execute(
             f"INSERT INTO {tables.summaries} (session_id, scope_key, through, summary, event_ids, seen_event_ids, "  # noqa: S608
@@ -187,6 +189,8 @@ def append_summary(
         ).fetchone()
         if fold is not None:
             store_fold(connection, tables.names, session_id, fold.run, fold.messages, fold.member_run_ids, row_id)
+    if created is not None:
+        report_created_row(created)
     return row_id
 
 
