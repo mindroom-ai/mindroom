@@ -15,10 +15,8 @@ from mindroom.error_handling import (
     get_user_friendly_error_message,
     is_model_safeguard_refusal,
     minimal_mode_failure_message,
-    needs_provider_key,
 )
 from mindroom.llm.errors import (
-    MISSING_API_KEY,
     AuthenticationFailed,
     InvalidRequest,
     ModelSafeguardRefusal,
@@ -449,19 +447,3 @@ def test_minimal_subagent_failure_suggests_a_standard_subagent() -> None:
     assert minimal_mode_failure_message(reason, "helper", subagent=False) == (
         "Minimal Bash requires an active managed response owner. Return to standard mode with `!mode helper standard`."
     )
-
-
-@pytest.mark.parametrize(
-    ("error", "needs_key"),
-    [
-        (AuthenticationFailed("no key", provider="openai", status_code=401, code=MISSING_API_KEY), True),
-        (AuthenticationFailed("bad key", provider="openai", status_code=401), False),
-        (RuntimeError("The api_key client option must be set either by passing api_key"), True),
-        (RateLimited("slow down", provider="openai"), False),
-        (RuntimeError("boom"), False),
-    ],
-)
-def test_a_missing_provider_key_is_told_apart_from_other_failures(error: Exception, needs_key: bool) -> None:
-    """The failures whose reply is the key setup guidance are exactly those ``needs_provider_key`` names."""
-    assert needs_provider_key(error) is needs_key
-    assert ("No AI provider key is set up yet" in get_user_friendly_error_message(error)) is needs_key

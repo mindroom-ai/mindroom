@@ -139,9 +139,11 @@ def get_user_friendly_error_message(
             f"{agent_prefix}⚠️ This model's safeguards blocked the request. "
             "Choose a different model (`!model list`) or revise the prompt, then try again."
         )
+    if needs_provider_key(error):
+        return f"{agent_prefix}{_missing_provider_key_message(runtime_paths)}"
     if isinstance(error, ProviderError):
-        return f"{agent_prefix}{_provider_error_message(error, safe_error, runtime_paths)}"
-    return f"{agent_prefix}{_untyped_error_message(error, safe_error, runtime_paths)}"
+        return f"{agent_prefix}{_provider_error_message(error, safe_error)}"
+    return f"{agent_prefix}{_untyped_error_message(error, safe_error)}"
 
 
 def needs_provider_key(error: Exception) -> bool:
@@ -175,9 +177,7 @@ def _authentication_failed(provider: str | None, safe_error: str) -> str:
     return f"❌ Authentication failed{provider_hint}: {safe_error}"
 
 
-def _provider_error_message(error: ProviderError, safe_error: str, runtime_paths: RuntimePaths | None) -> str:
-    if _is_missing_key(error):
-        return _missing_provider_key_message(runtime_paths)
+def _provider_error_message(error: ProviderError, safe_error: str) -> str:
     if isinstance(error, AuthenticationFailed):
         return _authentication_failed(error.provider, safe_error)
     if isinstance(error, ContextWindowExceeded):
@@ -192,12 +192,10 @@ def _provider_error_message(error: ProviderError, safe_error: str, runtime_paths
     return f"⚠️ Error: {safe_error}"
 
 
-def _untyped_error_message(error: Exception, safe_error: str, runtime_paths: RuntimePaths | None) -> str:
+def _untyped_error_message(error: Exception, safe_error: str) -> str:
     error_str = failure_text(error).lower()
-    if _MISSING_PROVIDER_KEY_PATTERN.search(error_str):
-        return _missing_provider_key_message(runtime_paths)
     if (typed := _payload_error(error, error_str)) is not None:
-        return _provider_error_message(typed, safe_error, runtime_paths)
+        return _provider_error_message(typed, safe_error)
     provider = _extract_provider_from_error(error)
     if _UNAUTHORIZED_WORDING.search(error_str) or is_credential_error(error_str):
         return _authentication_failed(provider, safe_error)
