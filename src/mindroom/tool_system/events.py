@@ -249,9 +249,10 @@ class CollectedStreamPresentation:
         self.tool_tracker.update_visible_trace_entry(self.tool_trace, pending_tool, completed_trace)
 
     def show_document(self, chunk: StructuredStreamChunk) -> None:
-        """Replace the collected presentation with a document the stream sent whole."""
+        """Replace the collected presentation with a document the stream sent whole; one without a trace keeps it."""
         self.response_text = chunk.content
-        self.tool_trace = list(chunk.tool_trace or ())
+        if chunk.tool_trace is not None:
+            self.tool_trace = list(chunk.tool_trace)
         self.document_state = chunk.presentation_state
 
     def final_text(self) -> str:

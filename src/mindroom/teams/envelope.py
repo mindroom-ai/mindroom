@@ -627,18 +627,13 @@ class _TeamTurn:
         if self.silent_no_report(record):
             # A quiet scheduled check that found nothing replies with the bare token, which delivery then suppresses,
             # instead of a team document around it.
-            shown = finished_run_text(record).strip()
-            yield StructuredStreamChunk(content=shown, tool_trace=[])
+            # The document's trace stays, as the streamed reply keeps it.
+            yield StructuredStreamChunk(content=finished_run_text(record).strip(), tool_trace=None)
         # The finished reply adds what no live chunk showed: a failed member run's reason, or the no-consensus note
         # when only members spoke.
         elif (chunk := attempt.chunk(finished=True)) is not None and chunk.content != shown:
-            shown = chunk.content
             yield chunk
-        # An attempt that streamed nothing writes no seen ids: when every attempt comes back empty, no stored run
-        # carries the trigger either, so the next turn still reads it.
-        yield AttemptResolved(
-            await self.resolve_completed(run, attempt, record, mark_seen=shown is not None),
-        )
+        yield AttemptResolved(await self.resolve_completed(run, attempt, record))
 
     def silent_no_report(self, record: TeamRunRecord) -> bool:
         """Whether a quiet scheduled turn's leader answered with the no-report token while no member found anything."""
@@ -689,25 +684,26 @@ class _TeamTurn:
         run: TurnRunState,
         attempt: TeamAttempt,
         record: TeamRunRecord,
-        *,
-        mark_seen: bool,
     ) -> CompletedAttempt:
         """Return the completed attempt: its rendered body, what replays, and the turn's metadata.
 
-        ``mark_seen`` records the Matrix events the turn consumed as seen on the stored session row.
+        An attempt that produced anything, text or tool calls, records the Matrix events the turn consumed as seen on
+        the stored session row; an empty one, whose run is discarded, leaves them unseen, so the next turn still reads
+        them.
         """
-        if mark_seen and self.ctx.reply_to_event_id:
+        tool_executions = team_tool_executions(record)
+        header = format_team_header(attempt.members.display_names)
+        # The text records the document the attempt's events built and its failed runs' reasons, in the configured
+        # member order, without tool markers: the chunks show the trace. The "No team response generated." fallback is
+        # display chrome, not replayable assistant text. A quiet scheduled reply records the bare token.
+        body_text = attempt.presentation.text_without_tool_markers(finished=True)
+        has_visible_output = bool(body_text)
+        is_empty = record.status is RunStatus.completed and not tool_executions and not has_visible_output
+        if not is_empty and self.ctx.reply_to_event_id:
             await _persist_bound_seen_event_ids(
                 scope_context=run.scope,
                 event_ids=_run_metadata_seen_event_ids(run.run_metadata),
             )
-        tool_executions = team_tool_executions(record)
-        header = format_team_header(attempt.members.display_names)
-        # The text records the document the attempt's events built and its failed member runs' reasons, in the
-        # configured member order, without tool markers: the chunks show the trace. The "No team response generated."
-        # fallback is display chrome, not replayable assistant text. A quiet scheduled reply records the bare token.
-        body_text = attempt.presentation.text_without_tool_markers(finished=True)
-        has_visible_output = bool(body_text)
         rendered = header + (body_text or NO_TEAM_RESPONSE)
         replayable_text = rendered if has_visible_output else ""
         if self.silent_no_report(record):
@@ -722,7 +718,7 @@ class _TeamTurn:
         return CompletedAttempt(
             replayable_text=replayable_text,
             has_visible_content=has_visible_output,
-            is_empty=record.status is RunStatus.completed and not tool_executions and not has_visible_output,
+            is_empty=is_empty,
             session_id=record.session_id,
             run_id=record.run_id,
             attempt_run_id=attempt.run_id,

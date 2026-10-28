@@ -219,6 +219,32 @@ async def test_a_team_turn_whose_attempts_all_came_back_empty_leaves_its_trigger
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False])
+async def test_a_team_turn_that_only_ran_tools_marks_its_trigger_seen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    """A turn whose runs called tools but wrote nothing keeps its run and marks the events it read seen, on either path.
+
+    The stored session row keeps them as well as the run, as it does for every turn that produced anything.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "writer", "Report"), answer("")],
+        writer=[calls(tool_call("touch", "call-touch", label="a")), answer("")],
+    )
+
+    await team.reply(stream=stream, show_tool_calls=False)
+
+    assert ProbeToolkit.calls == ["a"]
+    session = team.storage.load_session(SESSION_ID, "team")
+    assert session is not None
+    assert read_scope_seen_event_ids(team.storage, session, TEAM_SCOPE) == {EVENT_ID}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("show_tool_calls", [True, False])
 async def test_the_streamed_document_keeps_the_canonical_member_and_consensus_format(
     tmp_path: Path,
@@ -1859,33 +1885,43 @@ async def _lose_the_provider() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False])
 @pytest.mark.parametrize(
     ("leader", "recorded"),
     [
         pytest.param(
             [delegate("call-check", "checker", "Check"), [Await(_lose_the_provider)]],
-            "**Checker**: Checker overloaded",
+            "**Checker**: Checker overloaded\n\n\n**Team Consensus**:\n\nprovider connection lost",
             id="after-a-member-failed",
         ),
-        pytest.param([[Await(_lose_the_provider)]], "", id="on-the-first-request"),
+        pytest.param(
+            [[Await(_lose_the_provider)]],
+            "\n**Team Consensus**:\n\nprovider connection lost",
+            id="on-the-first-request",
+        ),
+        pytest.param(
+            [[TextDelta("Checked once."), Await(_lose_the_provider)]],
+            "\n**Team Consensus**:\n\nChecked once.\n\nprovider connection lost",
+            id="after-streaming-text",
+        ),
     ],
 )
-async def test_a_team_turn_whose_leader_request_fails_records_the_text_its_reply_showed(
+async def test_a_failed_team_turn_records_why_its_runs_failed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     leader: list[list[ScriptStep]],
     recorded: str,
+    stream: bool,
 ) -> None:
-    """A turn whose leader request fails stores its record of the document its run built, in the run's place.
+    """A turn whose leader request fails records its document with each failed run's reason, on either path.
 
-    A member that failed shows its reason in its slot however the team run ended, and the leader said nothing; the
-    run's error reaches the requester as the reply's error text.
+    A member that failed before any text shows its error; the leader's failure stands in its consensus, after any
+    text the failed request had streamed. The turn's interrupted record takes the failed team run's place.
     """
     team = squad_turn(tmp_path, monkeypatch, leader=leader, checker=[[Await(_checker_overloaded)]])
 
-    text = await team.respond(show_tool_calls=False)
+    await team.reply(stream=stream, show_tool_calls=False)
 
-    assert "provider connection lost" in text
     record, _ = team.stored_runs()
     assert team.recorder.outcome == "interrupted"
     assert team.recorder.assistant_text == recorded
@@ -1895,6 +1931,25 @@ async def test_a_team_turn_whose_leader_request_fails_records_the_text_its_reply
     )
     assert record.metadata is not None
     assert record.metadata["mindroom_original_status"] == "error"
+
+
+async def _lose_the_provider_and_leak_its_key() -> None:
+    msg = f"provider connection lost: {_KEY}"
+    raise ProviderError(msg, provider="Synthetic")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_team_turn_records_its_leader_s_redacted_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The text a turn records when its leader fails before writing is why it failed, credentials redacted."""
+    team = squad_turn(tmp_path, monkeypatch, leader=[[Await(_lose_the_provider_and_leak_its_key)]])
+
+    await team.respond(show_tool_calls=False)
+
+    assert team.recorder.outcome == "interrupted"
+    assert team.recorder.assistant_text == "\n**Team Consensus**:\n\nprovider connection lost: api_key=***redacted***"
 
 
 @pytest.mark.asyncio

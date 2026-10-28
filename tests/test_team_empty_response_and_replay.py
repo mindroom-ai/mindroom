@@ -43,6 +43,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
     from pathlib import Path
 
+    from mindroom.tool_system.events import ToolTraceEntry
+
 HEADER = "🤝 **Team Response** (GeneralAgent):\n\n"
 
 
@@ -243,6 +245,42 @@ async def test_a_later_attempt_of_a_team_turn_on_a_new_scope_replays_the_run_an_
     assert text.endswith("Done.")
     *_, last = team.models["default"].requests
     assert [message.tool_call_id for message in last.messages if message.role == "tool"] == ["call-team"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("show_tool_calls", [True, False])
+async def test_a_quiet_scheduled_team_reply_that_only_ran_tools_reports_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    show_tool_calls: bool,
+) -> None:
+    """A quiet schedule whose runs called tools but wrote nothing ends with an empty reply, which delivery suppresses.
+
+    The tool calls it showed are not an answer, so the empty final text replaces the document they built; the trace
+    stays with the reply.
+    """
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "general", "Run the tool"), answer("")],
+        general=[calls(tool_call("touch", "call-touch", label="noon")), answer("")],
+    )
+    tool_trace: list[ToolTraceEntry] = []
+
+    text = await team.respond(
+        ctx=team.ctx(allow_no_report_response=True),
+        message="Run the tool.",
+        show_tool_calls=show_tool_calls,
+        tool_trace=tool_trace,
+    )
+
+    assert text == ""
+    assert [entry.tool_name for entry in tool_trace] == (
+        ["touch", "delegate_task_to_member"] if show_tool_calls else []
+    )
+    assert team.recorder.outcome == "completed"
+    assert team.recorder.assistant_text == ""
 
 
 @pytest.mark.asyncio
