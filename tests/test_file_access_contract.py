@@ -25,7 +25,7 @@ import mindroom.custom_tools.coding as coding_module
 import mindroom.custom_tools.e2b as e2b_module
 import mindroom.custom_tools.gmail as gmail_module
 import mindroom.custom_tools.google_drive as google_drive_module
-import mindroom.custom_tools.microsoft_graph as microsoft_graph_module
+import mindroom.file_access as file_access_module
 import mindroom.media_delivery as media_delivery_module
 import mindroom.tools.agno_compat_airflow as airflow_module
 import mindroom.tools.agno_compat_groq as groq_module
@@ -401,10 +401,10 @@ _PROBES = (
     _ToolProbe("matrix_message", "send attachments", _send_attachment_path, attachments_module),
     _ToolProbe("gmail", "attachments", _stage_gmail_attachment, gmail_module),
     _ToolProbe("google_drive", "upload_file", _upload_to_google_drive, google_drive_module),
-    _ToolProbe("microsoft_files", "upload_file", _upload_to_microsoft_files, microsoft_graph_module),
-    _ToolProbe("outlook_mail", "attachments", _attach_with_outlook_mail, microsoft_graph_module),
-    # `slack` checks and reads uploads through the Microsoft Graph helpers.
-    _ToolProbe("slack", "slack_upload", _upload_to_slack, microsoft_graph_module),
+    # These check and read uploads through the shared upload helpers.
+    _ToolProbe("microsoft_files", "upload_file", _upload_to_microsoft_files, file_access_module),
+    _ToolProbe("outlook_mail", "attachments", _attach_with_outlook_mail, file_access_module),
+    _ToolProbe("slack", "slack_upload", _upload_to_slack, file_access_module),
     _ToolProbe("browser", "upload", _upload_in_browser, browser_module),
     _ToolProbe("e2b", "upload_file", _upload_to_e2b, e2b_module),
     _ToolProbe("openai", "transcribe_audio", _transcribe_with_openai, openai_module),

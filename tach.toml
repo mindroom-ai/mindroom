@@ -7001,7 +7001,11 @@ from = ["mindroom.tool_system.declarations"]
 [[interfaces]]
 expose = [
     "AuthorizedFile",
+    "UploadSourceError",
     "agent_file_access",
+    "checked_upload_source",
+    "open_upload_source",
+    "read_upload_source",
     "resolve_agent_file",
 ]
 from = ["mindroom.file_access"]
@@ -9826,6 +9830,7 @@ depends_on = ["mindroom.oauth.credential_lifecycle", "mindroom.slack.api", "mind
 path = "mindroom.custom_tools.slack"
 depends_on = [
     "mindroom.config.main",
+    "mindroom.file_access",
     "mindroom.oauth.credential_lifecycle",
     "mindroom.slack.api",
     "mindroom.slack.app",

@@ -19,8 +19,8 @@ from agno.tools import Toolkit
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
-from mindroom.custom_tools.microsoft_graph import MicrosoftGraphError, checked_upload_source, read_upload_source
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.file_access import UploadSourceError, checked_upload_source, read_upload_source
 from mindroom.oauth.client import active_oauth_credential_context
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialUnreadableError,
@@ -365,8 +365,8 @@ def _read_upload(path: str, workspace_root: Path | None, file_access: FileAccess
             field_name="path",
         )
         return source.name, read_upload_source(source, MAX_FILE_BYTES)
-    except MicrosoftGraphError as exc:
-        raise _SlackRefusalError(exc.message) from None
+    except UploadSourceError as exc:
+        raise _SlackRefusalError(str(exc)) from None
 
 
 async def _connection_required(

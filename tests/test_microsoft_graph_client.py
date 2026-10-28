@@ -14,7 +14,6 @@ import pytest
 from mindroom.custom_tools.microsoft_graph import (
     GRAPH_URL,
     MicrosoftGraphError,
-    checked_upload_source,
     graph_session,
     graph_time,
     graph_tool_result,
@@ -26,11 +25,11 @@ from mindroom.custom_tools.microsoft_graph import (
     next_page_token,
     page_path,
     path_segment,
-    read_upload_source,
     share_id,
     text_to_html,
     time_zone_name,
 )
+from mindroom.file_access import checked_upload_source
 from mindroom.oauth.microsoft import microsoft_files_oauth_provider
 from mindroom.redaction import redact_sensitive_text
 from tests.microsoft_graph_test_support import (
@@ -411,45 +410,6 @@ def test_an_upload_streams_the_workspace_file_with_its_length(tmp_path: Path, mo
     assert request.headers["content-length"] == str(len(b"new content"))
     assert "transfer-encoding" not in request.headers
     assert request.content == b"new content"
-
-
-def test_an_upload_source_over_the_limit_is_refused(tmp_path: Path) -> None:
-    workspace = _workspace(tmp_path)
-    (workspace / "big.bin").write_bytes(b"0123456789")
-
-    with pytest.raises(MicrosoftGraphError) as excinfo:
-        checked_upload_source("big.bin", workspace_root=workspace, file_access="workspace", max_bytes=4)
-
-    assert excinfo.value.code == "too_large"
-
-
-def test_reading_an_upload_source_refuses_a_file_swapped_or_grown_after_the_check(tmp_path: Path) -> None:
-    workspace = _workspace(tmp_path)
-    (workspace / "doc.bin").write_bytes(b"0123")
-    (tmp_path / "secret.bin").write_bytes(b"secret")
-    source = checked_upload_source("doc.bin", workspace_root=workspace, file_access="workspace", max_bytes=4)
-
-    assert read_upload_source(source, 4) == b"0123"
-    (workspace / "doc.bin").write_bytes(b"0123456789")
-    with pytest.raises(MicrosoftGraphError) as grown:
-        read_upload_source(source, 4)
-    (workspace / "doc.bin").unlink()
-    (workspace / "doc.bin").symlink_to(tmp_path / "secret.bin")
-    with pytest.raises(MicrosoftGraphError) as swapped:
-        read_upload_source(source, 100)
-
-    assert grown.value.code == "too_large"
-    assert swapped.value.code == "invalid_local_path"
-
-
-def test_an_upload_source_outside_the_workspace_is_refused(tmp_path: Path) -> None:
-    workspace = _workspace(tmp_path)
-    (tmp_path / "secret.txt").write_bytes(b"secret")
-
-    with pytest.raises(MicrosoftGraphError) as excinfo:
-        checked_upload_source("../secret.txt", workspace_root=workspace, file_access="workspace", max_bytes=100)
-
-    assert excinfo.value.code == "invalid_local_path"
 
 
 @pytest.mark.parametrize(
