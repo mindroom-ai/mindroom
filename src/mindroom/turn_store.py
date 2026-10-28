@@ -670,12 +670,15 @@ class TurnStore:
         history means the snapshot predates the redaction, and the request
         retries its preparation.
         """
-        preparation, context_redacted = await self.deps.turn_records.write(
-            _prepare_pending_source,
+        context_revisions = _context_revisions(thread_history)
+        # Only an edit to register needs the writer; the check reads, so it never queues behind other writes.
+        if context_revisions and source_event_ids:
+            await self.deps.turn_records.write(_register_context_revisions, source_event_ids[0], context_revisions)
+        preparation, context_redacted = await self.deps.turn_records.read(
+            _pending_source_preparation,
             room_id=target.room_id,
             source_event_ids=source_event_ids,
             terminal_source_event_ids=terminal_source_event_ids,
-            context_revisions=_context_revisions(thread_history),
             history_event_ids=tuple(message.latest_event_id for message in thread_history),
         )
         if not preparation.invalid and context_redacted:
@@ -956,22 +959,29 @@ def _redacted_history_events(
     return redacted
 
 
-def _prepare_pending_source(
+def _register_context_revisions(
+    transaction: Transaction,
+    agent_name: str,
+    source_event_id: str,
+    context_revisions: tuple[turn_rows.RevisionRegistration, ...],
+) -> None:
+    """Record the history's edits on the turn one of its sources answers to."""
+    owner = turn_rows.get_turn_record(transaction, agent_name, source_event_id)
+    if owner is not None and owner.turn_key is not None:
+        turn_rows.record_revisions(transaction, agent_name, turn_key=owner.turn_key, revisions=context_revisions)
+
+
+def _pending_source_preparation(
     transaction: Transaction,
     agent_name: str,
     *,
     room_id: str,
     source_event_ids: tuple[str, ...],
     terminal_source_event_ids: tuple[str, ...],
-    context_revisions: tuple[turn_rows.RevisionRegistration, ...],
     history_event_ids: tuple[str, ...],
 ) -> tuple[SourcePreparation, bool]:
-    """Record the history's edits on the turn, then split its sources into invalid and surviving."""
+    """Split a turn's sources into invalid and surviving, and report whether its history holds a redaction."""
     sources = terminal_source_event_ids
-    if context_revisions and source_event_ids:
-        owner = turn_rows.get_turn_record(transaction, agent_name, source_event_ids[0])
-        if owner is not None and owner.turn_key is not None:
-            turn_rows.record_revisions(transaction, agent_name, turn_key=owner.turn_key, revisions=context_revisions)
     invalid = set(turn_rows.deleted_events(transaction, agent_name, room_id, sources))
     invalid |= turn_rows.handled_among(transaction, agent_name, room_id, sources)
     # A redacted alias that maps to none of these sources, such as the question a selection answers, deletes them all.

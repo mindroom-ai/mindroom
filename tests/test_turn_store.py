@@ -55,6 +55,7 @@ from mindroom.turn_record import (
 from mindroom.turn_store import (
     ClaimContended,
     ClaimRefused,
+    SourcePreparation,
     TurnClaim,
     TurnStore,
     TurnStoreDeps,
@@ -78,7 +79,10 @@ from tests.session_storage.agno_layout import write_agno_database
 from tests.test_edit_regenerator import _reply
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.event_journal import EventJournalStore
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.session_storage.store import ConversationStore
 
 
@@ -454,6 +458,48 @@ async def test_redaction_in_another_room_cannot_tombstone_an_event_without_a_rec
         thread_history=[make_visible_message(event_id="$victim", body="Earlier message", thread_id="$thread")],
     )
     assert preparation.invalid == ()
+
+
+@pytest.mark.asyncio
+async def test_source_preparation_writes_only_to_register_the_edits_its_history_consumes(
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preparing a reply's sources is a read; only an edit its history consumes waits for the single writer."""
+    store = await _store(journal_store)
+    target = MessageTarget.resolve(ROOM, "$thread", "$user_msg")
+    await store.record_pending_turn(replace(_owned_turn_record(target), response_event_id=None, completed=False))
+    backend = store.deps.turn_records.backend
+    real_write = backend.write
+    writes: list[object] = []
+
+    async def counted_write(operation: Callable[..., object]) -> object:
+        writes.append(operation)
+        return await real_write(operation)
+
+    monkeypatch.setattr(backend, "write", counted_write)
+    context = make_visible_message(event_id="$context", body="Context", thread_id="$thread")
+    edited = replace(
+        make_visible_message(event_id="$edited", body="Edited", timestamp=1, thread_id="$thread"),
+        latest_event_id="$edit",
+        edited_timestamp=10,
+    )
+
+    async def prepare(history: list[ResolvedVisibleMessage]) -> SourcePreparation:
+        return await store.prepare_pending_response_source(
+            target=target,
+            source_event_ids=("$user_msg",),
+            terminal_source_event_ids=("$user_msg",),
+            thread_history=history,
+        )
+
+    assert await prepare([context]) == SourcePreparation(surviving=("$user_msg",))
+    assert writes == []
+    assert await prepare([context, edited]) == SourcePreparation(surviving=("$user_msg",))
+    assert len(writes) == 1
+    record = await store.get_turn_record("$user_msg")
+    assert record is not None
+    assert record.revision_replay == {"$edit": RevisionReplay("$edited", 10)}
 
 
 @pytest.mark.asyncio
