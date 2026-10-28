@@ -24,6 +24,9 @@ DROPPED_TOOL_EXECUTION_KEYS = frozenset(
         "created_at",
     },
 )
+# Keys Agno wrote on message dicts that the owned ``Message`` does not model: the shortened copy of a tool result
+# that only the retired ``compress_tool_results`` wrote and no provider of the owned runtime sent.
+DROPPED_MESSAGE_KEYS = frozenset({"compressed_content"})
 # Keys Agno wrote on requirement dicts that the owned ``RunRequirement`` does not model; nothing read its timestamp.
 DROPPED_REQUIREMENT_KEYS = frozenset({"created_at"})
 # Keys Agno wrote on run and session metrics that the owned metrics do not model; only tests ever filled them in.
@@ -56,8 +59,10 @@ def without(data: dict[str, Any], keys: frozenset[str]) -> dict[str, Any]:
 
 
 def expected_run_dict(data: dict[str, Any]) -> dict[str, Any]:
-    """Agno's run dict minus dropped keys, recursively over metrics, tools, requirements, and member runs."""
+    """Agno's run dict minus dropped keys, recursively over messages, metrics, tools, requirements, and member runs."""
     result = without(data, DROPPED_RUN_KEYS)
+    if "messages" in result:
+        result["messages"] = [without(message, DROPPED_MESSAGE_KEYS) for message in result["messages"]]
     if isinstance(result.get("metrics"), dict):
         result["metrics"] = without(result["metrics"], DROPPED_METRICS_KEYS)
     if "tools" in result:

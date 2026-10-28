@@ -393,7 +393,8 @@ def test_history_replays_only_the_newest_four_viewed_images_and_says_so() -> Non
 def test_history_viewed_images_fit_the_aggregate_byte_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(message_content, "_MAX_HISTORY_VIEWED_IMAGE_BYTES", 5)
     stored = [_media_follow_up(_viewed_image(index, b"x" * size)) for index, size in enumerate((3, 2, 3))]
-    stored[0].compressed_content = "compressed earlier content"
+    # A shortened copy Agno's retired ``compress_tool_results`` stored beside a message never replaces its content.
+    stored[0] = Message.from_dict({**stored[0].to_dict(), "compressed_content": "compressed earlier content"})
 
     history = _replay([_agent_run("run", messages=stored)])
 
@@ -401,8 +402,9 @@ def test_history_viewed_images_fit_the_aggregate_byte_cap(monkeypatch: pytest.Mo
         f"{VIEWED_IMAGE_ID_PREFIX}1",
         f"{VIEWED_IMAGE_ID_PREFIX}2",
     ]
-    assert str(history[0].content).startswith("compressed earlier content\n\n[1 historical viewed image omitted")
-    assert history[0].compressed_content is None
+    assert str(history[0].content).startswith(
+        "The tool call above generated the attached media.\n\n[1 historical viewed image omitted",
+    )
 
 
 def test_history_drops_every_other_media_kind() -> None:

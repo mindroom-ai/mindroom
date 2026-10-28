@@ -17,12 +17,14 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from mindroom.history.message_content import render_message_content
 from mindroom.llm import usage as llm_usage
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, SessionMetrics, TokenCounts
 from tests.llm.agno_dict_helpers import (
+    DROPPED_MESSAGE_KEYS,
     DROPPED_METRICS_KEYS,
     DROPPED_RUN_KEYS,
     DROPPED_TOOL_EXECUTION_KEYS,
@@ -136,9 +138,24 @@ def test_model_metrics_round_trip_agno_dict() -> None:
 
 @pytest.mark.parametrize("message_id", list(AGNO["messages"]))
 def test_message_round_trips_agno_dict(message_id: str) -> None:
-    expected = agno("messages")[message_id]
+    stored = agno("messages")[message_id]
 
-    assert Message.from_dict(expected).to_dict() == expected
+    assert Message.from_dict(stored).to_dict() == without(stored, DROPPED_MESSAGE_KEYS)
+
+
+def test_a_message_agno_stored_with_a_compressed_copy_reads_as_its_full_content() -> None:
+    """Agno's retired ``compress_tool_results`` stored a shortened copy beside the content; only the content reads.
+
+    Since the owned runtime replaced Agno, every provider has been sent the content, so estimates and summary input
+    read it too.
+    """
+    stored = agno("messages")["m-assistant"]
+    assert stored["compressed_content"] == "short"
+
+    message = Message.from_dict(stored)
+
+    assert render_message_content(message) == stored["content"] == "Running it."
+    assert "compressed_content" not in message.to_dict()
 
 
 def test_message_from_dict_ignores_agno_only_keys() -> None:
@@ -362,7 +379,7 @@ FIXTURE_RUNS = FIXTURES / "runs"
 FIXTURE_CODECS: dict[str, tuple[Callable[[dict[str, Any]], Any], Callable[[dict[str, Any]], dict[str, Any]]]] = {
     "run_output": (stored_run_record, expected_run_dict),
     "team_run_output": (stored_run_record, expected_run_dict),
-    "message": (Message.from_dict, dict),
+    "message": (Message.from_dict, lambda stored: without(stored, DROPPED_MESSAGE_KEYS)),
     "image": (Image.from_dict, dict),
     "audio": (Audio.from_dict, dict),
     "video": (Video.from_dict, dict),
