@@ -100,8 +100,8 @@ _HTTPX_TRANSPORT_ROOTS = frozenset(
         "trio",
     },
 )
-# The full tool-module sweep adds Agno's tool layer (docstring_parser and
-# packaging) and the httpx transport tree.
+# The full tool-module sweep adds Agno's tool layer (packaging), the docstring
+# parser tool schemas read, and the httpx transport tree.
 _TOOLS_ROOTS = _REGISTRY_ROOTS | _HTTPX_TRANSPORT_ROOTS | frozenset({"agno", "docstring_parser", "packaging"})
 # Top-level CLI help only needs command metadata and presentation libraries.
 # Command implementations must defer networking, crypto, config validation,
@@ -131,6 +131,12 @@ _ALLOWED_THIRD_PARTY_ROOTS: dict[str, frozenset[str]] = {
     "mindroom.tool_system.declarations": frozenset({"dotenv"}),
     # The owned tool values import no Agno module; agno_toolkits builds them from Agno's tool objects.
     "mindroom.tool_system.tool_function": frozenset({"dotenv"}),
+    # Plugin code authors tools through the owned API without loading Agno: the runtime context's config footprint.
+    "mindroom.tool_system.authoring": _CONFIG_LAYER_ROOTS - {"cryptography"},
+    # The owned schema generator reads annotations and docstrings and coerces arguments with pydantic.
+    "mindroom.tool_system.tool_schema": frozenset(
+        {"docstring_parser", "dotenv", "pydantic", "pydantic_core", "typing_extensions", "typing_inspection"},
+    ),
     "mindroom.tool_system.metadata": _REGISTRY_ROOTS,
     "mindroom.tool_system.catalog": _REGISTRY_ROOTS,
     "mindroom.tool_system.registration": _CONFIG_LAYER_ROOTS,

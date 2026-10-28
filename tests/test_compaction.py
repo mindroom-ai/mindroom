@@ -66,7 +66,7 @@ def _make_outcome(**overrides: object) -> CompactionOutcome:
 
 def _make_execution_plan(**overrides: object) -> ResolvedHistoryExecutionPlan:
     defaults: dict[str, object] = {
-        "authored_compaction_enabled": True,
+        "automatic_compaction": True,
         "text_compaction_available": True,
         "explicit_compaction_model": False,
         "compaction_model_name": "summary-model",
@@ -85,7 +85,7 @@ def _make_execution_plan(**overrides: object) -> ResolvedHistoryExecutionPlan:
 
 def _make_policy_plan() -> ResolvedHistoryExecutionPlan:
     return ResolvedHistoryExecutionPlan(
-        authored_compaction_enabled=True,
+        automatic_compaction=True,
         text_compaction_available=True,
         explicit_compaction_model=False,
         compaction_model_name="summary-model",
@@ -125,7 +125,7 @@ def _make_prepare_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
     [
         ({}, True, 70_000, True, ("required", "forced", 59_904)),
         ({"text_compaction_available": False}, True, 5_000, True, ("none", "forced_unavailable", None)),
-        ({"authored_compaction_enabled": False}, False, 60_000, True, ("none", "auto_disabled", None)),
+        ({"automatic_compaction": False}, False, 60_000, True, ("none", "auto_disabled", None)),
         ({"text_compaction_available": False}, False, 60_000, True, ("none", "compaction_unavailable", None)),
         ({"replay_budget_tokens": None}, False, 60_000, True, ("none", "missing_budget", None)),
         ({}, False, 10_000, True, ("none", "under_trigger", 10_000)),
