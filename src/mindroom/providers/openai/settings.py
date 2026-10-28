@@ -1,7 +1,7 @@
 """Typed ``extra_kwargs`` for the OpenAI wire family, under the field names Agno's model classes used.
 
-Authored configs keep working unchanged: every key a route accepted as an Agno dataclass field that maps to
-the wire or the SDK client is a field here. Keys a route does not accept fail with the list of valid keys.
+Each route accepts the keys its API and SDK client take. Keys a route does not accept fail with the list of valid
+keys, and a retired key with what to do instead (``config/legacy_fields.py``).
 """
 
 from __future__ import annotations
