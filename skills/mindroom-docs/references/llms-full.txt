@@ -2082,7 +2082,7 @@ models:
       base_url: http://localhost:8080/v1
 ```
 
-Models of every provider except `google`, `ollama`, and `synthetic` verify an HTTPS endpoint's certificate against the operating system's trust store, as do OpenAI embeddings, avatar generation, and the OpenAI speech requests of voice calls and outgoing voice messages, so a private CA installed in that store is trusted.
+Models of every provider except `google`, `ollama`, and `synthetic` verify an HTTPS endpoint's certificate against the operating system's trust store, as do downloads of media that tools return as URLs, OpenAI embeddings, avatar generation, and the OpenAI speech requests of voice calls and outgoing voice messages, so a private CA installed in that store is trusted.
 Setting `SSL_CERT_FILE` or `SSL_CERT_DIR` in the process environment replaces that store, so the file or directory must hold the public CAs too, for example the system CA bundle with the private CA appended.
 An `SSL_CERT_DIR` must be a hashed directory, as `c_rehash` or `openssl rehash` creates.
 
@@ -2433,10 +2433,11 @@ A model with any other key, including a misspelled key or a retired Agno model s
 | `vertexai_claude` | The `anthropic` keys without `auth_token`, plus `base_url`, `project_id`, and `region` |
 | `bedrock_claude` | The `anthropic` keys without `auth_token`, plus `aws_access_key`, `aws_profile`, `aws_region`, `aws_secret_key`, and `aws_session_token` |
 | `google`, `gemini` | `api_key`, `cached_content`, `client_params`, `frequency_penalty`, `generation_config`, `generative_model_kwargs`, `include_thoughts`, `location`, `logprobs`, `max_output_tokens`, `presence_penalty`, `project_id`, `safety_settings`, `search`, `seed`, `stop_sequences`, `temperature`, `thinking_budget`, `thinking_level`, `timeout`, `top_k`, `top_p`, `vertexai` |
-| `ollama` | `api_key`, `client_params`, `format`, `keep_alive`, `options`, `request_params`, `timeout` |
+| `ollama` | `api_key`, `client_params`, `format`, `keep_alive`, `options`, `request_params`, `think`, `timeout` |
 | `synthetic` | `chars_per_second`, `chunk_chars`, `max_response_chars`, `min_response_chars`, `seed`, `tool_call_probability` (see [Built-In Synthetic Model](#built-in-synthetic-model)) |
 
 On `deepseek`, `use_thinking`, a boolean that defaults to `true`, runs requests in DeepSeek's thinking mode, where the model reasons before it answers; set it to `false` to answer without thinking.
+An `ollama` model's `think` turns a thinking model's reasoning on (`true`) or off (`false`), or sets its effort (`low`, `medium`, or `high`) on models that take a level; unset leaves the choice to Ollama.
 
 When a response reaches the model's output limit (`max_tokens` or the route's equivalent), its text is kept, but none of its tool calls run: the agent is asked to split the work into smaller tool calls, and a third such response ends the reply with an error.
 
@@ -5633,6 +5634,7 @@ When a provider rejects a request containing inline media (images, audio, video,
 The retry adds `[Inline media unavailable for this model]` to the message that carried the media and tells the agent the content was not inspected, so the agent can still open the file through the [`attachments` tool](https://docs.mindroom.chat/attachments/#the-attachments-tool) or explain the limitation.
 If the provider error says the model does not support that kind of input, such as `does not support image input` or `is not a multimodal model`, later requests to the same model leave that media kind out from the start until MindRoom restarts.
 Other rejections, such as an image the provider could not decode, drop the media from that one request only.
+The same note replaces the request's media when an attachment file no longer exists or cannot be read, or when MindRoom cannot download media a tool returned as a URL, including media larger than 20 MiB.
 Once a reply has produced text, tool calls, or reasoning, a later provider error is reported instead of retried without media, and provider safeguard refusals are never retried without media.
 
 # Attachments
@@ -17103,8 +17105,7 @@ Custom events default to 1000 ms.
   `role` is `"user"` for a message the agent was sent and `"assistant"` for the agent's or team's own reply.
   `sender` is `None` for a reply; for a user line it is the sender's Matrix ID, or a placeholder such as `"unknown"` when MindRoom recorded no sender, and `display_name` is the name the message carried, or `None`.
   `text` is the message's text without the context `message:enrich` hooks attached, and is not redacted.
-  Tool calls, tool results, automation turns, queued-message notices, compaction summaries, job and media follow-up prompts, and the reply of a stopped turn are left out.
-  A few notes MindRoom adds to a thread's context still appear as user lines: the note that earlier thread messages were omitted, the note that the agent's previous reply is still being delivered, and that reply's unfinished text under the agent's own Matrix ID.
+  Tool calls, tool results, automation turns, queued-message notices, compaction summaries, job and media follow-up prompts, the reply of a stopped turn, and the notes MindRoom adds to a thread's context (that earlier thread messages were omitted, or that the agent's previous reply is still being delivered, with that reply's unfinished text) are left out.
   A compaction during a reply also covers what the reply wrote so far, but not the message it answers, which stays uncompacted.
 - **`schedule:fired`**: `ctx.thread_id` is the thread the message will be delivered to, which can differ from `ctx.workflow.thread_id` when the task starts a new thread or posts at room level.
   The event fires for visible and silent schedules.

@@ -3949,6 +3949,11 @@ class TestDoctor:
         """Keep the real-embedding probe off the network; specific tests override it."""
         monkeypatch.setattr("mindroom.cli.doctor.probe_embedder", lambda *_args: None)
 
+    @pytest.fixture(autouse=True)
+    def _reachable_ollama(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Answer every Ollama server check, such as the default memory LLM's, as a running server would."""
+        monkeypatch.setattr("mindroom.cli.doctor._ollama_reachable", lambda _options: (True, ""))
+
     def test_all_checks_pass(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor reports all green when everything is fine."""
         cfg = tmp_path / "config.yaml"

@@ -524,6 +524,7 @@ def build_provider_message_blobs_from_messages(
             prompt_messages,
             append_trailing_user_message=False,
             earlier_thinking=True,
+            provider="Anthropic",
         ).messages
         if apply_cache_ladder:
             cache_control = ladder_cache_control(model_params)
