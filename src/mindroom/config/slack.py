@@ -93,8 +93,15 @@ def _check_channels(path: str, channels: object) -> None:
         raise ValueError(msg)
 
 
+def _effective_write(config: Config, name: str) -> object:
+    """Return the `write` the agent's `slack` tool runs with: its own override over any from `defaults.tools`."""
+    entries = config.resolve_entity(name).authored_tool_configs
+    overrides = next((entry.tool_config_overrides for entry in entries if entry.name == _SLACK_TOOL_NAME), {})
+    return overrides.get("write", True)
+
+
 def _check_agent(config: Config, name: str, agent: AgentConfig) -> None:
-    """Check one agent's `channels`, `room` and `write` overrides."""
+    """Check one agent's `channels`, `room` and effective `write`."""
     overrides = _slack_overrides(agent)
     channels = overrides.get("channels")
     room = overrides.get("room")
@@ -106,7 +113,7 @@ def _check_agent(config: Config, name: str, agent: AgentConfig) -> None:
     if channels is None:
         msg = f"{path}.room needs channels"
         raise ValueError(msg)
-    if overrides.get("write", True) is not True:
+    if _effective_write(config, name) is not True:
         msg = f"{path}.room needs write; an answering agent posts its replies to Slack"
         raise ValueError(msg)
     if room not in agent.rooms:

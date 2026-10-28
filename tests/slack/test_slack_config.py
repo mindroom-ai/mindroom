@@ -123,6 +123,24 @@ def test_room_needs_write() -> None:
     assert [agent.agent for agent in slack_answering_agents(answering)] == ["helper"]
 
 
+def test_room_needs_the_effective_write() -> None:
+    """`write: false` in `defaults.tools` reaches an answering agent unless it sets write or skips the defaults."""
+    read_only_default = {"tools": [{"slack": {"write": False}}]}
+
+    def config(agent: dict[str, object]) -> Config:
+        return Config.model_validate({**_config_data({"helper": agent}, **_MAPPING), "defaults": read_only_default})
+
+    with pytest.raises(ValidationError, match=r"agents\.helper\.tools\.slack\.room needs write"):
+        config(_agent(rooms=["lobby"], channels=["C0123ABCD"], room="lobby"))
+
+    explicit = config(_agent(rooms=["lobby"], channels=["C0123ABCD"], room="lobby", write=True))
+    without_defaults = config(
+        {**_agent(rooms=["lobby"], channels=["C0123ABCD"], room="lobby"), "include_default_tools": False},
+    )
+    assert [agent.agent for agent in slack_answering_agents(explicit)] == ["helper"]
+    assert [agent.agent for agent in slack_answering_agents(without_defaults)] == ["helper"]
+
+
 def test_a_channel_has_one_answering_agent() -> None:
     """Two agents cannot both answer mentions in one channel, even when they list other channels too."""
     agents = {
