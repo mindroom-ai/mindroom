@@ -147,3 +147,57 @@ def test_an_agent_only_tool_setting_reaches_the_toolkit_once_normalized(tmp_path
     )
     shell = source_toolkit(offered_function(build, "run_shell_command"))
     assert shell._shell_path_prepend == "/opt/a, /opt/b"
+
+
+def _docker_runtime_paths(tmp_path: Path) -> RuntimePaths:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    return resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+            "MINDROOM_WORKER_BACKEND": "docker",
+            "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "MINDROOM_SANDBOX_PROXY_TOKEN": "attachments-test-token",
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("agent", "uses_worker"),
+    [
+        pytest.param({"tools": ["attachments"]}, False, id="no-workspace-tool"),
+        pytest.param({"tools": ["attachments", "shell"]}, True, id="worker-shell"),
+        pytest.param({"tools": ["attachments", "shell"], "worker_tools": []}, False, id="everything-in-primary"),
+        # Today an explicit list counts workspace tools the agent does not have.
+        pytest.param({"tools": ["attachments"], "worker_tools": ["file"]}, True, id="explicit-list-names-absent-tool"),
+    ],
+)
+def test_attachments_save_where_the_agents_workspace_tools_run(
+    tmp_path: Path,
+    agent: dict[str, Any],
+    uses_worker: bool,
+) -> None:
+    """Attachments go to the worker only when the agent's workspace-path tools run there."""
+    runtime_paths = _docker_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "defaults": {"tools": [], "allow_self_config": False},
+            "agents": {"code": {"display_name": "Code", **agent}},
+            "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+        },
+        runtime_paths,
+    )
+    persist_entity_accounts(config, runtime_paths)
+    build = create_agent(
+        "code",
+        config,
+        runtime_paths,
+        execution_identity=_identity(room=True),
+        knowledge=None,
+        active_model_name=None,
+    )
+    attachments = source_toolkit(offered_function(build, "view_file"))
+    assert attachments._tools_use_worker(None) is uses_worker  # type: ignore[attr-defined, arg-type]

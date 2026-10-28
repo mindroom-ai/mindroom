@@ -15,17 +15,18 @@ import pytest
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
+from mindroom.workers.backend import WorkerBackendError
 
 _GOLDEN_PATH = Path(__file__).with_name("tool_placement_golden.txt")
 _TOKEN = "placement-test-token"  # noqa: S105
 
-_MODES = (None, "all", "selective", "off")
+_MODES = (None, "all", "selective", "off", "bogus")
 _PROXY_TOOLS = (None, "*", "", "shell")
 _PROXY_URLS = (None, "http://sandbox-runner:8765")
-_BACKENDS = ("static_runner", "docker", "docker-misconfigured")
+_BACKENDS = ("static_runner", "docker", "docker-misconfigured", "bogus")
 _FLAGS = (False, True)
-# A worker-default tool, a primary-default tool, a room-context tool, and a primary-only tool.
-_TOOLS = ("shell", "calculator", "matrix_message", "claude_agent")
+# A worker-default tool, a primary-default tool, a room-context tool, a primary-only tool, and a name no tool registers.
+_TOOLS = ("shell", "calculator", "matrix_message", "claude_agent", "unregistered_tool")
 _WORKER_TOOLS: tuple[tuple[str, ...] | None, ...] = (
     None,
     (),
@@ -50,7 +51,9 @@ def _env(
         env["MINDROOM_SANDBOX_PROXY_TOOLS"] = proxy_tools
     if proxy_url is not None:
         env["MINDROOM_SANDBOX_PROXY_URL"] = proxy_url
-    if backend != "static_runner":
+    if backend == "bogus":
+        env["MINDROOM_WORKER_BACKEND"] = "bogus"
+    elif backend != "static_runner":
         env["MINDROOM_WORKER_BACKEND"] = "docker"
     if backend == "docker":
         env["MINDROOM_DOCKER_WORKER_IMAGE"] = "ghcr.io/mindroom-ai/mindroom:latest"
@@ -59,12 +62,17 @@ def _env(
     return env
 
 
-def _runs_in_worker(runtime_paths: RuntimePaths, tool_name: str, worker_tools: tuple[str, ...] | None) -> bool:
-    return sandbox_proxy.sandbox_proxy_enabled_for_tool(
-        tool_name,
-        runtime_paths=runtime_paths,
-        worker_tools_override=None if worker_tools is None else list(worker_tools),
-    )
+def _placement(runtime_paths: RuntimePaths, tool_name: str, worker_tools: tuple[str, ...] | None) -> str:
+    """Return 1 for the worker, 0 for the primary, and E when the settings are rejected."""
+    try:
+        routed = sandbox_proxy.sandbox_proxy_enabled_for_tool(
+            tool_name,
+            runtime_paths=runtime_paths,
+            worker_tools_override=None if worker_tools is None else list(worker_tools),
+        )
+    except (ValueError, WorkerBackendError):
+        return "E"
+    return "1" if routed else "0"
 
 
 def _column_labels() -> list[str]:
@@ -93,9 +101,7 @@ def placement_table(config_dir: Path) -> list[str]:
             process_env=_env(mode, proxy_tools, proxy_url, backend, unsafe=unsafe, runner=runner),
         )
         bits = "".join(
-            "1" if _runs_in_worker(runtime_paths, tool, worker_tools) else "0"
-            for worker_tools in _WORKER_TOOLS
-            for tool in _TOOLS
+            _placement(runtime_paths, tool, worker_tools) for worker_tools in _WORKER_TOOLS for tool in _TOOLS
         )
         settings = (
             f"mode={mode} proxy_tools={proxy_tools!r} url={int(proxy_url is not None)} "
@@ -119,7 +125,7 @@ def test_primary_only_and_room_tools_never_run_in_a_worker_even_when_listed(tmp_
     lines = placement_table(tmp_path)[1:]
     labels = _column_labels()
     columns = [index for index, label in enumerate(labels) if label.startswith(f"{tool_name}@")]
-    assert all(line.split(": ")[1][index] == "0" for line in lines for index in columns)
+    assert all(line.split(": ")[1][index] != "1" for line in lines for index in columns)
 
 
 def test_a_misconfigured_dedicated_backend_still_routes_so_the_call_fails(tmp_path: Path) -> None:
