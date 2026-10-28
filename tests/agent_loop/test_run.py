@@ -31,7 +31,7 @@ from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from tests.agent_loop.helpers import add, boom, collect, context, echo, external, gated, spec, toolkit
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
-from tests.run_record_helpers import PRODUCT, approved, denied, result, resumed, settled, waiting_call
+from tests.run_record_helpers import PRODUCT, approved_call, denied_call, result, resumed, settled, waiting_call
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -573,7 +573,7 @@ async def test_an_approved_call_resumes_into_a_completed_run_with_its_result() -
     assert settled(record) == settled(
         resumed(
             paused,
-            decided=approved(waiting, PRODUCT),
+            decided=approved_call(waiting, PRODUCT),
             added=[result(call, PRODUCT)],
             answered=answered,
             confirmation=True,
@@ -604,7 +604,7 @@ async def test_a_denied_call_resumes_into_a_completed_run_that_answers_it_with_t
     assert settled(record) == settled(
         resumed(
             paused,
-            decided=denied(waiting, reason),
+            decided=denied_call(waiting, reason),
             added=[result(call, reason, is_error=True)],
             answered=answered,
             confirmation=False,
@@ -645,7 +645,7 @@ async def test_a_team_member_s_approved_call_resumes_into_the_member_s_completed
     assert settled(record) == settled(
         resumed(
             paused,
-            decided=approved(waiting, PRODUCT),
+            decided=approved_call(waiting, PRODUCT),
             added=[result(call, PRODUCT)],
             answered=answered,
             confirmation=True,

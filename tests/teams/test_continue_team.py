@@ -24,7 +24,7 @@ from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMode
 from tests.agent_loop.helpers import echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
-from tests.run_record_helpers import PRODUCT, approved, reply, result, resumed, run_metrics, settled, waiting_call
+from tests.run_record_helpers import PRODUCT, approved_call, reply, result, resumed, run_metrics, settled, waiting_call
 from tests.teams.squad import (
     CHECKER_PAUSED_PIECE,
     PROVIDER,
@@ -115,7 +115,7 @@ async def test_an_approved_member_call_resumes_the_member_and_then_the_leader() 
     assert settled(member) == settled(
         resumed(
             paused_member,
-            decided=approved(waiting, PRODUCT),
+            decided=approved_call(waiting, PRODUCT),
             added=[result(call, PRODUCT)],
             answered=("42", checker_usage),
             confirmation=True,

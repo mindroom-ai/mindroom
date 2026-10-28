@@ -89,12 +89,12 @@ def waiting_call(paused: AnyRunRecord) -> tuple[dict[str, Any], ToolExecution]:
     return call, waiting
 
 
-def approved(waiting: ToolExecution, answer: str) -> ToolExecution:
+def approved_call(waiting: ToolExecution, answer: str) -> ToolExecution:
     """Return ``waiting`` after its approval, once it ran and answered ``answer``."""
     return replace(waiting, is_error=False, result=answer, requires_confirmation=False, confirmed=True)
 
 
-def denied(waiting: ToolExecution, reason: str) -> ToolExecution:
+def denied_call(waiting: ToolExecution, reason: str) -> ToolExecution:
     """Return ``waiting`` after its denial for ``reason``, which answers the model as a failed call."""
     return replace(waiting, is_error=True, requires_confirmation=False, confirmed=False, confirmation_note=reason)
 

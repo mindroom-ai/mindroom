@@ -25,25 +25,6 @@ def test_a_file_known_only_by_its_id_stores_its_id_and_type() -> None:
     }
 
 
-def test_file_text_content_round_trips_by_mime_type() -> None:
-    text = File(content="héllo".encode(), mime_type="text/plain")
-    binary = File(content=b"\x00\x01", mime_type="application/octet-stream")
-    looks_like_base64 = File(content=b"TestData", mime_type="text/plain")
-
-    assert text.to_dict()["content"] == "héllo"
-    assert binary.to_dict()["content"] == "AAE="
-    assert File.from_dict(looks_like_base64.to_dict()).content == b"TestData"
-    assert File.from_dict(binary.to_dict()).content == b"\x00\x01"
-
-
-def test_file_to_dict_keeps_text_content_and_base64_encodes_text_bytes_that_are_not_utf8() -> None:
-    # A tool's Agno ``File`` can carry its content as text, which the stored run keeps as it is.
-    assert File(content="plain text").to_dict()["content"] == "plain text"
-    # Latin-1 text bytes cannot be stored as UTF-8 text, so they are stored as base64 like binary content, with the
-    # ``content_encoding`` marker that lets them read back as these bytes.
-    assert File(content="café".encode("latin-1"), mime_type="text/plain").to_dict()["content"] == "Y2Fm6Q=="
-
-
 def test_media_to_dict_without_content_keeps_scalars() -> None:
     audio = Audio(id="a", content=b"x", mime_type="audio/wav", transcript="hi")
 
@@ -68,6 +49,17 @@ def test_a_text_file_that_is_not_utf8_reads_back_as_its_bytes() -> None:
     utf8 = File(id="f", content="café".encode(), mime_type="text/plain")
     assert utf8.to_dict() == {"id": "f", "mime_type": "text/plain", "content": "café"}
     assert File.from_dict(utf8.to_dict()).content == "café".encode()
+    # Text that looks like base64 still reads back as its own bytes.
+    assert File.from_dict(File(content=b"TestData", mime_type="text/plain").to_dict()).content == b"TestData"
+    # Content a tool gave as text is stored as that text.
+    assert File(content="plain text").to_dict()["content"] == "plain text"
+
+
+def test_a_binary_file_is_stored_as_base64_and_reads_back_as_its_bytes() -> None:
+    binary = File(content=b"\x00\x01", mime_type="application/octet-stream")
+
+    assert binary.to_dict()["content"] == "AAE="
+    assert File.from_dict(binary.to_dict()).content == b"\x00\x01"
 
 
 # --- metrics ---------------------------------------------------------------------------------------------------

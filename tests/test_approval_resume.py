@@ -23,7 +23,16 @@ from mindroom.response_turn import CompletedApprovalRun
 from mindroom.session_storage.agent_storage import create_session_storage
 from tests.approval_continuation_helpers import receipt_call_ids
 from tests.approval_resume_helpers import AGENT_RESUMES, CodeResume, resume_case, setup_case, setup_resume
-from tests.run_record_helpers import PRODUCT, approved, as_stored, denied, result, resumed, settled, waiting_call
+from tests.run_record_helpers import (
+    PRODUCT,
+    approved_call,
+    as_stored,
+    denied_call,
+    result,
+    resumed,
+    settled,
+    waiting_call,
+)
 from tests.teams.squad import scripted
 
 if TYPE_CHECKING:
@@ -68,7 +77,7 @@ async def test_a_paused_approval_resumes_into_a_completed_run(
     if case.approve:
         expected = resumed(
             run.paused,
-            decided=approved(waiting, PRODUCT),
+            decided=approved_call(waiting, PRODUCT),
             added=[result(call, PRODUCT)],
             answered=_answered(case.code),
             confirmation=True,
@@ -77,7 +86,7 @@ async def test_a_paused_approval_resumes_into_a_completed_run(
         reason = "Alice declined the multiplication."
         expected = resumed(
             run.paused,
-            decided=denied(waiting, reason),
+            decided=denied_call(waiting, reason),
             added=[result(call, reason, is_error=True)],
             answered=_answered(case.code),
             confirmation=False,
@@ -123,7 +132,7 @@ async def test_a_paused_delegation_resumes_its_child_and_then_the_parent(
         as_stored(
             resumed(
                 paused_child,
-                decided=approved(child_waiting, PRODUCT),
+                decided=approved_call(child_waiting, PRODUCT),
                 added=[result(child_call, PRODUCT)],
                 answered=_answered(case.helper),
                 confirmation=True,
