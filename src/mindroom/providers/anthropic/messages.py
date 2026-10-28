@@ -10,7 +10,6 @@ discovers once.
 from __future__ import annotations
 
 import asyncio
-import time
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
@@ -47,7 +46,6 @@ from mindroom.llm.provider import (
     StreamProgress,
     TextDelta,
     ToolCallReady,
-    TurnCompleted,
     UsageReported,
     hosted_tool_started,
     structured_output_tools,
@@ -85,7 +83,7 @@ from mindroom.providers.anthropic.wire import (
     supports_structured_outputs,
     tool_call_from_block,
 )
-from mindroom.providers.assistant_turn import stamp_finished_turn
+from mindroom.providers.assistant_turn import TurnTimer, stamp_finished_turn, turn_end
 from mindroom.providers.claude_wire_blocks import SERVER_TOOL_USE_BLOCK_TYPE, as_dict
 from mindroom.providers.credentials import model_api_key
 from mindroom.providers.errors import (
@@ -273,11 +271,10 @@ class ClaudeProvider:
         ``message_start`` and ``message_delta`` report the usage so far, as a partial ``UsageReported``, so a stream
         that stops early still settles what Anthropic bills.
         """
-        started = time.monotonic()
+        timer = TurnTimer()
         request = replace(request, messages=await inline_url_media(request.messages, self.http_client))
         prepared = await asyncio.to_thread(self._prepare, request)
         client, kwargs = prepared.client, prepared.kwargs
-        first_output_at: float | None = None
         try:
             manager = client.beta.messages.stream(**kwargs) if prepared.beta else client.messages.stream(**kwargs)
             async with manager as events:
@@ -286,18 +283,10 @@ class ClaudeProvider:
                         # The SDK has already added the event's usage to its accumulated message.
                         yield UsageReported(parse_claude_usage(events.current_message_snapshot.usage), final=False)
                     elif isinstance(event, (ParsedMessageStopEvent, ParsedBetaMessageStopEvent)):
-                        usage, completed = self._finished_turn(
-                            event.message,
-                            request,
-                            prepared,
-                            started,
-                            first_output_at,
-                        )
-                        yield usage
-                        yield completed
+                        for ending in self._finished_turn(event.message, request, prepared, timer):
+                            yield ending
                     elif (output := _output_event(event)) is not None:
-                        first_output_at = first_output_at or time.monotonic()
-                        yield output
+                        yield timer.output(output)
                     elif event.type in _PROVIDER_EVENT_TYPES:
                         # Block starts, tool-call argument pieces, and server-tool blocks carry no output but
                         # show the provider is still working; the SDK's own convenience events repeat them.
@@ -310,15 +299,14 @@ class ClaudeProvider:
         response: AnthropicMessage | BetaMessage,
         request: ModelRequest,
         prepared: _PreparedRequest,
-        started: float,
-        first_output_at: float | None,
-    ) -> tuple[UsageReported, TurnCompleted]:
-        """Return the usage and completion of a finished response, its message stamped with provenance and timings."""
+        timer: TurnTimer,
+    ) -> list[StreamEvent]:
+        """Return the events that end a finished response, its message stamped with provenance and timings."""
         message = assistant_message_from_response(
             response,
             record_context_management=self.settings.context_management is not None,
         )
-        stamp_finished_turn(message, self.identity, started=started, first_output_at=first_output_at)
+        stamp_finished_turn(message, self.identity, timer)
         record_native_checkpoint_on(message, request.native_compaction, checkpoint_prefix=prepared.checkpoint_prefix)
         raw_stop_reason = response.stop_reason
         stop_reason = stop_reason_of(raw_stop_reason)
@@ -342,7 +330,8 @@ class ClaudeProvider:
                 blocks=len(dropped),
                 reasons=sorted({entry.reason for entry in dropped}),
             )
-        return UsageReported(message.metrics), TurnCompleted(message=message, stop_reason=stop_reason)
+        # A finished Claude response always carries its usage.
+        return turn_end(message, stop_reason, usage_reported=True)
 
     def _output_format(self, schema: type[BaseModel] | None) -> dict[str, Any] | None:
         """Return the ``output_config.format`` value, or None on every route but ``native``.

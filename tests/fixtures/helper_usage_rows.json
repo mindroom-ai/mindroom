@@ -7,6 +7,14 @@
       "{\"run_id\": \"claude_agent:<hex id>\", \"parent_run_id\": null, \"team_id\": null, \"user_id\": null, \"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 50, \"output_tokens\": 9, \"total_tokens\": 59, \"cache_read_tokens\": 5, \"cache_write_tokens\": 2, \"details\": {\"model\": [{\"input_tokens\": 50, \"output_tokens\": 9, \"total_tokens\": 59, \"cache_read_tokens\": 5, \"cache_write_tokens\": 2, \"id\": \"claude-sonnet-5-5\", \"provider\": \"Anthropic\"}]}}, \"requests\": [], \"kind\": \"claude_agent\"}"
     ]
   ],
+  "compaction_summary": [
+    [
+      "agents/test_agent/sessions/test_agent.db",
+      "session",
+      "compaction:<uuid>",
+      "{\"run_id\": \"compaction:<uuid>\", \"parent_run_id\": null, \"team_id\": null, \"user_id\": null, \"model_provider\": \"Scripted Chat\", \"model\": \"scripted-model\", \"created_at\": 1790000000.5, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3}, \"requests\": [{\"created_at\": 1790000000.5, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3}, \"model\": \"scripted-model\", \"model_provider\": \"Scripted Chat\"}], \"kind\": \"compaction_summary\"}"
+    ]
+  ],
   "dynamic_workflow": [
     [
       "agents/test_agent/sessions/test_agent.db",
@@ -31,6 +39,14 @@
       "{\"run_id\": \"knowledge_graph:<hex id>\", \"parent_run_id\": null, \"team_id\": null, \"user_id\": null, \"model_provider\": \"Scripted\", \"model\": \"scripted-model\", \"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"details\": {\"model\": [{\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"id\": \"scripted-model\", \"provider\": \"Scripted Chat\"}]}}, \"requests\": [{\"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3}, \"model\": \"scripted-model\", \"model_provider\": \"Scripted Chat\"}], \"kind\": \"knowledge_graph\"}"
     ]
   ],
+  "live_voice": [
+    [
+      "agents/helper/sessions/helper.db",
+      "call",
+      "live_voice:provider-session",
+      "{\"run_id\": \"live_voice:provider-session\", \"parent_run_id\": null, \"team_id\": null, \"user_id\": \"@user:localhost\", \"model_provider\": \"OpenAI\", \"model\": \"gpt-live-1\", \"created_at\": 1790000000.5, \"voice_seconds\": 12.5, \"voice_finalized\": true, \"metrics\": {}, \"kind\": \"live_voice\"}"
+    ]
+  ],
   "memory_auto_flush": [
     [
       "agents/test_agent/sessions/test_agent.db",
@@ -53,6 +69,14 @@
       "memory_extraction",
       "memory_extraction:<hex id>",
       "{\"run_id\": \"memory_extraction:<hex id>\", \"parent_run_id\": null, \"team_id\": null, \"user_id\": null, \"model_provider\": \"OpenAI Chat\", \"model\": \"gpt-6-luna\", \"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 240, \"output_tokens\": 60, \"total_tokens\": 300, \"details\": {\"model\": [{\"input_tokens\": 240, \"output_tokens\": 60, \"total_tokens\": 300, \"id\": \"gpt-6-luna\", \"provider\": \"OpenAI Chat\"}]}}, \"requests\": [{\"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 120, \"output_tokens\": 30, \"total_tokens\": 150}, \"model\": \"gpt-6-luna\", \"model_provider\": \"OpenAI Chat\"}, {\"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 120, \"output_tokens\": 30, \"total_tokens\": 150}, \"model\": \"gpt-6-luna\", \"model_provider\": \"OpenAI Chat\"}], \"kind\": \"memory_extraction\"}"
+    ]
+  ],
+  "realtime_voice": [
+    [
+      "agents/helper/sessions/helper.db",
+      "call",
+      "realtime_voice:call-1",
+      "{\"run_id\": \"realtime_voice:call-1\", \"parent_run_id\": null, \"team_id\": null, \"user_id\": \"@user:localhost\", \"model_provider\": \"OpenAI\", \"model\": \"gpt-realtime-2.1\", \"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 900, \"output_tokens\": 300, \"total_tokens\": 1200, \"cache_read_tokens\": 400, \"audio_input_tokens\": 800, \"audio_total_tokens\": 800, \"details\": {\"model\": [{\"input_tokens\": 900, \"output_tokens\": 300, \"total_tokens\": 1200, \"cache_read_tokens\": 400, \"audio_input_tokens\": 800, \"audio_total_tokens\": 800, \"id\": \"gpt-realtime-2.1\", \"provider\": \"OpenAI\"}]}}, \"requests\": [{\"created_at\": 1790000010, \"metrics\": {\"input_tokens\": 900, \"output_tokens\": 300, \"total_tokens\": 1200, \"cache_read_tokens\": 400, \"audio_input_tokens\": 800, \"audio_total_tokens\": 800}, \"model\": \"gpt-realtime-2.1\", \"model_provider\": \"OpenAI\"}], \"kind\": \"realtime_voice\"}"
     ]
   ],
   "room_topic": [
@@ -124,7 +148,7 @@
       "system/sessions/system.db",
       "voice_transcription",
       "voice_transcription:<uuid>",
-      "{\"run_id\": \"voice_transcription:<uuid>\", \"parent_run_id\": null, \"team_id\": null, \"user_id\": null, \"model_provider\": \"openai\", \"model\": \"gpt-transcribe\", \"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 12, \"output_tokens\": 3, \"total_tokens\": 15, \"audio_input_tokens\": 9, \"audio_total_tokens\": 9}, \"requests\": [{\"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 12, \"output_tokens\": 3, \"total_tokens\": 15, \"audio_input_tokens\": 9, \"audio_total_tokens\": 9}}], \"kind\": \"voice_transcription\"}"
+      "{\"run_id\": \"voice_transcription:<uuid>\", \"parent_run_id\": null, \"team_id\": null, \"user_id\": null, \"model_provider\": \"openai\", \"model\": \"gpt-transcribe\", \"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 12, \"output_tokens\": 3, \"total_tokens\": 15, \"audio_input_tokens\": 9, \"audio_total_tokens\": 9}, \"requests\": [{\"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 12, \"output_tokens\": 3, \"total_tokens\": 15, \"audio_input_tokens\": 9, \"audio_total_tokens\": 9}, \"model\": \"gpt-transcribe\", \"model_provider\": \"openai\"}], \"kind\": \"voice_transcription\"}"
     ]
   ]
 }

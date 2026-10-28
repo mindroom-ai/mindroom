@@ -1,7 +1,8 @@
-"""The error classification and ``extra_kwargs`` parsing every provider family shares."""
+"""The error classification, ``extra_kwargs`` parsing, and turn timing every provider family shares."""
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,6 +18,10 @@ from mindroom.llm.errors import (
     ProviderUnavailable,
     RateLimited,
 )
+from mindroom.llm.messages import Message, model_provenance
+from mindroom.llm.provider import ModelIdentity, ReasoningDelta, StreamProgress, TextDelta, ToolCallReady, UsageReported
+from mindroom.llm.usage import MessageMetrics
+from mindroom.providers.assistant_turn import TurnTimer, stamp_finished_turn
 from mindroom.providers.errors import (
     classify_provider_error,
     is_context_window_error,
@@ -278,3 +283,34 @@ def test_authored_containers_are_copied_and_opaque_values_kept() -> None:
     assert settings.stop == ["x"]
     assert settings.stop is not authored["stop"]
     assert settings_from_extra_kwargs(_Settings, None, provider="test") == _Settings()
+
+
+_CALL = {"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}
+
+
+@pytest.mark.parametrize(
+    "output",
+    [TextDelta("Hi"), ReasoningDelta("Hmm"), ToolCallReady(_CALL)],
+    ids=["text", "reasoning", "tool_call"],
+)
+def test_a_turn_is_timed_from_its_first_output(output: TextDelta | ReasoningDelta | ToolCallReady) -> None:
+    """Text, reasoning, and a complete tool call are output; usage, progress, and later output leave the time alone.
+
+    A provider chunk without events passes on as progress.
+    """
+    timer = TurnTimer()
+    usage = UsageReported(MessageMetrics(), final=False)
+
+    assert [*timer.chunk([usage]), *timer.chunk([])] == [usage, StreamProgress()]
+    assert timer.first_output_at is None
+    assert list(timer.chunk([output])) == [output]
+    first_output_at = timer.first_output_at
+    assert first_output_at is not None
+    assert timer.output(TextDelta("more")) == TextDelta("more")
+    message = Message(role="assistant", content="Hi")
+    stamp_finished_turn(message, ModelIdentity(id="m", provider="P", provider_name="P"), timer)
+
+    assert timer.first_output_at == first_output_at
+    assert message.metrics.time_to_first_token == first_output_at - timer.started
+    assert 0 <= message.metrics.time_to_first_token <= message.metrics.duration <= time.monotonic() - timer.started
+    assert message.provider_data == model_provenance("m", "P")

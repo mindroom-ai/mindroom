@@ -20,7 +20,7 @@ import pytest
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
-from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
+from mindroom.llm.usage import HelperUsage, MessageMetrics, RequestUsage, RunMetrics, TokenCounts
 from mindroom.session_storage import store as store_module
 from mindroom.session_storage.store import (
     ConversationStore,
@@ -1522,7 +1522,7 @@ def test_every_writer_of_a_session_row_stores_absent_metadata_as_json_null(
             usage_id="u1",
             kind="compaction_summary",
             requester_id=None,
-            run={"model_provider": "P", "model": "m", "created_at": 1, "metrics": {}, "messages": []},
+            usage=HelperUsage(run_id="u1", model="m", provider="P", metrics=RunMetrics(), created_at=1),
             initial_session=session,
         ),
     }
@@ -1549,7 +1549,7 @@ def _write_row(store: ConversationStore, session: ConversationSession, writer: s
             usage_id="u1",
             kind="compaction_summary",
             requester_id=None,
-            run={"model_provider": "P", "model": "m", "created_at": 1, "metrics": {}, "messages": []},
+            usage=HelperUsage(run_id="u1", model="m", provider="P", metrics=RunMetrics(), created_at=1),
             initial_session=session,
         )
 
@@ -1739,8 +1739,9 @@ def test_usage_saves_move_the_sessions_update_time_and_rewrites_do_not(store: Co
 
 
 def test_independent_usage_is_recorded_beside_the_runs_and_not_in_the_totals(store: ConversationStore) -> None:
-    """Helper usage keeps its kind and requester, takes no ownership from the payload, and adds nothing to the totals."""
+    """Helper usage keeps its kind and requester beside the runs, and adds nothing to the totals."""
     created_at = 1_700_000_500
+    tokens = TokenCounts(input_tokens=40, output_tokens=4, total_tokens=44)
     metrics = {"input_tokens": 40, "output_tokens": 4, "total_tokens": 44}
 
     store.save_independent_usage(
@@ -1748,15 +1749,14 @@ def test_independent_usage_is_recorded_beside_the_runs_and_not_in_the_totals(sto
         usage_id="compaction:1",
         kind="compaction_summary",
         requester_id="@bob:example.test",
-        run={
-            "model_provider": "P",
-            "model": "summary-model",
-            "created_at": created_at,
-            "metrics": metrics,
-            "messages": [{"role": "assistant", "created_at": created_at, "metrics": metrics}],
-            "metadata": {"requester_id": "@mallory:example.test"},
-            "parent_run_id": "ignored",
-        },
+        usage=HelperUsage(
+            run_id="1",
+            model="summary-model",
+            provider="P",
+            metrics=RunMetrics(tokens=tokens),
+            requests=(RequestUsage(created_at=created_at, metrics=MessageMetrics(tokens=tokens)),),
+            created_at=created_at,
+        ),
         initial_session=_session(),
     )
 
@@ -1784,7 +1784,7 @@ def test_independent_usage_needs_its_conversation_row(store: ConversationStore) 
             usage_id="routing:1",
             kind="routing",
             requester_id=None,
-            run={"metrics": {}},
+            usage=HelperUsage(run_id="1", model=None, provider=None, metrics=RunMetrics()),
         )
 
 

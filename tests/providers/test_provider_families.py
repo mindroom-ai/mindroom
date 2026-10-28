@@ -22,7 +22,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, ProviderError, ProviderUnavailable
 from mindroom.llm.media import Audio, Image, Video
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import DeferredTools, ModelRequest, ToolSpec, complete
+from mindroom.llm.provider import DeferredTools, ModelRequest, ToolSpec, TurnCompleted, UsageReported, complete
 from mindroom.media_inputs import MediaInputs
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers.pipeline import retry as retry_stage
@@ -35,6 +35,7 @@ from tests.providers.family_support import (
     CLAUDE_DEPRECATION_FILTER,
     FAMILIES,
     Family,
+    chat_chunk,
     claude_events,
     gemini_chunk,
     ollama_chunk,
@@ -45,6 +46,7 @@ from tests.providers.golden_support import (
     hide_provider_environment,
     ndjson_response,
     pipeline_provider,
+    responses_events,
     sse_response,
 )
 from tests.session_storage.agno_layout import converted_store
@@ -487,6 +489,113 @@ async def test_a_reply_without_output_records_no_time_to_first_token(family: str
 
     assert turn.content == ""
     assert turn.usage.time_to_first_token is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", sorted(FAMILIES))
+async def test_every_family_ends_a_turn_with_its_final_usage_timed_from_its_first_output(
+    family: str,
+    tmp_path: Path,
+) -> None:
+    """A finished turn's last events are its final usage report and the turn, which carries that usage.
+
+    Its time to first token runs from the request to the reply's text, within the request's duration.
+    """
+    spec = FAMILIES[family]
+    provider = pipeline_provider(spec.adapter(tmp_path, Wire(spec.reply())))
+
+    events = [event async for event in provider.stream(ModelRequest(messages=[Message(role="user", content="Hi")]))]
+
+    *_, usage, completed = events
+    assert isinstance(usage, UsageReported)
+    assert isinstance(completed, TurnCompleted)
+    metrics = completed.message.metrics
+    assert (completed.message.content, completed.stop_reason, usage.final, usage.usage) == ("ok", "end", True, metrics)
+    assert metrics.time_to_first_token is not None
+    assert 0 <= metrics.time_to_first_token <= metrics.duration
+
+
+_WEATHER_ARGUMENTS = '{"city": "Paris"}'
+
+
+def _chat_weather_call() -> httpx.Response:
+    """A Chat stream that opens the call, streams its arguments as a second piece, then finishes."""
+    opened = {"index": 0, "id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": ""}}
+    arguments = {"index": 0, "function": {"arguments": _WEATHER_ARGUMENTS}}
+    return sse_response(
+        [
+            chat_chunk({"tool_calls": [opened]}),
+            chat_chunk({"tool_calls": [arguments]}),
+            chat_chunk({}, finish_reason="tool_calls"),
+            "[DONE]",
+        ],
+    )
+
+
+def _ollama_weather_call() -> httpx.Response:
+    calling = ollama_chunk()
+    calling["message"]["tool_calls"] = [{"function": {"name": "get_weather", "arguments": {"city": "Paris"}}}]
+    return ndjson_response([calling, ollama_chunk(done=True)])
+
+
+# One reply per adapter whose only output is one ``get_weather`` call, its arguments streamed where the wire streams them.
+_REPLIES_THAT_ONLY_CALL_A_TOOL: dict[str, Callable[[], httpx.Response]] = {
+    "anthropic": lambda: sse_response(
+        claude_events(
+            [{"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {}}],
+            deltas=[{"type": "input_json_delta", "partial_json": _WEATHER_ARGUMENTS}],
+            stop_reason="tool_use",
+        ),
+        named=True,
+    ),
+    "gemini": lambda: sse_response(
+        [gemini_chunk({"functionCall": {"name": "get_weather", "args": {"city": "Paris"}}}, finish=True)],
+    ),
+    "ollama": _ollama_weather_call,
+    "openai_chat": _chat_weather_call,
+    "openai_responses": lambda: sse_response(
+        responses_events(
+            {
+                "id": "resp_1",
+                "object": "response",
+                "created_at": 1,
+                "model": "gpt-6-astra",
+                "status": "completed",
+                "output": [
+                    {
+                        "id": "fc_1",
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "get_weather",
+                        "arguments": _WEATHER_ARGUMENTS,
+                        "status": "completed",
+                    },
+                ],
+            },
+        ),
+        named=True,
+    ),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", _REPLIES_THAT_ONLY_CALL_A_TOOL)
+async def test_a_reply_that_only_calls_a_tool_is_timed_from_that_call(family: str, tmp_path: Path) -> None:
+    """A complete tool call is output, so a reply without text still records its time to first token."""
+    spec = FAMILIES[family]
+    wire = Wire(_REPLIES_THAT_ONLY_CALL_A_TOOL[family]())
+
+    turn = await complete(
+        pipeline_provider(spec.adapter(tmp_path, wire)),
+        ModelRequest(messages=[Message(role="user", content="Weather in Paris?")], tools=[_tool("get_weather")]),
+    )
+
+    assert [(call["function"]["name"], json.loads(call["function"]["arguments"])) for call in turn.tool_calls] == [
+        ("get_weather", {"city": "Paris"}),
+    ]
+    assert turn.content == ""
+    assert turn.usage.time_to_first_token is not None
+    assert 0 <= turn.usage.time_to_first_token <= turn.usage.duration
 
 
 # --- Stream activity and server tools ----------------------------------------------------------------------------
