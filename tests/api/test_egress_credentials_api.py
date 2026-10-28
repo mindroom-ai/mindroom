@@ -2424,6 +2424,7 @@ def test_switching_between_its_own_and_the_tools_account_stops_the_opt_in(
     assert _broker_reads(portal, alice, "personal", "mine", "google_drive") == secrets.SecretMissing(
         provider="google_drive",
         reuse_off=True,
+        own_account=not separate_first,
     )
     assert _egress_row(portal, "alice", "personal", "drive_too")["oauth"]["reuse_enabled"] is True
 
