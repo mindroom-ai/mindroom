@@ -2,6 +2,7 @@ import { hasCustomTemplate } from "./egressRuleAuth";
 import type {
   AuthoredEgressService,
   EgressAuth,
+  EgressCredentialService,
   EgressOAuthProviderOption,
   EgressRuleAuthType,
   EgressValidation,
@@ -285,10 +286,20 @@ export function serializeService(
   return authored;
 }
 
+/** The login a service signs in with: its own, else its preset's; empty for none. */
+export function serviceLogin(
+  form: EgressServiceForm,
+  preset: EgressPreset | undefined,
+): string {
+  return form.preset === "" || form.explicitlyEmpty.presetLogin
+    ? form.oauthProvider.trim()
+    : (preset?.oauth_provider ?? "");
+}
+
 /**
- * Whether the editor shows "Use its own account": for a personal agent's own service whose login (the service's
- * own, else the preset's) is not one whose accounts belong to each user (GitHub, Atlassian), and always while the
- * form has it, so it can be unticked.
+ * Whether the editor asks which account the service uses: for a personal agent's own service whose login is not
+ * one whose accounts belong to each user (GitHub, Atlassian), and always while the form has its own account, so it
+ * can be switched back.
  */
 export function offersSeparateAccount(
   form: EgressServiceForm,
@@ -301,16 +312,45 @@ export function offersSeparateAccount(
 ): boolean {
   if (form.separateAccount) return true;
   if (context !== "personal" || sharedTarget) return false;
-  const login =
-    form.preset === "" || form.explicitlyEmpty.presetLogin
-      ? form.oauthProvider.trim()
-      : preset?.oauth_provider;
+  const login = serviceLogin(form, preset);
   return (
     !!login &&
     !providers.some(
       (provider) => provider.id === login && provider.requester_scoped,
     )
   );
+}
+
+/**
+ * The agent's other service that signs in with the account its tools use for
+ * this login, and that account's address: what the editor names beside "The
+ * account your tools use". Limits and services with their own account do not
+ * count.
+ */
+export function toolsAccountUse(
+  provider: string,
+  services: readonly EgressCredentialService[],
+  editingName: string | undefined,
+): { usedBy: string | null; address: string | null } {
+  const user = services.find(
+    (service) =>
+      service.name !== editingName &&
+      !service.restrict_only &&
+      !service.separate_account &&
+      service.oauth?.provider === provider,
+  );
+  return {
+    usedBy: user?.display_name ?? null,
+    address: user?.oauth?.account_label ?? null,
+  };
+}
+
+/** Whether saving gives the service an account of its own it did not have, so its sign-in comes next. */
+export function signsInAfterSave(
+  form: Pick<EgressServiceForm, "separateAccount">,
+  saved: AuthoredEgressService | null,
+): boolean {
+  return form.separateAccount && saved?.oauth_separate_account !== true;
 }
 
 /** Whether a preset carries an account login. */
@@ -397,7 +437,6 @@ export function usesMoreOptions(form: EgressServiceForm): boolean {
       (first.pathPrefix.trim() !== "" || first.port.trim() !== "")) ||
     form.restrictToRules ||
     form.oauthProvider.trim() !== "" ||
-    form.separateAccount ||
     form.placeholders.length > 0
   );
 }

@@ -23,9 +23,13 @@ import {
   NOT_EXPLICITLY_EMPTY,
   emptyRule,
   formFromService,
+  offersSeparateAccount,
   presetOf,
   serializeService,
+  serviceLogin,
+  signsInAfterSave,
   suggestedName,
+  toolsAccountUse,
   usesMoreOptions,
   usesOwnRules,
 } from "./egressServiceForm";
@@ -57,6 +61,7 @@ import {
   restoredHelperInput,
 } from "./EgressGithubHelper";
 import type { HelperInput, HelperLabels } from "./EgressGithubHelper";
+import { EgressAccountChoice } from "./EgressAccountChoice";
 import { MoreOptions, RulesSection } from "./EgressMoreOptions";
 import { errorText } from "./request";
 import {
@@ -217,9 +222,6 @@ export function EgressServiceEditor({
   });
   // A service that only limits repositories has no key, login, or website of its own.
   const limiting = form.restrictOnly;
-  // One with its own account signs in through Connect, so the form asks for
-  // no key and saves none typed before.
-  const takesKey = !limiting && !form.separateAccount;
   const [apiKey, setApiKey] = useState("");
   const [moreOpen, setMoreOpen] = useState(() => usesMoreOptions(form));
   const loadPresetsRef = useRef(loadPresets);
@@ -350,6 +352,31 @@ export function EgressServiceEditor({
   };
 
   const preset = presetOf(presets, form.preset);
+  // A service of one's own that signs in asks which account, in place of a
+  // key: it saves none typed before. Its row still offers a key for the
+  // tools' account.
+  const login = serviceLogin(form, preset);
+  const choosesAccount =
+    !limiting && offersSeparateAccount(form, options, preset);
+  const takesKey = !limiting && !choosesAccount;
+  const toolsAccount = toolsAccountUse(login, agentServices, name);
+  const signsIn = signsInAfterSave(form, initial);
+  const accountChoice = choosesAccount && (
+    <EgressAccountChoice
+      id={`${id}-account`}
+      provider={
+        providers.find((option) => option.id === login)?.display_name ??
+        (login || form.preset)
+      }
+      name={form.name}
+      separateAccount={form.separateAccount}
+      toolsAddress={toolsAccount.address}
+      usedBy={toolsAccount.usedBy}
+      signsIn={signsInAfterSave({ separateAccount: true }, initial)}
+      disabled={disabled}
+      onChange={(separateAccount) => set({ separateAccount })}
+    />
+  );
   // Shown beside the preset, since it is the preset that brings these variables.
   const presetWarnings = presetPlaceholderWarnings(
     form,
@@ -424,7 +451,7 @@ export function EgressServiceEditor({
     // repositories are to be applied again when the form is saved.
     appliedHelper.current = null;
     const loaded = value !== "" && value === service?.preset;
-    set({
+    const changes = {
       preset: value,
       replacePresetRules: false,
       rules: form.rules.length > 0 ? form.rules : [emptyRule()],
@@ -433,6 +460,19 @@ export function EgressServiceEditor({
         ...NOT_EXPLICITLY_EMPTY,
         presetLogin: loaded && service.oauth_provider !== undefined,
       },
+    };
+    // A new service starts on an account of its own where another service of
+    // the agent already uses the tools' one; an edited one keeps its choice.
+    const chosen = { ...form, ...changes, separateAccount: false };
+    const next = presetOf(presets, value);
+    set({
+      ...changes,
+      ...(!editing && {
+        separateAccount:
+          offersSeparateAccount(chosen, options, next) &&
+          toolsAccountUse(serviceLogin(chosen, next), agentServices, name)
+            .usedBy !== null,
+      }),
     });
   };
 
@@ -563,6 +603,7 @@ export function EgressServiceEditor({
               {warning}
             </p>
           ))}
+          {preset && accountChoice}
           {usesOwnRules(form) && (
             <div className="grid gap-3 sm:grid-cols-2">
               <RuleHostField {...ruleEditing(0, primaryRule)} />
@@ -709,6 +750,7 @@ export function EgressServiceEditor({
               onGithub={showGithubHelper}
               configPlaceholders={configPlaceholders}
               ruleEditing={ruleEditing}
+              accountChoice={accountChoice}
               newService={!editing}
               focusDisplayName={!editing && service !== null}
             />
@@ -753,6 +795,8 @@ export function EgressServiceEditor({
             "Save all changes"
           ) : limiting ? (
             "Save limit"
+          ) : signsIn ? (
+            "Save and sign in"
           ) : (
             "Save service"
           )}

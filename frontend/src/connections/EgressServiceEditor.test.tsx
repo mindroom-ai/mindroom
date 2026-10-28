@@ -12,6 +12,7 @@ import {
   bearerRule,
   credentialService,
   limitRules,
+  oauthStatus,
   presets,
   presetsReady,
   storedLimit,
@@ -69,6 +70,10 @@ const type = (label: string, value: string) =>
   fireEvent.change(screen.getByLabelText(label), { target: { value } });
 const save = () =>
   fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+/** The Account choice of a service of one's own that signs in, or null where the form has none. */
+const accountChoice = () =>
+  screen.queryByRole("radiogroup", { name: "Account" });
+const toolsAccount = () => screen.getByLabelText(/^The account your tools use/);
 const enter = (value: string) => type("GitHub repositories", value);
 const apply = () =>
   fireEvent.click(
@@ -570,22 +575,18 @@ describe("the editor form", () => {
   });
 
   it("offers its own account only for a service of one's own that logs in", async () => {
-    const ownAccount = () =>
-      screen.queryByLabelText(
-        "Use its own account, not the one the agent's tools use",
-      );
     const { onSave } = await renderEditor();
     type("Name", "team_calendar");
     openMoreOptions();
-    expect(ownAccount()).toBeNull();
+    expect(accountChoice()).toBeNull();
     type("Preset", "google_calendar");
-    fireEvent.click(ownAccount()!);
+    fireEvent.click(screen.getByLabelText("Another Google Calendar account"));
     expect(
       screen.getByText(
-        "Requests choose this service with the header X-Agent-Keys-Service: team_calendar.",
+        "You sign in right after saving. Agents pick it with X-Agent-Keys-Service: team_calendar.",
       ),
-    ).toBeInTheDocument();
-    save();
+    ).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Save and sign in" }));
     await waitFor(() => expect(onSave).toHaveBeenCalled());
     expect(onSave).toHaveBeenCalledWith("team_calendar", {
       preset: "google_calendar",
@@ -593,7 +594,7 @@ describe("the editor form", () => {
     });
   });
 
-  it("names the preset's login by its display name, and the header instead of the overlaps beside its own account", async () => {
+  it("asks which account in place of the login line, and drops the overlaps for its own account", async () => {
     const calendar = credentialService({
       name: "google_calendar",
       display_name: "Google Calendar",
@@ -615,17 +616,10 @@ describe("the editor form", () => {
       ],
     });
     openMoreOptions();
-    const instead =
-      "Users can connect an account (Google Calendar) instead of an API key.";
-    expect(screen.getByText(instead)).toBeVisible();
+    // The Account choice says what the line would, so the line is gone.
+    expect(screen.queryByText(/Users can connect an account/)).toBeNull();
     expect(screen.getAllByText(/already handles/)).toHaveLength(2);
-    // Its own account is all it uses, so there is no key to connect one instead of.
-    fireEvent.click(
-      screen.getByLabelText(
-        "Use its own account, not the one the agent's tools use",
-      ),
-    );
-    expect(screen.queryByText(instead)).toBeNull();
+    fireEvent.click(screen.getByLabelText("Another Google Calendar account"));
     // A request picks it by the header, so there is no overlap to warn about,
     // and the box's own hint stays the one place that names the header.
     expect(screen.queryByText(/already handles/)).toBeNull();
@@ -666,11 +660,7 @@ describe("the editor form", () => {
       "Users can connect an account of this kind instead of an API key. Leave it empty to use an API key.";
     expect(screen.getByText(keyHint)).toBeInTheDocument();
     type("Account login (optional)", "google_calendar");
-    fireEvent.click(
-      screen.getByLabelText(
-        "Use its own account, not the one the agent's tools use",
-      ),
-    );
+    fireEvent.click(screen.getByLabelText("Another Google Calendar account"));
     expect(screen.queryByText(keyHint)).toBeNull();
     expect(
       screen.getByText("Users can connect an account of this kind."),
@@ -688,11 +678,7 @@ describe("the editor form", () => {
       if (!screen.queryByLabelText("Display name")) openMoreOptions();
       type("Preset", "google_drive");
       type("Preset", service.preset!);
-      expect(
-        screen.queryByLabelText(
-          "Use its own account, not the one the agent's tools use",
-        ) !== null,
-      ).toBe(offered);
+      expect(accountChoice() !== null).toBe(offered);
       save();
       await waitFor(() => expect(onSave).toHaveBeenCalled());
       expect(onSave).toHaveBeenCalledWith("svc", service);
@@ -710,11 +696,7 @@ describe("the editor form", () => {
     // GitHub accounts belong to each user, so it would hide the box.
     type("Account login (optional)", "github");
     type("Preset", "google_calendar");
-    expect(
-      screen.getByLabelText(
-        "Use its own account, not the one the agent's tools use",
-      ),
-    ).not.toBeChecked();
+    expect(toolsAccount()).toBeChecked();
     save();
     await waitFor(() => expect(onSave).toHaveBeenCalled());
     expect(onSave).toHaveBeenCalledWith("svc", service);
@@ -729,14 +711,19 @@ describe("the editor form", () => {
       await renderEditor({
         service: { preset: "google_calendar" },
         name: "calendar",
+        saveKey: vi.fn(async () => undefined),
         ...props,
       });
       openMoreOptions();
+      expect(accountChoice()).toBeNull();
+      // Their forms keep the key field and the login line.
+      expect(screen.getByLabelText("API key")).toBeVisible();
       expect(
-        screen.queryByLabelText(
-          "Use its own account, not the one the agent's tools use",
-        ),
-      ).toBeNull();
+        screen.getByText(/instead of an API key|uses an API key/),
+      ).toBeVisible();
+      expect(
+        screen.getByRole("button", { name: "Save service" }),
+      ).toBeVisible();
       cleanup();
     }
   });
@@ -1797,11 +1784,12 @@ describe("the name of a new service", () => {
       takenNames: ["google_calendar"],
     });
     expect(name()).toHaveValue("google_calendar-2");
+    openMoreOptions();
     type("Display name", "Team calendar");
     expect(name()).toHaveValue("team_calendar");
     expect(
       screen.getByText(
-        "Requests choose this service with the header X-Agent-Keys-Service: team_calendar.",
+        "You sign in right after saving. Agents pick it with X-Agent-Keys-Service: team_calendar.",
       ),
     ).toBeVisible();
   });
@@ -2091,26 +2079,17 @@ describe("saving the API key with the service", () => {
     expect(saveKey).toHaveBeenCalledWith("ghp_x", "github");
   });
 
-  it("has no key field while the service uses its own account, which signs in through Connect", async () => {
+  it("has no key field while the form asks which account, and saves no key typed before", async () => {
     const saveKey = vi.fn(async () => undefined);
     const onClose = vi.fn();
     const { onSave } = await renderEditor({ saveKey, onClose });
-    type("Preset", "google_calendar");
     type("API key", "sk-1");
-    openMoreOptions();
-    const ownAccount = screen.getByLabelText(
-      "Use its own account, not the one the agent's tools use",
-    );
-    fireEvent.click(ownAccount);
+    type("Preset", "google_calendar");
     expect(screen.queryByLabelText("API key")).toBeNull();
-    fireEvent.click(ownAccount);
-    expect(screen.getByLabelText("API key")).toHaveValue("sk-1");
-    fireEvent.click(ownAccount);
     save();
     await waitFor(() => expect(onClose).toHaveBeenCalled());
     expect(onSave).toHaveBeenCalledWith("google_calendar", {
       preset: "google_calendar",
-      oauth_separate_account: true,
     });
     expect(saveKey).not.toHaveBeenCalled();
   });
@@ -2211,11 +2190,7 @@ describe("the note on whose service this is", () => {
         "Only your Code Helper uses this service and its account.",
       ),
     ).toBeInTheDocument();
-    fireEvent.click(
-      screen.getByLabelText(
-        "Use its own account, not the one the agent's tools use",
-      ),
-    );
+    fireEvent.click(toolsAccount());
     expect(
       screen.getByText("Only your Code Helper uses this service and its key."),
     ).toBeInTheDocument();
@@ -3307,11 +3282,7 @@ describe("the display name of a new service", () => {
     });
     type("Preset", "");
     type("Website", "cal.example.com");
-    fireEvent.click(
-      screen.getByLabelText(
-        "Use its own account, not the one the agent's tools use",
-      ),
-    );
+    openMoreOptions();
     expect(screen.getByLabelText("Display name")).toHaveAccessibleDescription(
       "Leave empty to use cal.example.com.",
     );
@@ -3433,5 +3404,172 @@ describe("a website another service of the agent already handles", () => {
     await renderEditor({ context: "operator" });
     type("Website", "api.github.com");
     expect(screen.queryByText(/already handles/)).toBeNull();
+  });
+});
+
+describe("the Account choice", () => {
+  // The administrator's Gmail, signed in with the account the agent's tools use.
+  const gmail = credentialService({
+    name: "google_gmail",
+    display_name: "Gmail",
+    rules: [
+      {
+        host: "gmail.googleapis.com",
+        port: null,
+        path_prefix: "/",
+        auth_type: "bearer",
+      },
+      {
+        host: "www.googleapis.com",
+        port: null,
+        path_prefix: "/gmail/",
+        auth_type: "bearer",
+      },
+    ],
+    configured: true,
+    active_source: "oauth",
+    oauth: oauthStatus({
+      provider: "google_gmail",
+      display_name: "Gmail",
+      connected: true,
+      account_label: "alex@example.com",
+    }),
+  });
+  const another = () => screen.getByLabelText("Another Gmail account");
+  const withGmail = {
+    agentServices: [gmail],
+    takenNames: ["google_gmail"],
+    saveKey: vi.fn(async () => undefined),
+  };
+
+  it("a Gmail preset asks which account, not for a key", async () => {
+    await renderEditor(withGmail);
+    expect(accountChoice()).toBeNull();
+    type("Preset", "google_gmail");
+    expect(accountChoice()).toBeVisible();
+    expect(screen.queryByLabelText("API key")).toBeNull();
+    expect(toolsAccount()).toHaveAccessibleName(
+      "The account your tools use (alex@example.com)",
+    );
+    expect(another()).toBeChecked();
+    expect(screen.getByText("Gmail already uses this account.")).toBeVisible();
+    expect(
+      screen.getByText(
+        "You sign in right after saving. Agents pick it with X-Agent-Keys-Service: google_gmail-2.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Save and sign in" }),
+    ).toBeVisible();
+    // Its own account is picked by its header, so nothing overlaps.
+    expect(screen.queryByText(/already handles/)).toBeNull();
+    openMoreOptions();
+    expect(screen.queryByText(/instead of an API key/)).toBeNull();
+  });
+
+  it("says <name> in the header while the name is empty", async () => {
+    await renderEditor(withGmail);
+    type("Preset", "google_gmail");
+    type("Name", "");
+    expect(
+      screen.getByText(
+        "You sign in right after saving. Agents pick it with X-Agent-Keys-Service: <name>.",
+      ),
+    ).toBeVisible();
+  });
+
+  it("without another Gmail service the tools' account is the default", async () => {
+    await renderEditor({ saveKey: vi.fn(async () => undefined) });
+    type("Preset", "google_gmail");
+    expect(toolsAccount()).toBeChecked();
+    expect(toolsAccount()).toHaveAccessibleName("The account your tools use");
+    expect(screen.queryByText(/already uses this account/)).toBeNull();
+    expect(screen.queryByLabelText("API key")).toBeNull();
+    expect(screen.getByRole("button", { name: "Save service" })).toBeVisible();
+  });
+
+  it("each choice saves its flag", async () => {
+    const first = await renderEditor(withGmail);
+    type("Preset", "google_gmail");
+    fireEvent.click(screen.getByRole("button", { name: "Save and sign in" }));
+    await waitFor(() =>
+      expect(first.onSave).toHaveBeenCalledWith("google_gmail-2", {
+        preset: "google_gmail",
+        oauth_separate_account: true,
+      }),
+    );
+    cleanup();
+    const second = await renderEditor(withGmail);
+    type("Preset", "google_gmail");
+    fireEvent.click(toolsAccount());
+    expect(screen.getByText("Gmail already uses this account.")).toBeVisible();
+    save();
+    await waitFor(() =>
+      expect(second.onSave).toHaveBeenCalledWith("google_gmail-2", {
+        preset: "google_gmail",
+      }),
+    );
+  });
+
+  it("editing keeps the saved choice", async () => {
+    const { onSave } = await renderEditor({
+      ...withGmail,
+      name: "mail",
+      service: { preset: "google_gmail", oauth_separate_account: true },
+    });
+    expect(another()).toBeChecked();
+    // It already has its own account, so saving signs in to nothing new.
+    expect(
+      screen.getByText("Agents pick it with X-Agent-Keys-Service: mail."),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Save service" })).toBeVisible();
+    fireEvent.click(toolsAccount());
+    save();
+    await waitFor(() =>
+      expect(onSave).toHaveBeenCalledWith("mail", { preset: "google_gmail" }),
+    );
+    cleanup();
+    // A service on the tools' account stays there, even with Gmail beside it
+    // and across a change of preset, until the user picks the other choice.
+    await renderEditor({
+      ...withGmail,
+      name: "cal",
+      service: { preset: "google_calendar" },
+    });
+    type("Preset", "google_gmail");
+    expect(toolsAccount()).toBeChecked();
+    fireEvent.click(another());
+    expect(
+      screen.getByRole("button", { name: "Save and sign in" }),
+    ).toBeVisible();
+  });
+
+  it("a custom service keeps the choice in More options", async () => {
+    const { onSave } = await renderEditor(withGmail);
+    type("Name", "mail");
+    type("Website", "mail.example.com");
+    openMoreOptions();
+    expect(accountChoice()).toBeNull();
+    type("Account login (optional)", "google_gmail");
+    const more = document.getElementById(
+      screen
+        .getByRole("button", { name: "More options" })
+        .getAttribute("aria-controls")!,
+    )!;
+    expect(
+      within(more).getByRole("radiogroup", { name: "Account" }),
+    ).toBeVisible();
+    expect(toolsAccount()).toBeChecked();
+    expect(screen.queryByLabelText("API key")).toBeNull();
+    fireEvent.click(another());
+    fireEvent.click(screen.getByRole("button", { name: "Save and sign in" }));
+    await waitFor(() =>
+      expect(onSave).toHaveBeenCalledWith("mail", {
+        display_name: "mail.example.com",
+        rules: [{ host: "mail.example.com", auth: { type: "bearer" } }],
+        oauth_provider: "google_gmail",
+        oauth_separate_account: true,
+      }),
+    );
   });
 });

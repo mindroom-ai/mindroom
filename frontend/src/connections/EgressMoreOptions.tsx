@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { administratorLimitNote } from "./accountCopy";
@@ -12,7 +13,6 @@ import {
   type PlaceholderForm,
   type RuleForm,
   emptyRule,
-  offersSeparateAccount,
   usesOwnRules,
 } from "./egressServiceForm";
 import { configPlaceholderWarning } from "./egressServiceNotes";
@@ -162,6 +162,7 @@ export function MoreOptions({
   onGithub,
   configPlaceholders,
   ruleEditing,
+  accountChoice,
   newService,
   focusDisplayName,
 }: {
@@ -186,6 +187,8 @@ export function MoreOptions({
   /** Variable name to the display name of the administrator's service that sets it. */
   configPlaceholders: Readonly<Record<string, string>>;
   ruleEditing: (index: number, rule: RuleForm) => RuleEditing;
+  /** Which account the service uses, where the form asks; a preset's sits in the basic fields instead. */
+  accountChoice: ReactNode;
   /** The service is being added, so an empty display name is saved as its host; an edited one keeps none. */
   newService: boolean;
   /** Focus the display name when the section opens, for a new service that starts from another, such as another account. */
@@ -330,34 +333,9 @@ export function MoreOptions({
         </p>
       </div>
 
-      {/* A service with its own account uses only that account, so no key is there to connect one instead of. */}
-      {!(preset?.oauth_provider && form.separateAccount) && loginField}
-
-      {offersSeparateAccount(
-        form,
-        { context, sharedTarget, providers },
-        preset,
-      ) && (
-        <div className="space-y-1">
-          <label className="flex items-start gap-2 text-sm">
-            <input
-              type="checkbox"
-              className="mt-0.5 h-4 w-4"
-              checked={form.separateAccount}
-              disabled={disabled}
-              onChange={(event) =>
-                set({ separateAccount: event.target.checked })
-              }
-            />
-            <span className="font-medium">
-              Use its own account, not the one the agent's tools use
-            </span>
-          </label>
-          <p className="pl-6 text-xs text-muted-foreground">
-            {`Requests choose this service with the header X-Agent-Keys-Service: ${form.name || "<name>"}.`}
-          </p>
-        </div>
-      )}
+      {/* The Account choice says what a preset's login line would. */}
+      {preset && accountChoice ? null : loginField}
+      {!preset && accountChoice}
 
       {/* The placeholder variables: what they are for, the rules for their names, one row each with its problem or warning. */}
       <div className="space-y-3">

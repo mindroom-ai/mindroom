@@ -2715,16 +2715,17 @@ describe("adding another account", () => {
       "google_calendar",
     );
     expect(
-      within(form).getByLabelText(
-        "Use its own account, not the one the agent's tools use",
-      ),
+      within(form).getByLabelText("Another Google Calendar account"),
     ).toBeChecked();
+    fireEvent.click(within(form).getByRole("button", { name: "More options" }));
     expect(within(form).getByLabelText("Display name")).toHaveFocus();
     fireEvent.change(within(form).getByLabelText("Display name"), {
       target: { value: "Team calendar" },
     });
     expect(within(form).getByLabelText("Name")).toHaveValue("team_calendar");
-    fireEvent.click(within(form).getByRole("button", { name: "Save service" }));
+    fireEvent.click(
+      within(form).getByRole("button", { name: "Save and sign in" }),
+    );
 
     // The new row offers its own account's sign-in as any other row does.
     expect(
