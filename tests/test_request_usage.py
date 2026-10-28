@@ -21,7 +21,8 @@ from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.stats import collect_admin_usage
-from tests.conftest import persist_runs
+from mindroom.usage.storage import usage_upsert_sql
+from tests.conftest import persist_runs, seed_session_row
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -253,6 +254,41 @@ def test_unreconciled_request_details_preserve_aggregates_and_mark_coverage(
     assert report.to_dict()["request_breakdown"] == []
     assert report.request_coverage is not None
     assert report.request_coverage.unavailable_sources == 1
+
+
+def test_a_compaction_summary_stored_with_an_untagged_request_reports_its_model(tmp_path: Path) -> None:
+    """A summary row from before its request named its model reports the request under the summary's model."""
+    config, paths = _usage_runtime(tmp_path)
+    storage = create_state_storage("code", tmp_path / "agents/code")
+    counters = {"input_tokens": 40, "output_tokens": 4, "total_tokens": 44}
+    # The row as compaction summaries stored it before its request named its model.
+    stored = {
+        "run_id": "compaction:summary",
+        "parent_run_id": None,
+        "team_id": None,
+        "user_id": "@alice:example.test",
+        "model_provider": "summary-provider",
+        "model": "summary-model",
+        "created_at": 1_700_000_500.5,
+        "metrics": counters,
+        "requests": [{"created_at": 1_700_000_500.5, "metrics": counters}],
+        "kind": "compaction_summary",
+    }
+    seed_session_row(storage, _session())
+    with storage.transaction(write=True) as connection:
+        connection.execute(
+            usage_upsert_sql(storage.names.sessions),
+            ("session", "compaction:summary", json.dumps(stored)),
+        )
+
+    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
+
+    assert [
+        (row["provider"], row["model"], row["kind"], row["totals"]["total_tokens"])
+        for row in report.to_dict()["request_breakdown"]
+    ] == [("summary-provider", "summary-model", "compaction_summary", 44)]
+    assert report.request_coverage is not None
+    assert report.request_coverage.unavailable_sources == 0
 
 
 @pytest.mark.parametrize("retained_run", [False, True])

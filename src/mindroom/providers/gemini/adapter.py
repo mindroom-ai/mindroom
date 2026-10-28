@@ -9,7 +9,6 @@ credentials file from the config, else ``GOOGLE_CLOUD_PROJECT``, ``GOOGLE_CLOUD_
 
 from __future__ import annotations
 
-import time
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from functools import partial
@@ -21,9 +20,9 @@ from google.genai.types import HttpOptions
 from pydantic import ValidationError
 
 from mindroom.llm.errors import InvalidRequest, ProviderError
-from mindroom.llm.provider import Capabilities, ModelIdentity, StreamProgress, TurnCompleted, UsageReported
+from mindroom.llm.provider import Capabilities, ModelIdentity
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
-from mindroom.providers.assistant_turn import finished_assistant_message, output_started
+from mindroom.providers.assistant_turn import TurnTimer, finished_turn
 from mindroom.providers.credentials import gemini_uses_vertexai, model_api_key
 from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
@@ -80,9 +79,8 @@ class GeminiProvider:
 
         Media uploads happen first, so their SDK and transport errors are normalized too.
         """
-        started = time.monotonic()
+        timer = TurnTimer()
         reply = GeminiReply()
-        first_output_at: float | None = None
         # Client construction reads credentials from disk; its failures are configuration errors, not transient.
         client = self._sdk_client()
         provider = self.identity.provider_name
@@ -96,9 +94,7 @@ class GeminiProvider:
             chunks = await client.aio.models.generate_content_stream(**call)
             async with aclosing(cast("AsyncGenerator[GenerateContentResponse]", chunks)) as responses:
                 async for chunk in responses:
-                    # A chunk without output, such as grounding or code-execution progress, is still activity.
-                    for event in read_chunk(reply, chunk) or [StreamProgress()]:
-                        first_output_at = output_started(first_output_at, event)
+                    for event in timer.chunk(read_chunk(reply, chunk)):
                         yield event
         except ProviderError:
             # Media and chunk failures arrive normalized.
@@ -108,25 +104,23 @@ class GeminiProvider:
         if not reply.finished:
             # The stream ended before Gemini ended the reply, so the turn did not finish.
             return
-        for event in self._finished_turn(reply, started=started, first_output_at=first_output_at):
+        for event in self._finished_turn(reply, timer):
             yield event
 
-    def _finished_turn(self, reply: GeminiReply, *, started: float, first_output_at: float | None) -> list[StreamEvent]:
-        """Return the final usage report and the finished turn of a reply Gemini ended, or raise its malformed call."""
+    def _finished_turn(self, reply: GeminiReply, timer: TurnTimer) -> list[StreamEvent]:
+        """Return the events that end a reply Gemini ended, or raise its malformed call."""
         if (malformed := malformed_tool_call_error(reply, provider=self.identity.provider_name)) is not None:
             raise malformed
-        message = finished_assistant_message(
+        return finished_turn(
             self.identity,
+            timer,
             content=reply.content or None,
             reasoning=reply.reasoning or None,
             tool_calls=reply.tool_calls,
             provider_data=reply_provider_data(reply),
             usage=reply.usage,
-            started=started,
-            first_output_at=first_output_at,
+            stop_reason=stop_reason(reply),
         )
-        usage = [] if reply.usage is None else [UsageReported(message.metrics)]
-        return [*usage, TurnCompleted(message=message, stop_reason=stop_reason(reply))]
 
     def _request_config(
         self,
@@ -136,12 +130,7 @@ class GeminiProvider:
         """Return the generation config of one request."""
         settings = self.settings
         overrides = request.overrides
-        # TODO(simplify): an authored ``generation_config`` key that has a dedicated field, such as temperature, is
-        # dropped when that field is unset. Let a dedicated field replace the key only when it is set. Operators and
-        # models would notice.
-        config: dict[str, Any] = {
-            **(settings.generation_config or {}),
-            **(settings.generative_model_kwargs or {}),
+        dedicated = {
             "safety_settings": settings.safety_settings,
             "temperature": settings.temperature if overrides.temperature is None else overrides.temperature,
             "top_p": settings.top_p,
@@ -153,6 +142,12 @@ class GeminiProvider:
             "frequency_penalty": settings.frequency_penalty,
             "seed": settings.seed,
             "cached_content": settings.cached_content,
+        }
+        # A dedicated setting replaces the authored ``generation_config`` key of the same name only when it is set.
+        config: dict[str, Any] = {
+            **(settings.generation_config or {}),
+            **(settings.generative_model_kwargs or {}),
+            **{key: value for key, value in dedicated.items() if value is not None},
         }
         if system_instruction is not None:
             config["system_instruction"] = system_instruction

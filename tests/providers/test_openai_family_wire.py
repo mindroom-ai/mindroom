@@ -296,6 +296,18 @@ async def test_a_chat_stream_splits_only_a_think_block_that_opens_the_reply(
 
 
 @pytest.mark.asyncio
+async def test_text_a_chat_stream_holds_until_its_end_is_still_its_first_output(tmp_path: Path) -> None:
+    """A reply that could still open a ``<think>`` block shows nothing until the stream ends, then times the turn."""
+    reply = _chat_reply(_chunk({"content": "<"}, finish_reason="stop"))
+    built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, reply)
+
+    turn = await _turn(built, ModelRequest(messages=[_user()]))
+
+    assert turn.content == "<"
+    assert turn.usage.time_to_first_token is not None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("server_id", "stored"),
     [
