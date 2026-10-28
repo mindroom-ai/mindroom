@@ -210,20 +210,20 @@ async def _run_orchestrator_start_until_ready(
 ) -> None:
     """Run start() until readiness, then explicitly shut the runtime down."""
     ready = asyncio.Event()
-    start_sync_task = orchestrator._start_sync_task
+    start_sync = orchestrator.fleet.start_sync
 
     def mark_ready() -> None:
         ready.set()
 
-    def start_sync_task_and_publish_router_readiness(entity_name: str, bot: object) -> None:
+    def start_sync_and_publish_router_readiness(bots: list[AgentBot | TeamBot]) -> None:
         # Stand in for the router's first sync, which publishes its reply memberships.
-        start_sync_task(entity_name, bot)
-        if entity_name == ROUTER_AGENT_NAME:
+        start_sync(bots)
+        if any(bot.agent_name == ROUTER_AGENT_NAME for bot in bots):
             orchestrator._router_reply_memberships_live_sync_ready.set()
 
     with (
         patch("mindroom.orchestrator.set_runtime_ready", side_effect=mark_ready),
-        patch.object(orchestrator, "_start_sync_task", side_effect=start_sync_task_and_publish_router_readiness),
+        patch.object(orchestrator.fleet, "start_sync", side_effect=start_sync_and_publish_router_readiness),
     ):
         runtime_task = asyncio.create_task(orchestrator.start())
         try:

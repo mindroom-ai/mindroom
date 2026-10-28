@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,8 @@ from mindroom.orchestration.runtime import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
 
@@ -36,11 +39,9 @@ class StartupMaintenanceController:
     sync_runtime_support: _SyncRuntimeSupport
     mark_runtime_support_ready: _MarkRuntimeSupportReady
     task: asyncio.Task[None] | None = field(default=None, init=False)
-    started: bool = field(default=False, init=False)
 
     def start(self, bots: list[_StartupBot], config: Config) -> None:
         """Schedule detached startup maintenance for one startup generation."""
-        self.started = True
         self.task = create_logged_task(
             self._run(bots, config),
             name="startup_maintenance",
@@ -55,19 +56,28 @@ class StartupMaintenanceController:
         await cancel_logged_task(task)
         return should_replay
 
-    def restart_after_runtime_replacement(
+    @asynccontextmanager
+    async def paused(
         self,
         *,
-        config: Config,
+        config_provider: Callable[[], Config | None],
         running_bots: _RunningBots,
-    ) -> None:
-        """Replay canceled startup maintenance with the bots running after a replacement."""
-        if not self.started or self.task is not None:
-            return
-        bots = running_bots()
-        if not bots:
-            return
-        self.start(bots, config)
+    ) -> AsyncIterator[None]:
+        """Cancel maintenance across a runtime replacement, then replay it with the bots running after it.
+
+        Maintenance holds the bots it started with, so a replacement that
+        interrupted it replays it with the replacements, even when the
+        replacement itself failed.
+        """
+        interrupted = await self.cancel()
+        try:
+            yield
+        finally:
+            config = config_provider()
+            if interrupted and config is not None and self.task is None:
+                bots = running_bots()
+                if bots:
+                    self.start(bots, config)
 
     async def _run(self, bots: list[_StartupBot], config: Config) -> None:
         await self._run_phase(

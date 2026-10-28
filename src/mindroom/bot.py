@@ -13,7 +13,6 @@ from uuid import uuid4
 
 import nio
 from nio import AuthenticatedToDeviceEvent
-from tenacity import retry, retry_if_exception_type, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 from mindroom.approval.inbound import (
     handle_tool_approval_action,
@@ -155,7 +154,6 @@ from .scheduling.tasks import (
     set_scheduled_task_runner_owner,
     unregister_scheduled_task_state_writer,
 )
-from .startup_errors import PermanentStartupError
 from .tool_jobs.client_cancel import cancel_room_jobs, handle_job_cancel_event, person_may_cancel
 from .tool_jobs.follow_ups import follow_up_event
 from .tool_jobs.runtime import get_background_runtime
@@ -1770,10 +1768,9 @@ class AgentBot:
     def _invited_call_rooms_by_agent(self) -> dict[str, frozenset[str]]:
         """Return live accepted-invite state for the configured call agents."""
         orchestrator = self.orchestrator
-        agent_bots_value = orchestrator.agent_bots if orchestrator is not None else None
-        if not isinstance(agent_bots_value, dict):
+        if orchestrator is None:
             return {self.agent_name: frozenset(self._room_lifecycle.invited_rooms)}
-        agent_bots = cast("dict[str, object]", agent_bots_value)
+        agent_bots = orchestrator.agent_bots
 
         invited_rooms: dict[str, frozenset[str]] = {}
         for agent_name in self.config.calls.agents:
@@ -2165,36 +2162,6 @@ class AgentBot:
             **mismatch_counts,
         )
 
-    async def try_start(self) -> bool:
-        """Try to start the agent bot with smart retry logic.
-
-        Retries transient failures but stops immediately on permanent startup errors.
-
-        Returns:
-            True if the bot started successfully, False otherwise.
-
-        """
-
-        @retry(
-            stop=stop_after_attempt(3),
-            wait=wait_exponential(multiplier=1, min=2, max=10),
-            # Tenacity sees BaseException too; never retry a cancelled start.
-            retry=retry_if_exception_type(Exception) & retry_if_not_exception_type(PermanentStartupError),
-            reraise=True,
-        )
-        async def _start_with_retry() -> None:
-            await self.start()
-
-        try:
-            await _start_with_retry()
-            return True  # noqa: TRY300
-        except Exception as exc:
-            if isinstance(exc, PermanentStartupError):
-                logger.error("agent_start_failed_permanently", agent=self.agent_name, error=str(exc))  # noqa: TRY400
-                raise
-            logger.exception("agent_start_failed", agent=self.agent_name)
-            return False
-
     async def leave_rooms(self) -> None:
         """Leave rooms for entity removal while the orchestrator keeps sync alive."""
         await self._room_lifecycle.leave_all_rooms(timeout_seconds=SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS)
@@ -2247,8 +2214,8 @@ class AgentBot:
         await self._release_stopped_resources(failures, shutdown_intent=shutdown_intent)
         if failures:
             # Every step ran, and the caller still has to hear about it.
-            # `stop_entities` pops from the runtime map only after its gather
-            # returns, so raising keeps this bot registered and stops the reload
+            # The fleet drops a stopped slot only after every stop phase
+            # succeeded, so raising keeps this bot registered and stops the reload
             # before it creates a replacement on a store that never closed.
             # Swallowing is what would certify a partial stop as a clean one.
             # A restart still replaces a bot whose only failure is a reply that
@@ -2778,10 +2745,7 @@ class AgentBot:
     def _lookup_personal_room_target(self, agent_name: str) -> PersonalRoomTarget | None:
         """Project a connected fleet member into its service and sync readiness."""
         orchestrator = self.orchestrator
-        bots = orchestrator.agent_bots if orchestrator is not None else None
-        if not isinstance(bots, dict):
-            return None
-        target = cast("dict[str, object]", bots).get(agent_name)
+        target = orchestrator.agent_bots.get(agent_name) if orchestrator is not None else None
         if not isinstance(target, AgentBot) or target.client is None:
             return None
         return PersonalRoomTarget(target.personal_rooms, target.first_sync_complete)

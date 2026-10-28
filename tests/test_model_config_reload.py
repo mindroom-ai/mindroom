@@ -84,13 +84,8 @@ async def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncItera
         bot = make_test_team_bot(**kwargs) if name == "team" else make_test_agent_bot(**kwargs)
         bot.orchestrator = orchestrator
         bot.running = True
-        orchestrator.agent_bots[name] = bot
+        orchestrator.fleet.add(name, bot)
     monkeypatch.setattr(AgentBot, "_set_presence_with_model_info", AsyncMock())
-    monkeypatch.setattr(
-        orchestrator,
-        "_restart_changed_entities",
-        AsyncMock(side_effect=AssertionError("Model-only reload must preserve Matrix bots")),
-    )
     try:
         yield orchestrator
     finally:

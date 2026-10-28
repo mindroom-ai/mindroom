@@ -28,7 +28,7 @@ from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptReques
 from mindroom.response_runner import ResponseShutdownTimeoutError
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
 from mindroom.session_storage.agent_storage import create_state_storage
-from tests.conftest import unwrap_extracted_collaborator
+from tests.conftest import install_bots, unwrap_extracted_collaborator
 from tests.journal_helpers import admit_dispatch_event
 from tests.response_runner_helpers import _bot, _plain_request, _target
 from tests.test_edit_regenerator import (
@@ -253,7 +253,7 @@ async def test_shutdown_closes_callbacks_before_membership_invalidation(  # noqa
     orchestrator.config = bot.config
     orchestrator.agent_reply_memberships = memberships
     orchestrator.agent_reply_membership_sync = AgentReplyMembershipSync(memberships)
-    orchestrator.agent_bots = {"general": bot}
+    install_bots(orchestrator, {"general": bot})
 
     async def release_callback() -> None:
         release.set()
@@ -393,10 +393,10 @@ async def test_shutdown_retains_slow_callback_cleanup_within_budgets(  # noqa: P
     monkeypatch.setattr("mindroom.bot.SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.02)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
     orchestrator.config = bot.config
-    orchestrator.agent_bots = {"general": bot}
+    install_bots(orchestrator, {"general": bot})
     opened_journal = MagicMock(spec=OpenEventJournal, store=journal_store, close=AsyncMock())
     orchestrator._open_journal = opened_journal
-    monkeypatch.setattr("mindroom.orchestrator.RESPONSE_FINALIZATION_TIMEOUT_SECONDS", 0.02)
+    monkeypatch.setattr("mindroom.orchestration.entity_fleet.RESPONSE_FINALIZATION_TIMEOUT_SECONDS", 0.02)
     stopping = asyncio.create_task(orchestrator.stop() if orchestrated else bot.stop(shutdown_intent=ORDERLY_SHUTDOWN))
     try:
         await asyncio.wait_for(unwinding.wait(), timeout=1)
@@ -492,11 +492,11 @@ async def test_orderly_shutdown_upgrades_callback_already_stopping(  # noqa: PLR
     await asyncio.wait_for(unwinding.wait(), timeout=2)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
     orchestrator.config = bot.config
-    orchestrator.agent_bots = {"general": bot}
+    install_bots(orchestrator, {"general": bot})
     opened_journal = MagicMock(spec=OpenEventJournal, store=journal_store, close=AsyncMock())
     orchestrator._open_journal = opened_journal
     monkeypatch.setattr("mindroom.bot.SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.02)
-    monkeypatch.setattr("mindroom.orchestrator.RESPONSE_FINALIZATION_TIMEOUT_SECONDS", 0.02)
+    monkeypatch.setattr("mindroom.orchestration.entity_fleet.RESPONSE_FINALIZATION_TIMEOUT_SECONDS", 0.02)
     try:
         with pytest.raises(ResponseShutdownTimeoutError):
             await asyncio.wait_for(orchestrator.stop(), timeout=3)
@@ -538,7 +538,7 @@ async def test_process_shutdown_fence_survives_late_sync_start(  # noqa: C901, P
     bot._journal_dispatcher = dispatcher
     orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
     orchestrator.config = bot.config
-    orchestrator.agent_bots = {"general": bot}
+    install_bots(orchestrator, {"general": bot})
     teardown_entered = asyncio.Event()
     release_teardown = asyncio.Event()
     retry_entered = asyncio.Event()

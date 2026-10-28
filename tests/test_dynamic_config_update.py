@@ -20,8 +20,9 @@ from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
-from tests.conftest import install_model_providers, orchestrator_runtime_paths
+from tests.conftest import install_bots, install_model_providers, orchestrator_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 
@@ -101,7 +102,7 @@ class TestDynamicConfigUpdate:
         # Create a mock bot for the general agent
         mock_bot = _mock_agent_bot(initial_config)
         mock_bot.running = True
-        orchestrator.agent_bots["general"] = mock_bot
+        orchestrator.fleet.add("general", mock_bot)
 
         # Create updated config with a new agent
         updated_config = Config(
@@ -130,12 +131,13 @@ class TestDynamicConfigUpdate:
             with (
                 patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
                 patch("mindroom.orchestration.config_updates._get_changed_agents") as mock_identify,
-                patch.object(orchestrator, "_setup_rooms_and_memberships"),
+                patch.object(orchestrator._rooms, "setup"),
             ):
                 mock_identify.return_value = set()  # No entities need restarting
 
                 # Create a mock for the new bot
                 new_bot_mock = _mock_agent_bot(updated_config)
+                new_bot_mock.agent_name = "callagent"
                 new_bot_mock.start.return_value = None
                 new_bot_mock.sync_forever.return_value = None
                 mock_create_bot.return_value = new_bot_mock
@@ -194,27 +196,27 @@ class TestDynamicConfigUpdate:
         general_bot._set_presence_with_model_info = AsyncMock()
         router_bot = _mock_agent_bot(initial_config)
         router_bot._set_presence_with_model_info = AsyncMock()
-        orchestrator.agent_bots = {
-            "general": general_bot,
-            ROUTER_AGENT_NAME: router_bot,
-        }
+        install_bots(
+            orchestrator,
+            {
+                "general": general_bot,
+                ROUTER_AGENT_NAME: router_bot,
+            },
+        )
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
-            patch("mindroom.orchestrator.load_plugins", return_value=[]),
-            patch.object(
-                orchestrator,
-                "_restart_changed_entities",
-                new=AsyncMock(return_value=(set(), [], [])),
-            ) as mock_restart,
-            patch.object(orchestrator, "_reconcile_post_update_rooms", new=AsyncMock()),
-            patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
-            patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
+            patch.object(orchestrator.fleet, "create", new=AsyncMock()),
+            patch.object(orchestrator.fleet, "start", new=AsyncMock()) as mock_start,
         ):
             updated = await orchestrator.config_reload._update_config()
 
         assert updated is True
-        assert mock_restart.await_args.args[0].restart == {"general", ROUTER_AGENT_NAME}
+        # Both bots stopped for a restart before the new config was published, so neither received it.
+        assert not orchestrator.agent_bots
+        general_bot.stop.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+        router_bot.stop.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+        mock_start.assert_awaited_once_with({"general", ROUTER_AGENT_NAME})
         assert general_bot.config == initial_config
         assert router_bot.config == initial_config
         general_bot._set_presence_with_model_info.assert_not_awaited()
@@ -316,9 +318,9 @@ class TestDynamicConfigUpdate:
         orchestrator.config = initial_config
 
         mock_bot = _mock_agent_bot(initial_config)
-        orchestrator.agent_bots["general"] = mock_bot
+        orchestrator.fleet.add("general", mock_bot)
         router_bot = _mock_agent_bot(initial_config)
-        orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
+        orchestrator.fleet.add(ROUTER_AGENT_NAME, router_bot)
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
@@ -373,9 +375,9 @@ class TestDynamicConfigUpdate:
         orchestrator.config = initial_config
 
         mock_bot = _mock_agent_bot(initial_config)
-        orchestrator.agent_bots["general"] = mock_bot
+        orchestrator.fleet.add("general", mock_bot)
         router_bot = _mock_agent_bot(initial_config)
-        orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
+        orchestrator.fleet.add(ROUTER_AGENT_NAME, router_bot)
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
@@ -425,13 +427,13 @@ class TestDynamicConfigUpdate:
         orchestrator.config = initial_config
 
         general_bot = _mock_agent_bot(initial_config)
-        orchestrator.agent_bots["general"] = general_bot
+        orchestrator.fleet.add("general", general_bot)
         router_bot = _mock_agent_bot(initial_config)
-        orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
+        orchestrator.fleet.add(ROUTER_AGENT_NAME, router_bot)
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
-            patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
+            patch.object(orchestrator._rooms, "setup", new=AsyncMock()) as mock_setup,
         ):
             updated = await orchestrator.config_reload._update_config()
 
@@ -476,13 +478,13 @@ class TestDynamicConfigUpdate:
         orchestrator.config = initial_config
 
         general_bot = _mock_agent_bot(initial_config)
-        orchestrator.agent_bots["general"] = general_bot
+        orchestrator.fleet.add("general", general_bot)
         router_bot = _mock_agent_bot(initial_config)
-        orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
+        orchestrator.fleet.add(ROUTER_AGENT_NAME, router_bot)
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
-            patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
+            patch.object(orchestrator._rooms, "setup", new=AsyncMock()) as mock_setup,
         ):
             updated = await orchestrator.config_reload._update_config()
 
@@ -538,15 +540,18 @@ class TestDynamicConfigUpdate:
         general_bot = _mock_agent_bot(initial_config)
         router_bot = _mock_agent_bot(initial_config)
         router_bot.client = membership_client
-        orchestrator.agent_bots = {
-            "general": general_bot,
-            ROUTER_AGENT_NAME: router_bot,
-        }
+        install_bots(
+            orchestrator,
+            {
+                "general": general_bot,
+                ROUTER_AGENT_NAME: router_bot,
+            },
+        )
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
-            patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock(return_value={"lobby": room_id})),
-            patch.object(orchestrator, "_ensure_root_space", new=AsyncMock()),
+            patch.object(orchestrator._rooms, "ensure_rooms_exist", new=AsyncMock(return_value={"lobby": room_id})),
+            patch.object(orchestrator._rooms, "link_root_space", new=AsyncMock()),
             patch.object(orchestrator, "_finalize_config_reload", new=AsyncMock()),
         ):
             updated = await orchestrator.config_reload._update_config()
@@ -607,27 +612,25 @@ class TestDynamicConfigUpdate:
             orchestrator.runtime_paths,
             membership_client,
         )
-        orchestrator.agent_bots = {
-            "general": _mock_agent_bot(initial_config),
-            ROUTER_AGENT_NAME: _mock_agent_bot(initial_config),
-        }
+        install_bots(
+            orchestrator,
+            {
+                "general": _mock_agent_bot(initial_config),
+                ROUTER_AGENT_NAME: _mock_agent_bot(initial_config),
+            },
+        )
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
-            patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
-            patch.object(
-                orchestrator,
-                "_restart_changed_entities",
-                new=AsyncMock(return_value=(set(), [], [])),
-            ) as restart_entities,
             patch.object(orchestrator, "_reconcile_post_update_rooms", new=AsyncMock()) as reconcile_rooms,
             patch.object(orchestrator, "_finalize_config_reload", new=AsyncMock()),
         ):
             updated = await orchestrator.config_reload._update_config()
 
         assert updated is True
-        plan = restart_entities.await_args.args[0]
+        plan = reconcile_rooms.await_args.args[0]
         assert plan.restart == set()
+        assert set(orchestrator.agent_bots) == {ROUTER_AGENT_NAME, "general"}
         assert plan.reconcile_rooms == {ROUTER_AGENT_NAME, "general"}
         reconcile_rooms.assert_awaited_once_with(plan, set())
         assert not orchestrator.agent_reply_memberships.needs_refresh(updated_config)
@@ -673,15 +676,15 @@ class TestDynamicConfigUpdate:
         persist_entity_accounts(updated_config, orchestrator.runtime_paths)
         mock_bot = _mock_agent_bot(initial_config)
         mock_bot._set_presence_with_model_info = AsyncMock()
-        orchestrator.agent_bots["general"] = mock_bot
+        orchestrator.fleet.add("general", mock_bot)
         router_bot = _mock_agent_bot(initial_config)
         router_bot._set_presence_with_model_info = AsyncMock()
-        orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
+        orchestrator.fleet.add(ROUTER_AGENT_NAME, router_bot)
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
             patch.object(orchestrator, "_ensure_user_account", new=AsyncMock()) as mock_ensure_user,
-            patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
+            patch.object(orchestrator._rooms, "setup", new=AsyncMock()) as mock_setup,
         ):
             updated = await orchestrator.config_reload._update_config()
 
@@ -725,10 +728,10 @@ class TestDynamicConfigUpdate:
         orchestrator.config = initial_config
         mock_bot = _mock_agent_bot(initial_config)
         mock_bot._set_presence_with_model_info = AsyncMock()
-        orchestrator.agent_bots["general"] = mock_bot
+        orchestrator.fleet.add("general", mock_bot)
         router_bot = _mock_agent_bot(initial_config)
         router_bot._set_presence_with_model_info = AsyncMock()
-        orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
+        orchestrator.fleet.add(ROUTER_AGENT_NAME, router_bot)
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
@@ -737,7 +740,7 @@ class TestDynamicConfigUpdate:
                 "_ensure_user_account",
                 new=AsyncMock(side_effect=PermanentMatrixStartupError("mindroom_user.username cannot be changed")),
             ) as mock_ensure_user,
-            patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
+            patch.object(orchestrator._rooms, "setup", new=AsyncMock()) as mock_setup,
             pytest.raises(PermanentMatrixStartupError, match="cannot be changed"),
         ):
             await orchestrator.config_reload._update_config()

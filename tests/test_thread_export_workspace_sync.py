@@ -33,7 +33,7 @@ from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
     resolve_worker_key,
 )
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, runtime_paths_for, swap_fleet_bot, test_runtime_paths
 from tests.thread_export_helpers import write_thread_export_matrix_state
 
 if TYPE_CHECKING:
@@ -863,7 +863,7 @@ async def test_replacement_drains_automatic_exports_and_resumes_current_owners( 
     write_thread_export_matrix_state(tmp_path)
     original = _FakeBot("@mindroom_code:localhost")
     current = _FakeBot("@mindroom_code:localhost")
-    orchestrator.agent_bots["code"] = cast("AgentBot", original)
+    orchestrator.fleet.add("code", cast("AgentBot", original))
     runner = orchestrator._thread_export_runner
     runner._deps = replace(runner._deps, debounce_seconds=0)
     started, cleaning, allow_cleanup, cleaned = (asyncio.Event() for _ in range(4))
@@ -889,7 +889,7 @@ async def test_replacement_drains_automatic_exports_and_resumes_current_owners( 
 
     async def publish() -> None:
         assert cleaned.is_set(), "replacement closed a client still borrowed by an automatic export"
-        orchestrator.agent_bots["code"] = cast("AgentBot", current)
+        swap_fleet_bot(orchestrator, "code", current)
         runner.start()  # Runtime worker synchronization also calls start during publication.
         if outcome != "success":
             runner.mark_room_activity("!lobby:localhost")

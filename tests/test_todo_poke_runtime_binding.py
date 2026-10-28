@@ -706,7 +706,7 @@ def test_orchestrator_composes_live_coordinator_providers(tmp_path: Path) -> Non
     assert coordinator.config_provider() is config
 
     sentinel = _bot()
-    orchestrator.agent_bots["code"] = sentinel
+    orchestrator.fleet.add("code", sentinel)
     assert coordinator.bot_provider("code") is sentinel
     assert coordinator.bot_provider("missing") is None
     assert coordinator.agent_reply_memberships is orchestrator.agent_reply_memberships

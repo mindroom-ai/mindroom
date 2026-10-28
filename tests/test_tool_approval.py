@@ -1104,7 +1104,7 @@ async def test_startup_unavailable_owner_cleanup_walks_cursor_pages() -> None:
         patch("mindroom.approval.recovery._UNAVAILABLE_OWNER_SCAN_LIMIT", 2),
         patch.object(recovery, "_discard_unavailable", new=AsyncMock(return_value=True)) as discard,
     ):
-        assert await recovery._reconcile_unavailable_owner_pages(None)
+        assert await recovery._reconcile_unavailable_owner_pages(None, recovery._unavailable_entity_reason) == set()
 
     assert journal.approval_continuations.await_args_list == [
         call(limit=2, after=None),
@@ -1138,13 +1138,13 @@ async def test_startup_unavailable_cleanup_scans_owners_while_card_recovery_rema
         patch.object(
             recovery,
             "_reconcile_unavailable_owner_pages",
-            new=AsyncMock(return_value=True),
+            new=AsyncMock(return_value=set()),
         ) as reconcile,
         patch.object(recovery, "_schedule_startup_cleanup_retry") as schedule_retry,
     ):
         await recovery._run_startup_cleanup_if_ready()
 
-    reconcile.assert_awaited_once_with(None)
+    reconcile.assert_awaited_once_with(None, recovery._unavailable_entity_reason)
     schedule_retry.assert_called_once_with()
     assert recovery._startup_cleanup_done is False
 

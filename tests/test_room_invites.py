@@ -51,6 +51,7 @@ from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_bots,
     install_runtime_journal_support,
     install_send_response_mock,
     make_matrix_client_mock,
@@ -3035,7 +3036,7 @@ async def test_agent_invite_does_not_auto_add_router_to_ad_hoc_room(
 
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = config
-    orchestrator.agent_bots = {"agent1": bot, ROUTER_AGENT_NAME: router_bot}
+    install_bots(orchestrator, {"agent1": bot, ROUTER_AGENT_NAME: router_bot})
     bot.orchestrator = orchestrator
     router_bot.orchestrator = orchestrator
 
@@ -3046,7 +3047,7 @@ async def test_agent_invite_does_not_auto_add_router_to_ad_hoc_room(
         lambda *_args, **_kwargs: True,
     )
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
-    monkeypatch.setattr("mindroom.orchestrator.invite_to_room", invite_router)
+    monkeypatch.setattr("mindroom.orchestration.rooms.invite_to_room", invite_router)
 
     room = MagicMock(room_id="!project-room:localhost")
     room.canonical_alias = None

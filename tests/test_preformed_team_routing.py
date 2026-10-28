@@ -54,6 +54,11 @@ if TYPE_CHECKING:
     from mindroom.history.turn_recorder import TurnRecorder
 
 
+def _running_members() -> dict[str, MagicMock]:
+    """Return the live fleet the team and its members run in."""
+    return {name: MagicMock(running=True) for name in ("t1", "a1", "a2")}
+
+
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
     return bind_runtime_paths(config, test_runtime_paths(tmp_path))
 
@@ -187,6 +192,7 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
 
     # Minimal orchestrator stub is fine because we patch team_response
     bot.orchestrator = MagicMock()
+    bot.orchestrator.agent_bots = _running_members()
 
     team_user_id = ids["t1"].full_id
     room = _mock_room("!room:localhost", [team_user_id, "@user:localhost"])
@@ -247,6 +253,7 @@ async def _team_memory_saves(
     bot.client = _make_matrix_client_mock()
     install_runtime_journal_support(bot)
     bot.orchestrator = MagicMock()
+    bot.orchestrator.agent_bots = _running_members()
 
     store_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
     scheduled_tasks: list[asyncio.Task[Any]] = []
@@ -478,6 +485,7 @@ async def test_preformed_team_plain_reply_does_not_continue_existing_thread_root
     bot.client = _make_matrix_client_mock()
     install_runtime_journal_support(bot)
     bot.orchestrator = MagicMock()
+    bot.orchestrator.agent_bots = _running_members()
 
     team_user_id = ids["t1"].full_id
     room = _mock_room("!room:localhost", [team_user_id, "@user:localhost"])
@@ -548,6 +556,7 @@ async def test_team_does_not_respond_to_different_domain_mention(config_with_tea
     bot.client = _make_matrix_client_mock()
     install_runtime_journal_support(bot)
     bot.orchestrator = MagicMock()
+    bot.orchestrator.agent_bots = _running_members()
 
     async def fake_team_response(*_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401
         return "🤝 Team Response (a1, a2): ok"

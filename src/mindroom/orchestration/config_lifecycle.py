@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.config.main import failed_config_source_fingerprint, load_config
 from mindroom.config.reload_status import ConfigReloadStatus
-from mindroom.config.yaml_includes import partial_source_files
+from mindroom.config.yaml_includes import partial_source_files, source_files_fingerprint
 from mindroom.event_journal.opening import describe_event_journal, pending_event_journal_restart
 from mindroom.logging_config import get_logger
 from mindroom.orchestration.config_updates import build_config_update_plan, plugin_change_paths
@@ -93,9 +94,9 @@ class ConfigReloadLifecycle:
 
     runtime_paths: RuntimePaths
     is_running: Callable[[], bool]
-    current_config: Callable[[], Config | None]
+    # Reloads run only once startup published its config, so a config always exists here.
+    current_config: Callable[[], Config]
     agent_bots: Callable[[], Mapping[str, AgentBot | TeamBot]]
-    load_initial_config: Callable[[Config], Awaitable[bool]]
     apply_update_plan: Callable[[Config, ConfigUpdatePlan], Awaitable[bool]]
     response_admission_gate: ResponseAdmissionGate
     before_runtime_replacement: Callable[[], Awaitable[None]]
@@ -119,7 +120,7 @@ class ConfigReloadLifecycle:
     _incomplete_config: Config | None = field(default=None, init=False, repr=False)
     status: ConfigReloadStatus = field(default_factory=ConfigReloadStatus, init=False)
 
-    def record_applied(self, config: Config) -> None:
+    def _record_applied(self, config: Config) -> None:
         """Acknowledge source bytes only after their complete runtime publication."""
         self._fully_applied_config = config
         self.status = ConfigReloadStatus(
@@ -133,11 +134,11 @@ class ConfigReloadLifecycle:
         )
 
     def request_reload(self) -> None:
-        """Queue a debounced config reload for the running orchestrator."""
-        if not self.is_running():
-            logger.info("Ignoring config change while startup is still in progress")
-            return
+        """Queue a debounced config reload; a request made during startup runs once startup publishes."""
         self._requested_at = asyncio.get_running_loop().time()
+        if not self.is_running():
+            logger.info("Configuration changed during startup; reloading once startup finishes")
+            return
         if self._reload_task is not None and not self._reload_task.done():
             logger.info("Configuration reload already queued; extending debounce window")
             return
@@ -148,6 +149,14 @@ class ConfigReloadLifecycle:
             name="config_reload",
             failure_message="Queued config reload failed",
         )
+
+    def startup_published(self, config: Config) -> None:
+        """Acknowledge startup's config, and reload at once if its files changed since startup loaded them."""
+        self._record_applied(config)
+        if self._requested_at is not None or _source_fingerprint_on_disk(config, self.runtime_paths) != (
+            config.source_fingerprint
+        ):
+            self.request_reload()
 
     async def cancel(self) -> None:
         """Cancel any queued config reload task."""
@@ -177,22 +186,6 @@ class ConfigReloadLifecycle:
             current_config = self._fully_applied_config
             self.failed_reload_source_files = None
 
-            if current_config is None:
-                updated = False
-
-                async def load_initial_config() -> None:
-                    nonlocal updated
-                    async with self.config_update_lock:
-                        updated = await self.load_initial_config(new_config)
-                        self.record_applied(new_config)
-
-                applied = await self._apply_after_response_drain(
-                    load_initial_config,
-                    operation_name="configuration reload",
-                    request_is_current=self._reload_publication_is_current,
-                )
-                return updated if applied else None
-
             if pending_event_journal_restart(new_config, self.runtime_paths):
                 # Adopted, not refused: the store was opened once at startup and
                 # every bot borrows that one, so no reload can move it and the
@@ -206,20 +199,16 @@ class ConfigReloadLifecycle:
 
             current_effective_config = current_config.runtime_model_dump()
             new_effective_config = new_config.runtime_model_dump()
-            runtime_effective_config = runtime_config.runtime_model_dump() if runtime_config is not None else None
+            runtime_effective_config = runtime_config.runtime_model_dump()
             if (
                 self._incomplete_config is None
                 and current_effective_config == new_effective_config == runtime_effective_config
             ):
                 logger.info("Configuration content unchanged; skipping publication")
-                self.record_applied(new_config)
+                self._record_applied(new_config)
                 return False
             repair_config = self._incomplete_config
-            if (
-                repair_config is None
-                and runtime_config is not None
-                and runtime_effective_config != current_effective_config
-            ):
+            if repair_config is None and runtime_effective_config != current_effective_config:
                 repair_config = runtime_config
             requested_plan = None
             if repair_config is not None:
@@ -242,7 +231,7 @@ class ConfigReloadLifecycle:
                     repair_config=repair_config,
                     requested_plan=requested_plan,
                 )
-                self.record_applied(new_config)
+                self._record_applied(new_config)
 
             applied = await self._apply_after_response_drain(
                 apply_update_steps,
@@ -506,3 +495,14 @@ class ConfigReloadLifecycle:
         finally:
             if self._reload_task is current_task:
                 self._reload_task = None
+
+
+def _source_fingerprint_on_disk(config: Config, runtime_paths: RuntimePaths) -> str | None:
+    """Return the fingerprint of the files ``config`` was loaded from, as they are now; None if one is gone."""
+    if not config.source_files:
+        return config.source_fingerprint
+    try:
+        digests = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in config.source_files}
+    except OSError:
+        return None
+    return source_files_fingerprint(runtime_paths.config_path, digests)

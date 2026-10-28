@@ -168,10 +168,10 @@ def test_reload_reports_restart_and_keeps_effective_mode(tmp_path: Path, initial
             timezone="Europe/Amsterdam",
         )
         lifecycle = _make_lifecycle(tmp_path, current_config=config)
-        lifecycle.record_applied(changed)
+        lifecycle._record_applied(changed)
         assert background_tool_jobs_enabled(changed, paths) is initial
         assert lifecycle.status.status == "restart_required"
-        lifecycle.record_applied(config)
+        lifecycle._record_applied(config)
         assert lifecycle.status.status == "applied"
     finally:
         release_background_tool_jobs(paths, instance)

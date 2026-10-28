@@ -208,6 +208,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         # Mock the orchestrator
         mock_orchestrator = MagicMock()
         mock_orchestrator.current_config = config
+        mock_orchestrator.agent_bots = {name: MagicMock(running=True) for name in (*config.agents, *config.teams)}
         bot.orchestrator = mock_orchestrator
 
         # Create a mock client
@@ -301,6 +302,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         # Mock the orchestrator
         mock_orchestrator = MagicMock()
         mock_orchestrator.current_config = config
+        mock_orchestrator.agent_bots = {name: MagicMock(running=True) for name in (*config.agents, *config.teams)}
         bot.orchestrator = mock_orchestrator
 
         # Create a mock client
@@ -394,6 +396,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         wrap_extracted_collaborators(bot)
         mock_orchestrator = MagicMock()
         mock_orchestrator.current_config = config
+        mock_orchestrator.agent_bots = {name: MagicMock(running=True) for name in (*config.agents, *config.teams)}
         bot.orchestrator = mock_orchestrator
 
         bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
@@ -467,6 +470,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         wrap_extracted_collaborators(bot)
         mock_orchestrator = MagicMock()
         mock_orchestrator.current_config = config
+        mock_orchestrator.agent_bots = {name: MagicMock(running=True) for name in (*config.agents, *config.teams)}
         bot.orchestrator = mock_orchestrator
 
         bot.client = _make_client_mock(user_id="@mindroom_router:localhost")

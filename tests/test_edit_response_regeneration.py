@@ -844,6 +844,7 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
         current_config=config,
         config=config,
         runtime_paths=runtime_paths,
+        agent_bots={name: MagicMock(running=True) for name in (*config.agents, *config.teams)},
     )
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_team:example.com")

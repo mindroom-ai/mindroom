@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable
+    from collections.abc import Awaitable, Mapping
 
     import nio
 
@@ -55,7 +55,7 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
     def api_enabled(self) -> bool: ...  # noqa: D102
 
     @property
-    def agent_bots(self) -> object: ...  # noqa: D102
+    def agent_bots(self) -> Mapping[str, AgentBot | TeamBot]: ...  # noqa: D102
 
     @property
     def knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler: ...  # noqa: D102

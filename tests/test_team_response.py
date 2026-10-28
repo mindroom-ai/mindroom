@@ -168,14 +168,6 @@ def test_team_entries_require_a_turn_recorder(entry: Callable[..., object]) -> N
     assert turn_recorder.kind is inspect.Parameter.KEYWORD_ONLY
 
 
-def test_live_shared_agents_are_unknown_without_runtime_availability() -> None:
-    """Missing shared runtime state must remain unknown, not become an empty live set."""
-    orchestrator = MagicMock()
-    orchestrator.agent_bots = object()
-
-    assert resolve_live_shared_agent_names(orchestrator) is None
-
-
 def test_live_shared_agents_are_the_running_configured_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     team = _team(tmp_path, monkeypatch)
     team.orchestrator.agent_bots = {

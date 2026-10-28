@@ -3189,6 +3189,18 @@ depends_on = [
 visibility = ["mindroom.orchestrator"]
 
 [[modules]]
+path = "mindroom.orchestration.rooms"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.entity_resolution",
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.rooms",
+    "mindroom.matrix.state",
+    "mindroom.matrix.users",
+    "mindroom.matrix_identifiers",
+]
+
+[[modules]]
 path = "mindroom.orchestrator"
 depends_on = [
     "mindroom.agent_cli.session",
@@ -3221,7 +3233,6 @@ depends_on = [
     "mindroom.event_journal.opening",
     "mindroom.hooks",
     "mindroom.knowledge.watch",
-    "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
     "mindroom.matrix.provisioning_heartbeat",
     "mindroom.matrix.rooms",
@@ -3235,6 +3246,7 @@ depends_on = [
     "mindroom.memory",
     "mindroom.orchestration.config_lifecycle",
     "mindroom.orchestration.external_trigger_runtime",
+    "mindroom.orchestration.rooms",
     "mindroom.orchestration.runtime",
     "mindroom.orchestration.script_runtime",
     "mindroom.orchestration.todo_poke_runtime",
@@ -4008,6 +4020,7 @@ visibility = [
     "mindroom.matrix.room_cleanup",
     "mindroom.matrix.rooms",
     "mindroom.orchestration.external_trigger_runtime",
+    "mindroom.orchestration.rooms",
     "mindroom.orchestration.todo_poke_runtime",
     "mindroom.orchestrator",
 ]

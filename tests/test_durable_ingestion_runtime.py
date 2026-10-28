@@ -32,6 +32,7 @@ from mindroom.matrix.client_session import create_authenticated_client
 from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch
 from mindroom.matrix.personal_rooms import PersonalRoomService
 from mindroom.matrix.state import MatrixState
+from mindroom.orchestration import entity_fleet
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.personal_room_lifecycle import PersonalRoomTarget
 from mindroom.runtime_shutdown import ShutdownBudget
@@ -835,20 +836,32 @@ async def test_entity_removal_leaves_with_retained_input_before_closing_stores(
         session._transport.request = request
         session._maintain_crypto = AsyncMock()
         orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
-        orchestrator.agent_bots[bot.agent_name] = bot
-        monkeypatch.setattr(orchestrator._approval_recovery, "reconcile_unavailable_entities", AsyncMock())
+        orchestrator.fleet.add(bot.agent_name, bot)
+        monkeypatch.setattr(
+            orchestrator._approval_recovery,
+            "reconcile_removed_entities",
+            AsyncMock(return_value=set()),
+        )
         monkeypatch.setattr(orchestrator, "_shared_journal_store", lambda: MagicMock(end_entity_replies=AsyncMock()))
-        sync = asyncio.create_task(bot.sync_forever())
-        orchestrator._sync_tasks[bot.agent_name] = sync
+        sync_tasks: list[asyncio.Task[object]] = []
+
+        async def run_source(source_bot: AgentBot) -> None:
+            task = asyncio.current_task()
+            assert task is not None
+            sync_tasks.append(task)
+            await source_bot.sync_forever()
+
+        monkeypatch.setattr(entity_fleet, "sync_forever_with_restart", run_source)
+        orchestrator.fleet.start_sync([bot])
         try:
-            await asyncio.wait_for(orchestrator._remove_deleted_entities({bot.agent_name}), timeout=2)
+            await asyncio.wait_for(orchestrator.fleet.remove({bot.agent_name}), timeout=2)
             assert len(leaves) == 1
             assert bot.agent_name not in orchestrator.agent_bots
-            assert bot.agent_name not in orchestrator._sync_tasks
-            assert sync.done()
+            assert [task.done() for task in sync_tasks] == [True]
         finally:
-            sync.cancel()
-            await asyncio.gather(sync, return_exceptions=True)
+            for task in sync_tasks:
+                task.cancel()
+            await asyncio.gather(*sync_tasks, return_exceptions=True)
 
 
 @pytest.mark.asyncio

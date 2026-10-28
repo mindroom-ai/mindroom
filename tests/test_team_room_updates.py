@@ -29,7 +29,7 @@ def _mock_running_bot(entity_name: str, agent_user: object, config: Config) -> M
     bot.start = AsyncMock()
     bot.stop = AsyncMock()
     bot.sync_forever = AsyncMock()
-    bot.try_start = AsyncMock(return_value=True)
+    bot.start = AsyncMock()
     bot.prepare_for_sync_shutdown = AsyncMock()
     bot._quiesce_matrix_ingestion = AsyncMock()
     bot._set_presence_with_model_info = AsyncMock()
@@ -100,7 +100,7 @@ class TestTeamRoomUpdates:
                     patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
                     patch("mindroom.orchestrator._MultiAgentOrchestrator._validate_entity_accounts"),
                     patch(
-                        "mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships",
+                        "mindroom.orchestration.rooms.RoomSetup.setup",
                         new=AsyncMock(),
                     ) as setup_rooms,
                 ):
@@ -211,7 +211,7 @@ class TestTeamRoomUpdates:
                     patch("mindroom.matrix.rooms.generate_room_topic_ai", mock_generate_room_topic_ai),
                     patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
                     patch(
-                        "mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships",
+                        "mindroom.orchestration.rooms.RoomSetup.setup",
                         new=AsyncMock(),
                     ),
                 ):
@@ -222,7 +222,7 @@ class TestTeamRoomUpdates:
                         mock_bot.start = AsyncMock()
                         mock_bot.stop = AsyncMock()
                         mock_bot.sync_forever = AsyncMock()
-                        mock_bot.try_start = AsyncMock(return_value=True)
+                        mock_bot.start = AsyncMock()
                         mock_bot.prepare_for_sync_shutdown = AsyncMock()
                         mock_bot._set_presence_with_model_info = AsyncMock()
                         mock_bot.mark_sync_loop_started = MagicMock()
@@ -322,7 +322,7 @@ class TestTeamRoomUpdates:
                     patch("mindroom.matrix.rooms.generate_room_topic_ai", mock_generate_room_topic_ai),
                     patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
                     patch(
-                        "mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships",
+                        "mindroom.orchestration.rooms.RoomSetup.setup",
                         new=AsyncMock(),
                     ),
                 ):
@@ -333,7 +333,7 @@ class TestTeamRoomUpdates:
                         mock_bot.start = AsyncMock()
                         mock_bot.stop = AsyncMock()
                         mock_bot.sync_forever = AsyncMock()
-                        mock_bot.try_start = AsyncMock(return_value=True)
+                        mock_bot.start = AsyncMock()
                         mock_bot.prepare_for_sync_shutdown = AsyncMock()
                         mock_bot._set_presence_with_model_info = AsyncMock()
                         mock_bot.mark_sync_loop_started = MagicMock()

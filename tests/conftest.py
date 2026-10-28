@@ -195,6 +195,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ModelProvider
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.matrix_rtc.call_manager import CallManager
+    from mindroom.orchestrator import _MultiAgentOrchestrator
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
     from mindroom.streaming import StreamingResponse
@@ -2394,6 +2395,21 @@ def test_runtime_paths(tmp_root: Path) -> RuntimePaths:
 
 
 test_runtime_paths.__test__ = False
+
+
+def install_bots(orchestrator: "_MultiAgentOrchestrator", bots: Mapping[str, object]) -> None:
+    """Register test bots with a real orchestrator's entity fleet, which owns every managed bot."""
+    for entity_name, bot in bots.items():
+        orchestrator.fleet.add(entity_name, cast("AgentBot | TeamBot", bot))
+
+
+def swap_fleet_bot(orchestrator: "_MultiAgentOrchestrator", entity_name: str, bot: object | None) -> None:
+    """Swap or drop one fleet bot in place, as a finished replacement or removal leaves it, without its lifecycle."""
+    slots = orchestrator.fleet._slots
+    if bot is None:
+        del slots[entity_name]
+    else:
+        slots[entity_name].bot = cast("AgentBot | TeamBot", bot)
 
 
 def orchestrator_runtime_paths(

@@ -999,6 +999,7 @@ class TestAgentBot(AgentBotTestBase):
             current_config=config,
             config=config,
             runtime_paths=runtime_paths,
+            agent_bots={name: MagicMock(running=True) for name in (*config.agents, *config.teams)},
         )
         effects = _record_post_response_effects(bot)
 
@@ -1068,6 +1069,7 @@ class TestAgentBot(AgentBotTestBase):
             current_config=config,
             config=config,
             runtime_paths=runtime_paths,
+            agent_bots={name: MagicMock(running=True) for name in (*config.agents, *config.teams)},
         )
         effects = _record_post_response_effects(bot)
 

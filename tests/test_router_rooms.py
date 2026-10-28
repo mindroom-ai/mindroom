@@ -311,7 +311,7 @@ async def test_orchestrator_creates_router_with_all_rooms(
 
     monkeypatch.setattr("mindroom.orchestrator.load_config", mock_load_config)
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
-    monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
+    monkeypatch.setattr("mindroom.orchestration.rooms.RoomSetup.setup", AsyncMock())
 
     # Create orchestrator
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
@@ -387,7 +387,7 @@ async def test_router_updates_rooms_on_config_change(  # noqa: PLR0915
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle.load_config", mock_load_config)
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
     setup_rooms = AsyncMock()
-    monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships", setup_rooms)
+    monkeypatch.setattr("mindroom.orchestration.rooms.RoomSetup.setup", setup_rooms)
 
     # Create orchestrator with initial config
     # Mock start/sync_forever at class level so newly created bots in update_config don't perform real login/sync
@@ -411,7 +411,7 @@ async def test_router_updates_rooms_on_config_change(  # noqa: PLR0915
         assert set(router_bot.rooms) == {"room1"}
 
         async def reconcile_room_aliases(bots: list[object]) -> None:
-            orchestrator._resolve_bot_room_aliases(bots, orchestrator._require_config())  # type: ignore[arg-type]
+            orchestrator._rooms.resolve_aliases(bots, orchestrator._require_config())  # type: ignore[arg-type]
 
         setup_rooms.reset_mock()
         setup_rooms.side_effect = reconcile_room_aliases

@@ -364,7 +364,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     # MagicMock config, so keep unrelated runtime services stubbed.
     support_services_patch = patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock())
     support_services_patch.start()
-    room_setup_patch = patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock())
+    room_setup_patch = patch.object(orchestrator._rooms, "setup", new=AsyncMock())
     room_setup_patch.start()
     wait_for_homeserver_patch = patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock())
     wait_for_homeserver_patch.start()

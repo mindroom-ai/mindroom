@@ -854,22 +854,17 @@ class TestWatchPaths:
 
 
 def _reload_lifecycle(config_path: Path) -> ConfigReloadLifecycle:
-    """Build one reload lifecycle that loads fresh configs and never applies plans."""
+    """Build one reload lifecycle that loads fresh configs and accepts every plan."""
 
-    async def _load_initial(config: Config) -> bool:
-        del config
+    async def _apply_plan(config: Config, plan: object) -> bool:
+        del config, plan
         return True
-
-    async def _apply_plan(config: Config, plan: object, plugin_changes: tuple[str, ...]) -> bool:
-        del config, plan, plugin_changes
-        raise AssertionError
 
     return ConfigReloadLifecycle(
         runtime_paths=resolve_runtime_paths(config_path=config_path),
         is_running=lambda: True,
-        current_config=lambda: None,
+        current_config=Config,
         agent_bots=dict,
-        load_initial_config=_load_initial,
         apply_update_plan=_apply_plan,
         response_admission_gate=ResponseAdmissionGate(),
         before_runtime_replacement=AsyncMock(),

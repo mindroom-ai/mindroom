@@ -39,9 +39,8 @@ def _make_lifecycle(
     return ConfigReloadLifecycle(
         runtime_paths=test_runtime_paths(tmp_path),
         is_running=lambda: running,
-        current_config=lambda: current_config,
+        current_config=lambda: current_config if current_config is not None else Config(),
         agent_bots=lambda: agent_bots if agent_bots is not None else {},
-        load_initial_config=AsyncMock(return_value=False),
         apply_update_plan=AsyncMock(return_value=True),
         response_admission_gate=gate,
         before_runtime_replacement=AsyncMock(),
@@ -97,23 +96,43 @@ def test_replacement_drain_state_tracks_wait_warning_and_force() -> None:
 
 
 @pytest.mark.asyncio
-async def test_request_reload_is_ignored_until_running(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Reload requests before startup finishes should be dropped."""
-    logger_mock = MagicMock()
-    monkeypatch.setattr("mindroom.orchestration.config_lifecycle.logger", logger_mock)
-    lifecycle = _make_lifecycle(tmp_path, running=False)
+async def test_config_change_during_startup_reloads_once_startup_publishes(tmp_path: Path) -> None:
+    """An edit made while MindRoom starts is applied as soon as startup has published its config."""
+    running = False
+    config = load_config(test_runtime_paths(tmp_path))
+    lifecycle = _make_lifecycle(tmp_path, current_config=config)
+    lifecycle.is_running = lambda: running
 
     lifecycle.request_reload()
-
-    assert lifecycle._requested_at is None
     assert lifecycle._reload_task is None
-    assert any(
-        call.args and call.args[0] == "Ignoring config change while startup is still in progress"
-        for call in logger_mock.info.call_args_list
-    )
+
+    running = True
+    lifecycle.startup_published(config)
+
+    assert lifecycle._reload_task is not None
+    await lifecycle.cancel()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edited", [False, True])
+async def test_startup_publication_reloads_only_when_its_files_changed_since_loading(
+    tmp_path: Path,
+    *,
+    edited: bool,
+) -> None:
+    """An edit that landed before the watcher saw the config files still reaches the runtime."""
+    lifecycle = _make_lifecycle(tmp_path)
+    config_path = lifecycle.runtime_paths.config_path
+    config_path.write_text("defaults: {enable_streaming: true}\n", encoding="utf-8")
+    config = load_config(lifecycle.runtime_paths)
+    if edited:
+        config_path.write_text("defaults: {enable_streaming: false}\n", encoding="utf-8")
+
+    lifecycle.startup_published(config)
+
+    assert (lifecycle._reload_task is not None) is edited
+    assert lifecycle.status.status == ("pending" if edited else "applied")
+    await lifecycle.cancel()
 
 
 @pytest.mark.asyncio
@@ -761,25 +780,6 @@ async def test_drain_applies_reload_after_force_timeout(
 
 
 @pytest.mark.asyncio
-async def test_update_config_delegates_initial_load(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Without an active config, update_config should hand off to the initial loader."""
-    new_config = Config()
-    monkeypatch.setattr(
-        "mindroom.orchestration.config_lifecycle.load_config",
-        lambda *_args, **_kwargs: new_config,
-    )
-    lifecycle = _make_lifecycle(tmp_path, current_config=None)
-
-    assert await lifecycle._update_config() is False
-
-    lifecycle.load_initial_config.assert_awaited_once_with(new_config)
-    lifecycle.apply_update_plan.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_update_config_builds_plan_and_dispatches(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -803,7 +803,6 @@ async def test_update_config_builds_plan_and_dispatches(
 
     assert await lifecycle._update_config() is True
 
-    lifecycle.load_initial_config.assert_not_awaited()
     lifecycle.apply_update_plan.assert_awaited_once()
     dispatched_config, plan = lifecycle.apply_update_plan.await_args.args
     plugin_changes = plan.plugin_changes
@@ -1001,7 +1000,6 @@ async def test_update_config_loads_config_off_event_loop(
 
     monkeypatch.setattr(lifecycle_module, "load_config", slow_load_config)
     lifecycle = _make_lifecycle(tmp_path)
-    lifecycle.load_initial_config = AsyncMock(return_value=True)
 
     update_task = asyncio.get_running_loop().create_task(lifecycle._update_config())
     await asyncio.to_thread(load_started.wait, 5.0)
@@ -1015,7 +1013,7 @@ async def test_update_config_loads_config_off_event_loop(
 
     gate.set()
     assert await update_task is True
-    lifecycle.load_initial_config.assert_awaited_once_with(loaded_config)
+    assert lifecycle.apply_update_plan.await_args.args[1].new_config is loaded_config
 
 
 @pytest.mark.asyncio

@@ -65,6 +65,7 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_event,
     dispatch_context_result,
+    install_bots,
     install_runtime_journal_support,
     message_origin,
     orchestrator_runtime_paths,
@@ -1359,7 +1360,7 @@ async def test_agent_lifecycle_hooks_can_send_without_global_registration(tmp_pa
     bot = _hook_bot(tmp_path)
     bot.client = AsyncMock()
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-    orchestrator.agent_bots = {"router": bot}
+    install_bots(orchestrator, {"router": bot})
     bot.orchestrator = orchestrator
 
     captured_content: dict[str, object] = {}
@@ -1407,7 +1408,7 @@ async def test_trigger_dispatch_sets_hook_dispatch_source_kind(tmp_path: Path) -
         await ctx.send_message("!room:localhost", "dispatch me", trigger_dispatch=True)
 
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-    orchestrator.agent_bots = {"router": bot}
+    install_bots(orchestrator, {"router": bot})
     bot.orchestrator = orchestrator
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [started])])
     bot._conversation_reader = SimpleNamespace(latest_thread_event_id=AsyncMock(return_value=None))

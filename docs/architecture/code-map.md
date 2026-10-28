@@ -33,9 +33,12 @@ Matrix sync callback
 | `origins.py` | Shared browser-origin normalization and allowlist validation for dashboard auth, CORS, Connections same-origin checks, the Computers and Connections MindRoom Chat allowlists, and MCP gateway origins |
 | `matrix_openid.py` | Matrix OpenID verification at the configured homeserver and audience binding, shared by Computers and the Connections portal |
 | `atomic_file.py` | Shared atomic byte publication and cleanup relative to an opened directory |
-| `orchestrator.py` | MultiAgentOrchestrator - boots agents, manages sync loops, hot-reload |
+| `orchestrator.py` | MultiAgentOrchestrator - composition root: wires the fleet, services, and reload lifecycle, and applies reload plans |
 | `orchestration/` | Extracted orchestrator helpers (config update plans, plugin watch, rooms, runtime) |
 | `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: queueing, response drain, and update-plan dispatch |
+| `orchestration/config_updates.py` | The config update plan: the one decision of what a reload restarts, starts, removes, and re-authorizes |
+| `orchestration/entity_fleet.py` | The one owner of every managed bot's lifecycle: start, background retry, restart stop, removal, and process shutdown |
+| `orchestration/rooms.py` | Managed room setup through the router: room creation, policy, invitations, root Space, and bot memberships |
 | `config/bundle.py` | Native staged bundle validation, drift protection, directory publication, and recovery journals |
 | `cli/config_bundle.py` | Bundle install, change-classification, and runtime-confirmed apply/rollback command adapters, plus initialize-only runtime bootstrap |
 | `runtime_state.py` | Shared runtime readiness state for health/ready endpoints |

@@ -342,7 +342,7 @@ async def test_embedded_api_binds_and_clears_live_sources(
     """The bundled server must report its orchestrator's gate, calls, and scripts, then unbind on shutdown."""
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
     live = orchestrator._MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    live.agent_bots["helper"] = SimpleNamespace(active_call_requesters=("@alice:example.org",))
+    live.fleet.add("helper", SimpleNamespace(active_call_requesters=("@alice:example.org",)))
     gate = ResponseAdmissionGate()
     assert gate.admit()
     shutdown_requested = asyncio.Event()

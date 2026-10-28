@@ -415,6 +415,25 @@ def catalog_change_restarts(config: Config, server_ids: Iterable[str], existing_
     return mcp_dependents(config, server_ids) & existing_entities
 
 
+def catalog_refresh_restarts(
+    plan: ConfigUpdatePlan,
+    catalog_changed: Iterable[str],
+    running_entities: AbstractSet[str],
+) -> tuple[set[str], list[str]]:
+    """Decide what a reload does about MCP catalogs that changed while it connected their servers.
+
+    Returns the running entities to replace in this reload, and the servers whose
+    dependents restart later behind their own drain: a reload that drained
+    replies replaces them now, one that publishes while replies run cannot.
+    """
+    server_ids = sorted(set(catalog_changed))
+    if not server_ids:
+        return set(), []
+    if not plan.requires_response_drain:
+        return set(), server_ids
+    return catalog_change_restarts(plan.new_config, server_ids, running_entities), []
+
+
 def _changed_entity_construction_prompts(config: Config, new_config: Config) -> set[str]:
     """Return root prompt overrides that require entity reconstruction."""
     changed_prompt_names = {

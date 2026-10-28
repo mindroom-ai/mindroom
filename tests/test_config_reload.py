@@ -60,6 +60,7 @@ from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_bots,
     install_send_response_mock,
     orchestrator_runtime_paths,
     request_envelope,
@@ -75,6 +76,7 @@ if TYPE_CHECKING:
     from collections.abc import Set as AbstractSet
 
     from mindroom.message_target import MessageTarget
+    from mindroom.orchestration.entity_fleet import EntityFleet
 
 
 def _calls_for(
@@ -332,17 +334,12 @@ async def _noop_emit_config_reloaded(
     del self, new_config, changed_entities, added_entities, removed_entities, plugin_changes
 
 
-def _noop_start_sync_task(
-    self: _MultiAgentOrchestrator,
-    entity_name: str,
-    bot: AgentBot,
-) -> None:
-    del self, entity_name, bot
+def _noop_start_sync(self: EntityFleet, bots: Iterable[AgentBot]) -> None:
+    del self, bots
 
 
-async def _noop_try_start(self: AgentBot) -> bool:
+async def _noop_start(self: AgentBot) -> None:
     self.running = True
-    return True
 
 
 async def _noop_stop(self: AgentBot, *, shutdown_intent: object | None = None) -> None:
@@ -377,19 +374,16 @@ def _patch_orchestrator_plugin_update_test_runtime(monkeypatch: pytest.MonkeyPat
         _noop_sync_runtime_support_services,
     )
     monkeypatch.setattr(
-        "mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships",
+        "mindroom.orchestration.rooms.RoomSetup.setup",
         _noop_setup_rooms_and_memberships,
     )
     monkeypatch.setattr(
         "mindroom.orchestrator._MultiAgentOrchestrator._emit_config_reloaded",
         _noop_emit_config_reloaded,
     )
-    monkeypatch.setattr(
-        "mindroom.orchestrator._MultiAgentOrchestrator._start_sync_task",
-        _noop_start_sync_task,
-    )
-    monkeypatch.setattr("mindroom.bot.AgentBot.try_start", _noop_try_start)
-    monkeypatch.setattr("mindroom.bot.TeamBot.try_start", _noop_try_start)
+    monkeypatch.setattr("mindroom.orchestration.entity_fleet.EntityFleet.start_sync", _noop_start_sync)
+    monkeypatch.setattr("mindroom.bot.AgentBot.start", _noop_start)
+    monkeypatch.setattr("mindroom.bot.TeamBot.start", _noop_start)
     monkeypatch.setattr("mindroom.bot.AgentBot.stop", _noop_stop)
     monkeypatch.setattr("mindroom.bot.TeamBot.stop", _noop_stop)
     monkeypatch.setattr("mindroom.bot.AgentBot.prepare_for_sync_shutdown", _noop_prepare_for_sync_shutdown)
@@ -1161,7 +1155,7 @@ async def test_update_config_keeps_current_config_when_new_entity_account_prepar
     )
     orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config))
     orchestrator.config = current_config
-    orchestrator.agent_bots = {ROUTER_AGENT_NAME: MagicMock(), "general": MagicMock()}
+    install_bots(orchestrator, {ROUTER_AGENT_NAME: MagicMock(), "general": MagicMock()})
     orchestrator.running = True
     account_error = PermanentStartupError("configured entities share a Matrix ID")
 
@@ -1186,7 +1180,7 @@ async def test_update_config_starts_agent_added_only_by_personal_agent_roster(tm
     assert current_config.authored_model_dump() == new_config.authored_model_dump()
     orchestrator = _MultiAgentOrchestrator(paths)
     orchestrator.config = current_config
-    orchestrator.agent_bots = {ROUTER_AGENT_NAME: MagicMock()}
+    install_bots(orchestrator, {ROUTER_AGENT_NAME: MagicMock()})
     orchestrator.running = True
 
     with (
@@ -1223,7 +1217,7 @@ async def test_update_config_keeps_current_config_when_restarted_entity_account_
     )
     orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config))
     orchestrator.config = current_config
-    orchestrator.agent_bots = {ROUTER_AGENT_NAME: MagicMock(), "general": MagicMock()}
+    install_bots(orchestrator, {ROUTER_AGENT_NAME: MagicMock(), "general": MagicMock()})
     orchestrator.running = True
     account_error = PermanentStartupError("configured entities share a Matrix ID")
 
@@ -1295,7 +1289,7 @@ async def test_update_config_validates_internal_user_collision_before_publish(tm
     state.save(runtime_paths=runtime_paths)
     orchestrator = _MultiAgentOrchestrator(runtime_paths)
     orchestrator.config = current_config
-    orchestrator.agent_bots = {ROUTER_AGENT_NAME: MagicMock(), "general": MagicMock()}
+    install_bots(orchestrator, {ROUTER_AGENT_NAME: MagicMock(), "general": MagicMock()})
     orchestrator.running = True
 
     with (
@@ -1369,7 +1363,7 @@ async def test_ready_personal_agent_nudges_router_reconciliation(tmp_path: Path)
     orchestrator = _MultiAgentOrchestrator(paths)
     orchestrator.config = Config.validate_with_runtime(data, paths)
     router = MagicMock(spec=AgentBot)
-    orchestrator.agent_bots = {ROUTER_AGENT_NAME: router}
+    install_bots(orchestrator, {ROUTER_AGENT_NAME: router})
 
     await orchestrator.handle_bot_ready(MagicMock(spec=AgentBot, agent_name="general"))
     router.personal_room_target_ready.assert_not_called()
@@ -1717,14 +1711,13 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
         await orchestrator.reload_plugins_now(source="initial")
         assert plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module.VALUE == 1
 
-        async def start_blocked_reload(*_args: object, **_kwargs: object) -> set[str]:
+        async def start_blocked_reload(*_args: object, **_kwargs: object) -> None:
             nonlocal reload_task
             hooks_path.write_text("VALUE = 2\n", encoding="utf-8")
             reload_task = asyncio.create_task(orchestrator.reload_plugins_now(source="interleaved"))
             await asyncio.sleep(0)
             assert reload_task is not None
             assert not reload_task.done()
-            return set()
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
@@ -1732,14 +1725,10 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
                 "mindroom.orchestration.config_lifecycle.build_config_update_plan",
                 side_effect=lambda **kwargs: replace(plan, plugin_changes=kwargs["plugin_changes"]),
             ),
-            patch.object(
-                orchestrator,
-                "_stop_entities_before_mcp_sync",
-                new=AsyncMock(side_effect=start_blocked_reload),
-            ),
+            # Removal runs after the changed plugins are staged and before they are committed.
+            patch.object(orchestrator.fleet, "remove", new=AsyncMock(side_effect=start_blocked_reload)),
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
-            patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
         ):
             updated = await orchestrator.config_reload._update_config()
 
@@ -1881,7 +1870,7 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.config = config
     orchestrator.running = True
-    orchestrator.agent_bots["agent1"] = bot
+    orchestrator.fleet.add("agent1", bot)
     # The orchestrator owns one shared gate that every managed bot admits through.
     bot.admission_gate = orchestrator.config_reload.response_admission_gate
     reloaded_config = _runtime_bound_config(
@@ -3342,7 +3331,7 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
     monkeypatch.setattr("mindroom.bot.TeamBot.start", mock_start)
     monkeypatch.setattr("mindroom.bot.TeamBot.sync_forever", AsyncMock())
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
-    monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
+    monkeypatch.setattr("mindroom.orchestration.rooms.RoomSetup.setup", AsyncMock())
 
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
@@ -3868,7 +3857,7 @@ async def test_shutdown_during_active_drain_cancels_reload(
     mock_bot.deferred_stop_phase = None
     mock_bot.deferred_stop_required = False
     mock_bot.stop = AsyncMock()
-    orchestrator.agent_bots["agent1"] = mock_bot
+    orchestrator.fleet.add("agent1", mock_bot)
     # An admitted response that never finishes, so the drain never goes idle.
     assert orchestrator.config_reload.response_admission_gate.admit()
     load_config_mock = MagicMock(return_value=reloaded_config)

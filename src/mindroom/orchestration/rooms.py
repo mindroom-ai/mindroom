@@ -1,17 +1,36 @@
-"""Pure room invitation helpers for the orchestrator."""
+"""Managed room setup and the invitation rosters it uses."""
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from mindroom import constants
 from mindroom.access_policy import resolve_room_policy
+from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.entity_resolution import configured_bot_user_ids_for_room, is_configured_room
+from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.logging_config import get_logger
-from mindroom.matrix.state import MatrixState
-from mindroom.matrix_identifiers import split_concrete_matrix_user_ids
+from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
+from mindroom.matrix.identity import managed_account_user_id
+from mindroom.matrix.rooms import (
+    ensure_all_rooms_exist,
+    ensure_root_space,
+    ensure_user_in_rooms,
+    reconcile_managed_rooms,
+)
+from mindroom.matrix.state import MatrixState, load_rooms, resolve_room_aliases
+from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
+from mindroom.matrix_identifiers import extract_server_name_from_homeserver, split_concrete_matrix_user_ids
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Iterable
+
+    from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.room_reconciliation import RoomStateSnapshot
 
 logger = get_logger(__name__)
 
@@ -24,7 +43,7 @@ def _filter_concrete_matrix_user_ids(user_ids: set[str], *, warning_message: str
     return set(concrete_user_ids)
 
 
-def get_room_user_ids_to_invite(
+def _room_user_ids_to_invite(
     config: Config,
     room_id: str,
     runtime_paths: RuntimePaths,
@@ -46,7 +65,7 @@ def get_room_user_ids_to_invite(
     )
 
 
-def get_root_space_user_ids_to_invite(config: Config, runtime_paths: RuntimePaths) -> set[str]:
+def _root_space_user_ids_to_invite(config: Config, runtime_paths: RuntimePaths) -> set[str]:
     """Collect Matrix users that should be invited to the private root Space."""
     del runtime_paths
     configured_room_keys = sorted(
@@ -83,3 +102,228 @@ def warn_about_foreign_homeserver_authorities(config: Config, runtime_paths: Run
             server_name=server_name,
             user_ids=foreign_user_ids,
         )
+
+
+@dataclass
+class RoomSetup:
+    """Create managed rooms, reconcile their policy, and bring bots into their rooms through the router."""
+
+    runtime_paths: RuntimePaths
+    config_provider: Callable[[], Config]
+    # The router bot when it exists and has a client; managed room work runs through its account.
+    router_bot: Callable[[], AgentBot | TeamBot | None]
+    refresh_agent_reply_memberships: Callable[[], Awaitable[None]]
+
+    async def setup(self, bots: list[AgentBot | TeamBot]) -> None:
+        """Setup rooms and ensure all bots have correct memberships.
+
+        This shared flow is used during both initial startup and config updates.
+        """
+        # Ensure all configured rooms exist before reconciling memberships.
+        room_ids = await self.ensure_rooms_exist()
+        await self.link_root_space(room_ids)
+
+        # Resolve room aliases now that any missing rooms have been created.
+        config = self.config_provider()
+        self.resolve_aliases(bots, config)
+
+        async def _ensure_internal_user_memberships() -> None:
+            all_rooms = load_rooms(runtime_paths=self.runtime_paths)
+            all_room_ids = {room_key: room.room_id for room_key, room in all_rooms.items()}
+            if all_room_ids and config.mindroom_user is not None:
+                await ensure_user_in_rooms(
+                    constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
+                    all_room_ids,
+                    self.runtime_paths,
+                )
+
+        # Join the router before policy and invitations, including existing private rooms.
+        for bot in bots:
+            if bot.agent_name == ROUTER_AGENT_NAME:
+                await bot.ensure_rooms()
+        snapshots = await self.reconcile_room_policies(room_ids)
+        await self._ensure_room_invitations(snapshots)
+        await _ensure_internal_user_memberships()
+
+        await asyncio.gather(*(bot.ensure_rooms() for bot in bots if bot.agent_name != ROUTER_AGENT_NAME))
+
+        await self.refresh_agent_reply_memberships()
+
+        logger.info("All agents have joined their configured rooms")
+
+    async def ensure_rooms_exist(self) -> dict[str, str]:
+        """Ensure all configured rooms exist, creating them if necessary.
+
+        The router bot performs room creation because it holds the required permissions.
+        """
+        router_bot = self.router_bot()
+        if router_bot is None:
+            return {}
+        assert router_bot.client is not None
+
+        config = self.config_provider()
+        room_ids = await ensure_all_rooms_exist(router_bot.client, config, self.runtime_paths)
+        logger.info("ensured_room_existence", room_count=len(room_ids))
+        return room_ids
+
+    async def reconcile_room_policies(self, room_ids: dict[str, str]) -> dict[str, RoomStateSnapshot]:
+        """Wire the router's fresh policy reconciliation into startup and reload."""
+        router = self.router_bot()
+        if router is None or router.client is None:
+            return {}
+        return await reconcile_managed_rooms(router.client, self.config_provider(), self.runtime_paths, room_ids)
+
+    async def link_root_space(self, room_ids: dict[str, str] | None = None) -> None:
+        """Ensure the optional root Matrix Space exists and link the current managed rooms."""
+        router_bot = self.router_bot()
+        if router_bot is None:
+            return
+        assert router_bot.client is not None
+
+        config = self.config_provider()
+        if not config.matrix_space.enabled:
+            return
+
+        normalized_room_ids = room_ids if isinstance(room_ids, dict) else {}
+        root_space_user_ids = _root_space_user_ids_to_invite(config, self.runtime_paths)
+        root_space_id = await ensure_root_space(
+            router_bot.client,
+            config,
+            self.runtime_paths,
+            normalized_room_ids,
+            admin_user_ids=set(),
+        )
+        if root_space_id is None:
+            return
+
+        invite_user_ids = root_space_user_ids
+        if not invite_user_ids:
+            return
+
+        current_members = await get_room_members(router_bot.client, root_space_id)
+        if current_members is None:
+            logger.warning("room_invitations_skipped_members_unavailable", room_id=root_space_id)
+            return
+        for user_id in sorted(invite_user_ids):
+            log_context = {"user_id": user_id, "room_id": root_space_id}
+            await self._invite_user_if_missing(
+                root_space_id,
+                user_id,
+                current_members,
+                success_message="invited_user_to_root_space",
+                failure_message="invite_user_to_root_space_failed",
+                log_context=log_context,
+            )
+
+    async def _invite_user_if_missing(
+        self,
+        room_id: str,
+        user_id: str,
+        current_members: set[str],
+        *,
+        success_message: str,
+        failure_message: str,
+        log_context: dict[str, str] | None = None,
+    ) -> None:
+        """Invite one user if they are not already a member."""
+        router_bot = self.router_bot()
+        if router_bot is None:
+            return
+        assert router_bot.client is not None
+        if user_id in current_members:
+            return
+        success = await invite_to_room(router_bot.client, room_id, user_id)
+        if success:
+            logger.info(success_message, **(log_context or {}))
+            current_members.add(user_id)
+        else:
+            logger.warning(failure_message, **(log_context or {}))
+
+    async def _invite_authorized_users_to_room(
+        self,
+        room_id: str,
+        current_members: set[str],
+        authorized_user_ids: set[str],
+    ) -> None:
+        """Invite authorized human users who can access a given room."""
+        for authorized_user_id in authorized_user_ids:
+            await self._invite_user_if_missing(
+                room_id,
+                authorized_user_id,
+                current_members,
+                success_message=f"Invited authorized user {authorized_user_id} to room {room_id}",
+                failure_message=f"Failed to invite authorized user {authorized_user_id} to room {room_id}",
+            )
+
+    async def _invite_configured_bots_to_room(
+        self,
+        room_id: str,
+        current_members: set[str],
+        configured_bot_ids: Iterable[str],
+    ) -> None:
+        """Invite all configured bots for a room."""
+        for bot_user_id in configured_bot_ids:
+            await self._invite_user_if_missing(
+                room_id,
+                bot_user_id,
+                current_members,
+                success_message=f"Invited {bot_user_id} to room {room_id}",
+                failure_message=f"Failed to invite {bot_user_id} to room {room_id}",
+            )
+
+    async def _ensure_room_invitations(self, snapshots: dict[str, RoomStateSnapshot] | None = None) -> None:
+        """Ensure all agents and the internal user are invited to their configured rooms.
+
+        The router client performs these invitations because it has admin privileges
+        across the managed rooms.
+        """
+        router_bot = self.router_bot()
+        if router_bot is None:
+            return
+        assert router_bot.client is not None
+
+        config = self.config_provider()
+
+        joined_rooms = await get_joined_rooms(router_bot.client)
+        if not joined_rooms:
+            return
+
+        server_name = extract_server_name_from_homeserver(
+            constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
+            runtime_paths=self.runtime_paths,
+        )
+        internal_user_id = (
+            managed_account_user_id(INTERNAL_USER_ACCOUNT_KEY, server_name, self.runtime_paths)
+            if config.mindroom_user is not None
+            else None
+        )
+
+        for room_id in joined_rooms:
+            configured_bots = configured_bot_user_ids_for_room(config, room_id, self.runtime_paths)
+            managed = bool(configured_bots) or is_configured_room(config, room_id, self.runtime_paths)
+            if not managed and internal_user_id is None:
+                continue
+
+            snapshot = (snapshots or {}).get(room_id)
+            current_members = (
+                snapshot.present_user_ids()
+                if snapshot is not None
+                else await get_room_members(router_bot.client, room_id)
+            )
+            if current_members is None:
+                logger.warning("room_invitations_skipped_members_unavailable", room_id=room_id)
+                continue
+            authorized_user_ids = _room_user_ids_to_invite(config, room_id, self.runtime_paths) if managed else set()
+            if internal_user_id is not None:
+                authorized_user_ids.add(internal_user_id)
+            await self._invite_authorized_users_to_room(room_id, current_members, authorized_user_ids)
+            if configured_bots:
+                await self._invite_configured_bots_to_room(room_id, current_members, configured_bots)
+
+        logger.info("Ensured room invitations for all configured responders and authorized users")
+
+    def resolve_aliases(self, bots: list[AgentBot | TeamBot], config: Config) -> None:
+        """Resolve currently known room aliases into each bot's configured room IDs."""
+        for bot in bots:
+            room_aliases = get_rooms_for_entity(bot.agent_name, config)
+            bot.rooms = resolve_room_aliases(room_aliases, runtime_paths=self.runtime_paths)
