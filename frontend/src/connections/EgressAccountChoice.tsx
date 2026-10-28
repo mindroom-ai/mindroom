@@ -1,3 +1,6 @@
+import type { ReactNode } from "react";
+import { Code } from "./EgressServiceTable";
+
 /**
  * Which account a service of the user's own signs in with: the one the agent's
  * tools use, or another account of the same login that only this service uses
@@ -29,7 +32,7 @@ export function EgressAccountChoice({
   disabled: boolean;
   onChange: (separateAccount: boolean) => void;
 }) {
-  const choice = (own: boolean, label: string, note: string | null) => (
+  const choice = (own: boolean, label: string, note: ReactNode) => (
     <div>
       <label className="flex items-start gap-2 text-sm">
         <input
@@ -62,12 +65,15 @@ export function EgressAccountChoice({
       {choice(
         false,
         `The account your tools use${toolsAddress ? ` (${toolsAddress})` : ""}`,
-        usedBy && `${usedBy} already uses this account.`,
+        usedBy && `The ${usedBy} row already uses this account.`,
       )}
       {choice(
         true,
         `Another ${provider} account`,
-        `${signsIn ? "You sign in right after saving. " : ""}Agents choose it with X-Agent-Keys-Service: ${name || "<name>"}.`,
+        <>
+          {signsIn ? "You sign in right after saving. " : ""}Agents choose it
+          with <Code>X-Agent-Keys-Service: {name || "<name>"}</Code>
+        </>,
       )}
     </div>
   );

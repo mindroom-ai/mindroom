@@ -332,10 +332,16 @@ export function EgressServiceItem({
   const editable = canEdit(serviceEditing, service);
   const addAccount = serviceEditing.addAccount?.(service);
   // A service just saved with an account of its own asks to sign in to it,
-  // once, when the listing shows it so; one that cannot connect asks nothing.
+  // once, when the listing shows it so with that login; one that cannot
+  // connect asks nothing.
   const { signInNext, onSignInOpened } = serviceEditing;
   useEffect(() => {
-    if (signInNext !== service.name || !service.separate_account) return;
+    if (
+      signInNext?.name !== service.name ||
+      !service.separate_account ||
+      oauth?.provider !== signInNext.provider
+    )
+      return;
     onSignInOpened?.();
     if (canConnect) askReuse("read");
   });

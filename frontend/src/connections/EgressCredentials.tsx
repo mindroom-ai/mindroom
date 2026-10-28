@@ -19,6 +19,8 @@ import { DiscardEditsNotice, EgressServiceEditor } from "./EgressServiceEditor";
 import {
   firstFreeName,
   formFromService,
+  presetOf,
+  serviceLogin,
   signsInAfterSave,
 } from "./egressServiceForm";
 import { configPlaceholderOwners } from "./egressServiceNotes";
@@ -319,7 +321,10 @@ function AgentSection({
   const [editorDirty, setEditorDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [signInNext, setSignInNext] = useState<string | null>(null);
+  const [signInNext, setSignInNext] = useState<{
+    name: string;
+    provider: string;
+  } | null>(null);
   const operation = useRef<AbortController | null>(null);
 
   useEffect(() => () => operation.current?.abort(), []);
@@ -381,14 +386,19 @@ function AgentSection({
     if (!(await write(servicePath(agent.agent_name, name), "PUT", service)))
       return;
     onChanged();
+    const saved = formFromService(name, service);
+    const presets = catalog?.presets ?? null;
     if (
       signsInAfterSave(
-        formFromService(name, service),
+        saved,
         editor?.kind === "edit" ? editor.service : null,
-        catalog?.presets ?? null,
+        presets,
       )
     )
-      setSignInNext(name);
+      setSignInNext({
+        name,
+        provider: serviceLogin(saved, presetOf(presets, saved.preset)),
+      });
   };
 
   const saveKey = async (secret: string, name: string) => {
@@ -440,7 +450,7 @@ function AgentSection({
         agent.can_manage &&
         !agent.shared &&
         !separate_account &&
-        oauth &&
+        oauth?.connected &&
         !oauth.service_account &&
         catalog?.oauth_providers.find(
           (option) => option.id === oauth.provider && !option.requester_scoped,
@@ -462,7 +472,7 @@ function AgentSection({
           (counts) => {
             if (!counts) return;
             onChanged();
-            setSignInNext(name);
+            setSignInNext({ name, provider: login.id });
           },
           (cause) =>
             setError(errorText(cause, "Could not add the account. Try again.")),

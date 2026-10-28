@@ -50,8 +50,11 @@ export interface ServiceEditing {
   limitDisabled?: boolean;
   /** Add another account on a row: adds a service with another account of its provider; null where none can be added. */
   addAccount?: (service: EgressCredentialService) => (() => void) | null;
-  /** A service just saved with an account of its own: its row asks to sign in to it once the listing shows it. */
-  signInNext?: string | null;
+  /**
+   * A service just saved with an account of its own, and that account's login: its row asks to sign in once the
+   * listing shows it with that login, not while the row it replaces still shows.
+   */
+  signInNext?: { name: string; provider: string } | null;
   /** Called once that row has asked, so it asks only once. */
   onSignInOpened?: () => void;
 }

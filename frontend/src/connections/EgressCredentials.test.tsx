@@ -2876,6 +2876,108 @@ describe("adding another account", () => {
       ).toBeVisible();
   });
 
+  it("shows the link only on a row with a connected account", async () => {
+    listing = [
+      {
+        ...agents[0],
+        services: [{ ...gmail, oauth: { ...gmail.oauth!, connected: false } }],
+      },
+    ];
+    await renderPage();
+    await screen.findByRole("row", { name: "Gmail" });
+    expect(screen.queryByRole("button", { name: /^Add another / })).toBeNull();
+  });
+
+  it("signs in after an own account moves to another login, once the listing shows the new one", async () => {
+    // The own Gmail account is connected; the edit moves the service to Calendar, which has none yet.
+    const connectedOwn: EgressCredentialService = {
+      ...ownGmail,
+      configured: true,
+      active_source: "oauth",
+      oauth: {
+        ...ownGmail.oauth!,
+        connected: true,
+        account_label: "team@example.com",
+        reuse_enabled: true,
+        reuse_access: "read",
+      },
+    };
+    const ownCalendar: EgressCredentialService = {
+      ...ownGmail,
+      display_name: "Google Calendar",
+      rules: [
+        { host: "www.googleapis.com", port: null, path_prefix: "/calendar/" },
+      ],
+      oauth: {
+        ...ownGmail.oauth!,
+        provider: "google_calendar",
+        display_name: "Google Calendar",
+      },
+    };
+    listing = [{ ...agents[0], services: [gmail, connectedOwn] }];
+    let release = () => {};
+    let held = false;
+    vi.mocked(fetch).mockImplementation(async (input, options) => {
+      const path = String(input);
+      const method = options?.method ?? "GET";
+      calls.push({
+        method,
+        path,
+        body: options?.body ? JSON.parse(String(options.body)) : undefined,
+      });
+      if (path === "/api/connections/me") return json(identity);
+      if (path === PRESETS) return json(egressPresets);
+      if (path === "/api/connections/egress") {
+        // The reload after the save comes late, so the old row shows meanwhile.
+        if (held)
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        return json({ agents: listing });
+      }
+      if (method === "GET" && path === OWN)
+        return json({ preset: "google_gmail", oauth_separate_account: true });
+      if (method === "PUT" && path === OWN) {
+        listing = [{ ...agents[0], services: [gmail, ownCalendar] }];
+        held = true;
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`Unexpected request: ${method} ${path}`);
+    });
+    await renderPage();
+    const own = (await screen.findAllByRole("row", { name: "Gmail" }))[1];
+    fireEvent.click(await rowAction("Edit service for Gmail", own));
+    const form = await screen.findByRole("form", {
+      name: "Edit google_gmail-2",
+    });
+    await presetsReady();
+    fireEvent.change(within(form).getByLabelText("Preset"), {
+      target: { value: "google_calendar" },
+    });
+    fireEvent.click(
+      within(form).getByRole("button", { name: "Save and sign in" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("form", { name: "Edit google_gmail-2" }),
+      ).toBeNull(),
+    );
+    // The old row, still connected to the Gmail account, asks nothing.
+    expect(screen.queryByRole("dialog")).toBeNull();
+    release();
+    expect(await screen.findByRole("dialog")).toHaveAccessibleName(
+      "Sign in to another Google Calendar account?",
+    );
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(writes()).toEqual([
+      {
+        method: "PUT",
+        path: OWN,
+        body: { preset: "google_calendar", oauth_separate_account: true },
+      },
+    ]);
+  });
+
   it("own-account rows show no link", async () => {
     listing = [{ ...agents[0], services: [gmail, ownGmail] }];
     await renderPage();

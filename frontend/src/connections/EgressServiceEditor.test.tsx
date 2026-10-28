@@ -17,6 +17,7 @@ import {
   presetsReady,
   storedLimit,
   validation,
+  wholeText,
 } from "@/test/egressServiceTestKit";
 import { githubRepositoryRules } from "./githubRepositoryRules";
 import {
@@ -593,7 +594,9 @@ describe("the editor form", () => {
     fireEvent.click(screen.getByLabelText("Another Google Calendar account"));
     expect(
       screen.getByText(
-        "You sign in right after saving. Agents choose it with X-Agent-Keys-Service: team_calendar.",
+        wholeText(
+          "You sign in right after saving. Agents choose it with X-Agent-Keys-Service: team_calendar",
+        ),
       ),
     ).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Save and sign in" }));
@@ -639,7 +642,7 @@ describe("the editor form", () => {
     ).toHaveLength(1);
   });
 
-  it("warns about no overlap for a service with its own account", async () => {
+  it("says once that requests naming no service may use its own account, and only where it overlaps", async () => {
     const gmail = credentialService({
       name: "google_gmail",
       display_name: "Gmail",
@@ -652,13 +655,36 @@ describe("the editor form", () => {
         },
       ],
     });
+    const line = "Requests that name no service may use this account too.";
     await renderEditor({
       service: { preset: "google_gmail", oauth_separate_account: true },
       name: "google_gmail-2",
-      agentServices: [gmail],
+      agentServices: [
+        gmail,
+        { ...gmail, name: "other", display_name: "Other" },
+      ],
     });
     expect(screen.queryByText(/already handles/)).toBeNull();
-    expect(screen.queryByText(/usual routing order/)).toBeNull();
+    expect(screen.getAllByText(line)).toHaveLength(1);
+    expect(screen.getByText(line)).toHaveAttribute("role", "status");
+    cleanup();
+    await renderEditor({
+      service: { preset: "google_gmail", oauth_separate_account: true },
+      name: "google_gmail-2",
+      agentServices: [
+        {
+          ...gmail,
+          rules: [
+            {
+              ...gmail.rules[0],
+              host: "www.googleapis.com",
+              path_prefix: "/drive/",
+            },
+          ],
+        },
+      ],
+    });
+    expect(screen.queryByText(line)).toBeNull();
   });
 
   it("drops the API key from a custom service's login hint while the form asks which account", async () => {
@@ -1806,7 +1832,9 @@ describe("the name of a new service", () => {
     expect(name()).toHaveValue("team_calendar");
     expect(
       screen.getByText(
-        "You sign in right after saving. Agents choose it with X-Agent-Keys-Service: team_calendar.",
+        wholeText(
+          "You sign in right after saving. Agents choose it with X-Agent-Keys-Service: team_calendar",
+        ),
       ),
     ).toBeVisible();
   });
@@ -3478,17 +3506,30 @@ describe("the Account choice", () => {
       "The account your tools use (alex@example.com)",
     );
     expect(another()).toBeChecked();
-    expect(screen.getByText("Gmail already uses this account.")).toBeVisible();
+    expect(
+      screen.getByText("The Gmail row already uses this account."),
+    ).toBeVisible();
     expect(
       screen.getByText(
-        "You sign in right after saving. Agents choose it with X-Agent-Keys-Service: google_gmail-2.",
+        wholeText(
+          "You sign in right after saving. Agents choose it with X-Agent-Keys-Service: google_gmail-2",
+        ),
       ),
     ).toBeVisible();
     expect(
+      screen.getByText("X-Agent-Keys-Service: google_gmail-2").tagName,
+    ).toBe("CODE");
+    expect(
       screen.getByRole("button", { name: "Save and sign in" }),
     ).toBeVisible();
-    // Its own account is picked by its header, so nothing overlaps.
+    // Its own account is picked by its header, so no service is warned
+    // about; requests without one may still reach it.
     expect(screen.queryByText(/already handles/)).toBeNull();
+    expect(
+      screen.getByText(
+        "Requests that name no service may use this account too.",
+      ),
+    ).toHaveClass("text-muted-foreground");
     openMoreOptions();
     expect(screen.queryByText(/instead of an API key/)).toBeNull();
   });
@@ -3499,7 +3540,9 @@ describe("the Account choice", () => {
     type("Name", "");
     expect(
       screen.getByText(
-        "You sign in right after saving. Agents choose it with X-Agent-Keys-Service: <name>.",
+        wholeText(
+          "You sign in right after saving. Agents choose it with X-Agent-Keys-Service: <name>",
+        ),
       ),
     ).toBeVisible();
   });
@@ -3528,7 +3571,9 @@ describe("the Account choice", () => {
     const second = await renderEditor(withGmail);
     type("Preset", "google_gmail");
     fireEvent.click(toolsAccount());
-    expect(screen.getByText("Gmail already uses this account.")).toBeVisible();
+    expect(
+      screen.getByText("The Gmail row already uses this account."),
+    ).toBeVisible();
     save();
     await waitFor(() =>
       expect(second.onSave).toHaveBeenCalledWith("google_gmail-2", {
@@ -3546,7 +3591,9 @@ describe("the Account choice", () => {
     expect(another()).toBeChecked();
     // It already has its own account, so saving signs in to nothing new.
     expect(
-      screen.getByText("Agents choose it with X-Agent-Keys-Service: mail."),
+      screen.getByText(
+        wholeText("Agents choose it with X-Agent-Keys-Service: mail"),
+      ),
     ).toBeVisible();
     expect(screen.getByRole("button", { name: "Save service" })).toBeVisible();
     fireEvent.click(toolsAccount());
@@ -3582,7 +3629,9 @@ describe("the Account choice", () => {
     ).toBeChecked();
     expect(
       screen.getByText(
-        "You sign in right after saving. Agents choose it with X-Agent-Keys-Service: mail.",
+        wholeText(
+          "You sign in right after saving. Agents choose it with X-Agent-Keys-Service: mail",
+        ),
       ),
     ).toBeVisible();
     expect(
