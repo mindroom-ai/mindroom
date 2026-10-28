@@ -20,7 +20,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.registry import build_model_provider
-from mindroom.teams.members import BuiltTeam, build_team_spec, materialize_exact_team_members
+from mindroom.teams.members import BuiltTeam, build_team_spec, resolve_exact_team_members
 from mindroom.teams.spec import TeamMode
 from mindroom.token_budget import compute_compaction_input_budget
 from mindroom.turn_model import ModelScope, resolve_turn_model
@@ -125,7 +125,7 @@ def _materialize(runtime: _MultiAgentOrchestrator) -> tuple[AgentBuild, AgentBui
         knowledge=None,
         model=turn_model(config, runtime.runtime_paths, "general"),
     )
-    members = materialize_exact_team_members(
+    members = resolve_exact_team_members(
         ["general"],
         config=config,
         runtime_paths=runtime.runtime_paths,
@@ -145,7 +145,7 @@ def _materialize(runtime: _MultiAgentOrchestrator) -> tuple[AgentBuild, AgentBui
         timezone="UTC",
     )
     router = build_model_provider(config, runtime.runtime_paths, config.router.model)
-    return agent, members.builds[0], team, router
+    return agent, members.build("general", members.model_names["general"]), team, router
 
 
 def _temperature(model: ModelProvider) -> float | None:

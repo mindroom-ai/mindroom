@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.spec import RunContext
     from mindroom.ai import ResponseTurnContext
+    from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers
     from mindroom.tool_system.tool_function import AdaptedToolkit
 
 import pytest
@@ -80,7 +81,6 @@ from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.routing import ResponderSelection
 from mindroom.teams import leader as leader_module
 from mindroom.teams.envelope import PreparedTeamExecution
-from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers
 from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMode, TeamSpec
 from mindroom.tool_system.agno_toolkits import Toolkit, adapt_toolkit
@@ -96,7 +96,7 @@ from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import toolkit
 from tests.fakes.scripted_model import SYNTHETIC, Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.identity_helpers import persist_entity_accounts
-from tests.teams.squad import built_team, team_spec
+from tests.teams.squad import built_team, resolved_members, team_spec
 from tests.teams.squad import member as team_member
 from tests.turn_model_helpers import turn_model
 
@@ -3408,13 +3408,8 @@ def _scripted_team(
 
 
 def _resolved_members(members: Sequence[tuple[str, str, ScriptedModel]]) -> ResolvedExactTeamMembers:
-    """Return the member set ``materialize_exact_team_members`` resolves for the ``(id, name, model)`` members."""
-    return ResolvedExactTeamMembers(
-        requested_agent_names=[member_id for member_id, _name, _model in members],
-        builds=[],
-        display_names=[name for _member_id, name, _model in members],
-        failed_agent_names=[],
-    )
+    """Return the member set ``resolve_exact_team_members`` resolves for the ``(id, name, model)`` members."""
+    return resolved_members({member_id: name for member_id, name, _model in members})
 
 
 def _finished(content: str) -> RunFinished:
@@ -3659,7 +3654,7 @@ class TestTeamCompletion:
             assert matrix_text not in leader_prompt
         for member in built.spec.members:
             assert "the MindRoom agent exposed through the OpenAI-compatible API" in str(
-                member.spec.system_messages[0].content,
+                member.build().spec.system_messages[0].content,
             )
 
     @pytest.mark.asyncio
@@ -3950,7 +3945,7 @@ class TestTeamCompletion:
 
         config_lifecycle.app_state(team_app_client.app).knowledge_refresh_scheduler = _FakeRefreshScheduler()
         with (
-            patch("mindroom.api.openai_compat.materialize_exact_team_members", side_effect=fake_materialize),
+            patch("mindroom.api.openai_compat.resolve_exact_team_members", side_effect=fake_materialize),
             patch("mindroom.api.openai_compat.build_team_spec", return_value=built),
             patch(
                 "mindroom.api.openai_compat.prepare_materialized_team_execution",
@@ -4312,13 +4307,19 @@ class TestTeamCompletion:
         assert response.status_code == 500
         assert response.json()["error"]["message"] == "Team execution failed"
 
-    def test_team_member_materialization_failure_returns_generic_500(
+    def test_a_member_that_fails_to_build_is_a_failed_delegation_the_leader_answers_around(
         self,
         team_app_client: TestClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Configured team build failures should not expose internal exception details."""
-        install_model_providers(monkeypatch, {"default": ScriptedModel([])})
+        """A member that cannot be built fails only the delegation to it; the completion is the leader's answer."""
+        leader = ScriptedModel(
+            [
+                calls(tool_call("delegate_task_to_member", "call-general", member_id="general", task="Help")),
+                answer("General could not start."),
+            ],
+        )
+        install_model_providers(monkeypatch, {"default": leader})
         with (
             patch(
                 "mindroom.teams.members.resolve_agent_knowledge_access",
@@ -4334,9 +4335,10 @@ class TestTeamCompletion:
                 },
             )
 
-        assert response.status_code == 500
-        assert response.json()["error"]["type"] == "server_error"
-        assert response.json()["error"]["message"] == "Team execution failed"
+        assert response.status_code == 200
+        assert response.json()["choices"][0]["message"]["content"] == "General could not start."
+        delegated = leader.requests[1].messages[-1]
+        assert (delegated.tool_call_id, delegated.content) == ("call-general", "boom")
 
     @pytest.mark.parametrize("stream", [False, True])
     def test_team_execution_failure_500(self, team_app_client: TestClient, stream: bool) -> None:
@@ -4925,7 +4927,7 @@ class TestTeamCompletion:
         )
 
         assert (built.spec.leader.id, built.spec.mode) == ("coord_team", expected)
-        assert [member.spec.id for member in built.spec.members] == ["general"]
+        assert [member.id for member in built.spec.members] == ["general"]
 
     def test_build_team_openai_compat_does_not_require_persisted_matrix_accounts(
         self,
@@ -4971,7 +4973,7 @@ class TestTeamCompletion:
         )
 
         assert built.spec.mode is TeamMode.COORDINATE
-        assert [member.spec.id for member in built.spec.members] == ["general", "code"]
+        assert [member.id for member in built.spec.members] == ["general", "code"]
         assert not constants.matrix_state_file(runtime_paths=runtime_paths).exists()
 
     def test_build_team_propagates_team_build_failures(self) -> None:
@@ -5002,7 +5004,7 @@ class TestTeamCompletion:
         )
         assert scope_context is not None
         with (
-            patch("mindroom.api.openai_compat.materialize_exact_team_members", return_value=members),
+            patch("mindroom.api.openai_compat.resolve_exact_team_members", return_value=members),
             patch("mindroom.api.openai_compat.build_team_spec", side_effect=RuntimeError("team build failed")),
             pytest.raises(RuntimeError, match="team build failed"),
         ):
@@ -5044,13 +5046,19 @@ class TestTeamCompletion:
         )
         mock_knowledge = MagicMock()
         built = _scripted_team()
+        resolved: list[ResolvedExactTeamMembers] = []
+
+        def build_team_spec(*, members: ResolvedExactTeamMembers, **_kwargs: object) -> BuiltTeam:
+            resolved.append(members)
+            return built
+
         with (
             patch("mindroom.teams.members.create_agent") as mock_create,
             patch(
                 "mindroom.teams.members.resolve_agent_knowledge_access",
                 return_value=_KnowledgeResolution(knowledge=mock_knowledge),
             ),
-            patch("mindroom.api.openai_compat.build_team_spec", return_value=built),
+            patch("mindroom.api.openai_compat.build_team_spec", side_effect=build_team_spec),
         ):
             mock_create.return_value = MagicMock(name="Research")
 
@@ -5074,6 +5082,10 @@ class TestTeamCompletion:
                 unavailable_bases={},
                 refresh_scheduler=None,
             )
+            # The member builds on its first delegation, with the knowledge the team build resolved for it.
+            mock_create.assert_not_called()
+            [members] = resolved
+            members.build("research", members.model_names["research"])
 
             assert mock_create.call_args.kwargs["knowledge"] is mock_knowledge
             assert "include_default_tools" not in mock_create.call_args.kwargs

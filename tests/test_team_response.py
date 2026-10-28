@@ -29,6 +29,12 @@ from mindroom.history.interrupted_replay import _render_interrupted_replay_conte
 from mindroom.history.session_context import load_bound_scope_session
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.hooks import EnrichmentItem
+from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.utils import (
+    KnowledgeAvailabilityDetail,
+    _KnowledgeResolution,
+    format_knowledge_availability_notice,
+)
 from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message, system_text
@@ -44,12 +50,7 @@ from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, Response
 from mindroom.session_storage.store import ConversationStore
 from mindroom.teams.envelope import prepare_materialized_team_execution, team_response, team_response_stream
 from mindroom.teams.formation import resolve_live_shared_agent_names
-from mindroom.teams.members import (
-    ResolvedExactTeamMembers,
-    build_team_spec,
-    materialize_exact_requested_team_members,
-    materialize_team_members,
-)
+from mindroom.teams.members import build_team_spec, resolve_team_members
 from mindroom.teams.presentation import TeamStreamPresentation, url_safe_member_id
 from mindroom.teams.spec import TeamMode
 from mindroom.timing import DispatchPipelineTiming
@@ -86,6 +87,7 @@ if TYPE_CHECKING:
 
 
 HEADER = "🤝 **Team Response** (GeneralAgent):\n\n"
+HEADER_BOTH = "🤝 **Team Response** (GeneralAgent, ResearchAgent):\n\n"
 GATED = ApprovalRuleConfig(match="touch", action="require_approval")
 
 
@@ -189,24 +191,6 @@ def test_live_shared_agents_are_the_running_configured_agents(tmp_path: Path, mo
     assert resolve_live_shared_agent_names(team.orchestrator) == {"general"}
 
 
-def test_known_missing_live_members_fail_before_any_member_is_built() -> None:
-    build_member = MagicMock()
-
-    team_members = materialize_exact_requested_team_members(
-        ["general", "research"],
-        materializable_agent_names={"general"},
-        build_member=build_member,
-    )
-
-    assert team_members == ResolvedExactTeamMembers(
-        requested_agent_names=["general", "research"],
-        builds=[],
-        display_names=[],
-        failed_agent_names=["research"],
-    )
-    build_member.assert_not_called()
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("research_bot", ["missing", "stopped"])
@@ -230,27 +214,97 @@ async def test_a_team_with_a_member_that_is_not_running_answers_why_without_runn
     assert all(model.requests == [] for model in team.models.values())
 
 
+def _research_fails_to_build(agent_name: str, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+    """Build every member as production does, except ``research``, whose build raises."""
+    if agent_name == "research":
+        msg = "research is misconfigured: api_key=example-secret"
+        raise RuntimeError(msg)
+    return create_agent(agent_name, *args, **kwargs)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
-async def test_a_member_that_fails_to_build_is_named_with_the_caller_s_reason_prefix(
+async def test_a_member_that_fails_to_build_is_a_failed_delegation_the_leader_reads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     stream: bool,
 ) -> None:
-    team = _team(tmp_path, monkeypatch, members=("general", "research"))
+    """A member that cannot be built fails only the delegation to it: the leader reads why, and the team answers.
 
-    def build(agent_name: str, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-        if agent_name == "research":
-            msg = "boom"
-            raise RuntimeError(msg)
-        return create_agent(agent_name, *args, **kwargs)
+    The reason reaches the leader, the member's slot, and the member's stored row as a failed run's does, credentials
+    redacted where it is shown.
+    """
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-research", "research", "Dig."), answer("Research could not start.")],
+        members=("general", "research"),
+    )
 
-    with patch("mindroom.teams.members.create_agent", side_effect=build):
-        text = await team.reply(stream=stream, reason_prefix="Team 'summary'")
+    with patch("mindroom.teams.members.create_agent", side_effect=_research_fails_to_build):
+        text = await team.reply(stream=stream, show_tool_calls=False)
 
-    assert text == "Team 'summary' includes agent 'research' that could not be materialized for this request."
-    assert all(model.requests == [] for model in team.models.values())
+    reason = "research is misconfigured: api_key=***redacted***"
+    delegated = _leader(team).requests[1].messages[-1]
+    assert (delegated.role, delegated.tool_call_id, delegated.content) == ("tool", "call-research", reason)
+    assert text == (f"{HEADER_BOTH}**ResearchAgent**: {reason}\n\n\n**Team Consensus**:\n\nResearch could not start.")
+    record, [failed] = team.stored_runs()
+    assert record.status is RunStatus.completed
+    assert (failed.agent_id, failed.status) == ("research", RunStatus.error)
+    assert failed.content == "research is misconfigured: api_key=example-secret"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_a_team_builds_only_the_members_its_leader_delegates_to(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool,
+) -> None:
+    """A member is built on its first delegation, so one the leader never calls is never built, even if it would fail."""
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-general", "general", "Answer."), answer("Done.")],
+        general=[answer("Answered.")],
+        members=("general", "research"),
+    )
+
+    with patch("mindroom.teams.members.create_agent", side_effect=_research_fails_to_build) as build:
+        text = await team.reply(stream=stream)
+
+    assert [call.args[0] for call in build.call_args_list] == ["general"]
+    assert text.endswith("Done.")
+    leader_prompt = str(_leader(team).requests[0].messages[0].content)
+    assert '<member id="research" name="ResearchAgent">\n  Role: Researches.\n</member>' in leader_prompt
+
+
+@pytest.mark.asyncio
+async def test_the_leader_is_told_which_member_knowledge_is_unavailable_before_any_member_builds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The members' knowledge resolves as the turn starts, so the leader's request carries its availability notice."""
+    team = _team(tmp_path, monkeypatch, leader=[answer("Team response")])
+    unavailable = {
+        "docs": KnowledgeAvailabilityDetail(availability=KnowledgeAvailability.INITIALIZING, search_available=False),
+    }
+
+    with (
+        patch(
+            "mindroom.teams.members.resolve_agent_knowledge_access",
+            return_value=_KnowledgeResolution(knowledge=None, unavailable=unavailable),
+        ),
+        patch("mindroom.teams.members.create_agent") as build,
+    ):
+        await team.respond()
+
+    build.assert_not_called()
+    notice = format_knowledge_availability_notice(unavailable)
+    assert notice is not None
+    assert any(notice in str(message.content) for message in _leader(team).requests[0].messages)
 
 
 @pytest.mark.asyncio
@@ -697,7 +751,17 @@ async def test_private_members_join_an_ad_hoc_team_built_for_the_requester(
     stream: bool,
 ) -> None:
     """Each member is built with the request's execution identity, even when a bot of theirs is running."""
-    team = _private_team(tmp_path, monkeypatch, leader=[answer("Team response")])
+    team = _private_team(
+        tmp_path,
+        monkeypatch,
+        leader=[
+            delegate("call-general", "general", "Answer."),
+            delegate("call-research", "research", "Dig."),
+            answer("Team response"),
+        ],
+        general=[answer("Answered.")],
+        research=[answer("Dug.")],
+    )
     team.orchestrator.agent_bots = {"research": MagicMock(running=True)}
 
     with patch("mindroom.teams.members.create_agent", wraps=create_agent) as build:
@@ -907,7 +971,7 @@ async def test_preparing_a_team_turn_directly_recovers_an_earlier_reply_s_notice
     """A caller that prepares the turn itself, as the OpenAI-compatible API does, recovers the live notice too."""
     team = _team(tmp_path, monkeypatch)
     _seed_history(team, messages=[Message(role="user", content="Earlier"), _notice("prior-response")])
-    members = materialize_team_members(
+    members = resolve_team_members(
         list(team.member_names),
         team.orchestrator,
         team.identity,
@@ -959,7 +1023,7 @@ def test_a_member_s_roster_role_is_its_authored_role_not_its_rendered_prompt(
 ) -> None:
     """The leader reads the role the member's config authors, whatever the member's own prompt renders around it."""
     team = _team(tmp_path, monkeypatch)
-    members = materialize_team_members(
+    members = resolve_team_members(
         list(team.member_names),
         team.orchestrator,
         team.identity,
@@ -968,7 +1032,7 @@ def test_a_member_s_roster_role_is_its_authored_role_not_its_rendered_prompt(
         reason_prefix="Team request",
         active_model_names=dict.fromkeys(team.member_names, "default"),
     )
-    [build] = members.builds
+    build = members.build("general", members.model_names["general"])
     assert build.prompt.role is not None
     assert build.prompt.role != "Answers."
 
@@ -1526,7 +1590,7 @@ async def test_a_resume_whose_history_cannot_be_opened_builds_no_member(
     team = _team(tmp_path, monkeypatch)
 
     with (
-        patch("mindroom.teams.resume.materialize_exact_team_members") as materialize,
+        patch("mindroom.teams.resume.resolve_exact_team_members") as materialize,
         patch("mindroom.teams.resume.load_scope_session", side_effect=RuntimeError("scope load failed")),
         pytest.raises(RuntimeError, match="scope load failed"),
     ):

@@ -1,15 +1,17 @@
-"""Building a team: its exact members as agent builds, the leader's and members' models, and the team spec.
+"""Building a team: its exact members, the leader's and members' models, and the team spec.
 
-``build_team_spec`` turns the materialized members into the team the leader loop runs: the leader's model, prompt,
-job controls, and call budget, and each member's system messages, roster role, and loop hooks.
+``build_team_spec`` turns the resolved members into the team the leader loop runs: the leader's model, prompt, job
+controls, and call budget, and each member's roster entry from config with the build its first delegation makes, the
+member's system messages and loop hooks.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING
 
-from mindroom.agent_loop.build import appended_context, prompt_for_turn
+from mindroom.agent_loop.build import appended_context, prompt_for_turn, tool_owners_by_agent
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import toolkit_instructions
 from mindroom.agents import create_agent, team_background_jobs
@@ -26,7 +28,7 @@ from mindroom.teams.formation import (
     resolve_team_materializable_agent_names,
 )
 from mindroom.teams.prompt import render_leader_system_messages
-from mindroom.teams.spec import TeamMember, TeamSpec
+from mindroom.teams.spec import MemberBuild, TeamMember, TeamSpec
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.turn_model import ModelScope, resolve_turn_model
 
@@ -40,6 +42,7 @@ if TYPE_CHECKING:
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.types import ResolvedHistorySettings
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.knowledge.search import AgentKnowledge
     from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.teams.spec import TeamMode
@@ -52,56 +55,19 @@ logger = get_logger(__name__)
 
 @dataclass(frozen=True)
 class ResolvedExactTeamMembers:
-    """One exact requested member set after runtime materialization attempts."""
+    """One exact requested member set: each member's config name, display name, and model for this turn, and its build.
+
+    ``build(agent_name, model_name)`` builds one member on ``model_name`` under this set's settings and knowledge,
+    blocking; a team builds each member on its first delegation (``TeamMember.ensure_built``).
+    """
 
     requested_agent_names: list[str]
-    builds: list[AgentBuild]
     display_names: list[str]
-    failed_agent_names: list[str]
-    model_names: dict[str, str] = field(default_factory=dict)
+    model_names: dict[str, str]
+    build: Callable[[str, str], AgentBuild] = field(repr=False, compare=False)
 
 
-def materialize_exact_requested_team_members(
-    requested_agent_names: list[str],
-    *,
-    materializable_agent_names: set[str] | None,
-    build_member: Callable[[str], AgentBuild],
-) -> ResolvedExactTeamMembers:
-    """Materialize the exact requested team members without silent shrinkage."""
-    if materializable_agent_names is not None:
-        missing_agent_names = [name for name in requested_agent_names if name not in materializable_agent_names]
-        if missing_agent_names:
-            return ResolvedExactTeamMembers(
-                requested_agent_names=requested_agent_names,
-                builds=[],
-                display_names=[],
-                failed_agent_names=missing_agent_names,
-            )
-
-    builds: list[AgentBuild] = []
-    failed_agent_names: list[str] = []
-    for name in requested_agent_names:
-        try:
-            build = build_member(name)
-        except Exception:
-            logger.warning(
-                "Failed to materialize exact team member",
-                agent_name=name,
-                exc_info=True,
-            )
-            failed_agent_names.append(name)
-            continue
-        builds.append(build)
-
-    return ResolvedExactTeamMembers(
-        requested_agent_names=requested_agent_names,
-        builds=builds,
-        display_names=[build.spec.name for build in builds],
-        failed_agent_names=failed_agent_names,
-    )
-
-
-def materialize_exact_team_members(
+def resolve_exact_team_members(
     requested_agent_names: list[str],
     *,
     config: Config,
@@ -110,16 +76,17 @@ def materialize_exact_team_members(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     active_model_names: Mapping[str, str],
     include_openai_compat_guidance: bool = False,
-    materializable_agent_names: set[str] | None = None,
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] | None = None,
-    reason_prefix: str = "Team request",
     supports_native_tool_approval: bool = False,
     required_tool_names: Mapping[str, tuple[str, ...]] | None = None,
 ) -> ResolvedExactTeamMembers:
-    """Materialize the exact team-member set without silent fallback."""
-    selected_model_names: dict[str, str] = {}
+    """Resolve the exact team-member set: each member's model and knowledge, and its build.
 
-    def _build_member(agent_name: str) -> AgentBuild:
+    Each member's knowledge resolves now, so ``unavailable_bases`` collects what the leader's turn is told is
+    unavailable; the members themselves build on their first delegation.
+    """
+    knowledge: dict[str, AgentKnowledge | None] = {}
+    for agent_name in requested_agent_names:
         knowledge_resolution = resolve_agent_knowledge_access(
             agent_name,
             config,
@@ -129,21 +96,19 @@ def materialize_exact_team_members(
         )
         if unavailable_bases is not None:
             unavailable_bases.update(knowledge_resolution.unavailable)
+        knowledge[agent_name] = knowledge_resolution.knowledge
+    model_names = {agent_name: active_model_names[agent_name] for agent_name in requested_agent_names}
+
+    def build(agent_name: str, model_name: str) -> AgentBuild:
         # The team turn froze each member's model; the build runs it as chosen.
-        model = resolve_turn_model(
-            config,
-            runtime_paths,
-            ModelScope(entity=agent_name, explicit=active_model_names[agent_name]),
-            None,
-        )
-        selected_model_names[agent_name] = model.model_name
+        model = resolve_turn_model(config, runtime_paths, ModelScope(entity=agent_name, explicit=model_name), None)
         return create_agent(
             agent_name,
             config,
             runtime_paths,
             execution_identity=execution_identity,
             model=model,
-            knowledge=knowledge_resolution.knowledge,
+            knowledge=knowledge[agent_name],
             include_interactive_questions=False,
             include_openai_compat_guidance=include_openai_compat_guidance,
             refresh_scheduler=refresh_scheduler,
@@ -151,16 +116,12 @@ def materialize_exact_team_members(
             required_tool_names=(required_tool_names or {}).get(agent_name, ()),
         )
 
-    team_members = materialize_exact_requested_team_members(
-        requested_agent_names,
-        materializable_agent_names=materializable_agent_names,
-        build_member=_build_member,
+    return ResolvedExactTeamMembers(
+        requested_agent_names=requested_agent_names,
+        display_names=[config.get_agent(agent_name).display_name for agent_name in requested_agent_names],
+        model_names=model_names,
+        build=build,
     )
-    if team_members.failed_agent_names:
-        raise ValueError(
-            not_materializable_team_agents_message(team_members.failed_agent_names, prefix=reason_prefix),
-        )
-    return replace(team_members, model_names=selected_model_names)
 
 
 def requested_team_agent_names(agent_names: Sequence[str]) -> list[str]:
@@ -168,7 +129,7 @@ def requested_team_agent_names(agent_names: Sequence[str]) -> list[str]:
     return [name for name in agent_names if name != ROUTER_AGENT_NAME]
 
 
-def materialize_team_members(
+def resolve_team_members(
     agent_names: list[str],
     orchestrator: OrchestratorRuntime,
     execution_identity: ToolExecutionIdentity | None,
@@ -179,10 +140,12 @@ def materialize_team_members(
     active_model_names: Mapping[str, str],
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] | None = None,
 ) -> ResolvedExactTeamMembers:
-    """Materialize the exact requested team-member set under the turn's ``config`` without silent fallback.
+    """Resolve the exact requested team-member set under the turn's ``config`` without silent fallback.
 
-    The orchestrator says which shared agents are running now.
+    The orchestrator says which shared agents are running now; a requested member that is not, or that this request
+    may not reach, rejects the set with a ``ValueError`` naming it under ``reason_prefix``, before anything resolves.
     """
+    requested_agent_names = requested_team_agent_names(agent_names)
     materializable_agent_names = resolve_team_materializable_agent_names(
         config,
         resolve_live_shared_agent_names(orchestrator),
@@ -191,17 +154,19 @@ def materialize_team_members(
             configured_team_name=configured_team_name,
         ),
     )
-    return materialize_exact_team_members(
-        requested_team_agent_names(agent_names),
+    if materializable_agent_names is not None:
+        missing_agent_names = [name for name in requested_agent_names if name not in materializable_agent_names]
+        if missing_agent_names:
+            raise ValueError(not_materializable_team_agents_message(missing_agent_names, prefix=reason_prefix))
+    return resolve_exact_team_members(
+        requested_agent_names,
         config=config,
         runtime_paths=orchestrator.runtime_paths,
         execution_identity=execution_identity,
-        materializable_agent_names=materializable_agent_names,
         unavailable_bases=unavailable_bases,
         refresh_scheduler=orchestrator.knowledge_refresh_scheduler,
         supports_native_tool_approval=True,
         active_model_names=active_model_names,
-        reason_prefix=reason_prefix,
     )
 
 
@@ -228,20 +193,48 @@ def materialized_team_label(display_names: Sequence[str]) -> str:
 
 
 def _team_member(
-    build: AgentBuild,
+    agent_name: str,
+    members: ResolvedExactTeamMembers,
     system_enrichment: str,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    model_name: str,
 ) -> TeamMember:
-    """Return one member as the team runs it: this turn's system messages, the roster role, and its loop hooks.
+    """Return one member as the leader reads it from config, built on its first delegation (``_member_build``)."""
+    agent_config = config.get_agent(agent_name)
+    return TeamMember(
+        id=agent_name,
+        name=agent_config.display_name,
+        role=agent_config.role,
+        build=partial(
+            _member_build,
+            agent_name,
+            members,
+            system_enrichment,
+            config=config,
+            runtime_paths=runtime_paths,
+        ),
+    )
+
+
+def _member_build(
+    agent_name: str,
+    members: ResolvedExactTeamMembers,
+    system_enrichment: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> MemberBuild:
+    """Build one member as the team runs it: this turn's system messages, its loop hooks, and its toolkit owners.
 
     A member runs under the agent hook policy: its own tool-call policy, output-limit policy, portable tool search,
     mid-turn compaction, and the approval receipt hook; its tool-call policy and tools run under its own identity. It
     replays no history, so its compaction stays within the run, and the leader owns the queued-message notices of the
-    turn. ``model_name`` is the member's configured model for this turn, whose window its compaction sizes against.
+    turn. The member runs on its configured model for this turn (``members.model_names``), whose window its compaction
+    sizes against.
     """
+    model_name = members.model_names[agent_name]
+    build = members.build(agent_name, model_name)
     # The binding opens the policy a managed job runs again, so a member's call that becomes a job runs as the member.
     as_member = replace(build, tool_policy=(_as_member(build.spec.id, model_name), *build.tool_policy))
     turn = HookTurn(
@@ -256,11 +249,11 @@ def _team_member(
     def new_hooks() -> LoopHooks:
         return agent_loop_hooks(as_member, turn, queued_notices=False)
 
-    return TeamMember(
+    return MemberBuild(
         spec=replace(build.spec, system_messages=prompt_for_turn(build, system_enrichment)),
-        role=config.agents[build.spec.id].role,
         new_hooks=new_hooks,
         request_template=build.request_template,
+        toolkit_owners=tool_owners_by_agent(build),
     )
 
 
@@ -368,14 +361,8 @@ def build_team_spec(
     team_scope = config.resolve_scope(configured_team_name)
     jobs = team_background_jobs(config, runtime_paths, execution_identity)
     team_members = tuple(
-        _team_member(
-            build,
-            system_enrichment,
-            config=config,
-            runtime_paths=runtime_paths,
-            model_name=members.model_names[build.spec.id],
-        )
-        for build in members.builds
+        _team_member(agent_name, members, system_enrichment, config=config, runtime_paths=runtime_paths)
+        for agent_name in members.requested_agent_names
     )
     leader = AgentSpec(
         id=scope_context.scope.scope_id,
@@ -414,9 +401,8 @@ __all__ = [
     "ResolvedExactTeamMembers",
     "allow_direct_private_team_agents",
     "build_team_spec",
-    "materialize_exact_requested_team_members",
-    "materialize_exact_team_members",
-    "materialize_team_members",
     "materialized_team_label",
     "requested_team_agent_names",
+    "resolve_exact_team_members",
+    "resolve_team_members",
 ]

@@ -655,6 +655,12 @@ class DeliveryGateway:
         repr=False,
         compare=False,
     )
+    _reply_debt_locks: WeakValueDictionary[str, asyncio.Lock] = field(
+        default_factory=WeakValueDictionary,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def _ready_client(self) -> nio.AsyncClient:
         """Return the current Matrix client required for delivery."""
@@ -1615,21 +1621,31 @@ class DeliveryGateway:
         return await self.deps.outbox.replies.accepts_stop(event_id, room_id)
 
     async def settle_reply_debt(self, reply_id: str) -> None:
-        """Redact what a reply owes removed and deliver the note it owes, if any."""
-        reply = await self.deps.outbox.replies.load(reply_id)
-        if reply is None:
-            return
-        if reply.redaction_pending:
-            done = [
-                event_id for event_id in reply.redaction_pending if await self._redact_owed(reply.room_id, event_id)
-            ]
-            if done:
-                await self.deps.outbox.replies.update(
-                    reply_id,
-                    lambda current: rl.redactions_done(current, tuple(done), now_ns=time.time_ns()),
-                )
-        if reply.owed_write is not None:
-            await self._flush_owed_write(reply_id)
+        """Redact what a reply owes removed and deliver the note it owes, if any.
+
+        A span ending the reply and a background settlement, such as the one a row's acknowledgement starts, can
+        overlap. One waits for the other, so nothing is redacted twice and neither returns while the other is still
+        delivering what the reply owes.
+        """
+        lock = self._reply_debt_locks.get(reply_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._reply_debt_locks[reply_id] = lock
+        async with lock:
+            reply = await self.deps.outbox.replies.load(reply_id)
+            if reply is None:
+                return
+            if reply.redaction_pending:
+                done = [
+                    event_id for event_id in reply.redaction_pending if await self._redact_owed(reply.room_id, event_id)
+                ]
+                if done:
+                    await self.deps.outbox.replies.update(
+                        reply_id,
+                        lambda current: rl.redactions_done(current, tuple(done), now_ns=time.time_ns()),
+                    )
+            if reply.owed_write is not None:
+                await self._flush_owed_write(reply_id)
 
     async def _redact_owed(self, room_id: str, event_id: str) -> bool:
         """Redact one event a reply owes removed; a failed attempt stays owed for the next settlement."""

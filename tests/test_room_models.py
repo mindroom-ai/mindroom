@@ -25,7 +25,7 @@ from mindroom.room_model_overrides import (
     resolve_room_model_override,
     set_room_model_override,
 )
-from mindroom.teams.members import materialize_exact_team_members
+from mindroom.teams.members import resolve_exact_team_members
 from mindroom.thread_models import set_thread_model_override
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_model import ModelScope, resolve_turn_model
@@ -375,7 +375,7 @@ def test_runtime_model_precedence_applies_to_materialized_team_members(tmp_path:
         model_name="large",
     )
 
-    members = materialize_exact_team_members(
+    members = resolve_exact_team_members(
         ["assistant"],
         config=context.config,
         runtime_paths=context.runtime_paths,
@@ -398,7 +398,7 @@ def test_runtime_model_precedence_applies_to_materialized_team_members(tmp_path:
             ).model_name,
         },
     )
-    assert members.builds[0].spec.model.identity.id == "large-model"
+    assert members.build("assistant", members.model_names["assistant"]).spec.model.identity.id == "large-model"
 
     thread_id = "$thread:localhost"
     set_thread_model_override(
@@ -408,7 +408,7 @@ def test_runtime_model_precedence_applies_to_materialized_team_members(tmp_path:
         entity_names=("assistant",),
         config=context.config,
     )
-    thread_members = materialize_exact_team_members(
+    thread_members = resolve_exact_team_members(
         ["assistant"],
         config=context.config,
         runtime_paths=context.runtime_paths,
@@ -431,7 +431,10 @@ def test_runtime_model_precedence_applies_to_materialized_team_members(tmp_path:
             ).model_name,
         },
     )
-    assert thread_members.builds[0].spec.model.identity.id == "default-model"
+    assert (
+        thread_members.build("assistant", thread_members.model_names["assistant"]).spec.model.identity.id
+        == "default-model"
+    )
 
 
 def test_stale_runtime_room_override_falls_back_to_static_room_model(

@@ -366,7 +366,7 @@ When more than one user can sign in through a trusted upstream gateway, set `MIN
 ### Using a connected account
 
 An account connected for the provider's tools, on the Connections portal or here, serves only those tools until someone allows Agent Keys to use it for the service.
-Its row then shows "Connected for tools only" and offers **Use account**, and brokered requests that need it are refused with `oauth_reuse: "off"` (see [Error responses](#error-responses)).
+Its row then shows "Connected for tools only" and offers **Let commands use it**, and brokered requests that need it are refused with `oauth_reuse: "off"` (see [Error responses](#error-responses)).
 The provider's tools ask for approval before they write, but an allowed account lets the agent's shell and python commands act as it with its full access and without those prompts, so allowing it asks for confirmation first.
 Whoever may connect the account may allow it (see **Who may connect and set keys** above).
 Allowing a GitHub or Atlassian account covers every agent of that requester with a service of the same name, because the account is the requester's own; allowing any other account covers the scope of the service's keys (see [Secret management](#secret-management)), so on a shared agent everyone using it gets it.
@@ -427,12 +427,13 @@ When a config service sets the same variable, the config value wins, and the edi
 
 ### A service's own account
 
-A user service that signs in with a connected account on a `user` or `user_agent` agent can set `oauth_separate_account: true` (in the editor, **Use its own account, not the one the agent's tools use**), for example to use a second Google account for a shared mailbox or another calendar from the agent's commands.
+A user service that signs in with a connected account on a `user` or `user_agent` agent can set `oauth_separate_account: true` (in the editor, **Account**: **Another <provider> account**), for example to use a second Google account for a shared mailbox or another calendar from the agent's commands.
 A GitHub or Atlassian login cannot, because those accounts belong to each user rather than to one agent.
-A row's **Add another account** opens **Add service** with that row's preset and **Use its own account** ticked: save it, then use **Connect** on the new row.
-That service's row then connects, allows, and disconnects an account of its own, which shows as "Connected, not used for Agent Keys yet" until it is allowed, and the agent's tools and every other service keep the account they use.
+A row on the tools' account with a connected account offers **Add another <provider> account** under its status, which adds such a service with the row's preset and the next free name (`google_gmail-2`) at once.
+After that link, or **Save and sign in** in the editor, the new row asks what agents may do with the account and then opens the provider's sign-in, where Google always shows its account picker; cancelled, the row keeps its **Connect** button.
+That service's row then connects, allows, and disconnects an account of its own, which shows as "Not used by commands yet" until it is allowed, and the agent's tools and every other service keep the account they use.
 It uses only that account, so it takes no key and its row offers none: until the account is connected the service has none, and it never uses the tools' account instead.
-Deleting the service, unticking the box, or changing its account login also removes its own account and its opt-in.
+Deleting the service, switching it back to the tools' account, or changing its account login also removes its own account and its opt-in.
 
 Such a service usually covers the same hosts and paths as a service of your administrator's, which wins a tie, so a request picks it by name with the `X-Agent-Keys-Service` header:
 
@@ -458,7 +459,8 @@ One editor adds, edits, and deletes services in two places:
 On the personal page the editor saves the service and its key in one step.
 Pick a **Preset**, or **Custom** and fill in the website (the host of the first rule), how the key is sent (bearer token, header, basic auth, query parameter, or a custom header template), and the header, username, or parameter name.
 The **Name** is fixed once saved.
-**More options** holds the display name, description, path prefix, port, extra rules, **Replace the preset's rules with my own**, **Refuse other paths on these hosts** (`restrict_to_rules`), the account login (for a **Custom** service), **Use its own account, not the one the agent's tools use** (for a service of your own with an account login, see [A service's own account](#a-services-own-account)), and the placeholder variables.
+**More options** holds the display name, description, path prefix, port, extra rules, **Replace the preset's rules with my own**, **Refuse other paths on these hosts** (`restrict_to_rules`), the account login (for a **Custom** service), and the placeholder variables.
+A service of your own with an account login asks **Account** instead of an API key: the account the agent's tools use, or another account of that provider (see [A service's own account](#a-services-own-account)); a preset asks it right after **Preset**, a **Custom** service under **More options** after its account login.
 
 ### The limit editor
 
