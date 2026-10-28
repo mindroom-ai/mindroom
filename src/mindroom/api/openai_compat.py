@@ -64,7 +64,7 @@ from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import ScopeSessionContext, load_bound_scope_session
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access_async
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
-from mindroom.llm.request_context import RequestAttribution, bind_llm_request_log_context
+from mindroom.llm.request_context import RequestAttribution
 from mindroom.llm.runs import TeamRunRecord
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
@@ -722,19 +722,18 @@ async def _chat_completions(  # noqa: C901, PLR0912
                     refresh_scheduler=knowledge_refresh_scheduler,
                 )
             else:
-                with tool_execution_identity(execution_identity):
-                    response = await _non_stream_team_completion(
-                        team_name,
-                        agent_name,
-                        prompt,
-                        session_id,
-                        config,
-                        runtime_paths,
-                        thread_history,
-                        team_models,
-                        execution_identity=execution_identity,
-                        refresh_scheduler=knowledge_refresh_scheduler,
-                    )
+                response = await _non_stream_team_completion(
+                    team_name,
+                    agent_name,
+                    prompt,
+                    session_id,
+                    config,
+                    runtime_paths,
+                    thread_history,
+                    team_models,
+                    execution_identity=execution_identity,
+                    refresh_scheduler=knowledge_refresh_scheduler,
+                )
         else:
             # Resolve knowledge base for this agent
             try:
@@ -1111,6 +1110,50 @@ async def _prepare_team_turn(
     return scope_context, built, prepared
 
 
+def _team_completion_events(
+    team_name: str,
+    turn: tuple[ScopeSessionContext, BuiltTeam, PreparedTeamExecution],
+    *,
+    session_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity,
+) -> AsyncGenerator[TeamRunEvent, None]:
+    """Return one team completion's run events, each pulled as the requester, under its request log and helper usage.
+
+    Helper work during the run, such as a member's Claude Code session, belongs to this conversation.
+    """
+    scope_context, built, prepared = turn
+    requester_id = execution_identity.requester_id
+    request_log_context = _openai_team_request_log_context(
+        team_name=team_name,
+        session_id=session_id,
+        requester_id=requester_id,
+        prepared=prepared,
+    )
+    return cast(
+        "AsyncGenerator[TeamRunEvent, None]",
+        stream_with_tool_execution_identity(
+            execution_identity,
+            stream_factory=lambda: context_bound_async_stream(
+                context_factory=lambda: helper_usage_context(scope_context),
+                stream_factory=lambda: stream_with_llm_request_log_context(
+                    run_prepared_team(
+                        built,
+                        prepared,
+                        config=config,
+                        runtime_paths=runtime_paths,
+                        scope_context=scope_context,
+                        team_name=team_name,
+                        user_id=requester_id,
+                    ),
+                    request_context=request_log_context,
+                ),
+            ),
+        ),
+    )
+
+
 async def _non_stream_team_completion(
     team_name: str,
     model_id: str,
@@ -1123,8 +1166,7 @@ async def _non_stream_team_completion(
     execution_identity: ToolExecutionIdentity,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
 ) -> JSONResponse:
-    """Handle non-streaming team completion."""
-    requester_id = execution_identity.requester_id
+    """Handle non-streaming team completion: the streamed team run, collected into its leader's answer."""
     turn = await _prepare_team_turn(
         team_name,
         prompt,
@@ -1139,33 +1181,19 @@ async def _non_stream_team_completion(
     )
     if isinstance(turn, JSONResponse):
         return turn
-    scope_context, built, prepared = turn
     records = TerminalRecord(TeamRunRecord)
+    events = _team_completion_events(
+        team_name,
+        turn,
+        session_id=session_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+    )
     try:
-        with (
-            bind_llm_request_log_context(
-                **_openai_team_request_log_context(
-                    team_name=team_name,
-                    session_id=session_id,
-                    requester_id=requester_id,
-                    prepared=prepared,
-                ),
-            ),
-            # Helper work during the run, such as a member's Claude Code session, belongs to this conversation.
-            helper_usage_context(scope_context),
-        ):
-            events = run_prepared_team(
-                built,
-                prepared,
-                config=config,
-                runtime_paths=runtime_paths,
-                scope_context=scope_context,
-                team_name=team_name,
-                user_id=requester_id,
-            )
-            async with closing_async_stream(events):
-                async for event in events:
-                    records.collect(event)
+        async with closing_async_stream(events):
+            async for event in events:
+                records.collect(event)
     except Exception:
         logger.exception("Team execution failed", team=team_name)
         return error_response(500, "Team execution failed", error_type="server_error")
@@ -1192,7 +1220,7 @@ async def _non_stream_team_completion(
     return OpenAIJSONResponse(content=result.model_dump())
 
 
-async def _stream_team_completion(  # noqa: C901, PLR0915
+async def _stream_team_completion(  # noqa: C901
     team_name: str,
     model_id: str,
     prompt: str,
@@ -1206,7 +1234,6 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
     stream: AsyncGenerator[TeamRunEvent, None] | None = None
-    requester_id = execution_identity.requester_id
 
     async def _cleanup() -> None:
         if stream is not None:
@@ -1226,35 +1253,14 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
     )
     if isinstance(turn, JSONResponse):
         return turn
-    scope_context, built, prepared = turn
     try:
-        request_log_context = _openai_team_request_log_context(
-            team_name=team_name,
+        stream = _team_completion_events(
+            team_name,
+            turn,
             session_id=session_id,
-            requester_id=requester_id,
-            prepared=prepared,
-        )
-        stream = cast(
-            "AsyncGenerator[TeamRunEvent, None]",
-            stream_with_tool_execution_identity(
-                execution_identity,
-                # Helper work during the run, such as a member's Claude Code session, belongs to this conversation.
-                stream_factory=lambda: context_bound_async_stream(
-                    context_factory=lambda: helper_usage_context(scope_context),
-                    stream_factory=lambda: stream_with_llm_request_log_context(
-                        run_prepared_team(
-                            built,
-                            prepared,
-                            config=config,
-                            runtime_paths=runtime_paths,
-                            scope_context=scope_context,
-                            team_name=team_name,
-                            user_id=requester_id,
-                        ),
-                        request_context=request_log_context,
-                    ),
-                ),
-            ),
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
         )
         first_event = await anext(stream, None)
     except Exception:

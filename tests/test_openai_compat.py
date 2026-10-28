@@ -3996,8 +3996,13 @@ class TestTeamCompletion:
         assert run.ctx.metadata is not None
         assert run.ctx.metadata[constants.AI_RUN_METADATA_KEY]["prepared_context"]["tokens"] == 456
 
-    def test_team_streaming_keeps_execution_identity_for_full_stream(self, team_app_client: TestClient) -> None:
-        """Team streaming must keep worker-routing identity active after preflight."""
+    @pytest.mark.parametrize("stream", [True, False])
+    def test_a_team_completion_keeps_execution_identity_for_its_whole_run(
+        self,
+        team_app_client: TestClient,
+        stream: bool,
+    ) -> None:
+        """A team completion keeps worker-routing identity active after preflight, streamed or not."""
         observed_session_ids: list[str | None] = []
 
         async def run(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
@@ -4019,7 +4024,7 @@ class TestTeamCompletion:
                 json={
                     "model": "team/super_team",
                     "messages": [{"role": "user", "content": "Build it"}],
-                    "stream": True,
+                    "stream": stream,
                 },
             )
 
