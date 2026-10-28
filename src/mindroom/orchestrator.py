@@ -1011,7 +1011,7 @@ class _MultiAgentOrchestrator:
             for entity_name in sorted(entity_names)
         }
 
-    async def _entities_changing(self, entity_names: set[str]) -> None:
+    def _entities_changing(self, entity_names: set[str]) -> None:
         """Withdraw capabilities bound to these entities before any of them stops."""
         self._external_trigger_runtime.unbind_for_entity_changes(entity_names)
         self._computer_runtime.unbind_for_entity_changes(entity_names)

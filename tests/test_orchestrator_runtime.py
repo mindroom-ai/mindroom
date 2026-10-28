@@ -5769,9 +5769,8 @@ async def test_dashboard_departure_uses_live_membership_owner(tmp_path: Path) ->
     assert gate.in_flight_response_count == 0
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(("entities", "fenced"), [({ROUTER_AGENT_NAME, "general"}, True), ({"general"}, False)])
-async def test_entity_changes_fence_room_grants_only_when_the_router_stops(
+def test_entity_changes_fence_room_grants_only_when_the_router_stops(
     tmp_path: Path,
     entities: set[str],
     *,
@@ -5781,6 +5780,6 @@ async def test_entity_changes_fence_room_grants_only_when_the_router_stops(
     orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
 
     with patch.object(orchestrator, "invalidate_agent_reply_memberships") as invalidate:
-        await orchestrator._entities_changing(entities)
+        orchestrator._entities_changing(entities)
 
     assert invalidate.call_args_list == ([call(reason="router_replacement")] if fenced else [])

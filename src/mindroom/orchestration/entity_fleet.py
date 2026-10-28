@@ -66,7 +66,7 @@ class EntityFleetHooks:
     # Entities that must not start yet because a required MCP server is unavailable.
     start_blocked: Callable[[set[str]], set[str]]
     # Withdraw capabilities bound to these entities before any of them stops.
-    entities_changing: Callable[[set[str]], Awaitable[None]]
+    entities_changing: Callable[[set[str]], None]
     # Publish one batch of start outcomes: support bindings, approval cleanup, dispatch recovery.
     entities_started: Callable[[EntityStartResults], Awaitable[None]]
     # Reconcile rooms after a background retry started an entity, which no caller waits on.
@@ -421,7 +421,7 @@ class EntityFleet:
         for slot in slots.values():
             await cancel_task(slot.retry_task)
             slot.retry_task = None
-        await self._hooks.entities_changing(set(slots))
+        self._hooks.entities_changing(set(slots))
 
 
 async def _start_once(entity_name: str, bot: _Bot) -> bool | None:

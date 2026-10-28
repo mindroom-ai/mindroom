@@ -3214,7 +3214,6 @@ depends_on = [
     "mindroom.api.startup_probes",
     "mindroom.approval.manager",
     "mindroom.approval.recovery",
-    "mindroom.matrix.room_reconciliation",
     "mindroom.config.reload_status",
     "mindroom.matrix_rtc.call_manager",
     "mindroom.knowledge.status",
@@ -3241,13 +3240,9 @@ depends_on = [
     "mindroom.knowledge.watch",
     "mindroom.matrix.client_session",
     "mindroom.matrix.provisioning_heartbeat",
-    "mindroom.matrix.rooms",
-    "mindroom.matrix.state",
     "mindroom.matrix.thread_diagnostics",
     "mindroom.matrix.users",
-    "mindroom.matrix_identifiers",
     "mindroom.mcp.manager",
-    "mindroom.mcp.registry",
     "mindroom.mcp.toolkit",
     "mindroom.memory",
     "mindroom.orchestration.config_lifecycle",
@@ -4028,7 +4023,6 @@ visibility = [
     "mindroom.orchestration.external_trigger_runtime",
     "mindroom.orchestration.rooms",
     "mindroom.orchestration.todo_poke_runtime",
-    "mindroom.orchestrator",
 ]
 
 [[modules]]

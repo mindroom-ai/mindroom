@@ -2227,7 +2227,7 @@ def _fleet_with_bots(bots: dict[str, AsyncMock] | dict[str, _FakeBot]) -> Entity
         EntityFleetHooks(
             create_bots=AsyncMock(return_value={}),
             start_blocked=lambda _entity_names: set(),
-            entities_changing=AsyncMock(),
+            entities_changing=MagicMock(),
             entities_started=AsyncMock(),
             setup_rooms_after_retry=AsyncMock(),
             reconcile_removed=AsyncMock(return_value=set()),
