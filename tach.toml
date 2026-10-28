@@ -2206,10 +2206,9 @@ path = "mindroom.tool_system.dedicated_threads"
 depends_on = []
 visibility = [
     "mindroom.api.sandbox_runner",
-    "mindroom.tool_system.authoring",
-    "mindroom.tool_jobs.execution",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.sandbox_proxy",
+    "mindroom.tool_system.tool_hooks",
 ]
 
 [[modules]]
@@ -5588,11 +5587,13 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_system.tool_hooks"
 depends_on = [
+    "mindroom.background_tasks",
     "mindroom.hooks",
     "mindroom.llm",
     "mindroom.tool_jobs.control",
     "mindroom.tool_jobs.execution_authority",
     "mindroom.tool_system.call_record",
+    "mindroom.tool_system.dedicated_threads",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_calls",
     "mindroom.tool_system.tool_environment",
@@ -5621,14 +5622,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.tool_system.authoring"
-depends_on = [
-    "mindroom.background_tasks",
-    "mindroom.tool_jobs.control",
-    "mindroom.tool_system.dedicated_threads",
-    "mindroom.tool_system.invocation",
-    "mindroom.tool_system.runtime_context",
-    "mindroom.tool_system.tool_hooks",
-]
+depends_on = ["mindroom.tool_system.invocation", "mindroom.tool_system.runtime_context", "mindroom.tool_system.tool_hooks"]
 
 [[modules]]
 path = "mindroom.tool_system.tool_schema"
@@ -7425,7 +7419,7 @@ expose = [
 from = ["mindroom.tool_system.events"]
 
 [[interfaces]]
-expose = ["build_tool_hook_middleware", "dispatch_external_tool_hooks", "run_async_entrypoint_blocking_call", "run_sync_tool_entrypoint", "SyncToolCompletionTracker", "track_sync_tool_completion"]
+expose = ["build_tool_hook_middleware", "dispatch_external_tool_hooks", "run_as_completion_owner", "run_async_entrypoint_blocking_call", "run_sync_tool_entrypoint", "SyncToolCompletionTracker", "track_sync_tool_completion"]
 from = ["mindroom.tool_system.tool_hooks"]
 
 [[modules]]
@@ -8731,7 +8725,6 @@ visibility = [
     "mindroom.api.sandbox_runner",
     "mindroom.tool_system.worker_proxy_client",
     "mindroom.tool_system.agent_tool_calls",
-    "mindroom.tool_system.authoring",
 ]
 
 [[modules]]
@@ -8784,7 +8777,6 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_routing",
-    "mindroom.tool_system.dedicated_threads",
     "mindroom.tool_system.agent_tool_calls",
 ]
 visibility = [

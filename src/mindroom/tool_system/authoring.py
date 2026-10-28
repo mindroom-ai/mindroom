@@ -9,7 +9,6 @@ The module imports no Agno code, so plugin code that authors tools through ``min
 
 from __future__ import annotations
 
-import asyncio
 import functools
 import inspect
 from dataclasses import dataclass
@@ -210,8 +209,10 @@ def toolkit_functions(toolkit: Toolkit | _AgnoToolkit) -> dict[str, Callable[...
 
     For an Agno toolkit, such as one ``get_tool_by_name`` returns, a function's async variant wins where it has one,
     as an agent runs it. A call through an async callable is a tool call of its own, so a tool may call one any number
-    of times, at once too: the synchronous body or worker request it starts belongs to it, not to the call of the tool
-    that makes it, and it returns only once that work has finished, even when cancelled.
+    of times, at once too. The synchronous work it starts belongs to it, not to the call of the tool that makes it, and
+    runs where that call's owner runs such work: on a job's own threads, or on the MCP gateway's pool. A cancelled call
+    returns once its synchronous body has finished; a worker request of an async function holds it only under an owner
+    with its own threads, and otherwise the cancelled call returns at once.
     """
     if isinstance(toolkit, Toolkit):
         functions = dict(toolkit.functions)
@@ -231,24 +232,11 @@ def _own_call[F: Callable[..., Any]](function: F) -> F:
 
     @functools.wraps(function)
     async def own_call(*args: object, **kwargs: object) -> object:
-        # Deferred: they load the tool-call policy and the job runtime, which plugin code importing this module must
+        # Deferred: it loads the tool-call policy and the job runtime, which plugin code importing this module must
         # not; any code running a tool has loaded them already.
-        from mindroom.background_tasks import wait_for_future_until_complete  # noqa: PLC0415
-        from mindroom.tool_jobs.control import job_owns_execution  # noqa: PLC0415
-        from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR  # noqa: PLC0415
-        from mindroom.tool_system.tool_hooks import (  # noqa: PLC0415
-            SyncToolCompletionTracker,
-            track_sync_tool_completion,
-        )
+        from mindroom.tool_system.tool_hooks import run_as_completion_owner  # noqa: PLC0415
 
-        # A job's call has no time limit, so what it offloads must not hold a shared pool's thread.
-        tracker = SyncToolCompletionTracker(executor=JOB_CALL_EXECUTOR if job_owns_execution() else None)
-        try:
-            with track_sync_tool_completion(tracker):
-                return await function(*args, **kwargs)
-        finally:
-            if (started := tracker.started_task()) is not None:
-                await wait_for_future_until_complete(asyncio.gather(started, return_exceptions=True))
+        return await run_as_completion_owner(lambda: function(*args, **kwargs))
 
     return cast("F", own_call)
 

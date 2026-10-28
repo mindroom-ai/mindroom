@@ -17,6 +17,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
@@ -33,9 +34,10 @@ from mindroom.llm.runs import denial_note_for
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 from mindroom.timing import elapsed_ms_since, emit_timing_event
-from mindroom.tool_jobs.control import job_checkpoint
+from mindroom.tool_jobs.control import job_checkpoint, job_owns_execution
 from mindroom.tool_jobs.execution_authority import check_current_execution_authority
 from mindroom.tool_system.call_record import tool_call_recorder
+from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolDispatchContext,
@@ -148,6 +150,25 @@ def track_sync_tool_completion(tracker: SyncToolCompletionTracker | None) -> Ite
         yield
     finally:
         _SYNC_TOOL_COMPLETION_TRACKER.reset(token)
+
+
+async def run_as_completion_owner[Result](run: Callable[[], Awaitable[Result]]) -> Result:
+    """Run one call as the owner of the synchronous leaf it starts, and wait for that leaf before returning.
+
+    The leaf runs on a job's own threads inside a job, else on the executor of the call that encloses this one, such
+    as the MCP gateway's pool, else on the event loop's default executor. A call that is cancelled returns only after
+    its leaf has finished, so whoever owns the call holds its resources until then.
+    """
+    enclosing = _SYNC_TOOL_COMPLETION_TRACKER.get()
+    enclosing_executor = None if enclosing is None else enclosing.executor
+    tracker = SyncToolCompletionTracker(executor=JOB_CALL_EXECUTOR if job_owns_execution() else enclosing_executor)
+    try:
+        with track_sync_tool_completion(tracker):
+            return await run()
+    finally:
+        started = tracker.started_task()
+        if started is not None:
+            await wait_for_future_until_complete(asyncio.gather(started, return_exceptions=True))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
