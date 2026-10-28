@@ -218,8 +218,11 @@ Custom events default to 1000 ms.
   A failure or timeout stops the remaining startup hooks and fails that bot's startup like any other startup error.
 - **Sessions and compaction**: `ctx.scope.key` identifies the history scope, and `ctx.session_id` identifies the persisted session within it.
   In compaction hooks, `ctx.transcript` holds what was said in the compacted conversation, oldest first, as `mindroom.plugin_api.TranscriptLine` values with `role`, `sender`, `display_name`, and `text`.
-  `role` is `"user"` for a message someone in the room sent and `"assistant"` for the agent's or team's own reply; `sender` is the Matrix ID of a user line's sender and `None` for a reply, and `display_name` is the name the message carried, or `None`.
-  `text` is what the sender wrote, without the context `message:enrich` hooks attached, and is not redacted; tool calls, tool results, automation turns, and the prompts and notices MindRoom wrote are left out.
+  `role` is `"user"` for a message the agent was sent and `"assistant"` for the agent's or team's own reply.
+  `sender` is `None` for a reply; for a user line it is the sender's Matrix ID, or a placeholder such as `"unknown"` when MindRoom recorded no sender, and `display_name` is the name the message carried, or `None`.
+  `text` is the message's text without the context `message:enrich` hooks attached, and is not redacted.
+  Tool calls, tool results, automation turns, queued-message notices, compaction summaries, and job and media follow-up prompts are left out.
+  A few notes MindRoom adds to a thread's context still appear as user lines: the note that earlier thread messages were omitted, the note that the agent's previous reply is still being delivered, and that reply's unfinished text under the agent's own Matrix ID.
   A compaction during a reply also covers what the reply wrote so far, but not the message it answers, which stays uncompacted.
   `ctx.messages` holds the raw `mindroom.llm.messages.Message` objects being compacted, unsanitized, including attachments, media, tool calls and arguments, provider metadata, reasoning, and metrics; it will be removed in a later release, so new hooks should read `ctx.transcript`.
 - **`schedule:fired`**: `ctx.thread_id` is the thread the message will be delivered to, which can differ from `ctx.workflow.thread_id` when the task starts a new thread or posts at room level.

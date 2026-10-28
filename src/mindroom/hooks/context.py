@@ -543,9 +543,9 @@ class AgentLifecycleContext(HookContext):
 class TranscriptLine:
     """One thing said in a compacted conversation: who said it and the words they wrote."""
 
-    # "user" for a message someone in the room sent, "assistant" for the agent's or team's own reply.
+    # "user" for a message the agent was sent, "assistant" for the agent's or team's own reply.
     role: Literal["user", "assistant"]
-    # The Matrix ID of a user line's sender; None for the agent's or team's own reply.
+    # A user line's sender: a Matrix ID, or a placeholder such as "unknown" when none was recorded; None for a reply.
     sender: str | None
     # The display name a user line's message carried, as the sender had it then; None when it carried none.
     display_name: str | None
