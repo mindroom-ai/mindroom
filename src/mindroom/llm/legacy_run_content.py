@@ -33,7 +33,7 @@ _TEAM_PAUSED_NOTICE_HEADER = "Team run paused. The following require input:\n"
 # "I have tools to execute, but I need confirmation." for an agent run and "Team run paused. The following require
 # input:" followed by one line per call waiting for confirmation for a team run, or another wording Agno's runtime
 # wrote for both. A paused run held it, and so did the run's later row when its resume wrote no text.
-# Last legacy release: v2026.10.640, whose ``paused_content`` (``agent_loop/run.py``) and ``team_paused_content``
+# Last legacy release: v2026.10.643, whose ``paused_content`` (``agent_loop/run.py``) and ``team_paused_content``
 # (``teams/runtime.py``) wrote it, as the Agno runtime did before them; replacement: the next release, whose paused
 # runs store no content of their own and whose resumes start the content afresh.
 # Handling: the content reads as none, so neither a resume nor a delegation's settlement hands the notice to a team
@@ -53,9 +53,11 @@ def stored_content(data: Mapping[str, Any]) -> str | None:
 
 
 # LEGACY_COMPAT: Failed runs that store their failure text as their content.
-# Legacy format: an ``ERROR`` run dict without an ``error`` key, whose ``content`` is the unredacted text of the
-# failure when its model wrote nothing, else the model's text.
-# Last legacy release: v2026.10.640, whose ``_store_interrupted`` (``agent_loop/run.py``) and ``interrupt_child``
+# Legacy format: an ``ERROR`` run dict without an ``error`` key. The loop's ``_store_interrupted`` stored the
+# unredacted text of the failure as ``content`` when the model wrote nothing, else the model's text and no reason;
+# delegation recovery's ``interrupt_child`` stored its recovery reason, a fixed sentence holding no credentials, as
+# ``content`` in place of whatever the child had written.
+# Last legacy release: v2026.10.643, whose ``_store_interrupted`` (``agent_loop/run.py``) and ``interrupt_child``
 # (``delegation/recovery.py``) wrote it, as the Agno runtime did before them; replacement: the next release, which
 # stores the redacted failure text under ``error`` and keeps ``content`` for the model's text.
 # Handling: such a run hands over its content, credentials redacted, as its failure, which is what those releases

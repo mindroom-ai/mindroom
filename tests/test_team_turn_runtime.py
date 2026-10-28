@@ -1276,8 +1276,7 @@ async def test_an_approved_resume_that_shows_no_text_renders_its_finished_runs(
     """A resume whose runs write no text shows what they hand over, else the no-reply note, as a new team turn does.
 
     A member the resumed leader hands a task and that fails before any text shows its error; a leader that writes only
-    blank text leaves the no-reply note. The approved checker says nothing, so the paused notice it carried over shows
-    nowhere.
+    blank text leaves the no-reply note. The approved checker says nothing after its call.
     """
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel(leader)
