@@ -1,4 +1,4 @@
-"""A worker-routed call uses the config its toolkit was built from, wherever the call runs."""
+"""Dedicated workers launch from the applied config, while each call sends the snapshot and egress of its build config."""
 
 from __future__ import annotations
 

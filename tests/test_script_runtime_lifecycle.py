@@ -2025,7 +2025,10 @@ async def test_authorization_config_change_interrupts_unconfirmed_owner_before_c
     *,
     authorization_result: bool | None,
 ) -> None:
-    """Config publication requires confirmed continued authority for every active run."""
+    """Config publication requires confirmed continued authority for every active run.
+
+    A revoked owner's run whose process is not stopped yet does not hold the reload back: the broker refuses its calls.
+    """
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
     run = _stored_run(store, runtime_paths)
@@ -2058,7 +2061,7 @@ async def test_authorization_config_change_interrupts_unconfirmed_owner_before_c
         request_revocation=MagicMock(side_effect=request_revocation),
         revoke=AsyncMock(return_value=run),
         reconcile_revoked_process=AsyncMock(return_value=run),
-        reconcile_durable=_interrupting_reconcile(store),
+        reconcile_durable=AsyncMock(return_value=run),
     )
     resolver = SimpleNamespace(is_authorized=MagicMock(return_value=authorization_result))
     runtime = ScriptRuntimeLifecycle(
@@ -2235,7 +2238,7 @@ async def test_a_reload_that_cannot_stop_a_script_whose_authority_it_changed_fai
     monkeypatch.setattr(worker_client, "status", unreachable)
     monkeypatch.setattr(lease.manager, "retire_worker", cannot_retire)
 
-    with pytest.raises(_ScriptRuntimeLifecycleError, match="did not stop every background script"):
+    with pytest.raises(_ScriptRuntimeLifecycleError, match="did not stop every background script whose worker access"):
         await runtime.apply_update_plan(_plan(old_config, new_config))
 
     assert store.get_run(run.run_id).state is ScriptRunState.RUNNING
@@ -2291,7 +2294,7 @@ async def test_reload_fails_while_a_revoked_run_stays_unfinalized(tmp_path: Path
         worker_lease_provider=lambda _locator: None,
     )
 
-    with pytest.raises(_ScriptRuntimeLifecycleError, match="did not stop every background script"):
+    with pytest.raises(_ScriptRuntimeLifecycleError, match="did not stop every background script whose worker access"):
         await runtime.apply_update_plan(_plan(config, Config(agents={}, defaults={"tools": []})))
 
     assert store.get_run(run.run_id).cancel_requested_at is not None

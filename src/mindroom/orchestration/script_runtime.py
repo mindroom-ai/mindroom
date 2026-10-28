@@ -712,11 +712,15 @@ class ScriptRuntimeLifecycle:
         if plugins_changed and unfinished:
             msg = "Plugin reload did not interrupt every active background script."
             raise _ScriptRuntimeLifecycleError(msg)
-        # A worker run the reload could not stop keeps what the reload revokes, such as its knowledge mounts, so the
-        # reload fails instead of publishing over it.
-        affected_worker_run_ids = {run.run_id for run in affected if not run.local_unsafe}
-        if any(run.run_id in affected_worker_run_ids for run in unfinished):
-            msg = "Config reload did not stop every background script whose authority it changed."
+        # A worker run the reload could not stop keeps what its worker can reach and the reload takes away, such as
+        # knowledge mounts, so the reload fails instead of publishing over it. A revoked owner or script tool is
+        # enforced through the broker, which already refuses the run's calls.
+        reach_changed_agents = removed_agents | isolation_changes | process_authority_changes
+        reach_changed_run_ids = {
+            run.run_id for run in affected if not run.local_unsafe and run.agent_name in reach_changed_agents
+        }
+        if any(run.run_id in reach_changed_run_ids for run in unfinished):
+            msg = "Config reload did not stop every background script whose worker access it changed."
             raise _ScriptRuntimeLifecycleError(msg)
 
     def _run_matches_recovery_contract(self, run: ScriptRunRecord, *, config: Config) -> bool:

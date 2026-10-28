@@ -177,9 +177,8 @@ def serialized_dedicated_worker_validation_snapshot(
     runtime_config: Config,
 ) -> dict[str, dict[str, object]]:
     """Build the authoritative worker validation snapshot for one applied config in the primary runtime."""
-    config = runtime_config
     with _WORKER_VALIDATION_SNAPSHOT_CACHE_LOCK:
-        cache_key = _worker_validation_snapshot_cache_key(runtime_paths, config)
+        cache_key = _worker_validation_snapshot_cache_key(runtime_paths, runtime_config)
         cached_snapshot = _WORKER_VALIDATION_SNAPSHOT_CACHE.get(cache_key)
         if cached_snapshot is None:
             from mindroom.tool_system.catalog import (  # noqa: PLC0415
@@ -189,7 +188,7 @@ def serialized_dedicated_worker_validation_snapshot(
 
             snapshot = resolved_tool_validation_snapshot_for_runtime(
                 runtime_paths,
-                config,
+                runtime_config,
                 tolerate_plugin_load_errors=True,
             )
             cached_snapshot = serialize_tool_validation_snapshot(snapshot)

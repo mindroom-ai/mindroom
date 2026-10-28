@@ -22,7 +22,7 @@ ScriptResourceProfileName = Literal["small", "standard", "large"]
 class WorkerLaunchConfig:
     """What a dedicated worker launches with, derived once from the applied config.
 
-    Only ``digest`` takes part in comparison, so a spec that carries it stays cheap to compare.
+    Only ``digest`` takes part in comparison, so two launches compare cheaply.
     The mappings are shared: a consumer that rewrites them copies them first.
     """
 
