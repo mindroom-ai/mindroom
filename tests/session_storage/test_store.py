@@ -22,6 +22,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage import store as store_module
+from mindroom.session_storage.schema import LOG_VERSION
 from mindroom.session_storage.store import (
     ConversationStore,
     ensure_session_row,
@@ -262,7 +263,7 @@ def test_a_first_write_takes_the_next_seq_whatever_its_status(store: Conversatio
     _save(store, _member("m3", "t4"), _team_run("t4"), session=_team())
 
     assert _seqs(store) == {"p0": 1, "r1": 2, "c2": 3, "m3": 4, "t4": 5}
-    assert _query(store, "SELECT version, next_seq FROM code_sessions_log_meta") == [(2, 6)]
+    assert _query(store, "SELECT version, next_seq FROM code_sessions_log_meta") == [(LOG_VERSION, 6)]
 
 
 def test_a_deleted_runs_number_is_never_handed_out_again(store: ConversationStore) -> None:

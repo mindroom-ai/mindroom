@@ -34,6 +34,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.codec import decode_json, run_kind
+from mindroom.session_storage.legacy_agent_session_owners import adopt_agent_session_owners, upgrade_storage_v2
 from mindroom.session_storage.legacy_agno2_runs import stored_timestamp
 from mindroom.session_storage.legacy_agno3_backup import write_conversion_backup
 from mindroom.session_storage.legacy_agno3_schema import (
@@ -84,14 +85,17 @@ def convert_conversation_database(
     path: Path,
     names: TableNames,
     descriptors: ExitStack,
+    *,
+    agent_name: str | None,
 ) -> None:
     """Convert the database ``connection`` holds open at ``path``, in an older layout, to storage v2.
 
     In one ``BEGIN IMMEDIATE``: the backup, the Agno-era steps (usage ledger seeding, summary-row adoption with Agno 2
     blob runs and positions), the conversion, the drop of the Agno tables and dead columns, and the v2 tables and meta
-    row. A file in write-ahead-log mode returns to the rollback journal first, which checkpoints its log. The file is
-    then compacted when that pays off (``_compact``), and its conversion is logged. ``descriptors`` takes the backup's
-    descriptor of the file, which the caller closes after ``connection``.
+    row, which records the current version, so in agent ``agent_name``'s database its session rows then name it
+    (``adopt_agent_session_owners``). A file in write-ahead-log mode returns to the rollback journal first, which
+    checkpoints its log. The file is then compacted when that pays off (``_compact``), and its conversion is logged.
+    ``descriptors`` takes the backup's descriptor of the file, which the caller closes after ``connection``.
     """
     _leave_wal_mode(connection, path)
     started = time.monotonic()
@@ -103,6 +107,8 @@ def convert_conversation_database(
         # SQLite keeps whatever bytes worker code stores as text; the conversion's own connection reads them.
         connection.text_factory = _TEXT_WITH_REPLACEMENT_CHARACTERS
         _convert(connection, AgnoTableNames(names.storage_name), path, descriptors)
+        if agent_name is not None:
+            adopt_agent_session_owners(connection, names, agent_name)
         runs, messages = connection.execute(
             f"SELECT (SELECT count(*) FROM {quote_identifier(names.log_runs)}), "  # noqa: S608
             f"(SELECT count(*) FROM {quote_identifier(names.log_messages)})",
@@ -150,33 +156,38 @@ async def migrate_conversation_storage(runtime_paths: RuntimePaths) -> None:
 
 def _migrate_databases(runtime_paths: RuntimePaths) -> None:
     root = resolve_session_state_root(runtime_paths.storage_root, runtime_paths)
-    directories = [*_directories(root / "agents"), *_directories(root / "teams")]
+    # Each agent's directory, shared or in a private instance, is named after its agent.
+    agents = _directories(root / "agents")
     for scope in _directories(root / "private_instances"):
-        directories.extend(_directories(scope))
+        agents.extend(_directories(scope))
+    others = _directories(root / "teams")
     # The system usage store, which records internal provider calls, is a conversation database of its own.
     system = root / SYSTEM_USAGE_STORAGE_NAME
     if not system.is_symlink() and system.is_dir():
-        directories.append(system)
-    for directory in directories:
+        others.append(system)
+    stores = [(directory, directory.name) for directory in agents] + [(directory, None) for directory in others]
+    for directory, agent_name in stores:
         names = TableNames(directory.name)
         path = names.database_path(directory)
         try:
             # A store that never wrote has no database to convert; its first open creates one.
             if path.is_symlink() or path.exists():
-                _convert_at_startup(path, names)
+                _convert_at_startup(path, names, agent_name)
         except Exception as error:
             # Worker code can write session databases, so one that is linked, unreadable, locked, or malformed must not
             # stop startup. Its owner converts it with the full lock timeout when it next opens it, or fails alone.
             logger.warning("conversation_conversion_skipped_store", path=str(path), error=str(error))
 
 
-def _convert_at_startup(path: Path, names: TableNames) -> None:
+def _convert_at_startup(path: Path, names: TableNames, agent_name: str | None) -> None:
     with (
         ExitStack() as descriptors,
         closing(connect_by_name(path, timeout=_STARTUP_LOCK_TIMEOUT_SECONDS)) as connection,
     ):
-        if table_names(connection) and not is_current_layout(connection, names):
-            convert_conversation_database(connection, path, names, descriptors)
+        if is_current_layout(connection, names):
+            upgrade_storage_v2(connection, names, agent_name)
+        elif table_names(connection):
+            convert_conversation_database(connection, path, names, descriptors, agent_name=agent_name)
 
 
 def _directories(root: Path) -> list[Path]:

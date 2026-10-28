@@ -1566,7 +1566,7 @@ def test_a_write_ahead_log_another_connection_holds_stops_the_conversion(tmp_pat
             closing(connect_by_name(database, timeout=0)) as connection,
             pytest.raises(RuntimeError, match=re.escape(str(database))),
         ):
-            convert_conversation_database(connection, database, names, descriptors)
+            convert_conversation_database(connection, database, names, descriptors, agent_name=None)
     finally:
         holder.close()
     assert not _is_converted(database)

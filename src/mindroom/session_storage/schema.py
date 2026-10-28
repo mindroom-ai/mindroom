@@ -32,8 +32,9 @@ _SESSION_COLUMN_TYPES = {
 }
 SESSION_COLUMNS = tuple(_SESSION_COLUMN_TYPES)
 _SESSION_COLUMN_SQL = ", ".join(f"{column} {column_type}" for column, column_type in _SESSION_COLUMN_TYPES.items())
-# The layout version ``<sessions>_log_meta`` records.
-LOG_VERSION = 2
+# The layout version ``<sessions>_log_meta`` records: 2 for storage v2, and 3 once an agent's session rows name that
+# agent (``legacy_agent_session_owners``).
+LOG_VERSION = 3
 # The statuses of a run that does not replay as model history, as stored, and as an SQL list.
 NON_VISIBLE_RUN_STATUS_VALUES = tuple(sorted(status.value for status in NON_VISIBLE_RUN_STATUSES))
 NON_VISIBLE_RUN_STATUS_SQL = ", ".join(f"'{status}'" for status in NON_VISIBLE_RUN_STATUS_VALUES)
@@ -110,8 +111,8 @@ def log_schema_sql(names: TableNames) -> tuple[str, ...]:
     """Return the idempotent DDL of a conversation database, new or converted, with its meta row.
 
     It creates the nine-column sessions table, the six log tables and their indexes, and the usage ledger, each
-    only when missing, and the meta row (version 2, ``next_seq`` 1) only when the table has none, so it leaves a
-    converted database's counter and existing tables alone.
+    only when missing, and the meta row (version ``LOG_VERSION``, ``next_seq`` 1) only when the table has none, so it
+    leaves a converted database's counter and existing tables alone.
     """
     sessions = quote_identifier(names.sessions)
     meta, runs = quote_identifier(names.log_meta), quote_identifier(names.log_runs)
