@@ -2209,6 +2209,23 @@ def test_a_service_with_its_own_account_never_takes_a_key(oauth_egress_portal: d
     assert _stored_key(portal, "mine") is None
 
 
+def test_ticking_its_own_account_deletes_a_key_stored_before(oauth_egress_portal: dict[str, Any]) -> None:
+    """A key saved while the box was off is never used once it is on, so the save deletes it and unticking finds none."""
+    portal = oauth_egress_portal
+    assert _put_service(portal, "alice", "personal", "mine", {"preset": "google_drive"}).status_code == 204
+    assert _put_key(portal, "alice", "personal", "mine", "stored-before").status_code == 204
+    assert _stored_key(portal, "mine") == "stored-before"
+
+    _put_own_account_service(portal)
+    ticked = _stored_key(portal, "mine")
+    unticked = _put_service(portal, "alice", "personal", "mine", {"preset": "google_drive"})
+
+    assert ticked is None
+    assert unticked.status_code == 204
+    assert _stored_key(portal, "mine") is None
+    assert _egress_row(portal, "alice", "personal", "mine")["key_configured"] is False
+
+
 @pytest.mark.parametrize("body", [{"preset": "github"}, _MY_GITHUB], ids=["preset", "custom"])
 def test_a_per_user_account_cannot_be_a_services_own_account(
     oauth_egress_portal: dict[str, Any],

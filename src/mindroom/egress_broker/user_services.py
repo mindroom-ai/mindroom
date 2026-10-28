@@ -186,8 +186,9 @@ def save_user_service(
     """Add or replace one of the scope's services, stored as authored so a preset stays a preset.
 
     A new name starts without a key: any key stored under it in the scope, for example one left by a removed config
-    service, is deleted first. Replacing an existing service keeps its key, unless it becomes `restrict_only`, which
-    never uses one. `oauth_providers` holds the ids of the registry's providers (`oauth.registry.load_oauth_providers`).
+    service, is deleted first. Replacing an existing service keeps its key, unless it becomes `restrict_only` or
+    `oauth_separate_account`, which never use one, so unticking the box later brings back no key. `oauth_providers`
+    holds the ids of the registry's providers (`oauth.registry.load_oauth_providers`).
 
     Raises UserServiceConflictError when `config_services` has the name, and ValueError for an invalid name, a
     service that sets `oauth_on_shared_workers`, an OAuth provider (a preset's included) that the registry does not
@@ -215,7 +216,7 @@ def save_user_service(
             msg = f"a scope's own services can take at most {MAX_DOCUMENT_BYTES // 1024} KiB together"
             raise ValueError(msg)
         try:
-            if new or service.restrict_only:
+            if new or service.restrict_only or service.oauth_separate_account:
                 delete_secret(manager, target, name)
             save_egress_document(manager, target, USER_SERVICES_CREDENTIAL_SERVICE, {"services": stored})
         finally:
