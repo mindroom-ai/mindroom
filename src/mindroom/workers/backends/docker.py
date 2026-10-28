@@ -588,7 +588,7 @@ class DockerWorkerBackend:
         now: float | None = None,
         progress_sink: ProgressSink | None = None,
     ) -> WorkerHandle:
-        """Resolve or start the worker container for the given worker key, from the launch applied once its lock is held."""
+        """Resolve or start the worker container for one worker key, from the launch applied once its lock is held."""
         timestamp = time.time() if now is None else now
         start_time = time.monotonic()
 

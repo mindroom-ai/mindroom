@@ -768,8 +768,9 @@ def build_tool_hook_middleware(
     declines it, a revoked grant, or a Stop committed while the call was being recorded keeps the tool from running; a
     declined call returns a failed ``ToolOutcome`` with the decline's text, ``refused_by="plugin_hook"``. A background
     script's call passes its ``origin`` and the ``approval_gate`` that asks its requester; a call its requester denied
-    returns a failed ``ToolOutcome`` with the denial's reason, ``refused_by="approval"``, without running. A call that may run collects its environment hooks once, and the
-    shell commands it runs, locally or in a worker, get what they set.
+    returns a failed ``ToolOutcome`` with the denial's reason, ``refused_by="approval"``, without running. A call that
+    may run collects its environment hooks once, and the shell commands it runs, locally or in a worker, get what they
+    set.
     """
     has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
     has_after_hooks = hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL)

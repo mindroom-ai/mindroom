@@ -360,13 +360,10 @@ async def invoke_tool(
             session_id=DETACHED_SESSION_ID,
             user_id=context.requester_id,
         )
-        try:
-            outcome = await run_with_tool_execution_identity(
-                context.execution_identity,
-                operation=lambda: run_tool_call(target, arguments, call_context, middleware=(policy,)),
-            )
-        except Exception as exc:
-            raise GatewayError(code=GatewayErrorCode.TOOL_UNAVAILABLE) from exc
+        outcome = await run_with_tool_execution_identity(
+            context.execution_identity,
+            operation=lambda: run_tool_call(target, arguments, call_context, middleware=(policy,)),
+        )
         payload = _invocation_response(outcome)
         if _json_size(payload) > 65536:
             raise GatewayError(code=GatewayErrorCode.RESULT_TOO_LARGE)

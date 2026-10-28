@@ -156,7 +156,7 @@ def _proxy_http_error_message(response: _WorkerProxyResponse) -> str:
 
 
 class _WorkerHttpError(RuntimeError):
-    """A worker answered with an HTTP error, whose message is the worker's own account when it gave one."""
+    """A worker refused a request, by HTTP error or typed failure; the message is the worker's own when it gave one."""
 
     def __init__(self, response: _WorkerProxyResponse) -> None:
         super().__init__(_proxy_http_error_message(response))
@@ -569,6 +569,9 @@ def _create_credential_lease(
     )
     response = client.post(lease_url, json=lease_request.model_dump(mode="json"), headers=headers)
     _raise_for_worker_status(response)
+    if _typed_failure(response) is not None:
+        # The worker refused the lease in its own words, which decide whether the worker is at fault.
+        raise _WorkerHttpError(response)
     try:
         return LeaseResponse.model_validate(response.json()).lease_id
     except (ValueError, ValidationError) as exc:

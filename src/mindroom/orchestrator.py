@@ -1340,7 +1340,7 @@ class _MultiAgentOrchestrator:
                 )
                 return result
             finally:
-                await self._script_runtime.complete_worker_replacement()
+                await self._script_runtime.finish_reload()
 
     async def _apply_plugin_changes_for_config_update(
         self,
@@ -2165,7 +2165,7 @@ class _MultiAgentOrchestrator:
                 self.plugin_watch.sync_roots(new_config)
                 self._activate_hook_registry(self.hook_registry)
                 clear_worker_validation_snapshot_cache()
-            await self._script_runtime.complete_worker_replacement()
+            await self._script_runtime.finish_reload()
             changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
             logger.info(
                 "updating_config_authorization",
@@ -2222,7 +2222,7 @@ class _MultiAgentOrchestrator:
             )
             return True
         finally:
-            await self._script_runtime.complete_worker_replacement()
+            await self._script_runtime.finish_reload()
             if replay_startup_maintenance and self.running and self.config is not None:
                 self._startup_maintenance.restart_after_runtime_replacement(
                     config=self.config,
@@ -3245,9 +3245,10 @@ async def _run_runtime(  # noqa: PLR0915
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=api)
         config_reload = orchestrator.config_reload
         # Bound before the API and the bots start, and kept until the worker manager has shut down; a reload that
-        # is still applying, or failed partway, never reaches a worker launch.
+        # is still applying, or failed partway, never reaches a worker launch. Until startup records its config as
+        # applied, workers launch from the config it loaded, which no older config precedes.
         worker_launch_binding.enter_context(
-            bind_worker_launch_config_source(lambda: config_reload.fully_applied_config),
+            bind_worker_launch_config_source(lambda: config_reload.fully_applied_config or orchestrator.config),
         )
         set_runtime_starting()
         auxiliary_tasks.extend(

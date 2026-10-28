@@ -106,6 +106,7 @@ from mindroom.workers.protocol import (
     LeaseRequest,
     SaveAttachmentRequest,
     SaveAttachmentResponse,
+    WorkerFailure,
     WorkerRoute,
 )
 from tests.api.sandbox_runner_support import execute_call
@@ -1706,6 +1707,27 @@ def test_static_runner_proxy_leases_the_tool_own_saved_settings(
     assert [url.rsplit("/", 1)[-1] for url, _payload in captured_calls] == ["leases", "execute"]
     assert captured_calls[0][1]["credential_overrides"] == expected_overrides
     assert captured_calls[1][1]["lease_id"] == "lease-123"
+
+
+def test_a_refused_lease_reports_the_runner_own_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A runner that refuses a lease in its typed answer fails the call with its reason, and no call runs."""
+    captured_calls: list[tuple[str, dict[str, Any]]] = []
+    fake_credentials = FakeCredentialsManager({"calculator": {"api_key": "saved-key", "_source": "ui"}})
+    monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
+    runtime_paths = _configure_proxy_runtime(monkeypatch, proxy_url="http://sandbox-runner:8765", execution_mode="all")
+    refusal = WorkerFailure(error="The primary speaks worker protocol 6, this worker 7.", failure_kind="worker")
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(captured_calls=captured_calls, responder=lambda _url, _json: refusal.model_dump()),
+    )
+
+    tool = get_tool_by_name("calculator", runtime_paths, credentials_manager=fake_credentials, worker_target=None)
+    entrypoint = tool.functions["add"].entrypoint
+    assert entrypoint is not None
+
+    with pytest.raises(RuntimeError, match=re.escape(refusal.error)):
+        entrypoint(1, 2)
+    assert [url.rsplit("/", 1)[-1] for url, _payload in captured_calls] == ["leases"]
 
 
 @pytest.mark.parametrize(

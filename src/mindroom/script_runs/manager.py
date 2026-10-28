@@ -60,7 +60,7 @@ from mindroom.tool_system.worker_routing import (
     build_agent_toolkit_worker_target,
     serialize_tool_execution_identity,
 )
-from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backend import WorkerBackendError, required_launch
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import ScriptResourceProfileName, WorkerHandle, WorkerLaunchConfig, WorkerSpec
 from mindroom.workers.runtime import current_worker_launch_config
@@ -441,7 +441,7 @@ class ScriptRunManager:
                 recovery_signature=script_recovery_signature(
                     backend=self.worker_backend,
                     # The config the worker launches with, so recovery binds to the authority it actually got.
-                    config=_require_launch(worker_spec).config,
+                    config=required_launch(worker_spec).config,
                     agent_name=context.agent_name,
                     gateway_url=self.gateway_url,
                     resource_profile=profile,
@@ -1467,13 +1467,6 @@ def _script_worker_launch(runtime_paths: RuntimePaths) -> WorkerLaunchConfig:
         return current_worker_launch_config(runtime_paths)
     except WorkerBackendError as exc:
         raise ScriptRunManagerError(str(exc)) from exc
-
-
-def _require_launch(worker_spec: WorkerSpec) -> WorkerLaunchConfig:
-    if worker_spec.launch is None:
-        msg = "A background script worker needs the launch config of the applied config."
-        raise ScriptRunManagerError(msg)
-    return worker_spec.launch
 
 
 def _require_script_launch_backend(

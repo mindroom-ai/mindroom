@@ -191,6 +191,9 @@ Smaller changes that need operator action:
 - **MCP gateway and shared agents**: the [MCP gateway](mcp-gateway.md#agent-eligibility) no longer offers agents whose worker scope is `shared` or unset, so their users lose gateway access to them and saved selections of them stop working.
   To restore an agent, set `mcp_gateway_shared_credentials: true` on it or give it `worker_scope: user` or `user_agent`.
 - **Retired prompt overrides**: a [`prompts`](../configuration/index.md#built-in-prompt-overrides) entry for `DEFAULT_UNSEEN_MESSAGES_HEADER`, `INTERRUPTED_PARTIAL_REPLY_HEADER`, `MIXED_PARTIAL_REPLY_HEADER`, or `PREVIOUS_CONVERSATION_THREAD_HEADER` fails validation as an unknown prompt, so delete it from `config.yaml`; no prompt rendered these headers, so removing them changes no text a model reads.
+- **Workers and sandbox runners**: the upgrade replaces every Docker and Kubernetes worker once on its next use, which ends background shell commands running in it.
+  Kubernetes background scripts still running during the upgrade are interrupted when MindRoom starts again instead of resuming; start them again.
+  Upgrade a separately deployed sandbox runner together with MindRoom: a runner from an earlier release ignores the request fields it does not know instead of refusing the call.
 
 ### Compaction History
 

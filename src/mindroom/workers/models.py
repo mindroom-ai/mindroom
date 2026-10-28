@@ -39,7 +39,7 @@ class WorkerSpec:
 
     A dedicated backend provisions from the applied launch it reads inside the worker's lock; ``launch`` pins one,
     so the request fails instead when the applied launch has moved on. The shared runner ignores it.
-    ``mirror_grantable_credentials`` mirrors the launch's grantable credentials into the worker; script runs mirror none.
+    ``mirror_grantable_credentials`` mirrors the launch's grantable credentials into the worker; scripts mirror none.
     """
 
     worker_key: str

@@ -1842,21 +1842,26 @@ class TestAgentBot(AgentBotTestBase):
         self,
         tmp_path: Path,
     ) -> None:
-        """Dedicated workers launch only from the lifecycle's fully applied config, from start through shutdown."""
+        """Dedicated workers launch from the fully applied config, or startup's loaded one before it, through shutdown."""
         reset_runtime_state()
         runtime_paths = self._runtime_paths(tmp_path)
+        loaded = Config()
         applied = Config()
         mock_orchestrator = _mock_runtime_orchestrator()
         mock_orchestrator.stop = AsyncMock()
-        mock_orchestrator.config = Config()
+        mock_orchestrator.config = None
         mock_orchestrator.config_reload = SimpleNamespace(fully_applied_config=None)
         seen: dict[str, object] = {}
 
         async def _start() -> None:
-            # A reload that has not finished applying publishes no launch.
+            # Before startup loads a config, there is nothing to launch from.
             with pytest.raises(WorkerBackendError, match="applied config"):
                 workers_runtime_module.current_worker_launch_config(runtime_paths)
+            mock_orchestrator.config = loaded
+            seen["loaded"] = workers_runtime_module.current_worker_launch_config(runtime_paths).config
+            # Once a config is fully applied, a later published config that has not finished applying is not used.
             mock_orchestrator.config_reload.fully_applied_config = applied
+            mock_orchestrator.config = Config()
             seen["start"] = workers_runtime_module.current_worker_launch_config(runtime_paths).config
             msg = "stop after the launch check"
             raise RuntimeError(msg)
@@ -1875,7 +1880,9 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
 
-        assert seen == {"start": applied, "shutdown": applied}
+        assert seen["loaded"] is loaded
+        assert seen["start"] is applied
+        assert seen["shutdown"] is applied
         with pytest.raises(WorkerBackendError, match="applied config"):
             workers_runtime_module.current_worker_launch_config(runtime_paths)
 
@@ -4763,7 +4770,6 @@ class TestMultiAgentOrchestrator:
             await orchestrator._apply_config_update_plan(current_config, plan, ())
 
         assert orchestrator.config is current_config
-        assert runtime._worker_replacement_phase == "idle"
         assert runtime.manager.worker_backend is old_backend
         assert runtime._current_worker_lease is lease
 
@@ -4792,7 +4798,7 @@ class TestMultiAgentOrchestrator:
         runtime = orchestrator.script_runtime
         completed_configs: list[Config] = []
 
-        async def complete_worker_replacement(_runtime: object) -> None:
+        async def finish_reload(_runtime: object) -> None:
             completed_configs.append(orchestrator.config)
 
         with (
@@ -4804,8 +4810,8 @@ class TestMultiAgentOrchestrator:
             ),
             patch.object(
                 type(runtime),
-                "complete_worker_replacement",
-                new=complete_worker_replacement,
+                "finish_reload",
+                new=finish_reload,
                 create=True,
             ),
             pytest.raises(RuntimeError, match="maintenance cancellation failed"),
@@ -4839,7 +4845,7 @@ class TestMultiAgentOrchestrator:
         runtime = orchestrator.script_runtime
         completed_configs: list[Config] = []
 
-        async def complete_worker_replacement(_runtime: object) -> None:
+        async def finish_reload(_runtime: object) -> None:
             completed_configs.append(orchestrator.config)
 
         with (
@@ -4849,8 +4855,8 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
             patch.object(
                 type(runtime),
-                "complete_worker_replacement",
-                new=complete_worker_replacement,
+                "finish_reload",
+                new=finish_reload,
                 create=True,
             ),
             patch.object(
@@ -5228,7 +5234,7 @@ class TestMultiAgentOrchestrator:
         )
         generation_refreshes: list[Config] = []
 
-        async def complete_worker_replacement(_runtime: object) -> None:
+        async def finish_reload(_runtime: object) -> None:
             assert orchestrator.config is new_config
             generation_refreshes.append(new_config)
 
@@ -5243,8 +5249,8 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()) as mock_sync_support,
             patch.object(
                 type(orchestrator.script_runtime),
-                "complete_worker_replacement",
-                new=complete_worker_replacement,
+                "finish_reload",
+                new=finish_reload,
                 create=True,
             ),
         ):

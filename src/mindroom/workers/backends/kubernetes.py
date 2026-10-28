@@ -34,7 +34,6 @@ from mindroom.workers.backends._dedicated_worker_common import (
     resolve_state_scope_worker_key,
 )
 from mindroom.workers.backends._lifecycle import (
-    WorkerLifecycleState,
     initial_worker_lifecycle_state,
     mark_worker_failed,
     mark_worker_idle,
@@ -1058,27 +1057,13 @@ class KubernetesWorkerBackend:
 
     def _patch_cached_worker_usage(self, entry: _ReadyWorkerCacheEntry, *, now: float) -> WorkerHandle | None:
         # A cached worker was ready when cached, so its touch writes it as ready without reading its Deployment.
-        lifecycle = touch_worker_lifecycle(
-            WorkerLifecycleState(
-                created_at=entry.handle.created_at,
-                last_used_at=entry.handle.last_used_at,
-                status=entry.handle.status,
-                failure_reason=entry.handle.failure_reason,
-            ),
-            now=now,
-        )
-        handle = replace(
-            entry.handle,
-            last_used_at=lifecycle.last_used_at,
-            status=lifecycle.status,
-            failure_reason=lifecycle.failure_reason,
-        )
+        handle = replace(entry.handle, last_used_at=now, status="ready", failure_reason=None)
         exists = self._resources.patch_deployment_annotations(
             handle.worker_id,
             annotations={
-                resources.ANNOTATION_LAST_USED_AT: str(lifecycle.last_used_at),
-                resources.ANNOTATION_WORKER_STATUS: lifecycle.status,
-                resources.ANNOTATION_FAILURE_REASON: lifecycle.failure_reason or "",
+                resources.ANNOTATION_LAST_USED_AT: str(now),
+                resources.ANNOTATION_WORKER_STATUS: "ready",
+                resources.ANNOTATION_FAILURE_REASON: "",
             },
         )
         if not exists:

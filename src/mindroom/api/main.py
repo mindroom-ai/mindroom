@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from contextlib import asynccontextmanager, suppress
+from contextlib import ExitStack, asynccontextmanager, suppress
 from dataclasses import asdict, dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, Literal
@@ -562,43 +562,52 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:  # noqa: PLR0915
     knowledge_refresh_scheduler = app_state.orchestrator_knowledge_refresh_scheduler
     # `mindroom run` binds its scheduler before it serves this app, so without one the API runs on its own.
     standalone = knowledge_refresh_scheduler is None
-    if standalone:
-        api_owned_knowledge_refresh_scheduler = KnowledgeRefreshScheduler.from_runtime(runtime_paths)
-        knowledge_refresh_scheduler = api_owned_knowledge_refresh_scheduler
-        standalone_knowledge_source_watcher = KnowledgeSourceWatcher(knowledge_refresh_scheduler)
-        app_state.knowledge_source_watcher = standalone_knowledge_source_watcher
-    app_state.knowledge_refresh_scheduler = knowledge_refresh_scheduler
-    await _sync_standalone_knowledge_watchers(_app)
-    logger.info(
-        "Published knowledge index refresh is scheduled by Git polling, filesystem watch, on access, or explicit API actions",
-    )
+    worker_launch_binding = ExitStack()
+    try:
+        if standalone:
+            # An API running on its own owns the applied config dedicated workers launch from, until its worker manager
+            # has shut down; an edit that fails to load keeps the last config that loaded.
+            worker_launch_binding.enter_context(
+                bind_worker_launch_config_source(lambda: _app_context(_app).runtime_config),
+            )
+            api_owned_knowledge_refresh_scheduler = KnowledgeRefreshScheduler.from_runtime(runtime_paths)
+            knowledge_refresh_scheduler = api_owned_knowledge_refresh_scheduler
+            standalone_knowledge_source_watcher = KnowledgeSourceWatcher(knowledge_refresh_scheduler)
+            app_state.knowledge_source_watcher = standalone_knowledge_source_watcher
+        app_state.knowledge_refresh_scheduler = knowledge_refresh_scheduler
+        await _sync_standalone_knowledge_watchers(_app)
+        logger.info(
+            "Published knowledge index refresh is scheduled by Git polling, filesystem watch, on access, or explicit API actions",
+        )
 
-    stop_event = asyncio.Event()
-    watch_task = asyncio.create_task(_watch_config(stop_event, _app))
-    worker_cleanup_task = asyncio.create_task(_worker_cleanup_loop(stop_event, _app))
+        stop_event = asyncio.Event()
+        watch_task = asyncio.create_task(_watch_config(stop_event, _app))
+        worker_cleanup_task = asyncio.create_task(_worker_cleanup_loop(stop_event, _app))
 
-    async with gateway_lifespan(_app):
-        yield
+        async with gateway_lifespan(_app):
+            yield
 
-    if app_state.computer_sessions is not None:
-        app_state.computer_sessions.close_all()
-    app_state.computer_runtime = None
-    stop_event.set()
-    watch_task.cancel()
-    worker_cleanup_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await watch_task
-    with suppress(asyncio.CancelledError):
-        await worker_cleanup_task
-    if standalone_knowledge_source_watcher is not None:
-        await standalone_knowledge_source_watcher.shutdown()
-    if api_owned_knowledge_refresh_scheduler is not None:
-        await api_owned_knowledge_refresh_scheduler.shutdown()
-    close_usage_export_runner(_app)
-    if standalone:
-        # `mindroom run` stops the worker manager itself once its bots have stopped.
-        # An API running on its own must stop it here, or its Docker worker containers outlive the process.
-        await run_blocking_until_complete(shutdown_primary_worker_manager)
+        if app_state.computer_sessions is not None:
+            app_state.computer_sessions.close_all()
+        app_state.computer_runtime = None
+        stop_event.set()
+        watch_task.cancel()
+        worker_cleanup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await watch_task
+        with suppress(asyncio.CancelledError):
+            await worker_cleanup_task
+        if standalone_knowledge_source_watcher is not None:
+            await standalone_knowledge_source_watcher.shutdown()
+        if api_owned_knowledge_refresh_scheduler is not None:
+            await api_owned_knowledge_refresh_scheduler.shutdown()
+        close_usage_export_runner(_app)
+        if standalone:
+            # `mindroom run` stops the worker manager itself once its bots have stopped.
+            # An API running on its own must stop it here, or its Docker worker containers outlive the process.
+            await run_blocking_until_complete(shutdown_primary_worker_manager)
+    finally:
+        worker_launch_binding.close()
 
 
 def bind_orchestrator_knowledge_refresh_scheduler(
@@ -1124,6 +1133,4 @@ app.include_router(frontend_router)
 if __name__ == "__main__":
     import uvicorn
 
-    # A standalone API owns the applied config, and an edit that fails to load keeps the last one that loaded.
-    with bind_worker_launch_config_source(lambda: _app_context(app).runtime_config):
-        uvicorn.run(app, host="0.0.0.0", port=8765)  # noqa: S104
+    uvicorn.run(app, host="0.0.0.0", port=8765)  # noqa: S104
