@@ -16,6 +16,7 @@ from mindroom.interactive_models import InteractiveSelection
 
 from .approval_card_state import ApprovalCardReservation, ApprovalDecisionMetadata, RecordedApprovalDecision
 from .approval_continuations import (
+    DEFAULT_ROUTER_MANAGED_ROOM_REASON,
     INTERRUPTED_FAILURE_REASON,
     ApprovalAdvance,
     ApprovalCall,
@@ -93,6 +94,7 @@ from .views import (
 )
 
 __all__ = [
+    "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
     "INTERRUPTED_FAILURE_REASON",
     "SCHEDULED_APPROVAL_WINDOW_NS",
     "TURN_BACKED_KINDS",

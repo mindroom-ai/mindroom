@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.approval.receipt_readers import take_unsent_receipt
-from mindroom.event_journal import ApprovalCall
+from mindroom.event_journal import DEFAULT_ROUTER_MANAGED_ROOM_REASON, ApprovalCall
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
 from mindroom.llm.messages import Message
 
@@ -54,6 +54,9 @@ def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
                 outcome = "approval was granted, but its approval provenance is unavailable."
         elif call.decision is ContinuationDecision.EXPIRED:
             outcome = "human approval expired; the tool was not executed."
+        elif call.reason == DEFAULT_ROUTER_MANAGED_ROOM_REASON:
+            # Nobody was asked, so the runtime's own reason says what to do next, such as calling `invite_router`.
+            outcome = f"the tool was not executed: {call.reason}"
         else:
             outcome = "approval was denied; the tool was not executed."
         lines.append(f"- {call_label}: {outcome}")

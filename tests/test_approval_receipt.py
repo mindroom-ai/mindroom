@@ -18,7 +18,12 @@ from mindroom.approval.receipt_readers import add_approval_receipt_reader, appro
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
-from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
+from mindroom.event_journal import (
+    DEFAULT_ROUTER_MANAGED_ROOM_REASON,
+    ApprovalCall,
+    ApprovalDecision,
+    approval_arguments_digest,
+)
 from mindroom.history.request_messages import TurnMessages, build_request, build_resume_request
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
@@ -146,6 +151,29 @@ def test_approval_receipt_reports_denied_and_expired_calls_as_unexecuted() -> No
     assert (
         "`publish_report` (tool call id `call-expired`): human approval expired; the tool was not executed." in receipt
     )
+
+
+def test_approval_receipt_gives_the_router_missing_reason_instead_of_a_denial() -> None:
+    """A call refused because no router can post its card was never denied by a person, so the receipt says why."""
+    receipt = build_approval_receipt(
+        (
+            ApprovalCall(
+                tool_call_id="call-no-router",
+                tool_name="create_agent",
+                invoking_agent="mind",
+                expires_at_ns=1,
+                decision=ApprovalDecision.DENIED,
+                reason=DEFAULT_ROUTER_MANAGED_ROOM_REASON,
+                human_approval_required=True,
+            ),
+        ),
+    )
+
+    assert (
+        f"`create_agent` (tool call id `call-no-router`): the tool was not executed: {DEFAULT_ROUTER_MANAGED_ROOM_REASON}"
+        in receipt
+    )
+    assert "approval was denied" not in receipt
 
 
 def test_approval_receipt_omits_invalid_provider_tool_names() -> None:

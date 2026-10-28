@@ -25,7 +25,13 @@ from mindroom.constants import (
 from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.delegation.state import member_slot_id, pending_call_slot
 from mindroom.delivery_gateway import DeliveryStage
-from mindroom.event_journal import ApprovalAdvance, ApprovalCall, ApprovalContinuation, approval_arguments_digest
+from mindroom.event_journal import (
+    DEFAULT_ROUTER_MANAGED_ROOM_REASON,
+    ApprovalAdvance,
+    ApprovalCall,
+    ApprovalContinuation,
+    approval_arguments_digest,
+)
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
 from mindroom.message_target import MessageTarget
 from mindroom.redaction import redact_sensitive_text
@@ -217,7 +223,7 @@ async def plan_approval_calls(
                 "No approval recipient is configured; the tool was denied safely.",
             )
         elif room_id is not None and manager is not None and manager.router_missing and manager.router_missing(room_id):
-            decision, reason = ContinuationDecision.DENIED, approval_manager.DEFAULT_ROUTER_MANAGED_ROOM_REASON
+            decision, reason = ContinuationDecision.DENIED, DEFAULT_ROUTER_MANAGED_ROOM_REASON
         decisions[tool.tool_call_id] = (decision, timeout_seconds, requires_approval, reason)
     now = datetime.now(UTC)
     calls = tuple(

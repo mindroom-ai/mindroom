@@ -113,6 +113,13 @@ class ApprovalDecision(StrEnum):
     EXPIRED = "expired"
 
 
+# The reason a call is denied without asking anyone, because no router is in the room to post its approval card.
+DEFAULT_ROUTER_MANAGED_ROOM_REASON = (
+    "Tool approval needs the router in this room. If `router.accept_invites` allows this Matrix transport account, "
+    "call `invite_router` and wait for the router to join; otherwise enable it or add the router manually, then retry."
+)
+
+
 @dataclass(frozen=True, slots=True)
 class ApprovalCall:
     """One exact tool call of one paused generation."""

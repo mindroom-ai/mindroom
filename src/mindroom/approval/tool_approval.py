@@ -13,7 +13,6 @@ from uuid import uuid4
 
 from mindroom.approval import manager as approval_manager
 from mindroom.approval.manager import (
-    DEFAULT_ROUTER_MANAGED_ROOM_REASON,
     ApprovalActionResult,
     ToolApprovalTransportError,
 )
@@ -41,7 +40,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.tool_function import ToolFunction
 
 __all__ = [
-    "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
     "JOB_APPROVAL_TYPE",
     "POLICY_CONFIRMATION_APPROVAL_TYPE",
     "ApprovalActionResult",
