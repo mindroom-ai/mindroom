@@ -782,7 +782,7 @@ async def _chat_completions(  # noqa: C901, PLR0912
                 refresh_scheduler=knowledge_refresh_scheduler,
             )
             if req.stream:
-                response = await _stream_completion(turn, config, runtime_paths, execution_identity=execution_identity)
+                response = await _stream_completion(turn, config, runtime_paths)
             else:
                 with tool_execution_identity(execution_identity):
                     response = await _non_stream_completion(turn, config, runtime_paths)
@@ -855,15 +855,13 @@ async def _stream_completion(
     turn: ResponseTurnContext,
     config: Config,
     runtime_paths: RuntimePaths,
-    *,
-    execution_identity: ToolExecutionIdentity,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming chat completion via SSE."""
     agent_name, session_id = turn.entity_label, turn.session_id
     stream = cast(
         "AsyncGenerator[AIStreamChunk, None]",
         stream_with_tool_execution_identity(
-            execution_identity,
+            turn.execution_identity,
             stream_factory=lambda: stream_agent_response(turn, runtime_paths, config),
         ),
     )

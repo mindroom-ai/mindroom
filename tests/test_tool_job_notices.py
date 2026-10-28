@@ -11,6 +11,7 @@ import pytest
 from mindroom import ai
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.llm.runs import RunStatus
 from mindroom.prompts import BACKGROUND_JOBS_ENDED_NOTICE
 from mindroom.response_turn import TurnContinuationRunState
@@ -507,7 +508,7 @@ async def test_only_a_standard_reply_opens_with_the_job_note(
                 runtime_paths=conversation.context.runtime_paths,
                 config=conversation.context.config,
                 scope_context=None,
-                turn_recorder=None,
+                turn_recorder=TurnRecorder(),
             )
         assert ("background_jobs" in seen[0]) is (agent_mode == "standard")
     finally:

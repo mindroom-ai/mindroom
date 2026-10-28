@@ -2082,7 +2082,6 @@ class TestStreamingCompletion:
                 ),
                 test_config,
                 runtime_paths,
-                execution_identity=execution_identity,
             )
 
         assert isinstance(response, openai_compat.OpenAIStreamingResponse)
@@ -2141,7 +2140,6 @@ class TestStreamingCompletion:
                 ),
                 test_config,
                 runtime_paths,
-                execution_identity=execution_identity,
             )
 
         assert isinstance(response, StreamingResponse)
