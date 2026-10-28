@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -69,7 +70,7 @@ def _config(tmp_path: Path) -> Config:
     )
 
 
-def _plugin(name: str, callbacks: list[object]) -> object:
+def _plugin(name: str, callbacks: list[object], settings: dict[str, object] | None = None) -> object:
     return type(
         "PluginStub",
         (),
@@ -77,7 +78,7 @@ def _plugin(name: str, callbacks: list[object]) -> object:
             "name": name,
             "discovered_hooks": tuple(callbacks),
             "discovered_automations": (),
-            "entry_config": PluginEntryConfig(path=f"./plugins/{name}"),
+            "entry_config": PluginEntryConfig(path=f"./plugins/{name}", settings=settings or {}),
             "plugin_order": 0,
         },
     )()
@@ -607,6 +608,51 @@ async def test_emit_recursion_guard_drops_nested_custom_events_after_depth_three
     await emit(registry, "todo:item_added", _custom_event_context(tmp_path))
 
     assert seen_depths == [0, 1, 2]
+
+
+@pytest.mark.asyncio
+async def test_emit_gives_each_hook_its_plugin_name_settings_and_logger(tmp_path: Path) -> None:
+    """Each hook gets its plugin's name, a copy of its settings, and a logger naming its plugin and hook."""
+    seen: list[tuple[str, dict[str, object]]] = []
+
+    @hook("todo:item_added", priority=10)
+    async def audit(ctx: CustomEventContext) -> None:
+        seen.append((ctx.plugin_name, dict(ctx.settings)))
+        ctx.settings["mode"] = "changed"
+        ctx.logger.info("audited")
+
+    @hook("todo:item_added", priority=20)
+    async def notify(ctx: CustomEventContext) -> None:
+        seen.append((ctx.plugin_name, dict(ctx.settings)))
+
+    registry = HookRegistry.from_plugins(
+        [
+            _plugin("audit-plugin", [audit], settings={"mode": "fast"}),
+            _plugin("notify-plugin", [notify], settings={"mode": "slow"}),
+        ],
+    )
+    config = _config(tmp_path)
+    context = CustomEventContext(
+        event_name="todo:item_added",
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        correlation_id="corr-custom",
+        payload={},
+        source_plugin="todo",
+        room_id="!room:localhost",
+        thread_id=None,
+        sender_id="@user:localhost",
+    )
+
+    with capture_logs() as logs:
+        await emit(registry, "todo:item_added", context)
+        await emit(registry, "todo:item_added", context)
+
+    assert seen == [("audit-plugin", {"mode": "fast"}), ("notify-plugin", {"mode": "slow"})] * 2
+    audited = [entry for entry in logs if entry["event"] == "audited"]
+    assert [(entry["plugin_name"], entry["hook_name"], entry["event_name"]) for entry in audited] == [
+        ("audit-plugin", "audit", "todo:item_added"),
+    ] * 2
 
 
 @pytest.mark.asyncio
