@@ -279,6 +279,9 @@ class TestReshape:
 
         with pytest.raises(ValueError, match="another room"):
             await pending(store, turn(["$a"], target=MessageTarget.resolve(OTHER_ROOM, None, None)), OTHER_ROOM)
+        # An answered turn elsewhere refuses a batch naming its source like any answered owner.
+        await write(store, turn_rows.record_turn, TurnRecord.create(["$done"]), room_id=OTHER_ROOM)
+        assert await pending(store, turn(["$done", "$b"])) == Refused(("$done",))
 
 
 class TestAliases:

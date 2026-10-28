@@ -68,16 +68,19 @@ def upgrade_turn_records_to_rows(
     existing_tables: frozenset[str],
     outbox_columns: frozenset[str],
     *,
-    turn_row_ddl: Sequence[str],
+    schema_ddl: Sequence[str],
 ) -> None:
     """Convert turn records and redaction tombstones into turn rows, inside the schema transaction.
 
     ``outbox_columns`` is the delivery outbox as earlier upgrades left it,
-    empty when there is none.
+    empty when there is none. ``schema_ddl`` is the whole current schema, run
+    first: a redaction's effects read membership, reply, and continuation
+    tables that a database from an earlier release gains only from these
+    statements, and running them twice changes nothing.
     """
     if "turn_records" not in existing_tables and "redaction_tombstones" not in existing_tables:
         return
-    for statement in turn_row_ddl:
+    for statement in schema_ddl:
         transaction.execute(statement)
     if "redaction_tombstones" in existing_tables:
         _copy_redaction_tombstones(transaction)

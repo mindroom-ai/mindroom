@@ -844,11 +844,6 @@ def _render_statement(statement: str, dialect: _SchemaDialect) -> str:
     )
 
 
-def turn_row_statements(dialect: _SchemaDialect) -> tuple[str, ...]:
-    """Return the DDL of the turn-row tables, which their upgrade creates before the rest of the schema."""
-    return tuple(_render_statement(statement, dialect) for statement in (*_TURN_ROW_TABLES, *_TURN_ROW_INDEXES))
-
-
 def schema_statements(dialect: _SchemaDialect) -> tuple[str, ...]:
     """Return every DDL statement needed to create the current schema.
 
@@ -859,9 +854,9 @@ def schema_statements(dialect: _SchemaDialect) -> tuple[str, ...]:
     whose default text collation is already byte order, so the mismatch shows up
     only on the backend that is not measured by a local query-plan test.
     """
-    return (
-        *(_render_statement(statement, dialect) for statement in (*_TABLES, *_INDEXES)),
-        *turn_row_statements(dialect),
+    return tuple(
+        _render_statement(statement, dialect)
+        for statement in (*_TABLES, *_TURN_ROW_TABLES, *_INDEXES, *_TURN_ROW_INDEXES)
     )
 
 
@@ -897,5 +892,4 @@ __all__ = [
     "SQLITE_DIALECT",
     "render",
     "schema_statements",
-    "turn_row_statements",
 ]

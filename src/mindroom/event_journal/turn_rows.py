@@ -986,8 +986,6 @@ def _reshape(
     owners = _physical_owners(transaction, agent_name, sources)
     alias_owners = _alias_owners(transaction, agent_name, sources)
     turns = _turns(transaction, agent_name, {*owners.values(), *chain.from_iterable(alias_owners.values())})
-    for key in set(owners.values()):
-        _require_same_room(turns[key], room_id)
     target: _Turn | None = None
     if len(owners) == len(sources) and len(set(owners.values())) == 1:
         key = owners[sources[0]]
@@ -1005,6 +1003,8 @@ def _reshape(
     )
     if conflicting:
         return Refused(conflicting)
+    for key in set(owners.values()):
+        _require_same_room(turns[key], room_id)
     if target is not None:
         return target, target.frozen
     return _absorb(transaction, agent_name, candidate, room_id=room_id, owner_keys=set(owners.values())), False
