@@ -19,10 +19,12 @@ if TYPE_CHECKING:
 
 _CACHE_TTL_SECONDS = 600
 _CACHE_MAX_ENTRIES = 4096
-# Oldest first: an entry is re-inserted when it is looked up again after it expired.
-_AUTHORS: dict[tuple[str, str], tuple[float, SlackAuthor]] = {}
+# Slack answers these for someone we may never map; they are final, not outages.
+_UNKNOWN_USER_ERRORS = frozenset({"user_not_found", "user_not_visible"})
 # Accounts that are not full members of our workspace never map to a MindRoom user.
 _NOT_A_MEMBER_FLAGS = ("deleted", "is_bot", "is_app_user", "is_restricted", "is_ultra_restricted")
+# Oldest first: an entry is re-inserted when it is looked up again after it expired.
+_PROFILES: dict[tuple[str, str], tuple[float, _Profile]] = {}
 
 
 @dataclass(frozen=True)
@@ -34,16 +36,45 @@ class SlackAuthor:
     matrix_id: str | None
 
 
-def _matrix_id(user: Mapping[str, Any], team_id: str, slack_config: SlackConfig) -> str | None:
-    """Return the Matrix ID of a full member of our workspace whose email is in the configured domain."""
-    template = slack_config.matrix_user_id_template
+@dataclass(frozen=True)
+class _Profile:
+    """What Slack says about a person, whatever MindRoom's configuration is.
+
+    `email` is set only for a confirmed full member of our team, so a config change never needs a new lookup.
+    """
+
+    display_name: str
+    email: str | None
+
+
+def _profile(user: Mapping[str, Any], team_id: str) -> _Profile:
     email = json_object(user, "profile").get("email")
-    if (
-        template is None
-        or user.get("team_id") != team_id
-        or any(user.get(flag) for flag in _NOT_A_MEMBER_FLAGS)
-        or not isinstance(email, str)
-    ):
+    is_member = (
+        user.get("team_id") == team_id
+        and not any(user.get(flag) for flag in _NOT_A_MEMBER_FLAGS)
+        and user.get("is_email_confirmed", True)
+    )
+    return _Profile(slack_display_name(user), email if is_member and isinstance(email, str) else None)
+
+
+async def _fetch_profile(client: httpx.AsyncClient, bot_token: str, team_id: str, slack_user_id: str) -> _Profile:
+    try:
+        body = await slack_call(client, "users.info", bot_token, user=slack_user_id)
+    except SlackApiError as exc:
+        if exc.error in _UNKNOWN_USER_ERRORS:
+            return _Profile(slack_user_id, None)
+        raise
+    user = json_object(body, "user")
+    if not user:
+        error = "invalid_response"
+        raise SlackApiError(error)
+    return _profile(user, team_id)
+
+
+def _matrix_id(email: str | None, slack_config: SlackConfig) -> str | None:
+    """Return the Matrix ID an email in the configured domain maps to."""
+    template = slack_config.matrix_user_id_template
+    if template is None or email is None:
         return None
     try:
         return matrix_user_id_from_email(email, template, slack_config.email_domain)
@@ -62,22 +93,21 @@ async def slack_author(
 ) -> SlackAuthor:
     """Look up a Slack person with `users.info`, cached for ten minutes per team and user.
 
-    `matrix_id` is None for anyone who must not drive an agent; the display name is always set.
-    A Slack error raises `SlackApiError` and is not cached.
+    `team_id` must be the bot token's own team (`SlackBotIdentity.team_id`), never the event author's team,
+    because a person from another team is refused by comparing their team with it.
+    `matrix_id` is None for anyone who must not drive an agent, and follows `slack_config` as it is now.
+    The display name is always set; someone Slack does not know or show is named by their ID.
+    Any other Slack error raises `SlackApiError` and is not cached.
     """
     key = (team_id, slack_user_id)
     looked_up_at = now()
-    cached = _AUTHORS.get(key)
+    cached = _PROFILES.get(key)
     if cached is not None and looked_up_at - cached[0] < _CACHE_TTL_SECONDS:
-        return cached[1]
-    body = await slack_call(client, "users.info", bot_token, user=slack_user_id)
-    user = json_object(body, "user")
-    if not user:
-        error = "invalid_response"
-        raise SlackApiError(error)
-    author = SlackAuthor(slack_user_id, slack_display_name(user), _matrix_id(user, team_id, slack_config))
-    _AUTHORS.pop(key, None)
-    while len(_AUTHORS) >= _CACHE_MAX_ENTRIES:
-        del _AUTHORS[next(iter(_AUTHORS))]
-    _AUTHORS[key] = (looked_up_at, author)
-    return author
+        profile = cached[1]
+    else:
+        profile = await _fetch_profile(client, bot_token, team_id, slack_user_id)
+        _PROFILES.pop(key, None)
+        while len(_PROFILES) >= _CACHE_MAX_ENTRIES:
+            del _PROFILES[next(iter(_PROFILES))]
+        _PROFILES[key] = (looked_up_at, profile)
+    return SlackAuthor(slack_user_id, profile.display_name, _matrix_id(profile.email, slack_config))

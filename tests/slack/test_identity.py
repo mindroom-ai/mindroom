@@ -24,9 +24,9 @@ _CONFIG = SlackConfig(email_domain="example.com", matrix_user_id_template="@{loc
 
 @pytest.fixture(autouse=True)
 def _empty_author_cache() -> Iterator[None]:
-    identity._AUTHORS.clear()
+    identity._PROFILES.clear()
     yield
-    identity._AUTHORS.clear()
+    identity._PROFILES.clear()
 
 
 def _user(email: str | None = "ada@example.com", **overrides: Any) -> dict[str, Any]:  # noqa: ANN401
@@ -103,7 +103,7 @@ async def test_rejects_other_domain(email: str) -> None:
 async def test_email_domain_is_case_insensitive() -> None:
     """The domain matches in any case; the localpart reaches the template unchanged."""
     assert await _author(_slack(_user("ada@EXAMPLE.com"))) == SlackAuthor(_USER_ID, "Ada", "@ada:example.org")
-    identity._AUTHORS.clear()
+    identity._PROFILES.clear()
     assert await _author(_slack(_user("Ada.L@Example.COM"))) == SlackAuthor(_USER_ID, "Ada", "@Ada.L:example.org")
 
 
@@ -119,7 +119,7 @@ async def test_localpart_cannot_name_another_server() -> None:
 async def test_missing_email_does_not_map() -> None:
     """A profile without an email, or with a blank one, has no Matrix ID."""
     assert await _author(_slack(_user(None))) == SlackAuthor(_USER_ID, "Ada", None)
-    identity._AUTHORS.clear()
+    identity._PROFILES.clear()
     assert await _author(_slack(_user(""))) == SlackAuthor(_USER_ID, "Ada", None)
 
 
@@ -134,7 +134,7 @@ async def test_display_name_falls_back_to_real_name_then_handle() -> None:
     """The display name follows the Slack display-name rule used everywhere else."""
     user = _user(profile={"display_name": "", "real_name": "Ada Lovelace", "email": "ada@example.com"})
     assert (await _author(_slack(user))).display_name == "Ada Lovelace"
-    identity._AUTHORS.clear()
+    identity._PROFILES.clear()
     user = _user(profile={"email": "ada@example.com"})
     assert (await _author(_slack(user))).display_name == "ada"
 
@@ -194,7 +194,7 @@ async def test_cache_drops_oldest_at_cap(monkeypatch: pytest.MonkeyPatch) -> Non
     async with slack.client() as client:
         for user_id in ("U0000000A", "U0000000B", "U0000000C"):
             await slack_author(client, _BOT_TOKEN, _TEAM, user_id, _CONFIG)
-        assert list(identity._AUTHORS) == [(_TEAM, "U0000000B"), (_TEAM, "U0000000C")]
+        assert list(identity._PROFILES) == [(_TEAM, "U0000000B"), (_TEAM, "U0000000C")]
 
         await slack_author(client, _BOT_TOKEN, _TEAM, "U0000000B", _CONFIG)
         assert len(slack.requests) == 3
@@ -203,21 +203,76 @@ async def test_cache_drops_oldest_at_cap(monkeypatch: pytest.MonkeyPatch) -> Non
         assert len(slack.requests) == 4
 
 
+@pytest.mark.asyncio
+async def test_config_changes_apply_to_a_cached_profile() -> None:
+    """The cache holds what Slack said, so a reloaded config maps a cached person with no new request."""
+    slack = _slack(_user())
+    other_template = SlackConfig(email_domain="example.com", matrix_user_id_template="@staff.{localpart}:example.net")
+    other_domain = SlackConfig(email_domain="other.example", matrix_user_id_template="@{localpart}:example.org")
+
+    assert await _author(slack) == SlackAuthor(_USER_ID, "Ada", "@ada:example.org")
+    assert await _author(slack, other_template) == SlackAuthor(_USER_ID, "Ada", "@staff.ada:example.net")
+    assert await _author(slack, other_domain) == SlackAuthor(_USER_ID, "Ada", None)
+    assert await _author(slack, SlackConfig()) == SlackAuthor(_USER_ID, "Ada", None)
+    assert await _author(slack) == SlackAuthor(_USER_ID, "Ada", "@ada:example.org")
+    assert len(slack.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_team_is_the_callers_team() -> None:
+    """A user maps only when their team is the team the caller passes, which is the bot token's own team."""
+    slack = _slack(_user(team_id="T0OTHER99"))
+    async with slack.client() as client:
+        ours = await slack_author(client, _BOT_TOKEN, "T0OTHER99", _USER_ID, _CONFIG)
+        theirs = await slack_author(client, _BOT_TOKEN, _TEAM, _USER_ID, _CONFIG)
+
+    assert ours == SlackAuthor(_USER_ID, "Ada", "@ada:example.org")
+    assert theirs == SlackAuthor(_USER_ID, "Ada", None)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "matrix_id"),
+    [
+        ({"is_email_confirmed": True}, "@ada:example.org"),
+        ({}, "@ada:example.org"),
+        ({"is_email_confirmed": False}, None),
+    ],
+)
+@pytest.mark.asyncio
+async def test_unconfirmed_email_does_not_map(overrides: dict[str, Any], matrix_id: str | None) -> None:
+    """An email Slack reports as unconfirmed proves nothing; a profile that does not say is taken as is."""
+    assert await _author(_slack(_user(**overrides))) == SlackAuthor(_USER_ID, "Ada", matrix_id)
+
+
+@pytest.mark.parametrize("error", ["user_not_found", "user_not_visible"])
+@pytest.mark.asyncio
+async def test_unknown_user_is_unmappable_and_cached(error: str) -> None:
+    """Slack's final "no such person" answers are a refusal named by the ID, not a retryable failure."""
+    slack = _FakeSlack({"ok": False, "error": error})
+
+    first = await _author(slack)
+
+    assert first == SlackAuthor(_USER_ID, _USER_ID, None)
+    assert await _author(slack, SlackConfig()) == first
+    assert len(slack.requests) == 1
+
+
 @pytest.mark.parametrize(
     ("body", "error"),
     [
-        ({"ok": False, "error": "user_not_found"}, "user_not_found"),
+        ({"ok": False, "error": "internal_error"}, "internal_error"),
+        ({"ok": False, "error": "ratelimited"}, "ratelimited"),
         ({"ok": True}, "invalid_response"),
     ],
 )
 @pytest.mark.asyncio
-async def test_slack_errors_propagate_and_are_not_cached(body: dict[str, Any], error: str) -> None:
-    """A failed or malformed `users.info` raises `SlackApiError` and leaves nothing in the cache."""
+async def test_other_slack_errors_propagate_and_are_not_cached(body: dict[str, Any], error: str) -> None:
+    """Any other failed or malformed `users.info` raises `SlackApiError` and leaves nothing in the cache."""
     slack = _FakeSlack(body)
 
     with pytest.raises(SlackApiError, match=error):
         await _author(slack)
 
-    assert not identity._AUTHORS
+    assert not identity._PROFILES
     slack.body = {"ok": True, "user": _user()}
     assert (await _author(slack)).matrix_id == "@ada:example.org"
