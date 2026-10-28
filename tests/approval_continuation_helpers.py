@@ -11,12 +11,8 @@ from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
 from mindroom.approval.receipt import build_approval_receipt
-from mindroom.event_journal.approval_continuations import (
-    ApprovalAdvance,
-    ApprovalCall,
-    ApprovalContinuation,
-    ApprovalDecision,
-)
+from mindroom.event_journal.approval_calls import ApprovalCall, ApprovalDecision
+from mindroom.event_journal.approval_continuations import ApprovalAdvance, ApprovalContinuation
 from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowRequest
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
 from mindroom.response_sources import ResponseSources

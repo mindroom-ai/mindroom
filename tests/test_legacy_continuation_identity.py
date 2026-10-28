@@ -112,9 +112,10 @@ async def test_an_approval_an_earlier_release_left_pending_is_cancelled(
         finally:
             await store.close()
         assert legacy_database.query("SELECT * FROM approval_cards") == []
-        assert legacy_database.query("SELECT * FROM approval_continuation_calls") == []
-        # The emptied call table comes back with the columns the earlier release lacked.
-        assert {"toolkit_name", "arguments_digest"} <= _columns(legacy_database, "approval_continuation_calls")
+        assert legacy_database.query("SELECT * FROM approval_calls") == []
+        # The emptied call table is replaced by one with the columns the earlier release lacked.
+        assert _columns(legacy_database, "approval_continuation_calls") == set()
+        assert {"toolkit_name", "arguments_digest"} <= _columns(legacy_database, "approval_calls")
 
 
 @pytest.mark.asyncio

@@ -198,12 +198,14 @@ class _Cards:
         self,
         *,
         origin: BackgroundScriptToolOrigin,
+        owner_kind: str,
         tool_name: str,
         arguments: dict[str, object],
         entity_name: str | None = None,
         grant_operation: ApprovalOperation | None = None,
         **_kwargs: object,
     ) -> BackgroundApprovalDecision:
+        assert owner_kind == "job"
         self.requested.append((origin.run_id, tool_name, arguments))
         self.toolkits.append(origin.toolkit_name)
         self.grants.append((entity_name, grant_operation))

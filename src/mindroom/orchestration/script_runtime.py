@@ -110,6 +110,7 @@ class _BackgroundApprovalManager(Protocol):
         self,
         *,
         origin: BackgroundScriptToolOrigin,
+        owner_kind: Literal["job", "script"],
         room_id: str,
         thread_id: str | None,
         agent_name: str,
@@ -339,6 +340,7 @@ class _LiveScriptRuntimeResolver:
             return ToolApprovalDecision(approved=False, reason="Tool approval runtime is not ready.")
         decision = await approvals.request_background_approval(
             origin=origin,
+            owner_kind="script",
             room_id=context.room_id,
             thread_id=context.resolved_thread_id,
             agent_name=context.agent_name,

@@ -471,6 +471,16 @@ def acknowledge(
         (event_id, principal_id, delivery_id, stage.value),
     )
     if bound is not None and stage is DeliveryStage.INITIAL:
+        # The event now shows the approval card this delivery carries, if any.
+        transaction.execute(
+            """
+            INSERT INTO approval_card_events (principal_id, card_event_id, room_id, delivery_id)
+            SELECT principal_id, ?, room_id, delivery_id FROM approval_cards
+            WHERE principal_id = ? AND delivery_id = ?
+            ON CONFLICT (principal_id, card_event_id) DO NOTHING
+            """,
+            (event_id, principal_id, delivery_id),
+        )
         # A reply row takes its edit target from its reply when it is claimed.
         transaction.execute(
             """

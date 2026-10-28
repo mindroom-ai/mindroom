@@ -165,6 +165,7 @@ from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, f
 from mindroom.tool_system.runtime_context import ToolDispatchContext, build_execution_identity_from_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_policy import PreparedDispatch
+from tests.approval_card_helpers import resolve_card_event
 from tests.approval_continuation_helpers import (
     advance_continuation,
     approval_continuation,
@@ -8173,7 +8174,7 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
     async def publish(continuation, plan, **kwargs):  # noqa: ANN001, ANN003, ANN202, ARG001
         published.append(continuation.approval_id)
         if live:
-            assert await store.approvals.reserve_approval_card_deliveries(
+            assert await store.approvals.reserve_reply_cards(
                 continuation_principal_id=store.principal_id,
                 continuation_id=continuation.approval_id,
                 expected_generation=0,
@@ -8182,6 +8183,8 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
                         delivery_id="expiry-card",
                         tool_call_id="inner",
                         event_type="io.mindroom.tool_approval",
+                        approver_user_id="@user:example.org",
+                        approvable=True,
                         payload={
                             "approval_id": "expiry-card",
                             "continuation_id": continuation.approval_id,
@@ -8228,7 +8231,9 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
     async def read_source(_store, source):  # noqa: ANN001, ANN202
         if live and ready and published and not runner._cli_approval_waits.waiters and not raced:
             raced.append(True)
-            decision = await store.approvals.resolve_continuation_approval_card(
+            decision = await resolve_card_event(
+                store.approvals,
+                room_id=_target().room_id,
                 card_event_id="$card",
                 requested_status="approved",
                 reason=None,

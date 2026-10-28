@@ -1069,11 +1069,6 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.approval.legacy_approval_payloads"
-depends_on = []
-visibility = ["mindroom.approval.events"]
-
-[[modules]]
 path = "mindroom.session_storage.types"
 depends_on = []
 
@@ -1300,10 +1295,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.approval.events"
-depends_on = [
-    "mindroom.approval.legacy_approval_payloads",
-    "mindroom.matrix.event_info",
-]
+depends_on = []
 visibility = ["mindroom.approval.manager"]
 
 [[modules]]

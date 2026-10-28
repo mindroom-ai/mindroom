@@ -1,4 +1,4 @@
-"""One principal's approval records: cards, grants, background and scheduled calls, and paused runs."""
+"""One principal's approval records: calls, cards, grants, scheduled calls, and paused runs."""
 
 from __future__ import annotations
 
@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING, Literal
 from mindroom import reply_lifecycle as rl
 
 from . import (
+    approval_calls,
+    approval_cards,
     approval_continuations,
     approval_grants,
-    approvals,
-    background_approvals,
     replies,
     scheduled_approvals,
 )
@@ -24,11 +24,15 @@ if TYPE_CHECKING:
 
     from mindroom.tool_approval_grants import ApprovalGrant, ApprovalGrantRevocation, ApprovalGrantScope
 
-    from .approval_card_state import ApprovalCardReservation, ApprovalDecisionMetadata, RecordedApprovalDecision
+    from .approval_calls import BackgroundApprovalDecision, CallKey
+    from .approval_cards import (
+        ApprovalCardReservation,
+        ApprovalCardView,
+        ApprovalDecisionMetadata,
+        RecordedApprovalDecision,
+    )
     from .approval_continuations import ApprovalContinuation, ApprovalContinuationState
-    from .approvals import StoredApprovalCard, UnreadableApprovalCard
     from .backend import Backend, Transaction
-    from .background_approvals import BackgroundApprovalDecision
     from .replies import AppliedTransition, PostCommitEffect, PreparedReplyRow, ReplyRowEnqueue, ReplyRowRequest
     from .scheduled_approvals import (
         ScheduledApprovalArmState,
@@ -49,7 +53,7 @@ class ApprovalStore:
     _backend: Backend
     _principal_id: str
 
-    async def reserve_approval_card_deliveries(
+    async def reserve_reply_cards(
         self,
         *,
         continuation_principal_id: str,
@@ -57,9 +61,9 @@ class ApprovalStore:
         expected_generation: int,
         cards: tuple[ApprovalCardReservation, ...],
     ) -> bool:
-        """Atomically reserve every exact-call card and release its publication lease."""
+        """Atomically reserve every undecided call's card of one paused generation and release its publication lease."""
         return await self._backend.write(
-            lambda transaction: approvals.reserve_deliveries(
+            lambda transaction: approval_cards.reserve_reply_cards(
                 transaction,
                 self._principal_id,
                 continuation_principal_id=continuation_principal_id,
@@ -69,92 +73,78 @@ class ApprovalStore:
             ),
         )
 
-    async def reserve_background_approval_card(
+    async def reserve_detached_card(
         self,
         *,
+        call: CallKey,
+        owner_kind: Literal["job", "script"],
+        tool_name: str,
+        toolkit_name: str,
+        invoking_agent: str,
         room_id: str,
         thread_id: str | None,
-        run_id: str,
-        call_id: str,
         expires_at_ns: int,
         card: ApprovalCardReservation,
         grant_scope: ApprovalGrantScope | None = None,
     ) -> bool:
-        """Atomically reserve one exact background-call approval card, or apply an active grant in its place."""
+        """Atomically reserve one detached call and its card, or apply an active grant in the card's place."""
         return await self._backend.write(
-            lambda transaction: background_approvals.reserve_script_delivery(
+            lambda transaction: approval_cards.reserve_detached_card(
                 transaction,
                 self._principal_id,
+                call=call,
+                owner_kind=owner_kind,
+                tool_name=tool_name,
+                toolkit_name=toolkit_name,
+                invoking_agent=invoking_agent,
                 room_id=room_id,
                 thread_id=thread_id,
-                run_id=run_id,
-                call_id=call_id,
                 expires_at_ns=expires_at_ns,
                 card=card,
                 grant_scope=grant_scope,
             ),
         )
 
-    async def background_approval_decision(
-        self,
-        *,
-        run_id: str,
-        call_id: str,
-    ) -> BackgroundApprovalDecision | None:
-        """Return one exact background call's terminal decision."""
+    async def detached_decision(self, call: CallKey) -> BackgroundApprovalDecision | None:
+        """Return one detached call's decision, if it has one."""
         return await self._backend.read(
-            lambda transaction: background_approvals.decision(
-                transaction,
-                self._principal_id,
-                run_id=run_id,
-                call_id=call_id,
-            ),
+            lambda transaction: approval_calls.detached_decision(transaction, self._principal_id, call),
         )
 
-    async def resolve_background_approval_call(
+    async def resolve_approval_call(
         self,
+        call: CallKey,
         *,
-        run_id: str,
-        call_id: str,
-        requested_status: Literal["denied", "expired"],
-        reason: str,
+        requested_status: Literal["approved", "denied", "expired"],
+        reason: str | None,
+        metadata: ApprovalDecisionMetadata | None = None,
     ) -> RecordedApprovalDecision:
-        """Resolve one exact background target through the shared card transaction."""
+        """Decide one call, whatever owns it, and queue its card's terminal edit."""
         return await self._backend.write(
-            lambda transaction: background_approvals.resolve_call(
+            lambda transaction: approval_calls.resolve_call(
+                transaction,
+                call,
+                requested=requested_status,
+                reason=reason,
+                metadata=metadata,
+            ),
+        )
+
+    async def deny_pending_detached_calls(self, *, owner_id: str, reason: str) -> int:
+        """Deny every pending call of one detached run atomically, returning how many this decided."""
+        return await self._backend.write(
+            lambda transaction: approval_calls.deny_pending(
                 transaction,
                 self._principal_id,
-                run_id=run_id,
-                call_id=call_id,
-                requested_status=requested_status,
+                owner_id=owner_id,
                 reason=reason,
             ),
         )
 
-    async def resolve_pending_background_approval_calls(
-        self,
-        *,
-        run_id: str,
-        reason: str,
-    ) -> int:
-        """Resolve every pending background target for one run atomically."""
+    async def prune_detached_calls(self, *, owner_id: str) -> bool:
+        """Delete one detached run's decided calls after their cards have retired."""
         return await self._backend.write(
-            lambda transaction: background_approvals.resolve_pending_calls(
-                transaction,
-                self._principal_id,
-                run_id=run_id,
-                reason=reason,
-            ),
-        )
-
-    async def prune_background_approvals(self, *, run_id: str) -> bool:
-        """Prune settled background targets after their cards have retired."""
-        return await self._backend.write(
-            lambda transaction: background_approvals.prune_calls(
-                transaction,
-                self._principal_id,
-                run_id=run_id,
-            ),
+            lambda transaction: approval_calls.prune(transaction, self._principal_id, owner_id=owner_id),
         )
 
     async def reserve_scheduled_call_approval(
@@ -162,6 +152,7 @@ class ApprovalStore:
         *,
         binding: ScheduledCallBinding,
         card: ApprovalCardReservation,
+        any_arguments_offered: bool,
     ) -> bool:
         """Atomically reserve one scheduling-time card and its exact-call binding."""
         return await self._backend.write(
@@ -170,6 +161,7 @@ class ApprovalStore:
                 self._principal_id,
                 binding=binding,
                 card=card,
+                any_arguments_offered=any_arguments_offered,
             ),
         )
 
@@ -239,26 +231,6 @@ class ApprovalStore:
             ),
         )
 
-    async def resolve_continuation_approval_card(
-        self,
-        *,
-        card_event_id: str,
-        requested_status: Literal["approved", "denied", "expired"],
-        reason: str | None,
-        metadata: ApprovalDecisionMetadata,
-    ) -> RecordedApprovalDecision:
-        """Atomically record one native card and its exact-call decision."""
-        return await self._backend.write(
-            lambda transaction: approvals.resolve_card(
-                transaction,
-                self._principal_id,
-                card_event_id=card_event_id,
-                requested_status=requested_status,
-                reason=reason,
-                metadata=metadata,
-            ),
-        )
-
     async def create_approval_grant(
         self,
         *,
@@ -297,11 +269,12 @@ class ApprovalStore:
         )
 
     async def maintain_automatic_approvals(self, *, grant_id: str | None = None) -> tuple[str, ...]:
-        """Retire settled automatic receipts, enqueue grant revocations after their approval edits, and prune old scheduled calls."""
+        """Retire settled receipts, enqueue grant revocations after their approval edits, and prune old scheduled calls."""
 
         def maintain(transaction: Transaction) -> tuple[str, ...]:
             if grant_id is None:
-                approvals.retire_automatic_receipts(transaction, self._principal_id)
+                approval_grants.lock(transaction, self._principal_id)
+                approval_cards.retire_receipts(transaction, self._principal_id)
             deliveries = approval_grants.maintain(transaction, self._principal_id, grant_id=grant_id)
             if grant_id is None:
                 scheduled_approvals.prune(transaction, self._principal_id, time.time_ns())
@@ -329,39 +302,16 @@ class ApprovalStore:
             ),
         )
 
-    async def expire_unacknowledged_approval_card(
-        self,
-        *,
-        delivery_id: str,
-    ) -> RecordedApprovalDecision:
-        """Atomically expire a due call whose attempted card still lacks an event ID."""
+    async def retire_approval_card(self, *, delivery_id: str) -> bool:
+        """Retire a request card whose terminal edit Matrix acknowledged."""
         return await self._backend.write(
-            lambda transaction: approvals.resolve_card(
-                transaction,
-                self._principal_id,
-                card_event_id=None,
-                requested_status="expired",
-                reason=None,
-                metadata=None,
-                delivery_id=delivery_id,
-            ),
-        )
-
-    async def retire_approval_card(self, *, delivery_id: str, card_event_id: str) -> bool:
-        """Retire delivered payload while preserving durable approval-only classification."""
-        return await self._backend.write(
-            lambda transaction: approvals.retire(
-                transaction,
-                self._principal_id,
-                delivery_id=delivery_id,
-                card_event_id=card_event_id,
-            ),
+            lambda transaction: approval_cards.retire(transaction, self._principal_id, delivery_id=delivery_id),
         )
 
     async def remember_terminal_approval_alias(self, *, room_id: str, card_event_id: str, delivery_id: str) -> None:
-        """Retain a transport-verified receipt alias without changing its decision."""
+        """Remember a transport-verified copy of an automatic receipt as another event of that receipt."""
         await self._backend.write(
-            lambda transaction: approvals.remember_terminal_alias(
+            lambda transaction: approval_cards.remember_alias(
                 transaction,
                 self._principal_id,
                 room_id=room_id,
@@ -370,26 +320,15 @@ class ApprovalStore:
             ),
         )
 
-    async def is_terminal_approval_card(self, *, room_id: str, card_event_id: str) -> bool:
-        """Return whether one delivered approval action is durably terminal."""
-        return await self._backend.read(
-            lambda transaction: approvals.is_terminal_card(
-                transaction,
-                self._principal_id,
-                room_id=room_id,
-                card_event_id=card_event_id,
-            ),
-        )
-
-    async def pending_approval_card(
+    async def approval_card(
         self,
         *,
         room_id: str,
         card_event_id: str,
-    ) -> StoredApprovalCard | None:
-        """Return one card this bot still owes work on under this membership."""
+    ) -> ApprovalCardView | Literal["terminal"] | None:
+        """Return the card one Matrix event shows, ``"terminal"`` for a terminal event whose card is unknown."""
         return await self._backend.read(
-            lambda transaction: approvals.pending_card(
+            lambda transaction: approval_cards.card_for_event(
                 transaction,
                 self._principal_id,
                 room_id=room_id,
@@ -398,9 +337,9 @@ class ApprovalStore:
         )
 
     async def pending_approval_room_ids(self) -> tuple[str, ...]:
-        """Return every current room where this principal still owns a card."""
+        """Return every current room where this principal still owns a live request card."""
         return await self._backend.read(
-            lambda transaction: approvals.pending_room_ids(transaction, self._principal_id),
+            lambda transaction: approval_cards.pending_room_ids(transaction, self._principal_id),
         )
 
     async def pending_approval_cards(
@@ -409,10 +348,10 @@ class ApprovalStore:
         room_id: str,
         limit: int = _DEFAULT_ROOM_CARD_LIMIT,
         after: tuple[int, str] | None = None,
-    ) -> tuple[StoredApprovalCard | UnreadableApprovalCard, ...]:
-        """Return one room's unfinished cards, oldest first."""
+    ) -> tuple[ApprovalCardView, ...]:
+        """Return one room's live request cards, oldest first."""
         return await self._backend.read(
-            lambda transaction: approvals.pending_cards(
+            lambda transaction: approval_cards.pending_cards(
                 transaction,
                 self._principal_id,
                 room_id=room_id,

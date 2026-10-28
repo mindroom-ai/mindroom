@@ -21,7 +21,7 @@ from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS, LoopHooks
 from mindroom.agent_loop.run import paused_content, resume_agent, run_agent
 from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.custom_tools.calculator import CalculatorTools
-from mindroom.event_journal.approval_continuations import ApprovalCall, approval_arguments_digest
+from mindroom.event_journal.approval_calls import ApprovalCall, approval_arguments_digest
 from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.errors import RateLimited
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted

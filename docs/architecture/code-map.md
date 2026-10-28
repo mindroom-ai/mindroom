@@ -73,7 +73,11 @@ Matrix sync callback
 | `reply_scope.py` | `ReplyRuntime` and `SpanHandle`: reply claims, span exits, write-ahead, owed writes, and runtime ownership |
 | `edit_regenerator.py` | Decides which message edits regenerate a reply and hands each to a regeneration off the room's event lane |
 | `event_journal/replies.py` | `ReplyStore`: reply rules applied inside journal transactions, with their in-transaction effects |
-| `event_journal/approval_store.py` | `ApprovalStore`: one principal's approval cards, grants, background and scheduled calls, and paused-run continuations |
+| `event_journal/approval_store.py` | `ApprovalStore`: one principal's approval calls, cards, grants, scheduled calls, and paused-run continuations |
+| `event_journal/approval_calls.py` | One row per gated call, whatever owns it, and `resolve_call`, the only writer of a call's decision and its card's terminal edit |
+| `event_journal/approval_cards.py` | Approval cards and receipts: reservation, the events that show them, terminal edits, retirement, departure cleanup, and the typed `ApprovalCardView` clicks and recovery read |
+| `event_journal/approval_grants.py` | Timed grants: the consent a card offers, the grant it originates, its batch, and revocation edits |
+| `event_journal/legacy_approval_records.py` | One-time conversion of an earlier release's per-kind approval tables to one row per call and card |
 | `event_journal/legacy_response_attempts.py` | One-time cancellation of the approvals an earlier release left pending, and removal of the tables that kept their reply identity |
 | `event_journal/scheduled_approvals.py` | Stored scheduled tool calls and their one-shot approvals: binding, fire-time arming, withdrawal, claim with its receipt, and outcome |
 | `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish |
@@ -106,7 +110,7 @@ Matrix sync callback
 | `approval/receipt_readers.py` | Which runs read the bound approval receipt: the binding an approval continuation sets around itself, free of model-loop imports so work the loop starts can leave it |
 | `approval/tool_owners.py` | Recorded toolkit restoration and exact owner validation for saved approvals |
 | `approval/response.py` | Response-side native approval continuation persistence, card publication, and terminal settlement |
-| `approval/manager.py` | Matrix-backed tool approval runtime state |
+| `approval/manager.py` | Matrix-backed tool approval runtime state: card publication, clicks, deadlines, and recovery over typed card reads |
 | `approval/auto_approve_windows.py` | Durable per-conversation `!auto_approve` windows that approve one requester's gated calls without cards |
 | `oauth/credential_binding.py` | Canonical OAuth provider and worker-target bindings for browser workflows |
 | `oauth/credential_lifecycle.py` | Single transaction owner for scoped OAuth load, refresh, callback publication, invalidation, and reset state |

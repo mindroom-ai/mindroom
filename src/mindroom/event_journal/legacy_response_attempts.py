@@ -22,8 +22,9 @@ if TYPE_CHECKING:
 # it deletes the continuation with its calls and card records, and settles its pending sources unanswered. A click on
 # one of its cards then does nothing, and its reply keeps what it showed. The upgrade then adds span_id and
 # claim_span_id and drops approval_continuation_sources, the entity_name column, and the response attempt tables, and
-# it drops approval_continuation_calls, which the cancellation emptied, so the schema creates it again with the
-# toolkit_name (since v2026.9.140) and arguments_digest (since v2026.10.36) columns older releases lacked.
+# it drops approval_continuation_calls, which the cancellation emptied; the approval-record conversion that runs next
+# creates approval_calls with the toolkit_name (since v2026.9.140) and arguments_digest (since v2026.10.36) columns
+# older releases lacked.
 # Coverage: tests/test_legacy_continuation_identity.py::test_an_approval_an_earlier_release_left_pending_is_cancelled,
 # tests/test_legacy_continuation_identity.py::test_the_upgrade_drops_what_kept_the_identity_of_a_pending_approval,
 # tests/test_legacy_continuation_identity.py::test_the_upgrade_cancels_every_approval_in_bounded_pages.
@@ -56,7 +57,7 @@ def upgrade_continuation_identity(transaction: Transaction, inspector: SchemaIns
     transaction.execute("ALTER TABLE approval_continuations DROP COLUMN entity_name")
     transaction.execute("DROP TABLE IF EXISTS response_attempt_sources")
     transaction.execute("DROP TABLE IF EXISTS response_attempts")
-    # Empty now; the schema creates it again with the columns a release before them lacked.
+    # Empty now; the approval-record conversion replaces it with approval_calls.
     transaction.execute("DROP TABLE IF EXISTS approval_continuation_calls")
 
 

@@ -27,9 +27,10 @@ from mindroom.commands.handler import handle_command
 from mindroom.commands.parsing import CommandType, command_parser, get_command_help
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.main import Config
-from mindroom.event_journal import ApprovalDecision, StoredApprovalCard, UnreadableApprovalCard
+from mindroom.event_journal import ApprovalCardView, ApprovalDecision, CallKey
 from mindroom.llm.runs import ToolExecution
 from mindroom.message_target import MessageTarget
+from tests.approval_card_helpers import card_view
 from tests.authorization_helpers import make_test_command_handler_context
 from tests.conftest import make_conversation_reader_mock, test_runtime_paths
 
@@ -394,28 +395,23 @@ def _stored(
     created_at_ns: int,
     thread_id: str = THREAD_ID,
     approver: str = HUMAN,
-    resolution: dict[str, object] | None = None,
-    target_kind: str = "continuation",
+    decided: bool = False,
+    owner_kind: str | None = "reply",
     approvable: bool = True,
     expires_in: timedelta = timedelta(hours=1),
-) -> StoredApprovalCard:
-    content = {
-        "thread_id": thread_id,
-        "approver_user_id": approver,
-        "approvable": approvable,
-        "expires_at": (datetime.now(UTC) + expires_in).isoformat(),
-    }
-    return StoredApprovalCard(
-        card={"content": content},
-        resolution=resolution,
+) -> ApprovalCardView:
+    return card_view(
         delivery_id=f"delivery-{created_at_ns}",
+        call=CallKey("continuation", 1, f"call-{created_at_ns}"),
+        room_id=ROOM_ID,
+        thread_id=thread_id,
         card_event_id=card_event_id,
         created_at_ns=created_at_ns,
-        continuation_id="continuation",
-        continuation_generation=1,
-        tool_call_id=f"call-{created_at_ns}",
-        continuation_entity_name="code",
-        target_kind=target_kind,  # type: ignore[arg-type]
+        approvable=approvable,
+        owner_kind=owner_kind,
+        approver_user_id=approver,
+        expires_at_ns=int((datetime.now(UTC) + expires_in).timestamp() * 1_000_000_000),
+        decided=decided,
     )
 
 
@@ -433,14 +429,14 @@ async def test_pending_card_listing_keeps_only_the_approvers_open_cards_in_one_t
             _stored("$other-approver", created_at_ns=3, approver="@other:localhost"),
         ),
         (
-            _stored("$answered", created_at_ns=4, resolution={"status": "approved"}),
+            _stored("$answered", created_at_ns=4, decided=True),
             _stored(None, created_at_ns=5),
-            _stored("$scheduled", created_at_ns=6, target_kind="scheduled_call"),
+            _stored("$scheduled", created_at_ns=6, owner_kind="scheduled"),
         ),
         (
             _stored("$too-large", created_at_ns=7, approvable=False),
-            UnreadableApprovalCard(delivery_id="unreadable", created_at_ns=8, continuation_id="continuation"),
-            _stored("$job-card", created_at_ns=9, target_kind="background_script"),
+            _stored("$call-gone", created_at_ns=8, owner_kind=None),
+            _stored("$job-card", created_at_ns=9, owner_kind="job"),
         ),
         (_stored("$past-deadline", created_at_ns=10, expires_in=timedelta(seconds=-1)),),
     ]

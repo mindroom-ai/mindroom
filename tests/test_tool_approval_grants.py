@@ -20,15 +20,16 @@ from mindroom.config.main import Config
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.event_journal import (
     ApprovalCall,
+    ApprovalCardView,
     ApprovalDecisionMetadata,
     BackgroundApprovalDecision,
+    CallKey,
     DeliveryStage,
     EventClass,
     EventJournalStore,
     EventKind,
     InboundEvent,
     MatrixDelivery,
-    StoredApprovalCard,
 )
 from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.large_messages import content_fits_normal_event
@@ -36,6 +37,7 @@ from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_approval_grants import AUTO_APPROVE_OPTIONS, ApprovalOperation, grant_operation
+from tests.approval_card_helpers import card_content, card_is_terminal, pending_card, resolve_card_event
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import handle_card_response_for_test, test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
@@ -207,15 +209,20 @@ async def test_only_policy_pause_offers_timed_approval(
             ),
             failure_reason="publication failed",
         )
-        card = await journal.principal("router@shared").approvals.pending_approval_card(
+        card = await pending_card(
+            journal.principal("router@shared").approvals,
             room_id="!room:test",
             card_event_id="$authored-0-0",
         )
         assert card is not None
         if approval_type == "mindroom_policy":
-            assert card.card["content"]["auto_approve_options"] == [300, 600, 1800]
+            assert (await card_content(journal.principal("router@shared"), card))["auto_approve_options"] == [
+                300,
+                600,
+                1800,
+            ]
         else:
-            assert "auto_approve_options" not in card.card["content"]
+            assert "auto_approve_options" not in (await card_content(journal.principal("router@shared"), card))
             await _approve(manager, "$authored-0-0")
             current = await responder.approvals.approval_continuation("authored")
             assert current is not None
@@ -402,7 +409,8 @@ async def test_subsequent_granted_call_publishes_exact_terminal_receipt(
         assert "auto_approval" not in receipt.payload
         assert "auto_approve_options" not in receipt.payload
         assert (
-            await journal.principal("router@shared").approvals.pending_approval_card(
+            await pending_card(
+                journal.principal("router@shared").approvals,
                 room_id="!room:test",
                 card_event_id="$card-subsequent",
             )
@@ -414,12 +422,15 @@ async def test_subsequent_granted_call_publishes_exact_terminal_receipt(
         assert continuation.calls[0].decision.value == "approved"
         audit = await journal.backend.read(
             lambda transaction: transaction.fetchone(
-                "SELECT continuation_id, tool_call_id, grant_id FROM approval_grant_cards WHERE delivery_id = ?",
+                "SELECT cards.owner_id, cards.tool_call_id, calls.grant_id FROM approval_cards AS cards "
+                "JOIN approval_calls AS calls ON calls.owner_id = cards.owner_id "
+                "AND calls.generation = cards.generation AND calls.tool_call_id = cards.tool_call_id "
+                "WHERE cards.delivery_id = ?",
                 ("card-subsequent",),
             ),
         )
         assert audit is not None
-        assert audit["continuation_id"] == "subsequent"
+        assert audit["owner_id"] == "subsequent"
         assert audit["tool_call_id"] == "call-subsequent"
         assert audit["grant_id"]
     finally:
@@ -471,17 +482,18 @@ async def test_automatic_receipt_reply_is_consumed_before_maintenance(
         )
         assert result.consumed is True
         before_consume.assert_awaited_once()
-        assert await owner.approvals.is_terminal_approval_card(room_id="!room:test", card_event_id=receipt_event_id)
-        assert not await owner.approvals.is_terminal_approval_card(
+        assert await card_is_terminal(owner.approvals, room_id="!room:test", card_event_id=receipt_event_id)
+        assert not await card_is_terminal(
+            owner.approvals,
             room_id="!other:test",
             card_event_id=receipt_event_id,
         )
-        assert not await owner.approvals.is_terminal_approval_card(room_id="!room:test", card_event_id="$unknown")
+        assert not await card_is_terminal(owner.approvals, room_id="!room:test", card_event_id="$unknown")
         continuation = await journal.principal("agent@code").approvals.approval_continuation("subsequent")
         assert continuation is not None
         assert continuation.calls[0].decision.value == "approved"
         await owner.approvals.maintain_automatic_approvals()
-        assert await owner.approvals.is_terminal_approval_card(room_id="!room:test", card_event_id=receipt_event_id)
+        assert await card_is_terminal(owner.approvals, room_id="!room:test", card_event_id=receipt_event_id)
     finally:
         await manager.shutdown()
 
@@ -555,7 +567,7 @@ async def test_republished_receipt_aliases_remain_terminal(
                 authorize_responder=lambda _agent: True,
             )
             assert result.consumed is False
-            assert not await owner.approvals.is_terminal_approval_card(room_id="!room:test", card_event_id=event_id)
+            assert not await card_is_terminal(owner.approvals, room_id="!room:test", card_event_id=event_id)
         for event_id in (old_event_id, "$replacement-receipt"):
             before_consume = AsyncMock()
             result = await handle_card_response_for_test(
@@ -571,8 +583,9 @@ async def test_republished_receipt_aliases_remain_terminal(
             assert result.consumed is True
             before_consume.assert_awaited_once()
         await owner.approvals.maintain_automatic_approvals()
-        assert await owner.approvals.is_terminal_approval_card(room_id="!room:test", card_event_id=old_event_id)
-        assert await owner.approvals.is_terminal_approval_card(
+        assert await card_is_terminal(owner.approvals, room_id="!room:test", card_event_id=old_event_id)
+        assert await card_is_terminal(
+            owner.approvals,
             room_id="!room:test",
             card_event_id="$replacement-receipt",
         )
@@ -688,7 +701,8 @@ async def test_automatic_receipt_recovery_retires_only_acknowledged_payload(
         assert (
             await manager.cards.load_matrix_delivery(delivery_id="card-deferred", stage=DeliveryStage.INITIAL) is None
         )
-        assert await manager.cards.approvals.is_terminal_approval_card(
+        assert await card_is_terminal(
+            manager.cards.approvals,
             room_id="!room:test",
             card_event_id="$receipt-deferred",
         )
@@ -721,12 +735,13 @@ async def test_transport_refused_arguments_cannot_receive_automatic_approval(
         continuation = await journal.principal("agent@code").approvals.approval_continuation("refused")
         assert continuation is not None
         assert continuation.calls[0].decision is None
-        stored = await journal.principal("router@shared").approvals.pending_approval_card(
+        stored = await pending_card(
+            journal.principal("router@shared").approvals,
             room_id="!room:test",
             card_event_id="$card-refused",
         )
         assert stored is not None
-        assert "auto_approve_options" not in stored.card["content"]
+        assert "auto_approve_options" not in (await card_content(journal.principal("router@shared"), stored))
     finally:
         await manager.shutdown()
 
@@ -741,14 +756,19 @@ async def test_redacted_arguments_keep_timed_approval(
     manager = _manager(journal, tmp_path)
     try:
         card = await _card(journal, manager, "redacted", command="api_key=" + "sk-" + "Ab3Z" * 6)
-        stored = await journal.principal("router@shared").approvals.pending_approval_card(
+        stored = await pending_card(
+            journal.principal("router@shared").approvals,
             room_id="!room:test",
             card_event_id=card,
         )
         assert stored is not None
-        assert stored.card["content"]["arguments"] == {"command": "api_key=\u27e6secret-1\u27e7"}
-        assert stored.card["content"].get("approvable", True) is True
-        assert stored.card["content"]["auto_approve_options"] == list(AUTO_APPROVE_OPTIONS)
+        assert (await card_content(journal.principal("router@shared"), stored))["arguments"] == {
+            "command": "api_key=\u27e6secret-1\u27e7",
+        }
+        assert (await card_content(journal.principal("router@shared"), stored)).get("approvable", True) is True
+        assert (await card_content(journal.principal("router@shared"), stored))["auto_approve_options"] == list(
+            AUTO_APPROVE_OPTIONS,
+        )
 
         assert (await _approve(manager, card)).consumed
         grant = await journal.principal("router@shared").approvals.approval_grant_for_card(
@@ -783,13 +803,14 @@ async def test_approval_card_shows_commands_as_written(
     manager = _manager(journal, tmp_path)
     try:
         card = await _card(journal, manager, "visible", command=command)
-        stored = await journal.principal("router@shared").approvals.pending_approval_card(
+        stored = await pending_card(
+            journal.principal("router@shared").approvals,
             room_id="!room:test",
             card_event_id=card,
         )
         assert stored is not None
-        assert stored.card["content"]["arguments"] == {"command": shown}
-        assert stored.card["content"].get("approvable", True) is True
+        assert (await card_content(journal.principal("router@shared"), stored))["arguments"] == {"command": shown}
+        assert (await card_content(journal.principal("router@shared"), stored)).get("approvable", True) is True
     finally:
         await manager.shutdown()
 
@@ -807,14 +828,15 @@ async def test_arguments_beyond_redaction_depth_cannot_be_approved(
     manager = _manager(journal, tmp_path)
     try:
         card = await _card(journal, manager, "nested", command=nested)
-        stored = await journal.principal("router@shared").approvals.pending_approval_card(
+        stored = await pending_card(
+            journal.principal("router@shared").approvals,
             room_id="!room:test",
             card_event_id=card,
         )
         assert stored is not None
-        assert stored.card["content"]["approvable"] is False
-        assert "full_arguments" not in stored.card["content"]
-        assert "auto_approve_options" not in stored.card["content"]
+        assert (await card_content(journal.principal("router@shared"), stored))["approvable"] is False
+        assert "full_arguments" not in (await card_content(journal.principal("router@shared"), stored))
+        assert "auto_approve_options" not in (await card_content(journal.principal("router@shared"), stored))
 
         result = await _approve(manager, card, seconds=None)
 
@@ -876,7 +898,9 @@ async def test_terminal_calls_win_over_grants(
                 expected_runtime_generation=None,
             )
         else:
-            await journal.principal("router@shared").approvals.resolve_continuation_approval_card(
+            await resolve_card_event(
+                journal.principal("router@shared").approvals,
+                room_id="!room:test",
                 card_event_id=second,
                 requested_status=terminal,
                 reason="human declined",
@@ -1126,7 +1150,7 @@ async def test_grant_maintenance_removes_unused_retired_card_scope(
         await manager.recover_cards_on_startup()
         scopes = await journal.backend.read(
             lambda transaction: transaction.fetchall(
-                "SELECT delivery_id FROM approval_grant_cards WHERE principal_id = ?",
+                "SELECT delivery_id FROM approval_card_scopes WHERE principal_id = ?",
                 ("router@shared",),
             ),
         )
@@ -1581,6 +1605,7 @@ def _job_call(
     """Ask about one gated call the way a background job does, through a card the job owns."""
     return asyncio.create_task(
         manager.request_background_approval(
+            owner_kind="job",
             origin=BackgroundScriptToolOrigin(
                 run_id="tool-job:" + name,
                 call_id="call-" + name,
@@ -1602,10 +1627,11 @@ def _job_call(
     )
 
 
-async def _posted_job_card(journal: EventJournalStore, name: str) -> StoredApprovalCard:
+async def _posted_job_card(journal: EventJournalStore, name: str) -> ApprovalCardView:
     cards = journal.principal("router@shared")
     for _attempt in range(1000):
-        stored = await cards.approvals.pending_approval_card(
+        stored = await pending_card(
+            cards.approvals,
             room_id="!room:test",
             card_event_id=_job_card_event_id(name),
         )
@@ -1644,7 +1670,7 @@ async def test_job_card_offers_timed_approval_when_a_paused_reply_card_would(
     }.get(ineligible or "", {})
     waiting = [_job_call(manager, "first", **call)]
     try:
-        content = (await _posted_job_card(journal, "first")).card["content"]
+        content = await card_content(journal.principal("router@shared"), await _posted_job_card(journal, "first"))
         if ineligible is None:
             assert content["auto_approve_options"] == list(AUTO_APPROVE_OPTIONS)
             scope = content["approval_scope"]
@@ -1659,9 +1685,8 @@ async def test_job_card_offers_timed_approval_when_a_paused_reply_card_would(
             assert "approval_scope" not in content
             approver = str(call.get("approver", "@human:test"))
             assert not (await _approve(manager, _job_card_event_id("first"), sender=approver)).consumed
-            decision = await journal.principal("router@shared").approvals.background_approval_decision(
-                run_id="tool-job:first",
-                call_id="call-first",
+            decision = await journal.principal("router@shared").approvals.detached_decision(
+                CallKey.detached("tool-job:first", "call-first"),
             )
             assert decision is None
     finally:
@@ -1711,7 +1736,8 @@ async def test_timed_approval_on_a_job_card_covers_later_job_and_reply_calls(
         assert receipt.payload["approval_provenance"]["grant_id"] == grant.grant_id
         assert "auto_approve_options" not in receipt.payload
         assert (
-            await journal.principal("router@shared").approvals.pending_approval_card(
+            await pending_card(
+                journal.principal("router@shared").approvals,
                 room_id="!room:test",
                 card_event_id=_job_card_event_id("later"),
             )
@@ -1790,9 +1816,8 @@ async def test_job_call_outside_an_active_grant_still_asks(
         await _posted_job_card(journal, "asking")
         assert not asking.done()
         assert (
-            await journal.principal("router@shared").approvals.background_approval_decision(
-                run_id="tool-job:asking",
-                call_id="call-asking",
+            await journal.principal("router@shared").approvals.detached_decision(
+                CallKey.detached("tool-job:asking", "call-asking"),
             )
             is None
         )
@@ -1813,12 +1838,14 @@ async def test_ended_job_denies_its_open_timed_card(
     later = None
     try:
         stored = await _posted_job_card(journal, "ended")
-        assert stored.card["content"]["auto_approve_options"] == list(AUTO_APPROVE_OPTIONS)
+        assert (await card_content(journal.principal("router@shared"), stored))["auto_approve_options"] == list(
+            AUTO_APPROVE_OPTIONS,
+        )
         await _stop([ended])
         assert await manager.settle_pending_background_approvals("tool-job:ended", reason="The job ended.") == 1
         await _approve(manager, _job_card_event_id("ended"))
         cards = journal.principal("router@shared")
-        assert await cards.approvals.background_approval_decision(run_id="tool-job:ended", call_id="call-ended") == (
+        assert await cards.approvals.detached_decision(CallKey.detached("tool-job:ended", "call-ended")) == (
             BackgroundApprovalDecision(status="denied", reason="The job ended.")
         )
         assert (
