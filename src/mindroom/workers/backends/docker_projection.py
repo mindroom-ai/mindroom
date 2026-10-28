@@ -266,6 +266,8 @@ class DockerProjectionManager:
         self._runtime_paths = runtime_paths
         self._asset_hash_cache: dict[Path, tuple[str, str]] = {}
         self._config_data_cache: tuple[Path, str | None, dict[str, object], frozenset[Path]] | None = None
+        # The generated agents of the last config file that validated, kept while a rejected edit is on disk.
+        self._last_generated_agents: dict[str, object] = {}
 
     def config_mount_specs(
         self,
@@ -491,12 +493,14 @@ class DockerProjectionManager:
             # Owners' edits and created agents are built from the validated config, so take them from loading.
             config = Config.validate_with_runtime(config_data, paths, tolerate_plugin_load_errors=True)
         except (OSError, ValueError) as exc:
-            # A file the reload rejected must not stop every worker; generated agents wait for a fix, as at load.
-            logger.warning("Docker worker config left out generated agents", error=str(exc))
-            return data
-        agents = cast("dict[str, object]", config.runtime_model_dump().get("agents", {}))
-        generated = {name: agent for name, agent in agents.items() if config.generated_agent(name) is not None}
-        return {**data, "agents": {**cast("dict[str, object]", data.get("agents", {})), **generated}}
+            # The runtime keeps its last valid config when a reload rejects the file, so the workers do too.
+            logger.warning("Docker worker config kept the last valid generated agents", error=str(exc))
+        else:
+            agents = cast("dict[str, object]", config.runtime_model_dump().get("agents", {}))
+            generated = {name: agent for name, agent in agents.items() if config.generated_agent(name) is not None}
+            self._last_generated_agents = generated
+        authored = cast("dict[str, object]", data.get("agents", {}))
+        return {**data, "agents": {**authored, **copy.deepcopy(self._last_generated_agents)}}
 
     def _asset_contents_hash(self, host_path: Path) -> str:
         resolved_host_path = host_path.expanduser().resolve()
