@@ -390,7 +390,10 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["normal", "manual", "bounded", "custom_summary", "disabled", "scheduled"])
+@pytest.mark.parametrize(
+    "case",
+    ["normal", "manual", "bounded", "custom_summary", "disabled", "built_in", "scheduled"],
+)
 @pytest.mark.parametrize("authored_claude", [False, True])
 async def test_native_activation_respects_history_policy(
     tmp_path: Path,
@@ -399,13 +402,14 @@ async def test_native_activation_respects_history_policy(
     *,
     authored_claude: bool,
 ) -> None:
-    """Manual, bounded, custom-model, disabled, and scheduled policies keep portable semantics."""
+    """Manual, bounded, custom-model, disabled, built-in, and scheduled policies keep portable semantics."""
     compaction = CompactionConfig(threshold_tokens=120000, enabled=case != "disabled")
     if case == "custom_summary":
         compaction.model = "summary"
     config, paths = _make_config(
         tmp_path,
-        defaults_compaction=compaction,
+        # Under `defaults.compaction: null` the built-in config is enabled, but nobody authored it to compact.
+        defaults_compaction=None if case == "built_in" else compaction,
         num_history_runs=2 if case == "bounded" else None,
         models={
             "default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000),

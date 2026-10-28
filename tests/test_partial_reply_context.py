@@ -31,6 +31,7 @@ from mindroom.execution_preparation import (
     _PartialReplyKind,
     _sanitize_thread_history_for_replay,
 )
+from mindroom.history.conversation_text import utterances
 from mindroom.history.interrupted_replay import (
     InterruptedReplaySnapshot,
     _render_interrupted_replay_content,
@@ -56,6 +57,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.history_helpers import stored_turn
 from tests.identity_helpers import entity_ids
 from tests.streaming_helpers import FakeReplyRecords
 
@@ -435,6 +437,38 @@ class TestUnseenMessagesPartialReplies:
             event_id="e2",
         )
         assert context_messages[2].content == "Answer the new question."
+
+    def test_stored_turn_never_quotes_the_streaming_note_or_draft_as_someones_words(self) -> None:
+        """Memories, graph episodes, and compaction hooks skip both; a skill review reads them as MindRoom's."""
+        config = _make_config()
+        runtime_paths = runtime_paths_for(config)
+        agent_id = entity_ids(config, runtime_paths)["helper"].full_id
+        thread_history = [
+            _make_visible_message(
+                event_id="e1",
+                sender=agent_id,
+                body="Partial",
+                stream_status=STREAM_STATUS_STREAMING,
+            ),
+            _make_visible_message(event_id="e2", sender="@user:localhost", body="New question"),
+        ]
+        turn, _ = build_unseen_context_messages_for_test(
+            "Answer the new question.",
+            thread_history,
+            seen_event_ids=set(),
+            current_event_id="e2",
+            active_event_ids={"e1"},
+            response_sender_id=agent_id,
+            config=config,
+        )
+
+        run = stored_turn(turn, requester="@user:localhost")
+
+        assert [(said.kind, said.sender, said.unredacted) for said in utterances(run)] == [
+            ("said", "@user:localhost", "Answer the new question."),
+            ("reply", None, "Answered."),
+        ]
+        assert [said.kind for said in utterances(run, agent_work=True)] == ["runtime", "runtime", "said", "reply"]
 
     def test_replay_fallback_sanitizer_matches_unseen_context_rules(self) -> None:
         """Full-thread fallback replay should not reintroduce synthetic notices or stale partial replies."""

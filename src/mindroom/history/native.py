@@ -42,7 +42,7 @@ def configure_native_history(
     hard_budget = plan.hard_replay_budget_tokens
     enabled = (
         allowed
-        and plan.authored_compaction_enabled
+        and plan.automatic_compaction
         and not plan.explicit_compaction_model
         and history_settings.replays_whole_history
         and threshold is not None

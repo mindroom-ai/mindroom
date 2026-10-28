@@ -1,6 +1,6 @@
 """The tool values the agent loop sees: ``ToolFunction``, the toolkits that group them, and the values tools return.
 
-They import no Agno module; ``agno_toolkits`` builds them from Agno's tool objects.
+They import no Agno module; ``agno_toolkits`` builds them from Agno's tool objects and from owned toolkits.
 """
 
 from __future__ import annotations
@@ -42,9 +42,10 @@ class ToolFunction:
     ``external_execution_silent`` marks an externally executed call whose pause the run reports without text.
     ``injected_params`` maps each entrypoint parameter the framework supplies at call time to what it receives; the
     model never sees one, and its model-sent values are dropped unless it is a media name the schema declares.
-    ``entrypoint_processed`` marks a function that does not set ``skip_entrypoint_processing`` (MCP tools and a
-    toolkit's ``@tool`` methods set it); realtime calls run Agno's entrypoint processing on such a function a second
-    time, which closes its object schemas (see the TODO in ``matrix_rtc/call_tools.py``).
+    ``entrypoint_processed`` marks a function whose schema was derived from its signature: an owned one, or an Agno
+    one that does not set ``skip_entrypoint_processing`` (MCP tools and an Agno toolkit's ``@tool`` methods set it);
+    realtime calls run Agno's entrypoint processing on such a function a second time, which closes its object schemas
+    (see the TODO in ``matrix_rtc/call_tools.py``).
     ``actor_state`` is what an Agno toolkit keeps on its injected agent or team (``ToolCallActor``): one dict per
     adapted toolkit, shared by its functions and calls and never stored.
     ``middleware`` is the function's own policy, which every call of it runs innermost, inside whatever policy the
@@ -102,7 +103,7 @@ class ToolFunction:
 
 @dataclass(frozen=True, slots=True)
 class AdaptedToolkit:
-    """One Agno toolkit as the agent loop sees it; ``instructions`` is what the prompt shows of its instructions.
+    """One toolkit as the agent loop sees it; ``instructions`` is what the prompt shows of its instructions.
 
     The prompt shows them whenever the toolkit offers a function, unless the toolkit is deferred, whose instructions
     tool search shows instead. ``guidance`` is the toolkit's instructions whether or not the prompt shows them, which
