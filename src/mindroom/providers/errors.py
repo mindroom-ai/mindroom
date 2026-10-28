@@ -150,9 +150,6 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
     name the failure as the provider does, such as ``rate_limit_error`` or ``server_error``; the error keeps ``code``
     as its ``provider_code``. ``retry_after_seconds`` is the response's ``Retry-After`` hint.
 
-    Before any rule below, a name that says the account has no credit left or reached a spend or usage limit makes a
-    final ``ProviderError`` marked ``QUOTA_EXHAUSTED``, whatever its status: no wait lets the request through.
-
     1. A 429 status or a rate-limit name is ``RateLimited``, unless its wording says the request alone is larger than
        the account's tokens-per-minute limit, which makes it ``ContextWindowExceeded``: only a smaller request passes.
     2. A transient status, 408, 409, or any 5xx, is ``ProviderUnavailable``.
@@ -164,6 +161,9 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
        ``AuthenticationFailed``.
     7. An invalid-request status is ``InvalidRequest``.
     8. Anything else, such as a 403 or an unknown status, is a final ``ProviderError``.
+
+    A name that says the account has no credit left or reached a spend or usage limit outranks every rule: whatever its
+    status, it is a final ``ProviderError`` marked ``QUOTA_EXHAUSTED``, since no wait lets the request through.
     """
     status = status_code if status_code is not None else (int(code) if code is not None and code.isdecimal() else None)
     names = {code, error_type}
