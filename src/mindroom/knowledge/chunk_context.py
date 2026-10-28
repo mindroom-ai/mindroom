@@ -67,7 +67,7 @@ async def chunk_contexts(
                 _PROMPT.format(chunk=chunk),
                 instructions=(_DOCUMENT.format(document=window),),
             )
-        await record_system_usage(response.record, runtime_paths=runtime_paths, kind="knowledge_chunk_context")
+        await record_system_usage(response.usage, runtime_paths=runtime_paths, kind="knowledge_chunk_context")
         return str(response.content).strip()
 
     # The first call runs alone, so providers that cache prompt prefixes can serve the shared document to the rest.

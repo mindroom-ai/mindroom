@@ -88,7 +88,7 @@ async def suggest_responder(
             instructions=["Route messages to appropriate agents or teams"],
             schema=_RoutingSuggestion,
         )
-        await record_system_usage(result.record, runtime_paths=runtime_paths, kind="routing")
+        await record_system_usage(result.usage, runtime_paths=runtime_paths, kind="routing")
         suggestion = result.content
         if not isinstance(suggestion, _RoutingSuggestion):
             logger.warning(

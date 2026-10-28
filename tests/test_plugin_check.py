@@ -183,6 +183,55 @@ def test_check_plugin_accepts_skill_only_plugin_and_keeps_builtin_tools(tmp_path
     assert "calculator" in TOOL_REGISTRY
 
 
+def _tool_plugin(root: Path, factory: str) -> Path:
+    """Write a plugin whose tools module registers ``factory`` as the tool ``wrapper``."""
+    return _write_plugin(
+        root,
+        manifest={"name": "wrapper", "tools_module": "tools.py"},
+        modules={
+            "tools.py": (
+                "from mindroom.plugin_api import ToolCategory, ToolFileAccess, register_tool_with_metadata\n"
+                "@register_tool_with_metadata(\n"
+                "    name='wrapper',\n"
+                "    file_access=ToolFileAccess.UNCONFINED,\n"
+                "    display_name='Wrapper',\n"
+                "    description='Wrapper test tool',\n"
+                "    category=ToolCategory.DEVELOPMENT,\n"
+                ")\n"
+                f"{factory}"
+            ),
+        },
+    )
+
+
+def test_check_plugin_rejects_an_agno_mcp_toolkit_and_names_mcp_servers(tmp_path: Path) -> None:
+    """MindRoom runs MCP servers only from ``mcp_servers:``, so a plugin toolkit wrapping Agno ``MCPTools`` fails."""
+    plugin_root = _tool_plugin(
+        tmp_path / "plugin",
+        "def wrapper_tools():\n"
+        "    from agno.tools.mcp import MCPTools\n"
+        "    class FilesystemMCPTools(MCPTools):\n"
+        "        pass\n"
+        "    return FilesystemMCPTools\n",
+    )
+    original_tool_metadata = TOOL_METADATA.copy()
+
+    with pytest.raises(ValueError, match=r"'wrapper' subclasses Agno MCPTools.*mcp_servers:"):
+        check_plugin(plugin_root)
+
+    assert original_tool_metadata == TOOL_METADATA
+
+
+def test_check_plugin_accepts_a_tool_whose_factory_imports_a_package_installed_later(tmp_path: Path) -> None:
+    """A factory may import a dependency the user installs after the plugin, so the check cannot inspect its class."""
+    plugin_root = _tool_plugin(
+        tmp_path / "plugin",
+        "def wrapper_tools():\n    import package_that_does_not_exist\n    return package_that_does_not_exist.Tools\n",
+    )
+
+    assert check_plugin(plugin_root).tool_names == ("wrapper",)
+
+
 def test_plugin_fleet_registry_is_sorted_and_unique() -> None:
     """The checked-in fleet registry should remain deterministic and collision-free."""
     registry_path = Path(__file__).resolve().parents[1] / ".github" / "plugin-fleet.json"

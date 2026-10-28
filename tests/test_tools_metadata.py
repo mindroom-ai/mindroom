@@ -25,6 +25,7 @@ import agno.tools.crawl4ai as agno_crawl4ai
 import httpx
 import pytest
 from agno.tools import Toolkit
+from agno.tools.mcp import MCPTools
 from aiohttp import web
 from crawl4ai.models import CrawlResult, MarkdownGenerationResult
 from playwright.async_api import Error as PlaywrightError
@@ -63,6 +64,7 @@ from mindroom.tool_system.registry_state import (
     PLUGIN_MODULE_PREFIX,
     TOOL_METADATA,
     TOOL_REGISTRY,
+    ToolMetadataValidationError,
     capture_tool_registry_snapshot,
     reconcile_dynamic_tool_state,
     restore_tool_registry_snapshot,
@@ -1317,6 +1319,64 @@ def test_get_tool_by_name_does_not_infer_hidden_constructor_kwargs(tmp_path: Pat
             runtime_overrides={"runtime_paths": runtime_paths},
             worker_target=None,
         )
+
+
+def test_get_tool_by_name_refuses_an_agno_mcp_toolkit_and_names_mcp_servers(tmp_path: Path) -> None:
+    """MindRoom runs MCP servers only from ``mcp_servers:``, so a toolkit wrapping Agno ``MCPTools`` is never built."""
+    tool_name = "test_mcp_wrapper"
+    constructed: list[str] = []
+
+    class ServerTools(MCPTools):
+        def __init__(self) -> None:
+            constructed.append(tool_name)
+            super().__init__(command="true")
+
+    @register_tool_with_metadata(
+        name=tool_name,
+        file_access=ToolFileAccess.UNCONFINED,
+        display_name="MCP Wrapper",
+        description="Test-only wrapper around an Agno MCP toolkit.",
+        category=ToolCategory.DEVELOPMENT,
+    )
+    def _mcp_wrapper_factory() -> type[ServerTools]:
+        return ServerTools
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    with pytest.raises(ToolMetadataValidationError, match=r"'test_mcp_wrapper' subclasses Agno MCPTools.*mcp_servers:"):
+        get_tool_by_name(tool_name, runtime_paths, worker_target=None)
+    assert constructed == []
+
+
+def test_get_tool_by_name_builds_a_plugin_toolkit_that_only_shares_the_mcp_tools_name(tmp_path: Path) -> None:
+    """Only Agno's own ``MCPTools`` is refused; a plugin's unrelated toolkit with that class name still builds."""
+    tool_name = "test_mcp_named_toolkit"
+
+    class MCPTools(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name=tool_name, tools=[])
+
+    @register_tool_with_metadata(
+        name=tool_name,
+        file_access=ToolFileAccess.NONE,
+        display_name="MCP Named Toolkit",
+        description="Test-only toolkit whose class name matches Agno's MCP toolkit.",
+        category=ToolCategory.DEVELOPMENT,
+    )
+    def _mcp_named_factory() -> type[MCPTools]:
+        return MCPTools
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    assert get_tool_by_name(tool_name, runtime_paths, worker_target=None).name == tool_name
 
 
 def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> None:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import sqlite3
 from typing import TYPE_CHECKING
 
 import pytest
@@ -13,15 +12,14 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.helper_usage import record_system_usage
-from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
-from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
+from mindroom.llm.usage import HelperUsage, MessageMetrics, RequestUsage, RunMetrics, TokenCounts
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.stats import collect_admin_usage, collect_private_usage, collect_self_usage
 from mindroom.usage.stats_storage import discover_admin_usage_sources
-from mindroom.usage.storage import SYSTEM_USAGE_ENTITY, quote_identifier
+from mindroom.usage.storage import SYSTEM_USAGE_ENTITY
 from tests.conftest import persist_session, seed_session_metrics
 
 if TYPE_CHECKING:
@@ -29,7 +27,7 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.asyncio
-async def test_system_usage_is_content_free_idempotent_and_does_not_create_conversation_counts(tmp_path: Path) -> None:
+async def test_system_usage_is_idempotent_and_does_not_create_conversation_counts(tmp_path: Path) -> None:
     """Count one metered system request while preserving ordinary conversation counts."""
     config = Config(agents={"code": AgentConfig(display_name="Code")})
     paths = resolve_runtime_paths(
@@ -46,28 +44,23 @@ async def test_system_usage_is_content_free_idempotent_and_does_not_create_conve
         for source in discover_admin_usage_sources(config=config, runtime_paths=paths)
     )
 
-    response = RunRecord(
+    usage = HelperUsage(
         run_id="stable-run",
-        session_id="secret-session",
-        user_id="secret-user",
-        content="secret output",
         model="metered-model",
-        model_provider="test-provider",
+        provider="test-provider",
         created_at=1_723_837_600,
         metrics=RunMetrics(tokens=TokenCounts(input_tokens=7, output_tokens=3, cache_read_tokens=2, total_tokens=10)),
-        messages=[
-            Message(
-                role="assistant",
-                content="secret message",
+        requests=(
+            RequestUsage(
                 created_at=1_723_837_600,
                 metrics=MessageMetrics(
                     tokens=TokenCounts(input_tokens=7, output_tokens=3, cache_read_tokens=2, total_tokens=10),
                 ),
             ),
-        ],
+        ),
     )
-    await record_system_usage(response, runtime_paths=paths, kind="routing")
-    await record_system_usage(response, runtime_paths=paths, kind="routing")
+    await record_system_usage(usage, runtime_paths=paths, kind="routing")
+    await record_system_usage(usage, runtime_paths=paths, kind="routing")
     system_only = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert system_only.totals.total_tokens == 10
     assert system_only.session_count == 0
@@ -131,16 +124,6 @@ async def test_system_usage_is_content_free_idempotent_and_does_not_create_conve
     private_report = collect_private_usage(requester_id="@person:example.test", config=config, runtime_paths=paths)
     assert private_report.totals.total_tokens == 0
 
-    db = paths.storage_root / "system" / "sessions" / "system.db"
-    with sqlite3.connect(db) as connection:
-        tables = [name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
-        persisted = " ".join(
-            str(row)
-            for table in tables
-            for row in connection.execute(f"SELECT * FROM {quote_identifier(table)}")  # noqa: S608
-        )
-    assert "secret" not in persisted
-
 
 @pytest.mark.asyncio
 async def test_system_usage_storage_failure_logs_without_content_but_cancellation_propagates(
@@ -153,9 +136,10 @@ async def test_system_usage_storage_failure_logs_without_content_but_cancellatio
         storage_path=tmp_path / "storage",
         process_env={},
     )
-    response = RunRecord(
+    usage = HelperUsage(
         run_id="paid",
-        content="PRIVATE RESULT",
+        model=None,
+        provider=None,
         metrics=RunMetrics(tokens=TokenCounts(total_tokens=1)),
     )
     logged: list[tuple[str, dict[str, object]]] = []
@@ -171,7 +155,7 @@ async def test_system_usage_storage_failure_logs_without_content_but_cancellatio
         raise OSError(private_detail)
 
     monkeypatch.setattr(helper_usage, "run_session_storage_operation", fail_write)
-    await record_system_usage(response, runtime_paths=paths, kind="routing")
+    await record_system_usage(usage, runtime_paths=paths, kind="routing")
     assert logged == [("system_usage_recording_failed", {"kind": "routing", "error_type": "OSError"})]
 
     async def cancel_write(*_args: object, **_kwargs: object) -> None:
@@ -179,4 +163,4 @@ async def test_system_usage_storage_failure_logs_without_content_but_cancellatio
 
     monkeypatch.setattr(helper_usage, "run_session_storage_operation", cancel_write)
     with pytest.raises(asyncio.CancelledError):
-        await record_system_usage(response, runtime_paths=paths, kind="routing")
+        await record_system_usage(usage, runtime_paths=paths, kind="routing")

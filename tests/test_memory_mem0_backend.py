@@ -26,6 +26,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder, get_embedder_failure
 from mindroom.embeddings.errors import EmbedderRequestError, embedder_failure_is_transient, openai_embedder_error
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context
+from mindroom.llm.messages import ModelProvenance
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.memory import (
     add_agent_memory,
@@ -38,7 +39,7 @@ from mindroom.memory import (
     update_agent_memory,
 )
 from mindroom.memory._mem0_backend import Mem0MemoryBackend
-from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture, mem0_usage_run
+from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture, mem0_usage
 from mindroom.memory.config import _Mem0StrictOpenAIEmbedder
 from mindroom.redaction import REDACTED, REDACTION_FAILED
 from mindroom.tool_system.worker_routing import (
@@ -55,7 +56,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
-    from mindroom.llm.runs import RunRecord
+    from mindroom.llm.usage import HelperUsage
 
 
 async def _search_memory_results(*args: object, **kwargs: object) -> list:
@@ -804,11 +805,11 @@ def _mem0_memory_reporting_usage(
     return from_config
 
 
-def _recorder() -> tuple[list[tuple[RunRecord, dict[str, object]]], Callable[..., Awaitable[None]]]:
-    recorded: list[tuple[RunRecord, dict[str, object]]] = []
+def _recorder() -> tuple[list[tuple[HelperUsage, dict[str, object]]], Callable[..., Awaitable[None]]]:
+    recorded: list[tuple[HelperUsage, dict[str, object]]] = []
 
-    async def record(response: RunRecord, **kwargs: object) -> None:
-        recorded.append((response, kwargs))
+    async def record(usage: HelperUsage, **kwargs: object) -> None:
+        recorded.append((usage, kwargs))
 
     return recorded, record
 
@@ -839,18 +840,15 @@ async def test_conversation_memory_extraction_records_its_token_usage(storage_pa
         "memory_extraction",
         "@alice:example.org",
     )
-    assert run.metrics is not None
     assert (run.metrics.tokens.input_tokens, run.metrics.tokens.output_tokens, run.metrics.tokens.total_tokens) == (
         120,
         30,
         150,
     )
     # Each extraction call is one request in usage reports.
-    [message] = run.messages or []
-    assert message.role == "assistant"
-    assert message.metrics is not None
-    assert message.metrics.tokens.total_tokens == 150
-    assert message.provider_data == {"mindroom_model": {"id": "gpt-6-luna", "provider": "OpenAI Chat"}}
+    [request] = run.requests
+    assert request.metrics.tokens.total_tokens == 150
+    assert request.model == ModelProvenance(model_id="gpt-6-luna", provider="OpenAI Chat")
 
 
 @pytest.mark.asyncio
@@ -877,10 +875,9 @@ async def test_team_memory_extraction_counts_as_internal_usage(storage_path: Pat
     [(run, kwargs)] = recorded
     # Internal work names no requester, like the team's routing and mode decisions.
     assert kwargs == {"runtime_paths": runtime_paths_for(config), "kind": "memory_extraction"}
-    assert run.metrics is not None
     # Team memory is extracted once into each store it is kept in.
     assert run.metrics.tokens.total_tokens == 150 * fake_stores.call_count
-    assert len(run.messages or []) == fake_stores.call_count
+    assert len(run.requests) == fake_stores.call_count
 
 
 @pytest.mark.asyncio
@@ -915,7 +912,6 @@ async def test_extraction_usage_is_recorded_when_a_later_store_fails(storage_pat
         )
 
     [(run, _kwargs)] = recorded
-    assert run.metrics is not None
     assert run.metrics.tokens.total_tokens == 150
 
 
@@ -957,7 +953,6 @@ async def test_memory_tool_additions_record_usage_for_the_reply_that_made_them(
         "memory_extraction",
         "@alice:example.org",
     )
-    assert run.metrics is not None
     assert run.metrics.tokens.total_tokens == 150
 
 
@@ -974,7 +969,6 @@ async def test_memory_addition_outside_a_reply_counts_as_internal_usage(storage_
 
     [(run, kwargs)] = recorded
     assert kwargs["kind"] == "memory_extraction"
-    assert run.metrics is not None
     assert run.metrics.tokens.total_tokens == 150
 
 
@@ -996,7 +990,6 @@ async def test_memory_addition_records_usage_when_storing_the_facts_fails(storag
         await add_agent_memory("Atlas ships Friday.", "general", storage_path, config, runtime_paths_for(config))
 
     [(run, _kwargs)] = recorded
-    assert run.metrics is not None
     assert run.metrics.tokens.total_tokens == 150
 
 
@@ -1093,10 +1086,9 @@ def test_each_provider_reports_its_extraction_tokens(
     with counted_mem0_usage() as calls:
         call()
 
-    run = mem0_usage_run(calls)
-    assert run is not None
-    assert run.metrics is not None
-    metrics = run.metrics
+    usage = mem0_usage(calls)
+    assert usage is not None
+    metrics = usage.metrics
     assert (
         metrics.tokens.input_tokens,
         metrics.tokens.output_tokens,
@@ -1104,6 +1096,27 @@ def test_each_provider_reports_its_extraction_tokens(
         metrics.tokens.cache_write_tokens,
         metrics.tokens.reasoning_tokens,
     ) == expected
+
+
+def test_extraction_usage_is_dated_by_its_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each call is dated when it answered, and the write's usage when its first call did, not when it is recorded."""
+    answered = iter([1_700_000_000.5, 1_700_000_007.5])
+    monkeypatch.setattr("mindroom.memory._mem0_usage.time", lambda: next(answered))
+    completion = _chat_completion(10, 2)
+    llm = SimpleNamespace(
+        config=SimpleNamespace(model="extractor"),
+        client=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **_: completion))),
+    )
+    install_mem0_usage_capture(llm, "openai")
+
+    with counted_mem0_usage() as calls:
+        llm.client.chat.completions.create()
+        llm.client.chat.completions.create()
+
+    usage = mem0_usage(calls)
+    assert usage is not None
+    assert usage.created_at == 1_700_000_000
+    assert [request.created_at for request in usage.requests] == [1_700_000_000, 1_700_000_007]
 
 
 def test_calls_without_reported_usage_record_nothing() -> None:
@@ -1118,7 +1131,7 @@ def test_calls_without_reported_usage_record_nothing() -> None:
     with counted_mem0_usage() as calls:
         llm.client.chat.completions.create()
 
-    assert mem0_usage_run(calls) is None
+    assert mem0_usage(calls) is None
 
 
 @pytest.mark.asyncio

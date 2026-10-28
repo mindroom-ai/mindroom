@@ -8,19 +8,19 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
+from time import time
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from mindroom.llm.messages import Message, model_provenance, read_model_provenance
-from mindroom.llm.runs import RunRecord
-from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
+from mindroom.llm.messages import ModelProvenance
+from mindroom.llm.usage import HelperUsage, MessageMetrics, RequestUsage, RunMetrics, TokenCounts
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-# One assistant message per extraction call of the memory write in progress, so each call is its own request in
-# usage reports; Mem0 runs its prompts in worker threads, which inherit this context.
-_calls: ContextVar[list[Message] | None] = ContextVar("mem0_usage_calls", default=None)
+# The usage of each extraction call of the memory write in progress, so each call is its own request in usage
+# reports; Mem0 runs its prompts in worker threads, which inherit this context.
+_calls: ContextVar[list[RequestUsage] | None] = ContextVar("mem0_usage_calls", default=None)
 
 # The usage name budgets price each Mem0 client's route by; Mem0's OpenAI client calls Chat Completions.
 _PROVIDER_LABELS = {"openai": "OpenAI Chat", "openrouter": "OpenRouter", "anthropic": "Anthropic", "ollama": "Ollama"}
@@ -59,15 +59,14 @@ def _ollama_usage(response: Any) -> MessageMetrics:  # noqa: ANN401 - an Ollama 
 
 def install_mem0_usage_capture(llm: Any, provider: str) -> None:  # noqa: ANN401 - a Mem0 LLM of the configured provider
     """Read token usage off the client a newly built Mem0 LLM of the MindRoom ``provider`` calls."""
-    model_id, label = str(llm.config.model), _PROVIDER_LABELS.get(provider, provider)
+    model = ModelProvenance(model_id=str(llm.config.model), provider=_PROVIDER_LABELS.get(provider, provider))
 
     def counted(call: Callable[..., Any], read: Callable[[Any], MessageMetrics]) -> Callable[..., Any]:
         def counted_call(*args: object, **kwargs: object) -> object:
             response = call(*args, **kwargs)
             calls = _calls.get()
             if calls is not None and (metrics := read(response)).tokens.total_tokens:
-                provenance = model_provenance(model_id, label)
-                calls.append(Message(role="assistant", metrics=metrics, provider_data=provenance))
+                calls.append(RequestUsage(created_at=int(time()), metrics=metrics, model=model))
             return response
 
         return counted_call
@@ -82,9 +81,9 @@ def install_mem0_usage_capture(llm: Any, provider: str) -> None:  # noqa: ANN401
 
 
 @contextmanager
-def counted_mem0_usage() -> Iterator[list[Message]]:
+def counted_mem0_usage() -> Iterator[list[RequestUsage]]:
     """Collect the usage of every Mem0 extraction call made inside this block."""
-    calls: list[Message] = []
+    calls: list[RequestUsage] = []
     token = _calls.set(calls)
     try:
         yield calls
@@ -92,21 +91,21 @@ def counted_mem0_usage() -> Iterator[list[Message]]:
         _calls.reset(token)
 
 
-def mem0_usage_run(calls: list[Message]) -> RunRecord | None:
-    """Return the calls as one run to record, or None when none reported tokens."""
+def mem0_usage(calls: list[RequestUsage]) -> HelperUsage | None:
+    """Return the calls' usage to record, or None when none reported tokens."""
     if not calls:
         return None
-    # One memory write runs every call on the configured memory model, which each call's message records.
-    model = read_model_provenance(calls[0].provider_data)
+    # One memory write runs every call on the configured memory model, which each call records.
+    model = calls[0].model
     assert model is not None
     metrics = RunMetrics()
     for call in calls:
         metrics.add(call.metrics, model_id=model.model_id, provider=model.provider)
-    return RunRecord(
+    return HelperUsage(
         run_id=uuid4().hex,
         model=model.model_id,
-        model_provider=model.provider,
-        created_at=calls[0].created_at,
+        provider=model.provider,
         metrics=metrics,
-        messages=calls,
+        requests=tuple(calls),
+        created_at=calls[0].created_at,
     )
