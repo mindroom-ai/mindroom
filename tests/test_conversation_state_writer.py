@@ -315,6 +315,8 @@ async def test_session_started_fires_once_after_the_reply_whose_write_created_it
         "$thread",
     )
     assert (started.agent_name, started.correlation_id) == ("test_agent", "corr-1")
+    runtime_context = reply.tool_dispatch.runtime_context
+    assert (started.config, started.runtime_paths) == (runtime_context.config, runtime_context.runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -329,6 +331,20 @@ async def test_session_started_names_the_team_of_a_team_session(tmp_path: Path) 
     [started] = seen
     assert isinstance(started, SessionHookContext)
     assert (started.scope.key, started.agent_name) == ("team:crew", "crew")
+
+
+@pytest.mark.asyncio
+async def test_session_started_names_the_running_agent_of_an_agent_session(tmp_path: Path) -> None:
+    """An agent reply's hooks see the agent the reply runs as, not the agent scope's ID."""
+    seen: list[SessionHookContext | str] = []
+    reply, store = _reply(tmp_path, seen, scope=HistoryScope(kind="agent", scope_id="other_agent"))
+
+    async with session_started_on_creation(reply, correlation_id="corr-1", logger=get_logger(__name__)):
+        store.update_metadata(_first_session(reply), lambda _metadata: {"k": "v"})
+
+    [started] = seen
+    assert isinstance(started, SessionHookContext)
+    assert (started.scope.key, started.agent_name) == ("agent:other_agent", "test_agent")
 
 
 @pytest.mark.asyncio
