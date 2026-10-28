@@ -215,7 +215,7 @@ it("leaves a modified click on a tab to the browser", async () => {
 });
 
 it("adds no history entry for the page already open", async () => {
-  await loadEntry("/connections");
+  await loadEntry("/connections?notice=admin-only");
   await screen.findByRole("heading", { name: "Your MindRoom connections" });
   const entries = window.history.length;
   fireEvent.click(await screen.findByRole("link", { name: "Agents" }));

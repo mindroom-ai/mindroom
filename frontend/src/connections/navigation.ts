@@ -17,7 +17,8 @@ export function openInPage(event: MouseEvent<HTMLAnchorElement>) {
     return;
   event.preventDefault();
   // A second entry for the open page would only make Back seem to do nothing once.
-  if (event.currentTarget.href === window.location.href) return;
+  if (new URL(event.currentTarget.href).pathname === window.location.pathname)
+    return;
   window.history.pushState(null, "", event.currentTarget.href);
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
