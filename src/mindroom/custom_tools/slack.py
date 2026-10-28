@@ -40,7 +40,6 @@ from mindroom.slack.api import (
     reply_root,
     slack_call,
     slack_http_client,
-    slack_permalink,
 )
 from mindroom.slack.app import SLACK_APP_NOT_CONFIGURED, SlackAppCredentials, load_slack_app, slack_bot_identity
 from mindroom.slack.files import MAX_FILE_BYTES, SlackFileError, fetch_file, save_download, upload_file
@@ -224,6 +223,18 @@ def _watching_message(watch: SlackWatch) -> str:
     return message
 
 
+def _project_channel_refusal(channel_id: str, info: Mapping[str, Any]) -> str | None:
+    """Return why a project agent may not use a listed conversation, or None for a channel the app is a member of.
+
+    Only `is_member` proves membership: the bot can read a public channel's info without being in it.
+    """
+    if info.get("is_im") or info.get("is_mpim"):
+        return _NOT_PROJECT_CHANNEL
+    if info.get("is_member") is not True:
+        return f"Invite the MindRoom app to <#{channel_id}>"
+    return None
+
+
 def _name_matches(query: str, *names: object) -> bool:
     needle = query.strip().casefold()
     return not needle or any(isinstance(name, str) and needle in name.casefold() for name in names)
@@ -237,13 +248,17 @@ async def _user_name(session: _Session, user_id: str) -> str | None:
     return slack_display_name(json_object(body, "user")) or None
 
 
+async def _user_names(session: _Session, user_ids: Collection[str]) -> dict[str, str | None]:
+    """Look up each person's Slack name once; a person Slack does not show has no name."""
+    unique = sorted(set(user_ids))
+    return dict(zip(unique, await asyncio.gather(*(_user_name(session, user_id) for user_id in unique)), strict=True))
+
+
 async def _messages(session: _Session, located: list[tuple[str, dict[str, Any]]]) -> list[dict[str, object]]:
     """Render each `(channel_id, message)` with its author's name and its permalink."""
-    user_ids = sorted(
-        {message["user"] for _, message in located if isinstance(message.get("user"), str) and message["user"]},
-    )
-    names = dict(
-        zip(user_ids, await asyncio.gather(*(_user_name(session, user_id) for user_id in user_ids)), strict=True),
+    names = await _user_names(
+        session,
+        [message["user"] for _, message in located if isinstance(message.get("user"), str) and message["user"]],
     )
     workspace_url = await session.workspace_url()
     return [render_message(channel_id, message, workspace_url, names) for channel_id, message in located]
@@ -329,22 +344,17 @@ def _recent_entry(
     names: Mapping[str, str | None],
 ) -> dict[str, object]:
     """Return one conversation and its latest message; a direct message is named after the other person."""
-    channel_id, ts, kind = channel["id"], message["ts"], _conversation_kind(channel)
+    kind = _conversation_kind(channel)
     partner = channel.get("user")
     name = (names.get(partner) or partner) if kind == "dm" and isinstance(partner, str) else channel.get("name")
-    thread_ts = message.get("thread_ts")
-    text = message.get("text")
+    latest = render_message(channel["id"], message, workspace_url, names)
+    text = latest["text"]
     return {
-        "channel_id": channel_id,
+        "channel_id": channel["id"],
         "kind": kind,
         "name": name,
-        "latest_ts": ts,
-        "latest_permalink": slack_permalink(
-            workspace_url,
-            channel_id,
-            ts,
-            thread_ts=thread_ts if isinstance(thread_ts, str) else None,
-        ),
+        "latest_ts": latest["ts"],
+        "latest_permalink": latest["permalink"],
         "latest_text": text[:_LATEST_TEXT_CHARACTERS] if isinstance(text, str) else "",
     }
 
@@ -493,13 +503,9 @@ class SlackTools(Toolkit):
             return
         if channel_id not in self.project_channels:
             raise _SlackRefusalError(_NOT_PROJECT_CHANNEL)
-        # Only `is_member` proves membership: the bot can read a public channel's info without being in it.
-        info = await _channel_info(session, channel_id)
-        if info.get("is_im") or info.get("is_mpim"):
-            raise _SlackRefusalError(_NOT_PROJECT_CHANNEL)
-        if info.get("is_member") is not True:
-            msg = f"Invite the MindRoom app to <#{channel_id}>"
-            raise _SlackRefusalError(msg)
+        refusal = _project_channel_refusal(channel_id, await _channel_info(session, channel_id))
+        if refusal is not None:
+            raise _SlackRefusalError(refusal)
 
     async def _destination(self, session: _Session, parsed: SlackTarget) -> str:
         """Return the conversation a post or upload goes to; a user ID opens a direct message, in personal mode only."""
@@ -655,7 +661,7 @@ class SlackTools(Toolkit):
         joined = []
         for channel_id in sorted(self.project_channels):
             info = await _channel_info(session, channel_id)
-            if info.get("is_member") is True and not (info.get("is_im") or info.get("is_mpim")):
+            if _project_channel_refusal(channel_id, info) is None:
                 joined.append({**info, "id": channel_id})
         return joined, True
 
@@ -698,19 +704,13 @@ class SlackTools(Toolkit):
                     active.append((channel, message))
             # Every ts has 10 digits before its point, so text order is time order.
             active = sorted(active, key=lambda entry: entry[1]["ts"], reverse=True)[:size]
-            partners = sorted(
-                {
+            names = await _user_names(
+                session,
+                [
                     channel["user"]
                     for channel, _ in active
                     if _conversation_kind(channel) == "dm" and isinstance(channel.get("user"), str)
-                },
-            )
-            names = dict(
-                zip(
-                    partners,
-                    await asyncio.gather(*(_user_name(session, user_id) for user_id in partners)),
-                    strict=True,
-                ),
+                ],
             )
             workspace_url = await session.workspace_url()
             fields: dict[str, object] = {
