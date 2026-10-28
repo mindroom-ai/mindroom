@@ -3,7 +3,8 @@ import { ChevronDown } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import mindroomLogo from "../../../assets/logo/logo-mark-animated.svgz?url";
-import { requestConnection } from "./request";
+import { openInPage } from "./navigation";
+import { getSignedInUser, requestConnection } from "./request";
 import type { ConnectionsIdentity } from "./types";
 
 type Page = "agents" | "keys";
@@ -16,6 +17,10 @@ const LINKS: readonly { page: Page; href: string; label: string }[] = [
 /** What a non-administrator turned away from the dashboard is told on arriving, with `notice=admin-only`. */
 const ADMIN_ONLY_NOTICE =
   "The dashboard is for administrators. Manage your agents' keys and accounts here.";
+
+// The identity last loaded, which a switch to the other page shows at once so the tabs and the account do not blink out.
+// The account is fixed for the page's lifetime, so only an identity loaded for another sign-in, as in another test, fails the check.
+let knownIdentity: ConnectionsIdentity | null = null;
 
 const dismissedKey = (id: string) => `connections-notice-dismissed:${id}`;
 
@@ -53,7 +58,9 @@ export function ConnectionsHeader({
   howItWorks?: ReactNode;
   children: ReactNode;
 }) {
-  const [identity, setIdentity] = useState<ConnectionsIdentity | null>(null);
+  const [identity, setIdentity] = useState(() =>
+    knownIdentity?.matrix_user_id === getSignedInUser() ? knownIdentity : null,
+  );
   const [explaining, setExplaining] = useState(false);
   const [notice, setNotice] = useState(noticeFromAddress);
   const links = LINKS.filter(
@@ -68,6 +75,7 @@ export function ConnectionsHeader({
       controller.signal,
     )
       .then((data) => {
+        knownIdentity = data;
         if (!controller.signal.aborted) setIdentity(data);
       })
       .catch(() => undefined);
@@ -143,6 +151,7 @@ export function ConnectionsHeader({
             <a
               key={page}
               href={href}
+              onClick={openInPage}
               aria-current={page === current ? "page" : undefined}
               className={linkClass(page === current)}
             >
