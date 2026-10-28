@@ -1159,6 +1159,37 @@ async def test_a_batch_above_the_tokens_per_minute_limit_is_embedded_one_chunk_p
     )
 
 
+def _input_too_long_error() -> EmbedderRequestError:
+    """Return the embedder error of OpenAI's 400 for an input longer than the embedding model accepts."""
+    message = (
+        "This model's maximum context length is 8192 tokens, however you requested 9000 tokens (9000 in your prompt; "
+        "0 for the completion). Please reduce your prompt; or completion length."
+    )
+    failure = classify_provider_error(message, provider="openai", status_code=400)
+    return embedder_request_error(RuntimeError(message), failure)
+
+
+@pytest.mark.asyncio
+async def test_a_chunk_too_long_for_the_embedding_model_fails_only_its_own_file(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """The batch goes one chunk per request, so the refresh fails but keeps every other file's vectors for the next."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    embedder.batch_error = _input_too_long_error()
+    embedder.failures["content 1"] = [_input_too_long_error() for _ in range(5)]
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is False
+    checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
+    assert checkpoint is not None
+    assert (sorted(checkpoint.completed), sorted(checkpoint.failed)) == (["doc0000.md", "doc0002.md"], ["doc0001.md"])
+
+
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("real_embedder_clients")
 async def test_a_refresh_sends_a_request_the_account_s_billing_stops_once(
