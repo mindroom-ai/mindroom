@@ -858,8 +858,8 @@ async def _record_interrupted(
     if not sinks.persist_interrupted:
         return
     response_event_id = sinks.response_event_id() if sinks.response_event_id is not None else None
-    # A Stop that cancels this task again, as the streamer's bounded unwind does, waits for the record, so the reply
-    # settles, and the conversation's next turn reads history, only once it is stored.
+    # A further cancellation, such as the one the streamer sends 0.5 s after a Stop, waits for the record too, so the
+    # reply settles, and the conversation's next turn reads history, only once it is stored.
     await wait_for_future_until_complete(
         create_background_task(
             asyncio.to_thread(_persist_interrupted, ctx, adapter, run, response_event_id),
@@ -1166,7 +1166,7 @@ async def stream_response_turn[ChunkT](
     """Own the whole response while binding context only during pulls and close.
 
     A failed turn's reply is a bare string, never the adapter's text chunk: for an agent, whose text is ``TextDelta``,
-    that is how delivery and the OpenAI-compatible API tell a failed run's reply from its answer.
+    that is how the OpenAI-compatible API tells a failed run's reply from its answer.
     """
     lifetime = CliTurnLifetime()
     stream = context_bound_async_stream(

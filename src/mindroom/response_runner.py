@@ -2107,32 +2107,6 @@ class ResponseRunner:
             )
             request.pipeline_timing.mark("response_complete")
 
-    def _settle_collected_cancellation(
-        self,
-        exc: asyncio.CancelledError,
-        *,
-        message_id: str | None,
-        restart_message: str,
-        user_stop_message: str,
-        interrupted_message: str,
-    ) -> FinalDeliveryOutcome:
-        """Settle the cancellation of a collected reply through the visible note or a no-event outcome."""
-        cancel_source = classify_cancel_source(exc)
-        log_cancelled_response(
-            self.deps.logger,
-            exc=exc,
-            message_id=message_id,
-            restart_message=restart_message,
-            user_stop_message=user_stop_message,
-            interrupted_message=interrupted_message,
-        )
-        if message_id:
-            return self.deps.delivery_gateway.cancelled_outcome(message_id, cancel_source)
-        return self.deps.delivery_gateway.terminal_outcome_without_visible_event(
-            terminal_status="cancelled",
-            failure_reason=cancel_failure_reason(cancel_source),
-        )
-
     async def _finalize_streamed_turn(
         self,
         *,
@@ -4324,15 +4298,15 @@ class ResponseRunner:
         except ResponsePausedForApproval:
             raise
         except asyncio.CancelledError as exc:
-            if current_task_is_process_shutdown():
-                raise
-            return self._settle_collected_cancellation(
-                exc,
+            log_cancelled_response(
+                self.deps.logger,
+                exc=exc,
                 message_id=_existing_event_id(request),
                 restart_message=f"{label} response interrupted by sync restart",
                 user_stop_message=f"{label} response cancelled by user",
                 interrupted_message=f"{label} response interrupted — traceback for diagnosis",
             )
+            raise
         except Exception as error:
             self.deps.logger.exception(f"Error in {label.lower()} response", error=str(error))
             if skipped := _skip_unapproved_response(runtime.participation):

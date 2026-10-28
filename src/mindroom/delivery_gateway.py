@@ -709,24 +709,6 @@ class DeliveryGateway:
             failure_reason=failure_reason,
         )
 
-    def cancelled_outcome(
-        self,
-        event_id: str,
-        cancel_source: Literal["user_stop", "sync_restart", "interrupted"],
-    ) -> FinalDeliveryOutcome:
-        """Report a cancellation of a visible reply, whose span's exit writes the note through its records."""
-        # A generic interruption reuses the error wire status, so older clients do not read it as a Stop.
-        stream_status = (
-            constants.STREAM_STATUS_CANCELLED if cancel_source == "user_stop" else constants.STREAM_STATUS_ERROR
-        )
-        return FinalDeliveryOutcome(
-            terminal_status="cancelled",
-            event_id=event_id,
-            cancel_source=cancel_source,
-            failure_reason=cancel_failure_reason(cancel_source),
-            extra_content={constants.STREAM_STATUS_KEY: stream_status},
-        )
-
     def cancelled_terminal_outcome(
         self,
         outcome: FinalDeliveryOutcome,

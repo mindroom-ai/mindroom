@@ -678,7 +678,7 @@ async def test_a_stopped_turn_holds_its_conversation_until_its_interrupted_recor
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A stopped turn's record can take longer to store than the stream's bounded unwind; the turn waits for it.
+    """A stopped turn's record can take longer to store than the streamer waits before cancelling its stream again.
 
     The conversation's next turn reads history once this turn ends, so it must find the stopped turn there. Stopped
     while it prepared its prompt, before its run stored anything, the record is its session's first row, which starts
@@ -709,7 +709,7 @@ async def test_a_stopped_turn_holds_its_conversation_until_its_interrupted_recor
         await _wait_shown(turn, "Thinking...")
         assert await _stop(turn)
         assert await asyncio.wait_for(asyncio.to_thread(storing.wait, 10), timeout=15)
-        # Past the stream's 0.5 s unwind, the turn still waits for its record.
+        # Past the 0.5 s after which the streamer cancels its stream again, the turn still waits for its record.
         done, _pending = await asyncio.wait({response}, timeout=1.5)
         assert response not in done
         assert turn.agent_runs() == []
