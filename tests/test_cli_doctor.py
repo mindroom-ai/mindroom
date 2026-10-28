@@ -327,6 +327,36 @@ def test_doctor_checks_each_ollama_server_through_the_client_its_models_send_wit
     ]
 
 
+def test_doctor_checks_each_key_the_models_on_one_ollama_server_send(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Models on one server with different keys are each checked; ones differing only in reply timeout once."""
+    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    probed = _ollama_servers(monkeypatch)
+    host = "https://ollama.example"
+    config = Config(
+        models={
+            "first": ModelConfig(provider="ollama", id="qwen3.8:27b", host=host, api_key="first-key"),
+            "second": ModelConfig(provider="ollama", id="gemma4", host=host, api_key="second-key"),
+            "again": ModelConfig(
+                provider="ollama",
+                id="m",
+                host=host,
+                api_key="first-key",
+                extra_kwargs={"timeout": 30},
+            ),
+        },
+        router=RouterConfig(model="first"),
+    )
+
+    assert _check_providers(config, runtime_paths) == (2, 0, 0)
+    assert _servers_and_keys(probed) == [
+        ("https://ollama.example/api/tags", "Bearer first-key"),
+        ("https://ollama.example/api/tags", "Bearer second-key"),
+    ]
+
+
 def test_doctor_checks_an_ollama_server_with_the_key_the_dashboard_saved_for_its_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
