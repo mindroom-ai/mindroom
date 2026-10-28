@@ -1081,7 +1081,7 @@ def test_an_authored_approval_restore_requires_a_compatible_saved_policy(tmp_pat
     paused = route_provider("anthropic", tmp_path, wire, extra_kwargs=authored)
     saved = native_settings(paused, threshold=None, allow_authored=True)
     assert saved is not None
-    checkpoint = Message(role="assistant", content="Ready", provider_data={"content_blocks": [_CHECKPOINT, _TEXT]})
+    checkpoint = Message(role="assistant", content="Ready", provider_data={"claude_blocks": [_CHECKPOINT, _TEXT]})
     record_native_checkpoint(checkpoint, [_CHECKPOINT, _TEXT], saved)
     latest = Message(role="assistant", content="Waiting for approval")
     record_native_checkpoint(latest, [], saved)

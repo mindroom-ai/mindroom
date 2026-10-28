@@ -558,11 +558,11 @@ async def test_history_ending_with_an_assistant_turn_gets_a_trailing_user_turn(t
     wire = Wire(sse_reply([{"type": "text", "text": "More."}]))
     provider = route_provider("anthropic", tmp_path, wire)
     stored = {
-        "content_blocks": [{"type": "thinking", "thinking": "t", "signature": "s"}, {"type": "text", "text": "A"}],
+        "claude_blocks": [{"type": "thinking", "thinking": "t", "signature": "s"}, {"type": "text", "text": "A"}],
     }
     messages = [
         *_user(),
-        Message(role="assistant", content="A", provider_data=stored),
+        Message(role="assistant", content="A", reasoning_content="t", provider_data=stored),
         Message(role="assistant", content="B"),
     ]
     await claude_turn(provider, ModelRequest(messages=messages))
@@ -877,13 +877,13 @@ def _two_turns_with_a_tool_loop() -> list[Message]:
         Message(
             role="assistant",
             content="First answer.",
-            provider_data={"content_blocks": [dict(_EARLIER_THINKING), {"type": "text", "text": "First answer."}]},
+            provider_data={"claude_blocks": [dict(_EARLIER_THINKING), {"type": "text", "text": "First answer."}]},
         ),
         Message(role="user", content="Second?"),
         Message(
             role="assistant",
             tool_calls=[call],
-            provider_data={"content_blocks": [dict(_LOOP_THINKING), dict(_LOOP_REDACTED), dict(_LOOP_CALL)]},
+            provider_data={"claude_blocks": [dict(_LOOP_THINKING), dict(_LOOP_REDACTED), dict(_LOOP_CALL)]},
         ),
         Message(role="tool", content="Seen.", tool_call_id="toolu_1"),
     ]
@@ -986,7 +986,7 @@ async def test_a_request_without_the_binding_replays_thinking_only_inside_the_cu
 async def test_an_earlier_turn_of_only_thinking_is_left_out_whole(tmp_path: Path) -> None:
     """The API rejects an empty assistant turn, so one that had only thinking goes, and the user turns around it merge."""
     wire = Wire(sse_reply([{"type": "text", "text": "Done."}]))
-    thought = Message(role="assistant", provider_data={"content_blocks": [dict(_EARLIER_THINKING)]})
+    thought = Message(role="assistant", provider_data={"claude_blocks": [dict(_EARLIER_THINKING)]})
     messages = [*_user("First?"), thought, Message(role="user", content="Second?")]
     await claude_turn(route_provider("bedrock_claude", tmp_path, wire), ModelRequest(messages=messages))
     (turn,) = wire.body()["messages"]
@@ -1422,27 +1422,26 @@ async def test_an_authored_context_edit_records_what_the_response_applied(tmp_pa
 
 @pytest.mark.asyncio
 async def test_replay_drops_unsigned_thinking_from_a_cut_off_response(tmp_path: Path) -> None:
-    """A stream that stopped mid-block leaves an unsigned thinking block, which the API rejects on replay."""
+    """A stream that stopped mid-block stores an unsigned thinking block, which the API rejects on replay."""
     signed = {"type": "thinking", "thinking": "", "signature": "complete"}
     unsigned = {"type": "thinking", "thinking": "", "signature": ""}
     tool_use = {"type": "tool_use", "id": "toolu_save", "name": "save_file", "input": {"file_name": "notes.md"}}
     unfinished = {"type": "tool_use", "id": "toolu_shell", "name": "run_shell_command", "input": {}}
     stored = [signed, tool_use, unsigned, unfinished]
-    wire = Wire(sse_reply([{"type": "text", "text": "Saved."}]))
+    wire = Wire(
+        sse_reply([dict(block) for block in stored], stop_reason="max_tokens"),
+        sse_reply([{"type": "text", "text": "Saved."}]),
+    )
     provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={"thinking": {"type": "adaptive"}})
-    messages = [
-        Message(role="user", content="Save the notes."),
-        Message(
-            role="assistant",
-            content="",
-            provider_data={"content_blocks": [dict(block) for block in stored], "signature": "complete"},
-            tool_calls=[{"id": "toolu_save", "type": "function", "function": {"name": "save_file", "arguments": "{}"}}],
-        ),
-        Message(role="tool", tool_call_id="toolu_save", content="saved"),
-    ]
+    question = Message(role="user", content="Save the notes.")
+    cut_off = (await claude_turn(provider, ModelRequest(messages=[question]))).message
+    assert (cut_off.provider_data or {})["claude_blocks"] == stored
+    # Only the save call ran; the cut-off shell call left no result.
+    cut_off.tool_calls = [call for call in cut_off.tool_calls or [] if call["id"] == "toolu_save"]
+    messages = [question, cut_off, Message(role="tool", tool_call_id="toolu_save", content="saved")]
     await claude_turn(provider, ModelRequest(messages=messages))
     assert wire.body()["messages"][1]["content"] == [signed, tool_use]
-    assert (messages[1].provider_data or {})["content_blocks"] == stored
+    assert (messages[1].provider_data or {})["claude_blocks"] == stored
 
 
 @pytest.mark.asyncio

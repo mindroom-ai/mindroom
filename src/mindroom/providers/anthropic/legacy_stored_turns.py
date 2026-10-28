@@ -39,6 +39,9 @@ _SIGNATURE_KEY = "signature"
 #   tests/providers/test_anthropic_family_parity.py::test_a_turn_stored_now_replays_like_the_same_turn_stored_earlier,
 #   tests/providers/test_anthropic_family_replay.py::test_a_turn_stored_with_its_response_blocks_replays_as_a_new_turn_does,
 #   tests/providers/test_anthropic_family_replay.py::test_a_checkpoint_stored_with_its_response_blocks_replays_as_a_new_one_does,
+#   tests/providers/test_anthropic_family_replay.py::test_canonical_fallback_removes_the_thinking_bound_to_the_checkpoint
+#   (its "Ready" turn),
+#   tests/providers/test_anthropic_family_replay.py::test_a_turn_stored_with_its_response_blocks_reads_in_request_shape_outside_a_request,
 #   tests/providers/test_anthropic_family_replay.py::test_cited_answers_replay_as_plain_text
 def current_claude_turn(message: Message) -> Message:
     """Return a stored Claude turn with its blocks under ``claude_blocks``; any other message is returned as it is."""
@@ -68,7 +71,7 @@ def current_claude_turn(message: Message) -> Message:
 # Coverage: tests/providers/test_anthropic_family_replay.py::test_a_turn_stored_without_content_blocks_replays_its_server_tool_blocks,
 #   tests/providers/test_anthropic_family_replay.py::test_a_turn_stored_without_content_blocks_replays_its_tool_search_in_request_shape,
 #   tests/providers/test_anthropic_family_replay.py::test_reasoning_without_an_anthropic_signature_never_becomes_a_thinking_block,
-#   tests/test_mid_turn_compaction.py::test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_them
+#   tests/test_mid_turn_compaction.py::test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_them[claude_legacy]
 def legacy_rebuilt_blocks(message: Message) -> list[dict[str, Any]]:
     """Return the blocks a turn stored without its response blocks replays ahead of its text and tool uses."""
     data = message.provider_data or {}

@@ -485,12 +485,17 @@ def test_a_reply_without_text_or_calls_replays_as_an_empty_answer() -> None:
     ]
 
 
-def test_claude_server_tool_blocks_are_not_replayed_to_responses() -> None:
-    """Anthropic-native server tool blocks stay out when a thread switches to a Responses model."""
+def test_claude_blocks_are_not_replayed_to_responses() -> None:
+    """A Claude turn's stored blocks, server-tool blocks included, stay out when a thread switches to Responses."""
     assistant = Message(
         role="assistant",
         content="Claude searched here.",
-        provider_data={"server_tool_blocks": [{"type": "server_tool_use", "id": "srv_1"}]},
+        provider_data={
+            "claude_blocks": [
+                {"type": "server_tool_use", "id": "srv_1", "name": "web_search", "input": {"query": "here"}},
+                {"type": "text", "text": "Claude searched here."},
+            ],
+        },
     )
 
     assert _input([assistant]) == [{"role": "assistant", "content": "Claude searched here."}]
