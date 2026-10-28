@@ -16,7 +16,11 @@ import { breakAfterUnderscores } from "./breakAfterUnderscores";
 import { ConnectionsHeader } from "./ConnectionsHeader";
 import { InactiveServices } from "./EgressInactiveServices";
 import { DiscardEditsNotice, EgressServiceEditor } from "./EgressServiceEditor";
-import { firstFreeName, signsInAfterSave } from "./egressServiceForm";
+import {
+  firstFreeName,
+  formFromService,
+  signsInAfterSave,
+} from "./egressServiceForm";
 import { configPlaceholderOwners } from "./egressServiceNotes";
 import {
   keysSetText,
@@ -379,8 +383,9 @@ function AgentSection({
     onChanged();
     if (
       signsInAfterSave(
-        { separateAccount: service.oauth_separate_account === true },
+        formFromService(name, service),
         editor?.kind === "edit" ? editor.service : null,
+        catalog?.presets ?? null,
       )
     )
       setSignInNext(name);

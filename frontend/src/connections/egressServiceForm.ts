@@ -345,12 +345,20 @@ export function toolsAccountUse(
   };
 }
 
-/** Whether saving gives the service an account of its own it did not have, so its sign-in comes next. */
+/**
+ * Whether saving gives the service an account of its own that is not signed in yet, so its sign-in comes next: it
+ * had none, or had one for another login, which the server removes on save.
+ */
 export function signsInAfterSave(
-  form: Pick<EgressServiceForm, "separateAccount">,
+  form: EgressServiceForm,
   saved: AuthoredEgressService | null,
+  presets: readonly EgressPreset[] | null,
 ): boolean {
-  return form.separateAccount && saved?.oauth_separate_account !== true;
+  if (!form.separateAccount) return false;
+  if (saved?.oauth_separate_account !== true) return true;
+  const login = (of: EgressServiceForm) =>
+    serviceLogin(of, presetOf(presets, of.preset));
+  return login(form) !== login(formFromService("", saved));
 }
 
 /** Whether a preset carries an account login. */

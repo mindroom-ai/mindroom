@@ -868,14 +868,43 @@ describe("which account a service of one's own uses", () => {
       oauth_separate_account: true,
     });
     const tools = formFromService("svc", { preset: "google_gmail" });
-    expect(signsInAfterSave(own, null)).toBe(true);
-    expect(signsInAfterSave(own, { preset: "google_gmail" })).toBe(true);
+    expect(signsInAfterSave(own, null, presets)).toBe(true);
+    expect(signsInAfterSave(own, { preset: "google_gmail" }, presets)).toBe(
+      true,
+    );
     expect(
-      signsInAfterSave(own, {
-        preset: "google_gmail",
-        oauth_separate_account: true,
-      }),
+      signsInAfterSave(
+        own,
+        { preset: "google_gmail", oauth_separate_account: true },
+        presets,
+      ),
     ).toBe(false);
-    expect(signsInAfterSave(tools, null)).toBe(false);
+    expect(signsInAfterSave(tools, null, presets)).toBe(false);
+    // Another login has none of its own yet: the saved one goes with the old login.
+    expect(
+      signsInAfterSave(
+        formFromService("svc", {
+          preset: "google_calendar",
+          oauth_separate_account: true,
+        }),
+        { preset: "google_gmail", oauth_separate_account: true },
+        presets,
+      ),
+    ).toBe(true);
+    expect(
+      signsInAfterSave(
+        formFromService("svc", {
+          rules: [bearerRule],
+          oauth_provider: "google_drive",
+          oauth_separate_account: true,
+        }),
+        {
+          rules: [bearerRule],
+          oauth_provider: "google_gmail",
+          oauth_separate_account: true,
+        },
+        presets,
+      ),
+    ).toBe(true);
   });
 });

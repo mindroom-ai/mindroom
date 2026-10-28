@@ -516,6 +516,7 @@ export function EgressServiceItem({
               variant="link"
               size="sm"
               className="h-auto p-0 text-xs"
+              aria-label={`Add another ${oauth.display_name} account for ${name}`}
               disabled={serviceEditing.disabled || serviceEditing.limitDisabled}
               onClick={addAccount}
             >

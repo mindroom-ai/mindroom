@@ -678,9 +678,7 @@ describe("the editor form", () => {
     ).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText("Another Google Calendar account"));
     expect(screen.queryByText(keyHint)).toBeNull();
-    // GitHub accounts belong to each user, so a key is still asked for.
-    type("Account login (optional)", "github");
-    fireEvent.click(toolsAccount());
+    // Atlassian accounts belong to each user, so a key is still asked for.
     type("Account login (optional)", "atlassian");
     expect(accountChoice()).toBeNull();
     expect(screen.getByText(keyHint)).toBeInTheDocument();
@@ -3572,6 +3570,26 @@ describe("the Account choice", () => {
     ).toBeVisible();
   });
 
+  it("signs in again when an edited own account changes its login", async () => {
+    await renderEditor({
+      ...withGmail,
+      name: "mail",
+      service: { preset: "google_gmail", oauth_separate_account: true },
+    });
+    type("Preset", "google_calendar");
+    expect(
+      screen.getByLabelText("Another Google Calendar account"),
+    ).toBeChecked();
+    expect(
+      screen.getByText(
+        "You sign in right after saving. Agents pick it with X-Agent-Keys-Service: mail.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Save and sign in" }),
+    ).toBeVisible();
+  });
+
   it("a custom service keeps the choice in More options", async () => {
     const { onSave } = await renderEditor(withGmail);
     type("Name", "mail");
@@ -3587,9 +3605,9 @@ describe("the Account choice", () => {
     expect(
       within(more).getByRole("radiogroup", { name: "Account" }),
     ).toBeVisible();
-    expect(toolsAccount()).toBeChecked();
+    // Gmail already uses the tools' account, so it starts on another, as a preset does.
+    expect(another()).toBeChecked();
     expect(screen.queryByLabelText("API key")).toBeNull();
-    fireEvent.click(another());
     fireEvent.click(screen.getByRole("button", { name: "Save and sign in" }));
     await waitFor(() =>
       expect(onSave).toHaveBeenCalledWith("mail", {

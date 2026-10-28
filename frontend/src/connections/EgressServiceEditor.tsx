@@ -331,10 +331,24 @@ export function EgressServiceEditor({
       ?.focus();
   }, [focusRequest]);
 
+  // A new service starts on an account of its own where another service of
+  // the agent already uses the tools' one, again each time its login can
+  // change; an edited one keeps its choice.
+  const startsOnOwnAccount = (next: EgressServiceForm) => {
+    const fresh = { ...next, separateAccount: false };
+    const nextPreset = presetOf(presets, next.preset);
+    return (
+      offersSeparateAccount(fresh, options, nextPreset) &&
+      toolsAccountUse(serviceLogin(fresh, nextPreset), agentServices, name)
+        .usedBy !== null
+    );
+  };
   const set = (changes: Partial<EgressServiceForm>) => {
     setConfirmingSave(false);
     setForm((previous) => {
       const next = { ...previous, ...changes };
+      if (!editing && ("preset" in changes || "oauthProvider" in changes))
+        next.separateAccount = startsOnOwnAccount(next);
       return nameLocked || nameTyped || "name" in changes
         ? next
         : { ...next, name: suggestedName(next, openedWithNames) };
@@ -355,7 +369,7 @@ export function EgressServiceEditor({
     !limiting && offersSeparateAccount(form, options, preset);
   const takesKey = !limiting && !choosesAccount;
   const toolsAccount = toolsAccountUse(login, agentServices, name);
-  const signsIn = signsInAfterSave(form, initial);
+  const signsIn = signsInAfterSave(form, initial, presets);
   const accountChoice = choosesAccount && (
     <EgressAccountChoice
       id={`${id}-account`}
@@ -367,7 +381,11 @@ export function EgressServiceEditor({
       separateAccount={form.separateAccount}
       toolsAddress={toolsAccount.address}
       usedBy={toolsAccount.usedBy}
-      signsIn={signsInAfterSave({ separateAccount: true }, initial)}
+      signsIn={signsInAfterSave(
+        { ...form, separateAccount: true },
+        initial,
+        presets,
+      )}
       disabled={disabled}
       onChange={(separateAccount) => set({ separateAccount })}
     />
@@ -446,7 +464,7 @@ export function EgressServiceEditor({
     // repositories are to be applied again when the form is saved.
     appliedHelper.current = null;
     const loaded = value !== "" && value === service?.preset;
-    const changes = {
+    set({
       preset: value,
       replacePresetRules: false,
       rules: form.rules.length > 0 ? form.rules : [emptyRule()],
@@ -455,19 +473,6 @@ export function EgressServiceEditor({
         ...NOT_EXPLICITLY_EMPTY,
         presetLogin: loaded && service.oauth_provider !== undefined,
       },
-    };
-    // A new service starts on an account of its own where another service of
-    // the agent already uses the tools' one; an edited one keeps its choice.
-    const chosen = { ...form, ...changes, separateAccount: false };
-    const next = presetOf(presets, value);
-    set({
-      ...changes,
-      ...(!editing && {
-        separateAccount:
-          offersSeparateAccount(chosen, options, next) &&
-          toolsAccountUse(serviceLogin(chosen, next), agentServices, name)
-            .usedBy !== null,
-      }),
     });
   };
 

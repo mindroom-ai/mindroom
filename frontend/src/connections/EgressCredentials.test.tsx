@@ -2690,9 +2690,10 @@ describe("adding another account", () => {
   // The new service has no display name, so its row is Gmail too; only the administrator's has the link.
   const link = async () => {
     const [only, ...others] = await screen.findAllByRole("button", {
-      name: "Add another Gmail account",
+      name: "Add another Gmail account for Gmail",
     });
     expect(others).toEqual([]);
+    expect(only).toHaveTextContent(/^Add another Gmail account$/);
     return only;
   };
 
@@ -2852,13 +2853,37 @@ describe("adding another account", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
+  it("names each row's link after its row", async () => {
+    listing = [
+      {
+        ...agents[0],
+        services: [
+          gmail,
+          {
+            ...gmail,
+            name: "my_gmail",
+            display_name: "My Gmail",
+            source: "user",
+          },
+        ],
+      },
+    ];
+    await renderPage();
+    for (const name of ["Gmail", "My Gmail"])
+      expect(
+        within(await screen.findByRole("row", { name })).getByRole("button", {
+          name: `Add another Gmail account for ${name}`,
+        }),
+      ).toBeVisible();
+  });
+
   it("own-account rows show no link", async () => {
     listing = [{ ...agents[0], services: [gmail, ownGmail] }];
     await renderPage();
     const [administrators, own] = screen.getAllByRole("row", { name: "Gmail" });
     expect(
       within(administrators).getByRole("button", {
-        name: "Add another Gmail account",
+        name: "Add another Gmail account for Gmail",
       }),
     ).toBeVisible();
     expect(
