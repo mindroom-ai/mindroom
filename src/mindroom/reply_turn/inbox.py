@@ -125,7 +125,7 @@ class InboxResponses:
 
     @property
     def pending_inbox_response_count(self) -> int:
-        """Return an event-loop-local snapshot of runner-owned unsettled responses."""
+        """Return an event-loop-local snapshot of the unsettled responses this inbox owns."""
         return sum(
             not task.done() or ownership.drain_intent is not None
             for task, ownership in self._inbox_response_tasks.items()

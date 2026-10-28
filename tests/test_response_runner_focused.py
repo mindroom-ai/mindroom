@@ -5512,8 +5512,9 @@ async def test_agent_model_snapshot_precedes_locked_turn_preparation(tmp_path: P
         room_id="!room:localhost",
         model_name="large",
     )
-    original_begin_locked_turn = coordinator._begin_locked_turn
+    original_prepare = coordinator._prepare_admitted_locked_turn
     active_models: list[str | None] = []
+    prepared: list[bool] = []
 
     async def change_room_default_during_preparation(*args: object, **kwargs: object) -> ResponseRequest | None:
         set_room_model_override(
@@ -5521,14 +5522,15 @@ async def test_agent_model_snapshot_precedes_locked_turn_preparation(tmp_path: P
             room_id="!room:localhost",
             model_name="default",
         )
-        return await original_begin_locked_turn(*args, **kwargs)  # type: ignore[arg-type]
+        prepared.append(True)
+        return await original_prepare(*args, **kwargs)  # type: ignore[arg-type]
 
     async def fake_stream(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[str]:
         active_models.append(ctx.active_model_name)
         yield "final text"
 
     with (
-        patch.object(coordinator, "_begin_locked_turn", new=change_room_default_during_preparation),
+        patch.object(coordinator, "_prepare_admitted_locked_turn", new=change_room_default_during_preparation),
         patch.object(
             DeliveryGateway,
             "deliver_final",
@@ -5538,6 +5540,7 @@ async def test_agent_model_snapshot_precedes_locked_turn_preparation(tmp_path: P
     ):
         await coordinator.generate_response(_plain_request(_target()))
 
+    assert prepared == [True]
     assert active_models == ["large"]
 
 

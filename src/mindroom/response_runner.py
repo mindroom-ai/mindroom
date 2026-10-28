@@ -55,7 +55,7 @@ from mindroom.event_journal import (
 from mindroom.event_journal import (
     ApprovalDecision as ContinuationDecision,
 )
-from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history.storage import has_queued_force_compaction
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
@@ -685,8 +685,8 @@ class _TeamResponseRequest:
 
     member_names: tuple[str, ...]
     team_mode: str
-    reason_prefix: str = "Team request"
-    resolution_reason: str | None = None
+    reason_prefix: str
+    resolution_reason: str | None
 
 
 def _post_lock_error(error: Exception, early_placeholder: _EarlyPlaceholderState) -> Exception:
@@ -2108,33 +2108,6 @@ class ResponseRunner:
             )
             request.pipeline_timing.mark("response_complete")
 
-    async def _finalize_streamed_turn(
-        self,
-        *,
-        request: ResponseRequest,
-        delivery_target: MessageTarget,
-        transport_outcome: StreamTransportOutcome,
-        delivery_kind: Literal["sent", "edited"],
-        response_identity: ResponseIdentity,
-        tool_trace: list[Any] | None,
-        extra_content: dict[str, Any] | None,
-    ) -> FinalDeliveryOutcome:
-        """Finalize one streamed delivery and mark the terminal delivery timing."""
-        delivery = await self.deps.delivery_gateway.finalize_streamed_response(
-            FinalizeStreamedResponseRequest(
-                target=delivery_target,
-                stream_transport_outcome=transport_outcome,
-                initial_delivery_kind=delivery_kind,
-                identity=response_identity,
-                tool_trace=tool_trace,
-                extra_content=extra_content,
-                existing_event_id=_existing_event_id(request),
-                existing_event_is_placeholder=_replaceable_placeholder(request),
-            ),
-        )
-        self._note_final_delivery_timing(request, delivery)
-        return delivery
-
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target already has an active turn."""
         return self._lifecycle_coordinator.has_active_response_for_target(target)
@@ -3021,21 +2994,6 @@ class ResponseRunner:
             raise
         except Exception as exc:
             raise PostLockRequestPreparationError from exc
-
-    def _note_pipeline_metadata(
-        self,
-        request: ResponseRequest,
-        *,
-        response_kind: str,
-        used_streaming: bool,
-    ) -> None:
-        """Attach shared response metadata to one timing tracker."""
-        if request.pipeline_timing is None:
-            return
-        request.pipeline_timing.note(
-            response_kind=response_kind,
-            used_streaming=used_streaming,
-        )
 
     def _response_identity(self, request: ResponseRequest, *, response_kind: str) -> ResponseIdentity:
         """Build the per-turn identity carried by delivery requests and response hooks."""
@@ -4000,7 +3958,7 @@ class ResponseRunner:
                 queue_memory_persistence=queue_memory_persistence,
                 persist_response_event_id=persist_response_event_id,
             ),
-            team_member_names=tuple(agent_names),
+            team_member_names=team.member_names,
             team_mode=mode.value,
         )
 
@@ -4017,11 +3975,11 @@ class ResponseRunner:
                 enable_streaming=self.deps.runtime.enable_streaming,
             )
         )
-        self._note_pipeline_metadata(
-            request,
-            response_kind="agent" if turn.response_kind == "ai" else "team",
-            used_streaming=use_streaming,
-        )
+        if request.pipeline_timing is not None:
+            request.pipeline_timing.note(
+                response_kind="agent" if turn.response_kind == "ai" else "team",
+                used_streaming=use_streaming,
+            )
         # The turn driver writes the turn's record; this runner reads how it ended.
         recorder = TurnRecorder()
         progress = _DeliveryProgress()
@@ -4149,7 +4107,6 @@ class ResponseRunner:
         if use_streaming:
             return await self._deliver_streamed(
                 turn,
-                request,
                 response_stream,
                 response_identity=response_identity,
                 run_metadata_content=run_metadata_content,
@@ -4159,7 +4116,6 @@ class ResponseRunner:
             )
         return await self._deliver_collected(
             turn,
-            request,
             response_stream,
             response_identity=response_identity,
             tool_trace=tool_trace,
@@ -4170,7 +4126,6 @@ class ResponseRunner:
     async def _deliver_streamed(
         self,
         turn: _LockedTurn,
-        request: ResponseRequest,
         response_stream: Callable[[], AsyncIterator[StreamInputChunk]],
         *,
         response_identity: ResponseIdentity,
@@ -4180,6 +4135,7 @@ class ResponseRunner:
         progress: _DeliveryProgress,
     ) -> FinalDeliveryOutcome:
         """Stream the turn into its reply and finalize what the stream left."""
+        request = turn.delivery_request
         runtime = turn.runtime
         label = "Bot" if turn.response_kind == "ai" else "Team"
         # What the reply showed before this stream, which its terminal handling continues from.
@@ -4201,7 +4157,7 @@ class ResponseRunner:
                             stream_factory=response_stream,
                         ),
                         existing_event_id=existing_event_id,
-                        adopt_existing_placeholder=bool(existing_event_id) and _shows_placeholder(request),
+                        adopt_existing_placeholder=_shows_placeholder(request),
                         show_tool_calls=runtime.show_tool_calls,
                         # The live collector dict: the turn driver fills it at terminal settle, before the stream's
                         # final edit snapshots extra_content, so the ai_run metadata lands on the wire.
@@ -4249,20 +4205,25 @@ class ResponseRunner:
         if participation is not None and participation.is_silent:
             return _skipped_participation_outcome()
         progress.note_delivery_started()
-        return await self._finalize_streamed_turn(
-            request=request,
-            delivery_target=runtime.resolved_target,
-            transport_outcome=transport_outcome,
-            delivery_kind="edited" if existing_event_id else "sent",
-            response_identity=response_identity,
-            tool_trace=tool_trace if runtime.show_tool_calls else None,
-            extra_content=final_extra_content(),
+        delivery = await self.deps.delivery_gateway.finalize_streamed_response(
+            FinalizeStreamedResponseRequest(
+                target=runtime.resolved_target,
+                stream_transport_outcome=transport_outcome,
+                initial_delivery_kind="edited" if existing_event_id else "sent",
+                identity=response_identity,
+                tool_trace=tool_trace if runtime.show_tool_calls else None,
+                extra_content=final_extra_content(),
+                # Read again after the stream, which may have sent the reply's first event.
+                existing_event_id=_existing_event_id(request),
+                existing_event_is_placeholder=_replaceable_placeholder(request),
+            ),
         )
+        self._note_final_delivery_timing(request, delivery)
+        return delivery
 
     async def _deliver_collected(
         self,
         turn: _LockedTurn,
-        request: ResponseRequest,
         response_stream: Callable[[], AsyncIterator[StreamInputChunk]],
         *,
         response_identity: ResponseIdentity,
@@ -4271,6 +4232,7 @@ class ResponseRunner:
         progress: _DeliveryProgress,
     ) -> FinalDeliveryOutcome:
         """Collect the turn's stream into one reply, then deliver it whole."""
+        request = turn.delivery_request
         runtime = turn.runtime
         label = "Non-streaming" if turn.response_kind == "ai" else "Team non-streaming"
 
