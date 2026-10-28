@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import functools
 import inspect
 from collections.abc import AsyncIterator  # noqa: TC003 - A tool's annotations resolve when its toolkit adapts.
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock
 
 import pytest
@@ -19,6 +20,8 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtim
 from tests.tool_system import agno_parity_support as support
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.tool_system.tool_function import ToolFunction
 
 
@@ -195,6 +198,51 @@ def test_only_tool_marks_make_a_class_attribute_a_function() -> None:
             return "pong"
 
     assert list(ProxyHoldingTools().functions) == ["ping"]
+
+
+class _Callable:
+    """An object that is callable without being a function, which no schema can be derived from."""
+
+    def __call__(self, text: str) -> str:
+        return text
+
+
+@pytest.mark.parametrize("entry", [functools.partial(shout, "x"), _Callable()], ids=["partial", "callable_object"])
+def test_a_tool_that_is_no_function_or_method_is_refused_when_the_toolkit_is_built(entry: Callable[..., Any]) -> None:
+    """A schema and validation come from a function's own signature and annotations, so other callables cannot be tools."""
+    with pytest.raises(ValueError, match="takes functions and methods as tools"):
+        Toolkit(name="odd", tools=[entry])
+
+
+def test_a_tool_with_a_positional_only_parameter_is_refused_when_the_toolkit_is_built() -> None:
+    """The model passes every argument by name, so a parameter it could only pass by position is refused."""
+
+    class LookupTools(Toolkit):
+        @tool
+        def lookup(self, key: str, /) -> str:
+            return key
+
+    with pytest.raises(ValueError, match="'lookup' takes key only by position"):
+        LookupTools()
+
+
+def test_an_override_without_tool_stops_offering_the_inherited_function() -> None:
+    """A subclass stops offering an inherited function by overriding it without ``@tool``."""
+
+    class BaseTools(Toolkit):
+        @tool
+        def offered(self) -> str:
+            return "offered"
+
+        @tool
+        def withdrawn(self) -> str:
+            return "withdrawn"
+
+    class SubTools(BaseTools):
+        def withdrawn(self) -> str:
+            return "a helper now"
+
+    assert list(SubTools().functions) == ["offered"]
 
 
 def test_two_functions_under_one_name_raise() -> None:

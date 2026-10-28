@@ -65,8 +65,26 @@ def _tool_name(function: Callable[..., Any]) -> str:
     mark = _mark(function)
     if mark is not None and mark.name is not None:
         return mark.name
-    # A function or method has a name of its own; any other callable needs ``@tool(name=...)``.
+    # A tool is a function or a method (``_require_tool_shape``), so it has a name of its own.
     return function.__name__  # ty: ignore[unresolved-attribute]
+
+
+def _require_tool_shape(toolkit: str, function: object) -> None:
+    """Refuse what cannot be a tool function, raising ``ValueError``.
+
+    A callable other than a function or method has no signature and annotations of its own to derive a schema and
+    validation from, and the model passes every argument by name, so a parameter taken only by position is refused too.
+    """
+    if not (inspect.isfunction(function) or inspect.ismethod(function)):
+        msg = f"Toolkit {toolkit!r} takes functions and methods as tools, not {function!r}"
+        raise ValueError(msg)
+    parameters = inspect.signature(function).parameters.values()
+    if positional := [parameter.name for parameter in parameters if parameter.kind is parameter.POSITIONAL_ONLY]:
+        msg = (
+            f"Tool function {_tool_name(function)!r} takes {', '.join(positional)} only by position, but the model"
+            " passes every argument by name"
+        )
+        raise ValueError(msg)
 
 
 def authored_description(function: Callable[..., Any]) -> str | None:
@@ -90,7 +108,8 @@ class Toolkit:
 
     A subclass sets ``name`` and ``instructions`` as class attributes or passes them to the constructor. Its
     functions are its ``@tool`` methods, in the order the class defines them, then the callables passed as ``tools``;
-    ``functions`` holds them by the name the model calls each by. Each function's annotations, its return annotation
+    ``functions`` holds them by the name the model calls each by. An override without ``@tool`` is no function, so a
+    subclass stops offering an inherited one by overriding it plainly. Each function's annotations, its return annotation
     included, must resolve when an agent is built with the toolkit, so the types they name are imported at runtime.
     """
 
@@ -104,7 +123,11 @@ class Toolkit:
         tools: Sequence[Callable[..., Any]] = (),
         instructions: str | None = None,
     ) -> None:
-        """Collect the toolkit's functions; two different functions under one name raise ``ValueError``."""
+        """Collect the toolkit's functions, raising ``ValueError`` for a tool that cannot be one.
+
+        Two different functions under one name raise, as does a tool that is no function or method or that takes a
+        parameter only by position.
+        """
         if name is not None:
             self.name = name
         if instructions is not None:
@@ -118,6 +141,7 @@ class Toolkit:
         ]
         self.functions: dict[str, Callable[..., Any]] = {}
         for function in (*methods, *tools):
+            _require_tool_shape(self.name, function)
             function_name = _tool_name(function)
             if self.functions.setdefault(function_name, function) != function:
                 msg = f"Toolkit {self.name!r} has two functions named {function_name!r}"
