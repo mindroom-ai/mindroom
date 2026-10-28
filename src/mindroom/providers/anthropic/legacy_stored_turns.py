@@ -29,7 +29,7 @@ _SIGNATURE_KEY = "signature"
 #   citations, a tool-search result its response-only fields, and a search use that got no result stays. Beside it,
 #   ``server_tool_blocks`` repeats the blocks other than text, thinking, and tool use, ``signature`` holds the last
 #   thinking block's signature, and a native checkpoint's ``items`` are the blocks from its compaction block on.
-# Last legacy release: v2026.10.634, which wrote this shape as every release since v2026.9.44 (Agno 3.0.9) did;
+# Last legacy release: v2026.10.651, which wrote this shape as every release since v2026.9.44 (Agno 3.0.9) did;
 #   replacement: the next release stores the blocks once, in request shape, under ``claude_blocks``.
 # Handling: the turn reads with its blocks under ``claude_blocks`` and its checkpoint items, both in request shape
 #   (``replay_safe_blocks``), as every request repaired them, so its requests keep their bytes; ``server_tool_blocks``
