@@ -19,8 +19,9 @@ if TYPE_CHECKING:
 # LEGACY_COMPAT: Request snapshots omit their provider and model.
 # Legacy format: Requests contain only created_at and metrics.
 # Last legacy release: v2026.9.303 for run requests (replacement: v2026.9.304, which attributes each request to its
-# model) and v2026.10.624 for a compaction summary's one request (replacement: v2026.10.625).
-# Current producer: voice transcription emits one request without a model, under a usage row whose model can be unknown.
+# model) and v2026.10.628 for a compaction summary's and a voice transcription's one request (replacement:
+# v2026.10.629).
+# Current producer: voice transcription emits one request without a model when its usage row's model is unknown.
 # Handling: Inherit only a single run model; the caller must reconcile every counter.
 # Coverage: tests/test_request_usage.py::test_request_export_keeps_short_calls_distinct_and_preserves_all_counters;
 # tests/test_request_usage.py::test_unreconciled_request_details_preserve_aggregates_and_mark_coverage;
