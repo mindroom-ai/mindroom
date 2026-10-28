@@ -2376,6 +2376,8 @@ async def _run_runtime(  # noqa: PLR0915
 
         logger.info("Starting orchestrator...")
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=api)
+        # Before the config watcher starts, so it covers every included file while startup waits.
+        orchestrator.config_reload.record_load_sources(startup_config.source_files, loaded=True)
         set_runtime_starting()
         auxiliary_tasks.extend(
             _start_auxiliary_tasks(orchestrator, runtime_paths, shutdown_requested, journal_hold_lost),

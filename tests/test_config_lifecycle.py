@@ -143,6 +143,33 @@ async def test_config_change_during_startup_reaches_the_dashboard_and_applies_on
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("broken", [False, True])
+async def test_startup_load_keeps_the_watcher_on_include_files_it_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    broken: bool,
+) -> None:
+    """A root edit made while MindRoom starts that adds an include makes the watcher cover that file, valid or not."""
+    monkeypatch.setattr(lifecycle_module, "_CONFIG_RELOAD_DEBOUNCE_SECONDS", 0)
+    lifecycle = _make_lifecycle(tmp_path)
+    lifecycle.is_running = lambda: False
+    config_path = lifecycle.runtime_paths.config_path
+    included = config_path.with_name("defaults.yaml")
+    included.write_text("enable_streaming: [\n" if broken else "enable_streaming: false\n", encoding="utf-8")
+    config_path.write_text("defaults: !include defaults.yaml\n", encoding="utf-8")
+
+    lifecycle.request_reload()
+    startup_load = lifecycle._reload_task
+    assert startup_load is not None
+    await asyncio.wait_for(startup_load, timeout=5)
+
+    watched = lifecycle.failed_reload_source_files if broken else lifecycle.loaded_source_files
+    assert watched is not None
+    assert included.resolve() in {path.resolve() for path in watched}
+
+
+@pytest.mark.asyncio
 async def test_config_change_after_the_runtime_stopped_loads_nothing(tmp_path: Path) -> None:
     """A file edit during shutdown is neither loaded nor applied."""
     running = True

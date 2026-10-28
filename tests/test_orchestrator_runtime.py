@@ -555,6 +555,7 @@ async def test_mindroom_run_publishes_its_first_config_load_before_the_api_serve
     homeserver_waiting = asyncio.Event()
     started_with: list[Config] = []
     served_with: list[Config | None] = []
+    watched_at_start: list[frozenset[Path] | None] = []
 
     async def unreachable_homeserver(**_kwargs: object) -> None:
         homeserver_waiting.set()
@@ -564,6 +565,7 @@ async def test_mindroom_run_publishes_its_first_config_load_before_the_api_serve
 
     async def recording_start(orchestrator: _MultiAgentOrchestrator, config: Config) -> None:
         started_with.append(config)
+        watched_at_start.append(orchestrator.config_reload.loaded_source_files)
         await real_start(orchestrator, config)
 
     async def serving_api(*args: object, **_kwargs: object) -> None:
@@ -597,6 +599,9 @@ async def test_mindroom_run_publishes_its_first_config_load_before_the_api_serve
     [startup_config] = started_with
     assert served_with == [startup_config]
     assert homeserver_waiting.is_set()
+    # The config watcher covers every file the first load read while startup still waits.
+    assert startup_config.source_files
+    assert watched_at_start == [startup_config.source_files]
 
 
 @pytest.mark.asyncio

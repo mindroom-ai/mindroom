@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from mindroom.config.load_attempt import PublishedConfigLoad, load_config_attempt
 from mindroom.config.main import failed_config_source_fingerprint
 from mindroom.config.reload_status import ConfigReloadStatus
-from mindroom.config.yaml_includes import partial_source_files, source_files_fingerprint
+from mindroom.config.yaml_includes import source_files_fingerprint
 from mindroom.event_journal.opening import describe_event_journal, pending_event_journal_restart
 from mindroom.logging_config import get_logger
 from mindroom.orchestration.config_updates import build_config_update_plan, plugin_change_paths
@@ -187,6 +187,18 @@ class ConfigReloadLifecycle:
             failure_message="Queued config reload failed",
         )
 
+    def record_load_sources(self, source_files: frozenset[Path] | None, *, loaded: bool) -> None:
+        """Keep the config watcher on every file a load read.
+
+        A failed load adds the files it reached, so fixing a newly added include
+        file that the last good config never read still triggers the retry.
+        """
+        if loaded:
+            self.loaded_source_files = source_files
+            self.failed_reload_source_files = None
+        elif source_files:
+            self.failed_reload_source_files = source_files
+
     def _starting(self) -> bool:
         """Return whether the runtime has not run yet, as opposed to having stopped."""
         return not self.is_running() and self._fully_applied_config is None
@@ -222,10 +234,9 @@ class ConfigReloadLifecycle:
             # already changed the files, so the watcher queues the reload
             # that applies it; this stale read is never adopted.
             return None
+        self.record_load_sources(published.attempt.source_files, loaded=published.attempt.config is not None)
         new_config = published.attempt.loaded_config()
-        self.loaded_source_files = new_config.source_files
         self.status = ConfigReloadStatus(status="pending", fingerprint=new_config.source_fingerprint)
-        self.failed_reload_source_files = None
         async with self._response_admission_apply_lock:
             runtime_config = self.current_config()
             if self._fully_applied_config is None:
@@ -511,12 +522,6 @@ class ConfigReloadLifecycle:
                 fingerprint=failed_config_source_fingerprint(exc) or self.status.fingerprint,
             )
             logger.exception("Configuration update failed; will retry if a new change is queued")
-            # Keep watching every file the broken load read so fixing a newly
-            # added include file (not yet in the last good config) still
-            # triggers the retry reload.
-            failed_files = partial_source_files(exc)
-            if failed_files is not None:
-                self.failed_reload_source_files = failed_files
             return
         if updated is None:
             logger.info("Configuration reload superseded before publication; skipping")
@@ -546,7 +551,12 @@ class ConfigReloadLifecycle:
                 # dashboard loads the edit now, so a dashboard save made while
                 # MindRoom starts cannot write over it.
                 async with self.config_update_lock:
-                    await asyncio.to_thread(self.load_config)
+                    published = await asyncio.to_thread(self.load_config)
+                if not published.superseded:
+                    self.record_load_sources(
+                        published.attempt.source_files,
+                        loaded=published.attempt.config is not None,
+                    )
                 if self._requested_at == requested_at:
                     return
         finally:
