@@ -24,6 +24,7 @@ from mindroom.approval.manager import (
     _ApprovalStartupSweep,
     _build_event_arguments,
     get_approval_store,
+    initialize_approval_store,
 )
 from mindroom.approval.recovery import ApprovalRecovery
 from mindroom.approval.tool_approval import (
@@ -71,6 +72,7 @@ from mindroom.tools import config_manager as _config_manager  # noqa: F401 - reg
 from tests.approval_card_helpers import card_is_terminal, card_view
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import (
+    FakeApprovalTransport,
     approval_manager_for_test,
     bind_runtime_paths,
     handle_card_response_for_test,
@@ -2212,10 +2214,20 @@ async def test_manager_owns_recovery_across_bootstrap_rebind_and_shutdown(tmp_pa
     await recovery.mark_startup_runtime_support_ready()
     assert not recovery._startup_cleanup_done
     assert recovery._startup_cleanup_retry is None
-    manager = initialize_approval_store_for_test(test_runtime_paths(tmp_path), recovery=recovery)
+    cards = MagicMock()
+    manager = initialize_approval_store_for_test(test_runtime_paths(tmp_path), cards=cards, recovery=recovery)
     try:
-        # A reload rebinds the transport and keeps the recovery it does not replace.
-        assert initialize_approval_store_for_test(test_runtime_paths(tmp_path)) is manager
+        # A reload before the router bot exists rebinds the transport and keeps the card store and recovery.
+        transport = FakeApprovalTransport()
+        rebound = initialize_approval_store(
+            test_runtime_paths(tmp_path),
+            transport=transport,
+            cards=None,
+            recovery=None,
+        )
+        assert rebound is manager
+        assert manager.transport is transport
+        assert manager.cards is cards
         assert manager.recovery is recovery
         assert recovery.manager is manager
         with patch.object(
