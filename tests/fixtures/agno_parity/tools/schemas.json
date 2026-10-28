@@ -25699,7 +25699,7 @@
       },
       {
         "name": "slack_download",
-        "description": "Download one Slack file, up to 50 MB, into the workspace's slack-downloads directory.\nThe saved name starts with the file id, so a later download of the same file replaces that copy.",
+        "description": "Download one Slack file, up to 50 MB, into the workspace's slack-downloads directory.\nThe saved name starts with the file id, so a later download of the same file replaces that copy.\nSlack canvases and posts cannot be downloaded; read them in Slack.",
         "parameters": {
           "type": "object",
           "properties": {

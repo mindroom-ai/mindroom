@@ -789,6 +789,7 @@ class SlackTools(Toolkit):
         """Download one Slack file, up to 50 MB, into the workspace's slack-downloads directory.
 
         The saved name starts with the file id, so a later download of the same file replaces that copy.
+        Slack canvases and posts cannot be downloaded; read them in Slack.
 
         Args:
             file_id: A file id from slack_read or slack_search, such as F0123ABCD.
