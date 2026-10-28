@@ -7,5 +7,5 @@ class PermanentStartupError(ValueError):
     """Raised for startup failures that should not be retried."""
 
 
-class EventJournalHoldLostError(RuntimeError):
-    """Raised after a runtime stopped because it no longer held its event journal; a supervisor restarts it."""
+class EventJournalLostError(RuntimeError):
+    """Raised after a runtime lost its event journal's lock session or a journal connection; a supervisor restarts it."""

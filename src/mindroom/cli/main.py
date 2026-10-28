@@ -334,7 +334,7 @@ async def _run(
     api_host: str,
 ) -> None:
     """Run the multi-agent system with friendly error handling."""
-    from mindroom.startup_errors import EventJournalHoldLostError, PermanentStartupError  # noqa: PLC0415
+    from mindroom.startup_errors import EventJournalLostError, PermanentStartupError  # noqa: PLC0415
 
     # Links, OAuth callbacks, the OpenID audience, and the server Chat finds then name the port the API serves on.
     runtime_paths = with_api_port(activate_cli_runtime(path=config_path, storage_path=storage_path), api_port)
@@ -371,7 +371,7 @@ async def _run(
     except ConnectionError as exc:
         _print_connection_error(exc, runtime_paths)
         raise typer.Exit(1) from None
-    except (PermanentStartupError, EventJournalHoldLostError) as exc:
+    except (PermanentStartupError, EventJournalLostError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None
     except OSError as exc:
