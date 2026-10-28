@@ -141,6 +141,8 @@ class ConfigReloadLifecycle:
     _response_admission_apply_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _reload_task: asyncio.Task | None = field(default=None, init=False)
     _requested_at: float | None = field(default=None, init=False)
+    # Set by process shutdown, after which no file edit is loaded or applied.
+    _cancelled: bool = field(default=False, init=False)
     # Source files of the last reload attempt that failed to load, so the
     # config watcher can cover include files the last good config never saw.
     # Owned by ``_update_config``, which is the only place that knows whether
@@ -201,7 +203,7 @@ class ConfigReloadLifecycle:
 
     def _starting(self) -> bool:
         """Return whether the runtime has not run yet, as opposed to having stopped."""
-        return not self.is_running() and self._fully_applied_config is None
+        return not self._cancelled and not self.is_running() and self._fully_applied_config is None
 
     def startup_published(self, config: Config) -> None:
         """Acknowledge startup's config, and reload at once if its files changed since startup loaded them."""
@@ -212,7 +214,8 @@ class ConfigReloadLifecycle:
             self.request_reload()
 
     async def cancel(self) -> None:
-        """Cancel any queued config reload task."""
+        """Cancel any queued config reload task; process shutdown calls this, so later requests do nothing."""
+        self._cancelled = True
         task = self._reload_task
         self._reload_task = None
         self._requested_at = None

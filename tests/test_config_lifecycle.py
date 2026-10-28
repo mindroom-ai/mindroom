@@ -170,13 +170,19 @@ async def test_startup_load_keeps_the_watcher_on_include_files_it_read(
 
 
 @pytest.mark.asyncio
-async def test_config_change_after_the_runtime_stopped_loads_nothing(tmp_path: Path) -> None:
-    """A file edit during shutdown is neither loaded nor applied."""
-    running = True
+@pytest.mark.parametrize("startup_published", [True, False])
+async def test_config_change_after_the_runtime_stopped_loads_nothing(
+    tmp_path: Path,
+    *,
+    startup_published: bool,
+) -> None:
+    """A file edit during shutdown is neither loaded nor applied, even when startup never published."""
+    running = startup_published
     config = load_config(test_runtime_paths(tmp_path))
     lifecycle = _make_lifecycle(tmp_path, current_config=config, load_config=MagicMock())
     lifecycle.is_running = lambda: running
-    lifecycle.startup_published(config)
+    if startup_published:
+        lifecycle.startup_published(config)
     await lifecycle.cancel()
     running = False
 

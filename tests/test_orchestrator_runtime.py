@@ -4932,20 +4932,13 @@ class TestMultiAgentOrchestrator:
         old_config = Config(defaults={"enable_streaming": True})
         new_config = Config(defaults={"enable_streaming": False})
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-        new_hook_registry = HookRegistry.empty()
-        orchestrator.hook_registry = new_hook_registry
         first_bot = _mock_managed_bot(old_config)
         second_bot = _mock_managed_bot(old_config)
         install_bots(orchestrator, {"first": first_bot, "second": second_bot})
-        second_bot_state_at_first_await: list[tuple[bool, bool]] = []
+        second_bot_config_at_first_await: list[bool] = []
 
         async def fail_first_presence_update() -> None:
-            second_bot_state_at_first_await.append(
-                (
-                    second_bot.config is new_config,
-                    second_bot.hook_registry is new_hook_registry,
-                ),
-            )
+            second_bot_config_at_first_await.append(second_bot.config is new_config)
             msg = "presence unavailable"
             raise RuntimeError(msg)
 
@@ -4955,11 +4948,22 @@ class TestMultiAgentOrchestrator:
             await orchestrator._update_unchanged_bots(new_config)
 
         assert first_bot.config is new_config
-        assert first_bot.hook_registry is new_hook_registry
-        assert second_bot_state_at_first_await == [(True, True)]
+        assert second_bot_config_at_first_await == [True]
         first_bot._set_presence_with_model_info.assert_awaited_once_with()
         second_bot._set_presence_with_model_info.assert_awaited_once_with()
         mock_log_exception.assert_called_once_with("bot_presence_update_failed", agent="first")
+
+    def test_publishing_a_reload_gives_every_bot_the_new_hook_registry(self, tmp_path: Path) -> None:
+        """Bots kept through a plugin reload dispatch hooks through the registry the reload committed."""
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        bots = {"first": _mock_managed_bot(Config()), "second": _mock_managed_bot(Config())}
+        install_bots(orchestrator, bots)
+        new_hook_registry = HookRegistry.empty()
+
+        orchestrator._publish_config(ConfigUpdatePlan(new_config=Config()), lambda: new_hook_registry)
+
+        assert orchestrator.hook_registry is new_hook_registry
+        assert all(bot.hook_registry is new_hook_registry for bot in bots.values())
 
     @pytest.mark.asyncio
     async def test_update_config_syncs_runtime_services_when_running(self, tmp_path: Path) -> None:

@@ -1467,7 +1467,6 @@ class _MultiAgentOrchestrator:
         """Give the new config to the bots this reload keeps running."""
         for bot in self.agent_bots.values():
             bot.config = new_config
-            bot.hook_registry = self.hook_registry
 
         for entity_name, bot in self.agent_bots.items():
             try:
