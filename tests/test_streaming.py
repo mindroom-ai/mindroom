@@ -26,9 +26,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import (
-    STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
-    STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
@@ -43,7 +41,6 @@ from mindroom.reply_scope import SpanHandle
 from mindroom.response_sources import ResponseSources
 from mindroom.streaming import (
     _PROGRESS_PLACEHOLDER,
-    CANCELLED_RESPONSE_NOTE,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
     ReplacementStreamingResponse,
     StreamingDeliveryError,
@@ -591,7 +588,7 @@ async def test_stream_rerenders_changed_markdown(config: Config, change: str) ->
         accumulated_text="Hello @helper ",
         **reply_hooks(),
     )
-    initial = await streaming._prepare_delivery_async(is_final=False, allow_empty_progress=False, stream_status=None)
+    initial = await streaming._prepare_delivery_async(is_final=False, allow_empty_progress=False)
     assert initial is not None
     assert "@HelperAgent</a>" in initial.content["formatted_body"]
 
@@ -601,7 +598,7 @@ async def test_stream_rerenders_changed_markdown(config: Config, change: str) ->
     else:
         config.agents["helper"].display_name = "UpdatedHelper"
         expected_html = '<p>Hello <a href="https://matrix.to/#/@mindroom_helper:localhost">@UpdatedHelper</a></p>\n'
-    final = await streaming._prepare_delivery_async(is_final=True, allow_empty_progress=False, stream_status=None)
+    final = await streaming._prepare_delivery_async(is_final=True, allow_empty_progress=False)
     assert final is not None
     assert final.content["formatted_body"] == expected_html
     assert initial.content[STREAM_STATUS_KEY] == "pending"
@@ -665,55 +662,6 @@ async def test_placeholder_ack_waits_for_answer_ack_before_marking_substantive(c
     assert timing.metadata["first_substantive_kind"] == "stream_update"
 
 
-@pytest.mark.parametrize(
-    ("stream_status", "terminal_note"),
-    [
-        (STREAM_STATUS_ERROR, "**[Response interrupted by an error: boom]**"),
-        (STREAM_STATUS_CANCELLED, CANCELLED_RESPONSE_NOTE),
-    ],
-)
-@pytest.mark.asyncio
-async def test_terminal_failure_note_ack_is_visible_but_not_substantive(
-    config: Config,
-    stream_status: str,
-    terminal_note: str,
-) -> None:
-    """Acknowledged failure notes are visible transport output, not substantive replies."""
-    timing = DispatchPipelineTiming(source_event_id="$request", room_id="!test:localhost")
-
-    async def fake_edit(
-        _client: object,
-        _room_id: str,
-        _event_id: str,
-        new_content: dict[str, Any],
-        _new_text: str,
-    ) -> DeliveredMatrixEvent:
-        return DeliveredMatrixEvent(event_id="$terminal-edit", content_sent=dict(new_content))
-
-    streaming = StreamingResponse(
-        target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-        pipeline_timing=timing,
-        **FakeReplyRecords(edit=fake_edit).hooks(),
-    )
-    streaming.event_id = "$placeholder"
-    streaming.placeholder_progress_sent = True
-    streaming.accumulated_text = terminal_note
-
-    sent = await streaming._send_or_edit_message(
-        make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
-        is_final=True,
-        stream_status=stream_status,
-    )
-
-    assert sent is True
-    assert "first_visible_reply" in timing.marks
-    assert timing.metadata["first_visible_kind"] == "stream_update"
-    assert "first_substantive_reply" not in timing.marks
-    assert "first_substantive_kind" not in timing.metadata
-
-
 def test_delivery_snapshot_isolates_tool_trace(config: Config) -> None:
     """Snapshot formatting should not observe later live tool-trace mutations."""
     streaming = StreamingResponse(
@@ -728,7 +676,6 @@ def test_delivery_snapshot_isolates_tool_trace(config: Config) -> None:
     snapshot = streaming._delivery_snapshot(
         is_final=False,
         allow_empty_progress=False,
-        stream_status=None,
     )
 
     assert snapshot is not None
@@ -755,7 +702,6 @@ def test_delivery_preparation_builds_thread_relation_only_for_initial_send(confi
     initial_snapshot = streaming._delivery_snapshot(
         is_final=False,
         allow_empty_progress=False,
-        stream_status=None,
     )
     assert initial_snapshot is not None
 
@@ -763,7 +709,6 @@ def test_delivery_preparation_builds_thread_relation_only_for_initial_send(confi
     edit_snapshot = streaming._delivery_snapshot(
         is_final=False,
         allow_empty_progress=False,
-        stream_status=None,
     )
     assert edit_snapshot is not None
 
@@ -801,7 +746,7 @@ def test_streaming_edits_hide_an_interactive_block_until_it_closes(config: Confi
     )
 
     def display_text() -> str:
-        snapshot = streaming._delivery_snapshot(is_final=False, allow_empty_progress=False, stream_status=None)
+        snapshot = streaming._delivery_snapshot(is_final=False, allow_empty_progress=False)
         assert snapshot is not None
         return streaming_mod._prepare_delivery_from_snapshot(snapshot).display_text
 
@@ -823,11 +768,10 @@ def test_only_in_progress_edits_hide_an_unfinished_interactive_block(config: Con
         **reply_hooks(),
     )
     streaming.accumulated_text = '```interactive\n{"question": "What next?"'
-    progress = streaming._delivery_snapshot(is_final=False, allow_empty_progress=False, stream_status=None)
+    progress = streaming._delivery_snapshot(is_final=False, allow_empty_progress=False)
     final = streaming._delivery_snapshot(
         is_final=True,
         allow_empty_progress=False,
-        stream_status=STREAM_STATUS_COMPLETED,
     )
     assert progress is not None
     assert final is not None
@@ -847,11 +791,10 @@ def test_only_a_final_edit_warns_about_an_unfinished_interactive_block(config: C
         **reply_hooks(),
     )
     streaming.accumulated_text = 'Here is the plan.\n\n```interactive\n{"question": "Which step first?", "options": ['
-    progress = streaming._delivery_snapshot(is_final=False, allow_empty_progress=False, stream_status=None)
+    progress = streaming._delivery_snapshot(is_final=False, allow_empty_progress=False)
     final = streaming._delivery_snapshot(
         is_final=True,
         allow_empty_progress=False,
-        stream_status=STREAM_STATUS_COMPLETED,
     )
     assert progress is not None
     assert final is not None
@@ -867,18 +810,18 @@ def test_only_a_final_edit_warns_about_an_unfinished_interactive_block(config: C
 
 
 @pytest.mark.parametrize(
-    ("streamed", "stream_status", "shown_user_id"),
+    ("streamed", "is_final", "shown_user_id"),
     [
         # Still arriving: the cut ID would pill a different user, @grace:matrix.
-        ("Next item, @grace:matrix.", None, None),
-        ("Next item, @grace:matrix.localhost", STREAM_STATUS_COMPLETED, "@grace:matrix.localhost"),
-        ("Next item, @grace:matrix.localhost ", None, "@grace:matrix.localhost"),
+        ("Next item, @grace:matrix.", False, None),
+        ("Next item, @grace:matrix.localhost", True, "@grace:matrix.localhost"),
+        ("Next item, @grace:matrix.localhost ", False, "@grace:matrix.localhost"),
     ],
 )
 def test_streaming_edits_hide_a_mention_still_arriving(
     config: Config,
     streamed: str,
-    stream_status: str | None,
+    is_final: bool,
     shown_user_id: str | None,
 ) -> None:
     """An edit leaves out a trailing mention until it is complete, so it never pills a prefix of the ID."""
@@ -889,7 +832,7 @@ def test_streaming_edits_hide_a_mention_still_arriving(
         **reply_hooks(),
     )
     streaming.accumulated_text = streamed
-    snapshot = streaming._delivery_snapshot(is_final=False, allow_empty_progress=False, stream_status=stream_status)
+    snapshot = streaming._delivery_snapshot(is_final=is_final, allow_empty_progress=False)
     assert snapshot is not None
 
     content = streaming_mod._prepare_delivery_from_snapshot(snapshot).content
@@ -923,7 +866,7 @@ def test_in_progress_edits_render_every_complete_interactive_block(config: Confi
         **reply_hooks(),
     )
     streaming.accumulated_text = streamed
-    snapshot = streaming._delivery_snapshot(is_final=False, allow_empty_progress=False, stream_status=None)
+    snapshot = streaming._delivery_snapshot(is_final=False, allow_empty_progress=False)
     assert snapshot is not None
 
     shown = streaming_mod._prepare_delivery_from_snapshot(snapshot).display_text

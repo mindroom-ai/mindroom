@@ -5842,7 +5842,6 @@ visibility = ["mindroom.streaming"]
 [[modules]]
 path = "mindroom.streaming"
 depends_on = [
-    "mindroom.cancellation",
     "mindroom.constants",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.legacy_streaming",

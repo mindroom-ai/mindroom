@@ -12,7 +12,6 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from mindroom import interactive
-from mindroom.cancellation import task_cancel_source_from_message
 from mindroom.constants import (
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
@@ -862,7 +861,6 @@ class StreamingResponse:
                 client,
                 is_final=True,
                 allow_empty_progress=has_placeholder,
-                stream_status=STREAM_STATUS_COMPLETED,
                 retry_on_failure=True,
             )
         except asyncio.CancelledError:
@@ -916,7 +914,6 @@ class StreamingResponse:
         is_final: bool = False,
         *,
         allow_empty_progress: bool = False,
-        stream_status: str | None = None,
         retry_on_failure: bool = False,
         boundary_refresh: bool = False,
         force_nonterminal_delivery: bool = False,
@@ -926,7 +923,6 @@ class StreamingResponse:
         prepared_delivery = await self._prepare_delivery_async(
             is_final=is_final,
             allow_empty_progress=allow_empty_progress,
-            stream_status=stream_status,
         )
         if prepared_delivery is None:
             return True
@@ -1061,7 +1057,6 @@ class StreamingResponse:
         *,
         is_final: bool,
         allow_empty_progress: bool,
-        stream_status: str | None,
     ) -> _StreamingDeliverySnapshot | None:
         """Freeze all mutable stream state needed for one formatting pass."""
         warmup_suffix_lines = self._warmup_state.render_lines(show_tool_calls=self.show_tool_calls)
@@ -1083,7 +1078,7 @@ class StreamingResponse:
             presentation_state=deepcopy(self.presentation_state),
             extra_content=deepcopy(self.extra_content) if self.extra_content is not None else None,
             warmup_suffix_lines=tuple(warmup_suffix_lines),
-            stream_status=self._resolve_stream_status(is_final=is_final, stream_status=stream_status),
+            stream_status=self._resolve_stream_status(is_final=is_final),
             interactive_creator_agent=self.interactive_creator_agent,
             interactive_source_event_id=self.interactive_source_event_id,
             markdown_renderer=self._render_markdown,
@@ -1095,13 +1090,11 @@ class StreamingResponse:
         *,
         is_final: bool,
         allow_empty_progress: bool,
-        stream_status: str | None,
     ) -> _PreparedStreamingDelivery | None:
         """Prepare one outbound payload without blocking the event loop on formatting."""
         snapshot = self._delivery_snapshot(
             is_final=is_final,
             allow_empty_progress=allow_empty_progress,
-            stream_status=stream_status,
         )
         if snapshot is None:
             return None
@@ -1187,10 +1180,8 @@ class StreamingResponse:
             state=deepcopy(self._last_delivered_presentation_state),
         )
 
-    def _resolve_stream_status(self, *, is_final: bool, stream_status: str | None) -> str:
-        """Return the content status for the current send or edit."""
-        if stream_status is not None:
-            return stream_status
+    def _resolve_stream_status(self, *, is_final: bool) -> str:
+        """Return the content status for the current send or edit: only a stream that finished writes a final one."""
         if is_final:
             return STREAM_STATUS_COMPLETED
         if self.event_id is None:
@@ -1204,11 +1195,7 @@ class StreamingResponse:
         if delivered_state.visible_body_state == "placeholder_only":
             self.pipeline_timing.mark_first_visible_reply("placeholder")
             return
-        self.pipeline_timing.mark_first_visible_reply(
-            "stream_update",
-            substantive=delivered_state.stream_status
-            in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING, STREAM_STATUS_COMPLETED},
-        )
+        self.pipeline_timing.mark_first_visible_reply("stream_update", substantive=True)
 
     async def _send_initial_content(
         self,
@@ -1757,7 +1744,6 @@ async def _drive_stream_delivery(  # noqa: C901, PLR0912
                 prepared_phase_boundary_flush = await streaming._prepare_delivery_async(
                     is_final=False,
                     allow_empty_progress=False,
-                    stream_status=None,
                 )
             if prepared_phase_boundary_flush is None:
                 for capture_completion in phase_boundary_capture_completions:
@@ -1851,21 +1837,17 @@ async def _shutdown_stream_delivery(
     return None
 
 
-async def _cancel_stream_task(task: asyncio.Task[None], cause: asyncio.CancelledError | None = None) -> None:
+async def _cancel_stream_task(task: asyncio.Task[None]) -> None:
     """Cancel one stream supervision task and let it unwind, discarding its outcome.
 
-    When the supervising task's own cancellation is the ``cause``, the task is cancelled the same way: its Stop or
-    restart source, and a process shutdown's hand-off to the successor runtime, which the turn driver it runs reads.
+    A process shutdown that cancelled the supervising task hands the task to the successor runtime too, which the turn
+    driver it runs reads.
     """
     if task.done():
         with suppress(asyncio.CancelledError, Exception):
             await task
         return
-    request_task_cancel(
-        task,
-        cancel_source=task_cancel_source_from_message(str(cause.args[0]) if cause is not None and cause.args else None),
-        process_shutdown=current_task_is_process_shutdown(),
-    )
+    request_task_cancel(task, process_shutdown=current_task_is_process_shutdown())
     with suppress(asyncio.CancelledError, TimeoutError, Exception):
         await asyncio.wait_for(task, timeout=0.5)
 
@@ -1930,7 +1912,6 @@ async def _consume_stream_with_progress_supervision(
     if delivery_task is not None:
         monitored_tasks.add(delivery_task)
 
-    cancelled: asyncio.CancelledError | None = None
     try:
         while True:
             done, _pending = await asyncio.wait(monitored_tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -1956,11 +1937,8 @@ async def _consume_stream_with_progress_supervision(
             if stream_task in done:
                 await stream_task
                 return
-    except asyncio.CancelledError as error:
-        cancelled = error
-        raise
     finally:
-        await _cancel_stream_task(stream_task, cancelled)
+        await _cancel_stream_task(stream_task)
         if placeholder_task is not None:
             # Stop before delivery shuts down so a late approval never queues a placeholder.
             await _cancel_stream_task(placeholder_task)

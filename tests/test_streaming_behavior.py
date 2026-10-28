@@ -691,7 +691,6 @@ class TestStreamingBehavior:
             assert await streaming._send_or_edit_message(
                 mock_client,
                 is_final=True,
-                stream_status=STREAM_STATUS_COMPLETED,
             )
             assert mock_edit.await_count == 3
 
@@ -4584,7 +4583,6 @@ class TestTerminalEditDurability:
             await streaming._send_or_edit_message(
                 AsyncMock(),
                 is_final=True,
-                stream_status=STREAM_STATUS_COMPLETED,
             )
 
         [terminal] = records.writes
@@ -4683,7 +4681,6 @@ class TestStreamTransportStopsWithItsMembership:
             await streaming._send_or_edit_message(
                 AsyncMock(),
                 is_final=True,
-                stream_status=STREAM_STATUS_COMPLETED,
             )
 
         assert [write.kind for write in records.writes] == ["terminal"]
@@ -4719,7 +4716,6 @@ async def test_the_final_transform_shapes_the_terminal_payload_not_a_later_edit(
     prepared = await streaming._prepare_delivery_async(
         is_final=True,
         allow_empty_progress=False,
-        stream_status=STREAM_STATUS_COMPLETED,
     )
 
     assert transformed == ["raw answer"]
@@ -4751,7 +4747,6 @@ async def test_a_progressive_payload_is_never_transformed(tmp_path: Path) -> Non
     prepared = await streaming._prepare_delivery_async(
         is_final=False,
         allow_empty_progress=True,
-        stream_status=STREAM_STATUS_STREAMING,
     )
 
     assert calls == []
@@ -4787,7 +4782,6 @@ async def test_a_failing_final_transform_still_delivers_the_streamed_answer(tmp_
     prepared = await streaming._prepare_delivery_async(
         is_final=True,
         allow_empty_progress=False,
-        stream_status=STREAM_STATUS_COMPLETED,
     )
 
     assert prepared is not None
