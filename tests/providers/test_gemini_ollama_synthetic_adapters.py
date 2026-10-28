@@ -571,16 +571,19 @@ async def test_gemini_replays_undecodable_tool_arguments_as_empty(tmp_path: Path
 @pytest.mark.asyncio
 async def test_gemini_default_sampling_models_omit_sampling_controls(tmp_path: Path) -> None:
     """Models that require their provider's sampling defaults never receive temperature, top_p, or top_k."""
-    config = _config({**GEMINI, "id": "gemini-3.8-flash"}, temperature=0.2, top_p=0.9, top_k=40, seed=7)
+    model = {**GEMINI, "id": "gemini-3.8-flash"}
+    dedicated = _config(model, temperature=0.2, top_p=0.9, top_k=40, seed=7)
+    authored = _config(model, generation_config={"temperature": 0.2, "top_p": 0.9, "top_k": 40, "seed": 7})
 
-    request, _ = await run_adapter(
-        config,
-        _request(overrides=RequestOverrides(temperature=0.5)),
-        tmp_path,
-        gemini_sse(_gemini_chunk({"text": "ok"})),
-    )
+    for config in (dedicated, authored):
+        request, _ = await run_adapter(
+            config,
+            _request(overrides=RequestOverrides(temperature=0.5)),
+            tmp_path,
+            gemini_sse(_gemini_chunk({"text": "ok"})),
+        )
 
-    assert request["body"]["generationConfig"] == {"seed": 7}
+        assert request["body"]["generationConfig"] == {"seed": 7}
 
 
 @pytest.mark.asyncio
