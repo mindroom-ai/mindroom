@@ -37,7 +37,6 @@ _UNSUPPORTED_VIEW_MESSAGE = (
 # A retried media-free request must not repeat a failure the media cannot have caused.
 _NOT_MEDIA_RELATED_CODES = frozenset({SAFEGUARD_REFUSAL, MALFORMED_TOOL_CALL})
 _PAYLOAD_TOO_LARGE_STATUS = 413
-_SERVER_ERROR_STATUS = 500
 # Rejections naming one input's size or type prove only that this input failed, not the whole media kind.
 _INPUT_SPECIFIC_ERROR_MARKERS = ("exceed", "too large", "media_type", "mime type", "mime_type")
 # Only a rejection that names the missing capability may change later requests on the whole route.
@@ -125,9 +124,8 @@ def _names_capability_gap(error: ProviderError, kinds: frozenset[MediaKind]) -> 
     """Return whether a media-free success isolates one kind the provider says the model lacks."""
     if len(kinds) != 1 or isinstance(error, ContextWindowExceeded):
         return False
-    status = error.status_code
-    # A 413 or a server error says nothing about the model; rate limits are retryable, so they never reach this check.
-    if status is not None and (status == _PAYLOAD_TOO_LARGE_STATUS or status >= _SERVER_ERROR_STATUS):
+    # A 413 says nothing about the model; rate limits and server errors are retryable, so they never reach this check.
+    if error.status_code == _PAYLOAD_TOO_LARGE_STATUS:
         return False
     text = str(error).lower()
     if any(marker in text for marker in _INPUT_SPECIFIC_ERROR_MARKERS):

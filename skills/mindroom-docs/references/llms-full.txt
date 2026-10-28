@@ -2513,8 +2513,9 @@ Each decision logs `Cold cache model selected` with a `reason`: `no_earlier_repl
 
 ## Retries
 
-MindRoom retries a model request that fails with a rate limit, an overload, a server error, or a dropped connection up to four times, as long as nothing was streamed yet and no provider-hosted tool had started.
-Before each retry it waits as long as the provider's `Retry-After` header asks, when that is at most a minute, and otherwise a delay that doubles with each retry.
+MindRoom retries a model request that fails with a rate limit, an overload, a server error (any 5xx status, a CDN's origin timeout included), a request timeout, or a dropped connection up to four times, as long as nothing was streamed yet and no provider-hosted tool had started.
+Before each retry it waits as long as the provider's `Retry-After` or Azure's `retry-after-ms` header asks, when that is at most a minute, and otherwise a delay that doubles with each retry.
+These are the only retries: SDK retry settings in `client_params`, such as `max_retries` or Gemini's `http_options.retry_options`, have no effect.
 A request that still fails ends the turn with "⏱️ Rate limited. Please wait a moment and try again." for a rate limit, or "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly." otherwise.
 
 ## Stalled Streams
@@ -3674,7 +3675,7 @@ Rewriting leaves free space inside an index file, which later writes reuse; once
 Changing `chunk_size`, `chunk_overlap`, `chunk_context_model`, the embedder, or any file filter re-embeds the whole base on the next refresh.
 An explicit reindex from the dashboard or API rebuilds every vector, which is how you replace an index you no longer trust.
 An interrupted or failed semantic build continues where it stopped on the next refresh instead of starting over.
-Temporary embedding failures (timeouts, connection errors, and HTTP 408, 409, 429, 500, 502, 503, 504, and 529) are retried, while permanent failures such as authentication errors stop the refresh until you fix the cause.
+Temporary embedding failures (timeouts, connection errors, and HTTP 408, 409, 429, and any 5xx status) are retried, while permanent failures such as authentication errors stop the refresh until you fix the cause.
 
 Knowledge base configuration hot-reloads.
 After a `chunk_size`, `chunk_overlap`, or `chunk_context_model` change, agents keep searching the previous index until the rebuild succeeds.

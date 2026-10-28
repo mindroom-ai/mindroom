@@ -39,9 +39,12 @@ __all__ = [
 
 _RATE_LIMIT_STATUS = 429
 _UNAUTHORIZED_STATUS = 401
-# Statuses after which an unchanged request can succeed: 409 is OpenAI's transient conflict, and 529 is
-# Anthropic's overloaded model, which the error message reports as temporary unavailability, not as a rate limit.
-_TRANSIENT_STATUSES = frozenset({408, 409, 500, 502, 503, 504, 529})
+# Statuses after which an unchanged request can succeed, the ones the OpenAI and Claude SDKs retried: a request
+# timeout, OpenAI's transient conflict (409), and every server error, among them Anthropic's overloaded model (529),
+# which the error message reports as temporary unavailability rather than a rate limit, and a CDN's origin failures
+# (520 to 524) in front of a custom endpoint.
+_TRANSIENT_CLIENT_STATUSES = frozenset({408, 409})
+_SERVER_ERROR_RANGE = range(500, 600)
 _INVALID_REQUEST_STATUSES = frozenset({400, 404, 413, 422})
 _HTTP_CLIENT_ERROR_RANGE = range(400, 500)
 # The names providers give a throttled request: Anthropic's error type and the Responses code.
@@ -132,7 +135,7 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
     as its ``provider_code``. ``retry_after_seconds`` is the response's ``Retry-After`` hint.
 
     1. A 429 status or a rate-limit name is ``RateLimited``.
-    2. A transient status is ``ProviderUnavailable``.
+    2. A transient status, 408, 409, or any 5xx, is ``ProviderUnavailable``.
     3. A 401 status or Anthropic's ``authentication_error`` is ``AuthenticationFailed``.
     4. Wording or a code that names the context window, on a client error or an event without a status, is
        ``ContextWindowExceeded``: a retry cannot make the request fit. A 5xx that mentions it stays transient.
@@ -158,7 +161,7 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
 
     if status == _RATE_LIMIT_STATUS or names & _RATE_LIMIT_NAMES:
         return typed(RateLimited)
-    if status in _TRANSIENT_STATUSES:
+    if status in _TRANSIENT_CLIENT_STATUSES or status in _SERVER_ERROR_RANGE:
         return typed(ProviderUnavailable)
     if status == _UNAUTHORIZED_STATUS or _AUTHENTICATION_ERROR_TYPE in names:
         return typed(AuthenticationFailed)
@@ -174,15 +177,21 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
 
 
 def retry_after_seconds(headers: Mapping[str, str]) -> float | None:
-    """Return a response's numeric ``Retry-After`` header in seconds; an HTTP-date form or a negative value is none."""
-    raw_value = headers.get("retry-after") or headers.get("Retry-After")
-    if raw_value is None:
-        return None
-    try:
-        seconds = float(raw_value.strip())
-    except ValueError:
-        return None
-    return seconds if seconds >= 0 else None
+    """Return a response's ``Retry-After`` hint in seconds, preferring Azure's ``retry-after-ms`` as the SDKs did.
+
+    A value that is not a number, such as an HTTP date, or that is negative, is no hint. Header names match in any case.
+    """
+    by_name = {name.casefold(): value for name, value in headers.items()}
+    for name, divisor in (("retry-after-ms", 1000.0), ("retry-after", 1.0)):
+        raw_value = by_name.get(name)
+        if raw_value is None:
+            continue
+        try:
+            seconds = float(raw_value.strip()) / divisor
+        except ValueError:
+            continue
+        return seconds if seconds >= 0 else None
+    return None
 
 
 def missing_api_key_error(env_var: str, *, provider: str) -> AuthenticationFailed:

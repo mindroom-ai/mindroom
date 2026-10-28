@@ -57,7 +57,10 @@ from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
         ),
         (400, "API key not valid. Please pass a valid API key.", None, AuthenticationFailed, False),
         (503, "authentication service overloaded", None, ProviderUnavailable, True),
-        (520, "origin error", None, ProviderError, False),
+        (520, "origin error", None, ProviderUnavailable, True),
+        (524, "A timeout occurred", None, ProviderUnavailable, True),
+        (501, "not implemented", None, ProviderUnavailable, True),
+        (418, "teapot", None, ProviderError, False),
     ],
 )
 def test_statuses_and_wording_classify_the_same_for_every_family(
@@ -86,6 +89,9 @@ def test_statuses_and_wording_classify_the_same_for_every_family(
     [
         ({"retry-after": "2.5"}, 2.5),
         ({"Retry-After": " 7 "}, 7.0),
+        ({"retry-after-ms": "30000", "retry-after": "1"}, 30.0),
+        ({"Retry-After-Ms": "250"}, 0.25),
+        ({"retry-after-ms": "soon", "retry-after": "4"}, 4.0),
         ({"retry-after": "0"}, 0.0),
         ({"retry-after": "-1"}, None),
         ({"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}, None),

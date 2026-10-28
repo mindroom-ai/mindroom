@@ -50,7 +50,7 @@ from mindroom.providers.openai.errors import provider_error
 from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.pipeline import retry as retry_stage
-from tests.providers.golden_support import PacedBytes, encoded_response, httpx2_transport
+from tests.providers.golden_support import PacedBytes, encoded_response, httpx2_transport, pipeline_provider
 from tests.providers.openai_family_support import (
     golden_provider,
     openai_family_adapter,
@@ -699,16 +699,67 @@ async def test_http_errors_map_to_typed_provider_errors(
 
 
 @pytest.mark.asyncio
-async def test_a_retry_after_header_rides_on_the_typed_error(tmp_path: Path) -> None:
-    """The provider's ``Retry-After`` hint reaches the pipeline, which waits it out instead of the SDK."""
+@pytest.mark.parametrize("status", [520, 522, 524])
+async def test_a_cdn_origin_failure_in_front_of_a_custom_endpoint_is_retried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+) -> None:
+    """A Cloudflare origin failure is a server error the request pipeline retries, as the SDK did before it."""
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+    replies = [
+        _json_reply({"error": {"message": "A timeout occurred"}}, status=status),
+        _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")),
+    ]
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        sent.append(request)
+        return encoded_response(replies[len(sent) - 1])
+
+    config = {"provider": "llama_cpp", "id": "qwen", "extra_kwargs": {"base_url": "https://llm.example/v1"}}
+    provider = pipeline_provider(openai_family_adapter(config, tmp_path, respond))
+
+    turn = await complete(provider, ModelRequest(messages=[_user()]))
+
+    assert (turn.content, len(sent)) == ("ok", 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_config", "header", "value", "seconds"),
+    [
+        (_OPENAI_CHAT, "retry-after", "2", 2.0),
+        (
+            {
+                "provider": "azure",
+                "id": "gpt-6-astra",
+                "api_key": "test-key",
+                "extra_kwargs": {"azure_endpoint": "https://r.openai.azure.com"},
+            },
+            "retry-after-ms",
+            "30000",
+            30.0,
+        ),
+    ],
+    ids=["openai-seconds", "azure-milliseconds"],
+)
+async def test_a_retry_after_header_rides_on_the_typed_error(
+    tmp_path: Path,
+    model_config: dict[str, Any],
+    header: str,
+    value: str,
+    seconds: float,
+) -> None:
+    """The provider's ``Retry-After`` hint, Azure's ``retry-after-ms`` too, reaches the pipeline, which waits it out."""
     reply = _json_reply({"error": {"message": "slow down"}}, status=429)
-    reply["headers"]["retry-after"] = "2"
-    built = _Built(tmp_path, _OPENAI_CHAT, reply)
+    reply["headers"][header] = value
+    built = _Built(tmp_path, model_config, reply)
 
     with pytest.raises(RateLimited) as info:
         await _adapter_turn(built, ModelRequest(messages=[_user()]))
 
-    assert (info.value.retry_after_seconds, len(built.requests)) == (2.0, 1)
+    assert (info.value.retry_after_seconds, len(built.requests)) == (seconds, 1)
 
 
 @pytest.mark.asyncio

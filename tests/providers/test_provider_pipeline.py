@@ -497,13 +497,12 @@ async def test_input_specific_rejection_retries_without_learning() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [413, 501])
-async def test_a_payload_or_server_rejection_retries_without_learning(status: int) -> None:
-    """A 413 or a final server error proves nothing about the model, even when its text names a capability gap."""
+async def test_a_payload_rejection_retries_without_learning() -> None:
+    """A 413 proves nothing about the model, even when its text names a capability gap."""
     rejection = classify_provider_error(
         "This model does not support image input",
         provider="Scripted Chat",
-        status_code=status,
+        status_code=413,
     )
     inner = _ScriptedProvider([[rejection], [_turn()], [_turn()]])
     provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
