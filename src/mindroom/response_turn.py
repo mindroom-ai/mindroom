@@ -970,6 +970,10 @@ class _CompletionSettle:
     # (live-streamed attempts leave it empty because their chunks already
     # delivered the document).
     response_text: str = ""
+    # A quiet turn whose output holds no answer reports nothing: the driver
+    # emits its empty final text, which replaces a document a team's chunks
+    # showed, so delivery receives no text to post.
+    reports_nothing: bool = False
 
 
 def _settle_completed_attempt(
@@ -1029,7 +1033,13 @@ def _settle_completed_attempt(
         # Tool presentation and team fallback chrome are not semantic prose.
         # The tool records remain part of the completed turn, but quiet
         # delivery has no final assistant body to publish.
-        response_text = ""
+        return _CompletionSettle(
+            keep_going=False,
+            continuation=continuation,
+            recorded_text=recorded_text,
+            recorded_tools=resolution.completed_tools,
+            reports_nothing=True,
+        )
     return _CompletionSettle(
         keep_going=False,
         continuation=continuation,
@@ -1139,7 +1149,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                 )
                 continuation = settle.continuation
                 keep_going = settle.keep_going
-                if settle.response_text:
+                if settle.response_text or settle.reports_nothing:
                     yield adapter.make_text_chunk(settle.response_text)
                 if not keep_going:
                     _record_completed_turn(sinks, run, resolution, settle)

@@ -839,6 +839,32 @@ def test_tool_only_agent_and_team_presentations_respect_quiet_delivery(
     ]
 
 
+@pytest.mark.parametrize(("allow_no_report_response", "ending"), [(True, ["notice:"]), (False, [])])
+def test_a_quiet_turn_without_an_answer_ends_with_an_empty_final_text(
+    allow_no_report_response: bool,
+    ending: list[str],
+) -> None:
+    """A quiet turn whose shown output is no answer ends with an empty final text, which a team's chunks give way to."""
+    log = _AdapterLog()
+
+    async def _attempt(_run: TurnRunState, _c: TurnContinuationRunState) -> AsyncGenerator[str | AttemptResolved, None]:
+        yield "tool document"
+        yield AttemptResolved(CompletedAttempt(completed_tools=(_trace("touch"),)))
+
+    chunks = asyncio.run(
+        _collect(
+            stream_response_turn(
+                _ctx(allow_no_report_response=allow_no_report_response),
+                _streaming_adapter(log, _attempt),
+                TurnSinks(),
+                continuation=_continuation(),
+            ),
+        ),
+    )
+
+    assert chunks == ["tool document", *ending]
+
+
 def test_collected_completion_skips_collector_without_metadata_content() -> None:
     """No collector update happens when the attempt resolved without metadata."""
     log = _AdapterLog()

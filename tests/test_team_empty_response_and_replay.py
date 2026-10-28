@@ -259,6 +259,41 @@ async def test_a_later_attempt_of_a_team_turn_on_a_new_scope_replays_the_run_an_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("show_tool_calls", [True, False])
+async def test_a_quiet_scheduled_team_reply_that_only_ran_tools_reports_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    show_tool_calls: bool,
+) -> None:
+    """A quiet schedule whose runs called tools but wrote nothing ends with an empty reply, which delivery suppresses.
+
+    The tool calls it showed are not an answer, so the empty final text replaces the document they built.
+    """
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "general", "Run the tool"), answer("")],
+        general=[calls(tool_call("touch", "call-touch", label="noon")), answer("")],
+    )
+    tool_trace: list[ToolTraceEntry] = []
+
+    text = await team.respond(
+        ctx=team.ctx(allow_no_report_response=True),
+        message="Run the tool.",
+        show_tool_calls=show_tool_calls,
+        tool_trace_collector=tool_trace,
+    )
+
+    assert text == ""
+    assert [entry.tool_name for entry in tool_trace] == (
+        ["touch", "delegate_task_to_member"] if show_tool_calls else []
+    )
+    assert team.recorder.outcome == "completed"
+    assert team.recorder.assistant_text == ""
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("member_finding", [None, "Queue depth is elevated."])
 async def test_a_quiet_scheduled_team_reply_is_the_no_reply_token_unless_a_member_found_something(
     tmp_path: Path,
