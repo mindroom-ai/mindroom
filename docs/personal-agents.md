@@ -185,11 +185,15 @@ The person asks `mind` for a helper, and `mind` calls `create_agent` with a `nam
 The new agent joins no room by itself.
 The owner invites its Matrix ID to a room to talk to it, and the agent accepts because the invitation comes from an owner.
 Authored config cannot reference a created agent, so a `delegate_to` list or a team that names one fails to load.
+A change to a created agent through `self_config` or `config_manager` is refused with `agents.<name> was created by another agent; its owners change it with update_agent`, because saving it to `config.yaml` would lose it.
 
 > [!WARNING]
 > **A created agent has its creator's tools, knowledge bases, skills, and model.**
 > Anyone who may ask the creator can make copies of it up to the cap, and a copy can drop tools but never add one.
 > Set `created_agents_per_owner` only on agents whose whole configuration you would hand to each person who may ask them.
+> A copy's access is its owners, not the creator's `access`.
+> An owner can add any Matrix ID as a co-owner, including someone on another server who may not ask the creator, and a copy keeps working for its owners after they lose access to the creator.
+> To take one copy away, stop MindRoom and remove its entry from `created` in `tracking/personal_agents.json`; setting the cap to 0 or removing the creator stops every copy of that creator.
 
 The cap counts each person's agents from one creator, including one still being created.
 A person at the cap is refused with `<owner> already has <n> agents from <creator>, which may create <cap> per owner`, and deleting an agent frees a place.
@@ -225,8 +229,10 @@ A created agent is built again from its creator at every config load, so changin
   Setting it to 0 stops them all and removes `create_agent`.
 - Removing the creator stops its agents with `reason=creator_missing`.
 - Stopped agents keep their roster entries and Matrix accounts, so restoring the creator or raising the cap starts them again.
+- Changing the creator's `access` does not change who may use its created agents; see the warning in [Letting an Agent Create Agents](#letting-an-agent-create-agents).
 - Saving an agent, team, or template under a created agent's name from the dashboard or `config_manager` is refused with `<section>.<name> collides with the agent <creator> created for <owner>`.
   One added to `config.yaml` by hand keeps the name, and the created agent stops with `reason=name_taken`.
+  The authored agent then logs in with the created agent's Matrix account, so it joins that agent's rooms and uses its memory and workspace, and every later dashboard or `config_manager` save is refused until one of the two is renamed or the roster entry is removed.
 - A created agent copies a personal creator as its template defines it, so the owner's edits to that creator do not carry over, and the tools it may give come from the template.
 
 ## Troubleshooting Personal Agents
