@@ -9472,6 +9472,7 @@ depends_on = [
     "mindroom.approval.tool_approval",
     "mindroom.session_storage.agent_storage",
     "mindroom.helper_usage",
+    "mindroom.history.types",
     "mindroom.llm",
     "mindroom.model_usage",
     "mindroom.providers.registry",
