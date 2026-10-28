@@ -1182,7 +1182,11 @@ class TestMemoryConfig:
         for raised in (build.value, search.value):
             assert (str(raised), raised.retryable) == ("embedder endpoint unreachable", True)
         mem0_embedder.embed.assert_called_once_with("query", "search")
-        assert result.embedding_model.embed_batch(["memory"], "add") == [[0.5]]
+        assert result.embedding_model.embed_batch(["memory"], "update") == [[0.5]]
+        mem0_embedder.embed_batch.assert_called_once_with(["memory"], "update")
+        mem0_embedder.embed_batch.side_effect = refused
+        with pytest.raises(EmbedderRequestError, match="embedder endpoint unreachable"):
+            result.embedding_model.embed_batch(["memory"])
 
     @pytest.mark.asyncio
     async def test_a_failure_unrelated_to_ollama_while_building_mem0_keeps_its_type(self, tmp_path: Path) -> None:
