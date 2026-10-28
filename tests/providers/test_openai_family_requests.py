@@ -1446,6 +1446,29 @@ def test_every_request_setting_a_chat_dialect_accepts_reaches_its_body(
     assert {name: body.get(name) for name in body_fields} == authored
 
 
+@pytest.mark.parametrize("provider", ["openai", "groq", "cerebras"])
+def test_a_chat_request_without_tools_sends_no_tool_list(provider: str, tmp_path: Path) -> None:
+    """Every Chat dialect leaves ``tools`` out of a request that offers none, rather than sending an empty list."""
+    adapter = build_provider(
+        ModelConfig(provider=provider, id="m", api="chat_completions" if provider == "openai" else None, api_key="k"),
+        provider_runtime(resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})),
+    )
+    assert isinstance(adapter, ChatAdapter)
+
+    kwargs = chat_request_kwargs(
+        model_id="m",
+        messages=[Message(role="user", content="Hi")],
+        tools=(),
+        tool_choice=None,
+        output_schema=None,
+        structured_output=adapter.capabilities.structured_output,
+        settings=adapter.settings,
+        wire=adapter.wire,
+    )
+
+    assert "tools" not in {**kwargs.get("extra_body", {}), **kwargs}
+
+
 # --- Codex ----------------------------------------------------------------------------------------------------
 
 
