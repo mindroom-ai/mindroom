@@ -28,6 +28,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.message_target import MessageTarget
 from mindroom.response_turn import TurnSinks, collect_streamed_response_content
+from mindroom.streaming import ReplacementStreamingResponse
 from mindroom.teams.envelope import TeamTurnSpec, team_response_stream
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
@@ -185,7 +186,11 @@ async def collect_team_reply(spec: TeamTurnSpec, ctx: ResponseTurnContext, *, si
     """Collect one team turn's stream into the text it delivers whole, as the response runner collects it."""
     body, _tool_trace = await collect_streamed_response_content(
         team_response_stream(spec, ctx, sinks=sinks),
-        presentation=CollectedStreamPresentation(show_tool_calls=ctx.show_tool_calls, track_hidden_tools=True),
+        presentation=CollectedStreamPresentation(
+            show_tool_calls=ctx.show_tool_calls,
+            track_hidden_tools=True,
+            replaces_text=ReplacementStreamingResponse.replaces_text,
+        ),
     )
     return body
 

@@ -1120,9 +1120,10 @@ def _settle_completed_attempt(
             recorded_text = decision.limit_message
             response_text = decision.limit_message
     elif ctx.allow_no_report_response and not resolution.replayable_text.strip():
-        # Tool presentation and team fallback chrome are not semantic prose.
-        # The tool records remain part of the completed turn, but quiet
-        # delivery has no final assistant body to publish.
+        # An approval resume hands its final text over here, where a live attempt
+        # already streamed it. Tool presentation and fallback text are not
+        # semantic prose: the tool records remain part of the completed turn,
+        # but quiet delivery has no final assistant body to publish.
         response_text = ""
     return _CompletionSettle(
         keep_going=False,
