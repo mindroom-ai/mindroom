@@ -617,7 +617,7 @@ _INDEXES = (
     CREATE INDEX IF NOT EXISTS approval_card_scopes_scope ON approval_card_scopes (principal_id, scope_key)
     """,
     """
-    CREATE INDEX IF NOT EXISTS approval_card_events_delivery ON approval_card_events (principal_id, delivery_id/*bytes*/)
+    CREATE INDEX IF NOT EXISTS approval_card_events_delivery ON approval_card_events (principal_id, delivery_id)
     """,
     """
     CREATE INDEX IF NOT EXISTS approval_cards_call ON approval_cards (owner_id, generation, tool_call_id)

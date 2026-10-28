@@ -56,12 +56,12 @@ In-process notifications (`ApprovalSignals`) therefore belong to the store and s
 - An operation records its signals on its transaction; the backend keeps them only when the operation's savepoint held and the batch committed, and the writer task publishes them in commit order before it resolves any caller, because a caller cancelled after its commit would otherwise never publish and callers on other loops resume in no defined order.
 - A pause's hold applies at its commit, while the reply still holds the conversation lock, so no message is answered between the pause and its hold and no end precedes it; that is why the 30-second recheck and its accepted race could go.
 - A detached waiter registers before its card is reserved and clears before each read, so a decision on either side of a read wakes it.
-- Decisions the journal writes without the manager (a job's end, a departure) still reach Matrix at once, because the manager follows decided-call signals and flushes those cards; approval cards are flushed only by the manager, since the bots' generic outbox recovery skips their event type.
+- Decisions the journal writes without the manager (a job's cancel request or end, a departure) still reach Matrix at once, because the manager follows decided-call signals and flushes those cards; approval cards are flushed only by the manager, since the bots' generic outbox recovery skips their event type.
 
 ### Detached approvals
 
 - One `human_gate` answers "needs a person, or decided already" (no approver, an `!auto_approve` window, the router missing) for every kind, so background scripts get the router-missing denial `docs/tool-approval.md` already promised.
-- A job's end denies its pending cards in the transaction that saves its terminal snapshot, given a typed flag rather than a reading of job JSON; the job still cancels and joins its card requests first, so none reserves a card afterwards.
+- A job's cancel request denies its pending cards in the transaction that saves it, so a stopped job's cards are not answerable while the job winds down, and its end denies them again in the transaction that saves its terminal snapshot, covering a card that a request still in flight reserved after the cancel request; both saves carry a typed flag rather than a reading of job JSON, and the job still cancels and joins its card requests before its end, so none reserves a card after that.
 
 ### Journal upgrades
 
@@ -85,7 +85,7 @@ In-process notifications (`ApprovalSignals`) therefore belong to the store and s
 - A stopped, restarted, or failed reply's cards say why instead of "Tool approval request timed out.".
 - A refused final answer finishes its paused reply on every path.
 - Background scripts in a room without the router are denied with the router-missing text instead of failing the call.
-- A job's cards are denied in the commit that records the job's end, so an ended job never leaves an answerable card.
+- A job's cards are denied in the commit that records its cancel request or its end, so a stopping or ended job never leaves an answerable card.
 - Detached waits end as soon as their decision commits.
 - Cancelling a scheduled task with a stored call is refused while the approval runtime is not ready, instead of silently leaving its approval in place.
 

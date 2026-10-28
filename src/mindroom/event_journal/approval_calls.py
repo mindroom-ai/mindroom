@@ -427,9 +427,7 @@ def resolve_call(
     approval_signals.decided(
         transaction,
         call,
-        None
-        if card is None
-        else approval_signals.DecidedCard(card.principal_id, card.delivery_id, card_event_id, card.room_id),
+        None if card is None else approval_signals.DecidedCard(card.delivery_id, card_event_id, card.room_id),
     )
     if owner_kind != "reply":
         return approval_cards.RecordedApprovalDecision(

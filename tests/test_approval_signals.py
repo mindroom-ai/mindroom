@@ -251,7 +251,7 @@ async def test_a_decision_reports_the_card_whose_terminal_edit_it_queued(tmp_pat
     """A decided-card listener hears each decision that queued a card's terminal edit, until it stops."""
     store = EventJournalStore.open_sqlite(tmp_path / "journal.db")
     call = CallKey.detached("tool-job:job-1", "call-1")
-    card = DecidedCard("router@shared", "script-approval:tool-job:job-1:call-1", "$card", "!room:localhost")
+    card = DecidedCard("script-approval:tool-job:job-1:call-1", "$card", "!room:localhost")
     cards: list[DecidedCard] = []
     stop = store.approval_signals.follow_decided_cards(cards.append)
 

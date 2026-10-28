@@ -47,7 +47,6 @@ class PausedReply:
 class DecidedCard:
     """The live request card of a call just decided, whose terminal edit is queued."""
 
-    principal_id: str
     delivery_id: str
     card_event_id: str | None
     room_id: str

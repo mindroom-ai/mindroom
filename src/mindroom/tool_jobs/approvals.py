@@ -1,8 +1,9 @@
 """Approval cards that a background job posts and owns while it waits for their decisions.
 
 A background subagent's gated calls ask here, and so does a gated tool call that runs as a job. The job stays
-`awaiting_approval` while its cards are open; an exit before every decision arrives stops the card requests still
-open, and the save of the job's end denies the cards it posted. Timed approvals work as they do for a paused reply:
+`awaiting_approval` while its cards are open. The save of its cancel request denies the cards it posted so far, and
+the save of its end denies any card a request still in flight posted after that; an exit before every decision arrives
+stops the card requests still open. Timed approvals work as they do for a paused reply:
 the cards offer them, and an active one approves a call without a card.
 """
 
@@ -51,7 +52,7 @@ async def ask_job_approvals(
     """Ask the requester about each planned call through cards the job owns, and wait for every decision.
 
     Returns each call's decision and denial reason, in order. Any exit before then, a cancellation or a failure,
-    stops the card requests still open; the job's end denies the cards already posted.
+    stops the card requests still open; the saves of the job's cancel request and end deny the cards already posted.
     """
     gated = any(call.decision is None for call in calls)
     if gated:
@@ -63,7 +64,7 @@ async def ask_job_approvals(
     try:
         decided = await asyncio.gather(*decisions)
     except BaseException:
-        # Cancellation or a failed card ends this wait, and the job's end denies its cards: none may post after it.
+        # Cancellation or a failed card ends this wait; the job's end denies its cards, so none may post after it.
         await run_coroutine_until_complete(_end_wait(decisions))
         raise
     if gated:

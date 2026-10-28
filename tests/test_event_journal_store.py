@@ -10115,10 +10115,19 @@ class TestHotQueriesAreIndexCovered:
         indexes = [s for s in rendered if "CREATE INDEX" in s]
 
         assert not [s for s in rendered if "/*bytes*/" in s], "byte-order marker left unexpanded"
-        ordered_text_indexes = [s for s in indexes if "delivery_id" in s or "approval_continuations_owner_scan" in s]
+        # A card's events are only ever looked up by their delivery, in the default collation those equality queries
+        # use; a pin there would make PostgreSQL decline the index for them.
+        ordered_text_indexes = [
+            s
+            for s in indexes
+            if ("delivery_id" in s or "approval_continuations_owner_scan" in s)
+            and "approval_card_events_delivery" not in s
+        ]
         assert ordered_text_indexes, "expected indexes over the unpinned text columns"
         for statement in ordered_text_indexes:
             assert 'COLLATE "C"' in statement, statement
+        [card_events] = [s for s in indexes if "approval_card_events_delivery" in s]
+        assert 'COLLATE "C"' not in card_events, card_events
 
 
 class TestTurnRecordsLiveBesideTheTurnsTheyDescribe:
