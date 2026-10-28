@@ -975,6 +975,35 @@ def test_collected_external_cancel_builds_fallback_metadata() -> None:
     assert run_metadata["reply_to_event_id"] == "$reply"
 
 
+def test_a_cancel_after_the_turn_completed_keeps_its_completed_record() -> None:
+    """A stop that lands while a completed turn finishes its attempt leaves the turn's completed record as it is."""
+    log = _AdapterLog()
+    recorder = _FakeTurnRecorder()
+
+    async def _attempt(_run: TurnRunState, _c: TurnContinuationRunState) -> AsyncGenerator[str | AttemptResolved, None]:
+        yield AttemptResolved(CompletedAttempt(replayable_text="done", has_visible_content=True))
+
+    async def _cancel_while_finalizing(_scope: ScopeSessionContext | None) -> None:
+        raise asyncio.CancelledError
+
+    async def _run() -> None:
+        await _collect(
+            stream_response_turn(
+                _ctx(),
+                replace(_streaming_adapter(log, _attempt), finalize_attempt=_cancel_while_finalizing),
+                TurnSinks(turn_recorder=cast("Any", recorder)),
+                continuation=_continuation(),
+            ),
+        )
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(_run())
+
+    assert recorder.outcome == "completed"
+    assert recorder.interrupted_calls == []
+    assert log.persisted == []
+
+
 def test_collected_external_cancel_skips_persist_after_inline_persist() -> None:
     """A cancel after an errored attempt persisted its replay does not persist a second one."""
     log = _AdapterLog()

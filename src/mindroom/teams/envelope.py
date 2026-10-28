@@ -592,15 +592,12 @@ class _TeamTurn:
                         yield chunk
         except Exception as error:
             logger.exception("team_response_failed", agents=attempt.members.display_names)
-            self.sync_live_turn_recorder(run, attempt)
             yield self.error_text(error)
             yield AttemptResolved(HandledAttempt(metadata_content=self.run_metadata_content(attempt, RunStatus.error)))
             return
         record = attempt.terminal_record()
         # A failed member run's deltas never show why it failed; the document adds its reason now the team run ended.
-        shown_reasons = attempt.show_failure_reasons(record)
-        if shown_reasons:
-            self.sync_live_turn_recorder(run, attempt)
+        attempt.show_failure_reasons(record)
         if record.status is RunStatus.paused:
             paused = self.resolve_paused(attempt, record)
             if paused.response_text:
@@ -675,11 +672,11 @@ class _TeamTurn:
     ) -> CompletedAttempt:
         """Return the completed attempt: what its reply still has to show, what replays, and the turn's metadata.
 
-        ``shown`` says whether the attempt's chunks showed a document. One that showed nothing ends with the leader's
-        text or the no-response line; a quiet scheduled reply in which only the leader answered, with the bare
-        no-report token, which its delivery suppresses. An attempt that produced anything records the Matrix events
-        the turn consumed as seen on the stored session row; an empty one, whose run is discarded, leaves them unseen,
-        so the next turn still reads them.
+        ``shown`` says whether the attempt's chunks showed a document. One that showed nothing ends with the
+        no-response line; a quiet scheduled reply in which only the leader answered, with the bare no-report token,
+        which its delivery suppresses. An attempt that produced anything records the Matrix events the turn consumed
+        as seen on the stored session row; an empty one, whose run is discarded, leaves them unseen, so the next turn
+        still reads them.
         """
         tool_executions = team_tool_executions(record)
         # The text a reply records: its document without the header and tool markers. The no-response line is
@@ -691,11 +688,10 @@ class _TeamTurn:
                 scope_context=run.scope,
                 event_ids=_run_metadata_seen_event_ids(run.run_metadata),
             )
-        header = format_team_header(attempt.members.display_names)
-        leader_text = finished_run_text(record)
-        rendered = header + (body_text or leader_text or NO_TEAM_RESPONSE)
+        rendered = format_team_header(attempt.members.display_names) + (body_text or NO_TEAM_RESPONSE)
         replayable_text = rendered if body_text else ""
         response_text = "" if shown else rendered
+        leader_text = finished_run_text(record)
         if (
             self.ctx.allow_no_report_response
             and is_silent_schedule_no_report_response(leader_text)

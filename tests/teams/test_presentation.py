@@ -194,7 +194,7 @@ def test_a_failed_member_shows_its_redacted_reason_in_the_team_document(source: 
     )
     apply_team_event(presentation, TextDelta("Unchecked."))
 
-    assert attempt.show_failure_reasons(
+    attempt.show_failure_reasons(
         TeamRunRecord(run_id="team-run", content="Unchecked.", ended_member_runs=[checker], team_id=None),
     )
     document = presentation.text_without_tool_markers(finished=True)

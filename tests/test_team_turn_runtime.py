@@ -34,6 +34,7 @@ from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.delegation.state import DelegationState, child_execution_identity
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.event_journal import ApprovalDecision
+from mindroom.history import storage as history_storage
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, EnrichmentItem, MessageEnvelope, ToolBeforeCallContext, hook
 from mindroom.llm.errors import ProviderError
@@ -212,6 +213,33 @@ async def test_a_team_turn_whose_attempts_all_came_back_empty_leaves_its_trigger
     assert session is not None
     assert session.runs == []
     assert read_scope_seen_event_ids(team.storage, session, TEAM_SCOPE) == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False])
+async def test_a_team_turn_that_only_ran_tools_marks_its_trigger_seen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    """A turn whose runs called tools but wrote nothing keeps its run and marks the events it read seen, on either path.
+
+    The stored session row keeps them as well as the run, as it does for every turn that produced anything.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "writer", "Report"), answer("")],
+        writer=[calls(tool_call("touch", "call-touch", label="a")), answer("")],
+    )
+
+    await team.reply(stream=stream, show_tool_calls=False)
+
+    assert ProbeToolkit.calls == ["a"]
+    session = team.storage.load_session(SESSION_ID, "team")
+    assert session is not None
+    assert read_scope_seen_event_ids(team.storage, session, TEAM_SCOPE) == {EVENT_ID}
+    assert history_storage._read_preserved_scope_seen_event_ids(session.metadata, TEAM_SCOPE) == {EVENT_ID}
 
 
 @pytest.mark.asyncio
@@ -2630,14 +2658,23 @@ async def test_a_stopped_blocking_team_turn_records_what_its_leader_wrote_before
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("consensus", "recorded"),
+    [
+        pytest.param("Done.", "\n\n\n**Team Consensus**:\n\nDone.", id="with-consensus"),
+        pytest.param("", "\n\n\n*No team consensus - showing individual responses only*", id="members-only"),
+    ],
+)
 async def test_a_blocking_team_turn_stopped_after_its_run_ended_records_the_finished_runs_records(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    consensus: str,
+    recorded: str,
 ) -> None:
-    """A Stop that lands after the run ended, before the turn settles, records the finished runs' records.
+    """A Stop that lands after the run ended, before the turn settles, records the finished reply's document.
 
-    The checker failed before any text and shows its error, as the reply would have shown it; the text the run's
-    events built held no checker text.
+    The checker failed before any text, and the document adds its reason once the run ended, as the reply shows it;
+    a reply whose leader said nothing ends with the no-consensus note.
     """
     finishing = asyncio.Event()
     finalize_consumption = response_turn.finalize_consumption
@@ -2652,7 +2689,7 @@ async def test_a_blocking_team_turn_stopped_after_its_run_ended_records_the_fini
     team = squad_turn(
         tmp_path,
         monkeypatch,
-        leader=[delegate("call-check", "checker", "Check"), answer("Done.")],
+        leader=[delegate("call-check", "checker", "Check"), answer(consensus)],
         checker=[[Await(_checker_overloaded)]],
     )
     task = asyncio.create_task(team.respond(show_tool_calls=False))
@@ -2664,7 +2701,7 @@ async def test_a_blocking_team_turn_stopped_after_its_run_ended_records_the_fini
     record, [member] = team.stored_runs()
     assert (record.status, member.status) == (RunStatus.completed, RunStatus.error)
     assert team.recorder.outcome == "interrupted"
-    assert team.recorder.assistant_text == "**Checker**: Checker overloaded\n\n\n**Team Consensus**:\n\nDone."
+    assert team.recorder.assistant_text == f"**Checker**: Checker overloaded{recorded}"
 
 
 class _ExternalProbeToolkit(ProbeToolkit):
