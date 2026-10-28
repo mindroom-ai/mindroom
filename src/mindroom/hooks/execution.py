@@ -153,6 +153,7 @@ def _bind_hook_context(
     hook: RegisteredHook,
     context: _HookExecutionContext,
 ) -> _HookExecutionContext:
+    """Return the copy of ``context`` one hook receives, under that hook's plugin name, settings, and logger."""
     replacement_kwargs: dict[str, object] = {
         "plugin_name": hook.plugin_name,
         "settings": dict(hook.settings),
