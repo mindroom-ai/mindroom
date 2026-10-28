@@ -72,7 +72,7 @@ def _warn_about_unconfined_primary_tools_next_to_worker_code_tools(config: Confi
 
 
 def _warn_about_agent_keys_without_worker_commands(config: Config, runtime_paths: RuntimePaths) -> None:
-    """Warn about each agent that lists `egress_credentials` while none of its shell or python calls run in a worker.
+    """Warn about each agent that lists `egress_credentials` and shell or python, but none of them runs in a worker.
 
     The broker only reaches worker-routed calls, so such an agent is left off the Agent Keys pages.
     """

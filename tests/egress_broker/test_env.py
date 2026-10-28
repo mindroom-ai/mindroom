@@ -344,7 +344,7 @@ def test_agents_whose_shell_and_python_run_in_the_primary_do_not_use_the_broker(
     ("agent", "unused"),
     [
         pytest.param(_agent("shell", "egress_credentials", worker_tools=[]), True, id="shell-in-primary"),
-        pytest.param(_agent("egress_credentials"), True, id="tool-without-shell"),
+        pytest.param(_agent("egress_credentials"), False, id="tool-without-shell"),
         pytest.param(_agent("shell", "egress_credentials", worker_tools=["shell"]), False, id="shell-in-worker"),
         pytest.param(_agent("shell", worker_tools=[]), False, id="no-egress-tool"),
     ],
@@ -355,7 +355,7 @@ def test_an_egress_tool_no_worker_command_uses_is_reported(
     *,
     unused: bool,
 ) -> None:
-    """An agent that lists `egress_credentials` while no shell or python call of its own runs in a worker is named."""
+    """An agent whose shell or python could use Agent Keys but runs in the primary is named; one without them is not."""
     config = Config(agents={"agent": agent})
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",

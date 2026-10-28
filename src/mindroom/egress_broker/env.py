@@ -94,14 +94,19 @@ def egress_agent_scope(config: Config, agent_name: str, runtime_paths: RuntimePa
 
 
 def egress_tool_without_worker_commands(config: Config, agent_name: str, runtime_paths: RuntimePaths) -> bool:
-    """Return whether an agent lists `egress_credentials` while none of its shell or python calls run in a worker.
+    """Return whether an agent lists `egress_credentials` and shell or python, but none of them runs in a worker.
 
-    The broker then never reaches the agent, so `egress_agent_scope` leaves it out.
+    The broker then never reaches the agent's commands, so `egress_agent_scope` leaves it out. An agent with neither
+    tool is not named: it has nothing to route, as with `egress_credentials` in `defaults.tools`.
     """
     if agent_name not in config.agents:
         return False
     tools = config.resolve_entity(agent_name).available_tools
-    return _EGRESS_TOOL_NAME in tools and not _runs_commands_in_a_worker(config, agent_name, tools, runtime_paths)
+    return (
+        _EGRESS_TOOL_NAME in tools
+        and not EXECUTION_ENV_TOOL_NAMES.isdisjoint(tools)
+        and not _runs_commands_in_a_worker(config, agent_name, tools, runtime_paths)
+    )
 
 
 def _runs_commands_in_a_worker(
