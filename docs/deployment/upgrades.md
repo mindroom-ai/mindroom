@@ -11,7 +11,7 @@ Always back up configuration and persistent storage before replacing the running
 ## Upgrading from `MCPTools` plugin toolkits
 
 MindRoom no longer runs plugin toolkits that subclass Agno `MCPTools` (see [MCP servers](../plugins.md#mcp-servers)).
-Before upgrading, configure each such server under `mcp_servers:` in `config.yaml` as [MCP](../mcp.md) describes, and replace the plugin tool's name in agents' `tools:` lists with `mcp_<server_id>`.
+Before upgrading, configure each such server under `mcp_servers:` in `config.yaml` as [MCP](../mcp.md) describes, and replace the plugin tool's name with `mcp_<server_id>` in agents' `tools:` lists and in `defaults.tools`.
 The [community plugins](../plugins.md#community-plugins) are not affected.
 
 ## Upgrading to conversation storage v2
