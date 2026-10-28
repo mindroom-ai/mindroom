@@ -81,6 +81,7 @@ _EXPORTS = [
     "ToolRuntimeContext",
     "ToolRuntimeHookBindings",
     "ToolStatus",
+    "TranscriptLine",
     "TurnIntent",
     "TurnOrigin",
     "TurnTrust",
@@ -135,7 +136,7 @@ _SIGNATURES = {
     "BeforeResponseContext": f"({_HOOK}, draft, *, {_HOOK_HELPERS})",
     "CancelledResponseContext": f"({_HOOK}, info, *, {_HOOK_HELPERS})",
     "CompactionHookContext": (
-        f"({_HOOK}, agent_name, scope, room_id, thread_id, messages, session_id, token_count_before, "
+        f"({_HOOK}, agent_name, scope, room_id, thread_id, messages, transcript, session_id, token_count_before, "
         f"token_count_after, compaction_summary, *, {_HOOK_HELPERS})"
     ),
     "ConfigField": (
@@ -217,6 +218,7 @@ _SIGNATURES = {
     "ToolRuntimeHookBindings": (
         "(message_sender, matrix_admin, room_state_querier, room_state_putter, message_received_depth)"
     ),
+    "TranscriptLine": "(role, sender, display_name, text)",
     "TurnOrigin": (
         "(transport_sender_id, requester_id, sender_entity_name, requester_entity_name, sender_kind, requester_kind, "
         "intent, source_kind, trust)"

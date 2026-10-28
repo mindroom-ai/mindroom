@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import PurePath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.entity_resolution import mindroom_user_id
@@ -539,6 +539,20 @@ class AgentLifecycleContext(HookContext):
     stop_reason: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class TranscriptLine:
+    """One thing said in a compacted conversation: who said it and the words they wrote."""
+
+    # "user" for a message someone in the room sent, "assistant" for the agent's or team's own reply.
+    role: Literal["user", "assistant"]
+    # The Matrix ID of a user line's sender; None for the agent's or team's own reply.
+    sender: str | None
+    # The display name a user line's message carried, as the sender had it then; None when it carried none.
+    display_name: str | None
+    # The words without the context hooks attached to the message; not redacted.
+    text: str
+
+
 @dataclass(slots=True)
 class CompactionHookContext(HookContext):
     """Context for compaction lifecycle observer hooks."""
@@ -548,6 +562,7 @@ class CompactionHookContext(HookContext):
     room_id: str
     thread_id: str | None
     messages: list[Message]
+    transcript: tuple[TranscriptLine, ...]
     session_id: str
     token_count_before: int
     token_count_after: int | None
