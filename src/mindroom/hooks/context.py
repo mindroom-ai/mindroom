@@ -562,11 +562,12 @@ class CompactionHookContext(HookContext):
     room_id: str
     thread_id: str | None
     messages: list[Message]
-    transcript: tuple[TranscriptLine, ...]
     session_id: str
     token_count_before: int
     token_count_after: int | None
     compaction_summary: str | None
+    # Optional only while plugins still build this context without it; required once `messages` goes.
+    transcript: tuple[TranscriptLine, ...] = field(default=(), kw_only=True)
 
 
 @dataclass(slots=True)

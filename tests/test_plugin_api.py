@@ -137,8 +137,8 @@ _SIGNATURES = {
     "BeforeResponseContext": f"({_HOOK}, draft, *, {_HOOK_HELPERS})",
     "CancelledResponseContext": f"({_HOOK}, info, *, {_HOOK_HELPERS})",
     "CompactionHookContext": (
-        f"({_HOOK}, agent_name, scope, room_id, thread_id, messages, transcript, session_id, token_count_before, "
-        f"token_count_after, compaction_summary, *, {_HOOK_HELPERS})"
+        f"({_HOOK}, agent_name, scope, room_id, thread_id, messages, session_id, token_count_before, "
+        f"token_count_after, compaction_summary, *, {_HOOK_HELPERS}, transcript)"
     ),
     "ConfigField": (
         "(name, label, type, required, default, placeholder, description, options, validation, authored_override)"
