@@ -106,7 +106,6 @@ Slack must reach MindRoom for the OAuth redirect and for events, so set `MINDROO
 
    The bot's `users:read.email` scope is what maps a Slack author to a MindRoom account; without it nobody can wake a project agent.
    Keep `token_rotation_enabled` and `socket_mode_enabled` off, because MindRoom stores Slack user tokens that do not expire and receives events over HTTP.
-   When you add `files:write` to an app created from an earlier manifest, reinstall the app, and people who connected Slack before must reconnect before `slack_upload` works.
 
 2. Install the app to the workspace and copy the **Bot User OAuth Token**.
 3. On **Basic Information**, copy the **Client ID**, **Client Secret**, and **Signing Secret**.
@@ -217,7 +216,7 @@ Who can wake the agent:
 
 - The author's Slack email must be in `slack.email_domain`, and its localpart maps to a Matrix account through `slack.matrix_user_id_template`.
 - Guests, bots and other apps, deactivated accounts, and people from other workspaces never wake an agent.
-- The mapped account must also pass the agent's [`access`](../authorization.md#responder-access) check in `room`; with the default `access`, that means being joined to one of the agent's rooms.
+- The mapped account must also pass the agent's [`access`](../authorization.md#responder-access) check in `room`.
 - Anyone else sees a message in Slack that only they can see, `MindRoom can't answer you here.`, at most once a day per thread, and nothing reaches Matrix.
 
 Only replies to Slack messages are posted to Slack; what people write in the Matrix thread stays in Matrix.
@@ -316,13 +315,11 @@ The 👀 reaction and the reply MindRoom posts to a Slack mention are not tool c
 | `Slack rate limit, retry after 30s` | Slack asked to wait; the agent can retry then. |
 | `Slack did not answer; the message may have been sent, so check with slack_read before retrying` | A post, edit, delete, or upload may have gone through; check before trying again. |
 | `Slack refused the request: <code>` | Slack's own error code: for example, `channel_not_found` means the account cannot see that conversation, `not_in_channel` means it is not a member, so join it or invite the app, and `cant_update_message` or `cant_delete_message` means the account may not change that message. |
-| `Use <conversation>:<ts> or a message link to edit a message` | `slack_edit`, `slack_delete`, and `slack_react` act on one message, not a conversation or a person. |
 | `path '<path>' must be an existing file inside the agent workspace` | `slack_upload` reads only workspace files under the default `file_access`; save the file in the workspace first. |
 | `<path> is <size> bytes; the limit is 52428800 bytes.` | `slack_upload` takes files of up to 50 MB. |
 | `This Slack account belongs to another workspace` | The person approved with an account outside the app's workspace. |
 | `The MindRoom Slack app needs an app-level token for watches` | Add `app_token` to `slack_app`. |
 | `Cannot watch Slack here: another person is in this room` | A watch needs a room where only the owner is; the text after the colon names the cause, as in the table above. |
-| `Watch mentions, direct messages, or both` | `start` needs `mentions` or `direct_messages` set to `true`. |
 | `MindRoom couldn't receive your message; try again` | Shown in Slack when delivery to the agent failed; mention the app again. |
 | Slack cannot verify the request URL | MindRoom answers 404 until `slack_app` has a bot token and signing secret, and 401 for a wrong signing secret; an SSO proxy in front of `/api/slack/events` also blocks it. |
 | Slack reports `503` from the request URL | MindRoom answers 503 until it has finished starting, while it stops, and when a delivery failed, so that Slack resends the event; an API server started on its own, outside `mindroom run`, always answers 503. |
@@ -331,10 +328,4 @@ Config errors name the setting:
 
 | Error | Fix |
 | --- | --- |
-| `Set email_domain and matrix_user_id_template together` | Set both fields of `slack`, or neither. |
-| `Answering Slack mentions needs slack.email_domain and slack.matrix_user_id_template` | Add the `slack` section before setting `room`. |
-| `agents.<name>.tools.slack.room needs channels` | `room` is only for project agents. |
-| `agents.<name>.tools.slack.room must be one of the agent's rooms` | Add the room to the agent's `rooms`. |
-| `agents.<name>.tools.slack.room needs write; an answering agent posts its replies to Slack` | Remove `write: false`, or remove `room`. |
-| `agents.<name>.tools.slack.channels: Slack channel IDs look like C0123ABCD` | Use channel IDs, not names. |
 | `Slack channel C0123ABCD is answered by both first and second` | Remove the channel from one agent's `channels`, or remove that agent's `room`. |
