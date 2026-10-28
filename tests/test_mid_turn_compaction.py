@@ -1507,6 +1507,36 @@ async def test_mid_turn_compaction_emits_compaction_hooks(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_mid_turn_compaction_builds_no_transcript_without_hooks(
+    tmp_path: Path,
+    summary_calls: SummaryCalls,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fold no compaction hook observes never reads who said what."""
+    config, paths = _config(tmp_path)
+    storage = seeded_storage(config, paths)
+    hook_context = _hook_runtime_context(
+        config=config,
+        runtime_paths=paths,
+        registry=HookRegistry.empty(),
+        session_id="session-1",
+    )
+
+    def unexpected(_record: object) -> Never:
+        msg = "the compaction transcript should not be built without hooks"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(compaction, "utterances", unexpected)
+    with tool_runtime_context(hook_context):
+        await _run(
+            _scoped_agent(ToolLoopModel(tool_rounds=5, calls_per_round=2), config, paths, storage),
+            "Do the task",
+        )
+
+    assert summary_calls.inputs
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("summary_calls")
 async def test_mid_turn_compaction_hooks_see_who_said_each_line_without_what_mindroom_added(tmp_path: Path) -> None:
     """The stored runs and the running turn's folded part each name their senders, without enrichment or tool calls."""
