@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -11,17 +12,24 @@ from mindroom.ai import (
     _process_stream_events,
     _StreamingAttemptState,
     ai_response,
-    collect_streamed_response_content,
 )
 from mindroom.config.main import Config
-from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
-from mindroom.llm.runs import ToolExecution
-from mindroom.tool_system.events import CollectedStreamPresentation, ToolTraceEntry
+from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.runs import RunRecord, ToolExecution
+from mindroom.response_turn import (
+    PausedAttempt,
+    ResponsePausedForApproval,
+    TurnSinks,
+    collect_streamed_response_content,
+)
+from mindroom.tool_system.events import CollectedStreamPresentation, StructuredStreamChunk, ToolTraceEntry
 from tests.conftest import make_turn_context, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
     from pathlib import Path
+
+    from mindroom.response_turn import ResponseTurnContext
 
 
 @pytest.mark.asyncio
@@ -210,15 +218,22 @@ async def test_a_paused_call_the_stream_already_announced_is_not_announced_again
 
 
 @pytest.mark.asyncio
-async def test_ai_response_honors_hidden_tool_marker_collection_opt_in(
+async def test_ai_response_collects_the_stream_without_tool_markers_when_tool_calls_are_hidden(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Explicit stream collection should still work when inline tool markers are hidden."""
-    seen_kwargs: dict[str, object] = {}
+    """A reply that hides its tool calls collects its streamed text without their markers, as the streamer shows it.
 
-    async def fake_stream_agent_response(_ctx: object, **kwargs: object) -> AsyncGenerator[object, None]:
-        seen_kwargs.update(kwargs)
+    The text around a hidden call stays a paragraph apart, and the collected trace still names the call.
+    """
+    seen_show_tool_calls: list[bool] = []
+
+    async def fake_stream_agent_response(
+        ctx: ResponseTurnContext,
+        *_args: object,
+        **_kwargs: object,
+    ) -> AsyncGenerator[object, None]:
+        seen_show_tool_calls.append(ctx.show_tool_calls)
         yield TextDelta("Before.")
         yield ToolStarted(
             call=ToolExecution(
@@ -241,18 +256,15 @@ async def test_ai_response_honors_hidden_tool_marker_collection_opt_in(
 
     trace: list[ToolTraceEntry] = []
     body = await ai_response(
-        make_turn_context("general", session_id="session"),
-        prompt="Read",
-        runtime_paths=test_runtime_paths(tmp_path),
-        config=Config(),
-        show_tool_calls=False,
-        collect_streamed_response=True,
-        tool_trace_collector=trace,
+        replace(make_turn_context("general", session_id="session"), prompt="Read", show_tool_calls=False),
+        test_runtime_paths(tmp_path),
+        Config(),
+        sinks=TurnSinks(tool_trace=trace),
     )
 
-    assert body == "Before. After."
-    assert trace == []
-    assert seen_kwargs["show_tool_calls"] is False
+    assert body == "Before.\n\n After."
+    assert [(entry.type, entry.tool_name) for entry in trace] == [("tool_call_completed", "read_file")]
+    assert seen_show_tool_calls == [False]
 
 
 @pytest.mark.asyncio
@@ -278,3 +290,40 @@ async def test_a_collector_whose_update_fails_closes_the_stream_before_the_failu
             on_update=fail,
         )
     assert closed == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_streamed_no_text_is_collected_as_its_final_body() -> None:
+    """A run whose text arrived only in its final record is the collected reply."""
+
+    async def stream() -> AsyncGenerator[object, None]:
+        yield RunFinished(RunRecord(run_id="run-final", content="Final only."))
+
+    body, trace = await collect_streamed_response_content(
+        stream(),
+        presentation=CollectedStreamPresentation(show_tool_calls=True),
+    )
+
+    assert (body, trace) == ("Final only.", [])
+
+
+@pytest.mark.asyncio
+async def test_a_collected_team_pause_keeps_the_document_state_its_resume_restores() -> None:
+    """A team document collected whole hands its structured state to the approval pause."""
+    state: dict[str, object] = {"kind": "team_stream", "members": ["general"]}
+    pause = ResponsePausedForApproval(
+        PausedAttempt(session_id="session-1", run_id="run-paused", tools=(), toolkit_owners={}),
+    )
+
+    async def stream() -> AsyncGenerator[object, None]:
+        yield StructuredStreamChunk(content="Team document.", tool_trace=[], presentation_state=state)
+        raise pause
+
+    with pytest.raises(ResponsePausedForApproval):
+        await collect_streamed_response_content(
+            stream(),
+            presentation=CollectedStreamPresentation(show_tool_calls=True),
+        )
+
+    assert pause.presentation is not None
+    assert (pause.presentation.response_text, pause.presentation.state) == ("Team document.", state)

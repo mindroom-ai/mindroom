@@ -116,12 +116,14 @@ async def _delegate(
     call_id = f"{tool_name}-call-{len(leader.requests)}"
     leader.turns.extend([calls(tool_call(tool_name, call_id, **arguments)), answer("Parent done")])
     result = await ai.ai_response(
-        _leader_turn(_identity()),
-        prompt="Delegate",
-        runtime_paths=paths,
-        config=config,
-        execution_identity=_identity(),
-        supports_native_tool_approval=True,
+        replace(
+            _leader_turn(_identity()),
+            prompt="Delegate",
+            execution_identity=_identity(),
+            supports_native_tool_approval=True,
+        ),
+        paths,
+        config,
     )
     assert "Parent done" in result
     return next(
@@ -384,13 +386,7 @@ async def test_minimal_parent_runs_a_minimal_child_through_its_cli(
     monkeypatch.setattr(ai._TurnRunContinuation, "events", continue_turn_run)
 
     with tool_runtime_context(live):
-        result = await ai.ai_response(
-            turn,
-            prompt="Delegate",
-            runtime_paths=paths,
-            config=config,
-            execution_identity=identity,
-        )
+        result = await ai.ai_response(replace(turn, prompt="Delegate", execution_identity=identity), paths, config)
 
     assert "Leader done" in result, result
     assert len(child_listings) == 1

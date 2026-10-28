@@ -4,8 +4,7 @@
 ``TeamStreamPresentation`` is the structured document a streamed or collected team run renders from and the durable
 ``team_stream`` snapshot an approval continuation restores. Member slots are keyed by ``url_safe_member_id`` of the
 member's config name, the id stored snapshots and reply records carry. ``publish_team_presentation`` shows a resumed
-run's document live in the reply it continues. ``format_team_response`` renders a finished run from its records
-instead, as a blocking reply that never paused shows it, in the same slots.
+run's document live in the reply it continues.
 """
 
 from __future__ import annotations
@@ -18,7 +17,6 @@ from typing import TYPE_CHECKING, cast
 from mindroom.agent_loop.run import own_answers
 from mindroom.delegation.state import member_slot_id
 from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
-from mindroom.llm.runs import RunStatus
 from mindroom.matrix.message_builder import opens_with_markdown_block
 from mindroom.teams.runtime import MemberEvent
 from mindroom.tool_system.events import (
@@ -36,7 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from mindroom.llm.events import ReportedCall
-    from mindroom.llm.runs import AnyRunRecord, TeamRunRecord
+    from mindroom.llm.runs import AnyRunRecord
     from mindroom.streaming import ProgressPublisher
     from mindroom.teams.runtime import TeamRunEvent
 
@@ -116,32 +114,6 @@ def finished_run_text(record: AnyRunRecord) -> str:
     of the thread that its input carried.
     """
     return record.handover_content or "\n\n".join(own_answers(record))
-
-
-def format_team_response(record: TeamRunRecord, presentation: TeamStreamPresentation) -> str:
-    """Return a team run's text as a blocking team reply shows it, without the header.
-
-    It has the slots a streamed reply shows (``presentation``): one per member, in configured order, each holding the
-    ``finished_run_text`` of every run of that member that ended, a blank line apart, so a member whose run failed shows
-    the reason its run recorded, credentials redacted, even when it wrote text first. What the leader's run hands over
-    (``handover_content``) is the consensus, so a leader that failed shows that reason too. A run in which nobody wrote
-    anything renders as empty text. Only a completed run is a finished reply, so a stopped, failed, or paused one shows
-    no no-consensus note.
-    """
-    per_member = dict.fromkeys(presentation.member_ids, "")
-    for member in record.ended_member_runs:
-        if (text := finished_run_text(member)).strip():
-            member_id = presentation.resolve_member_id(member.agent_id, member.agent_display_name)
-            per_member[member_id] = append_stream_text(per_member[member_id], text.strip(), separate=True)
-    return "\n\n".join(
-        render_team_member_slots(
-            presentation.member_ids,
-            display_names_by_id=presentation.display_names_by_id,
-            per_member=per_member,
-            consensus=record.handover_content or "",
-            finished=record.status is RunStatus.completed,
-        ),
-    )
 
 
 _INVALID_SNAPSHOT = "Team continuation presentation snapshot is invalid"
@@ -301,10 +273,7 @@ class TeamStreamPresentation:
         self._append_text(f"agent:{member_id}", content, separate=separate)
 
     def append_member_run(self, member_id: str, run_id: str, content: str) -> None:
-        """Append a delta of member run ``run_id``; text from another run than the slot's last text starts a paragraph.
-
-        A blocking reply separates a member's runs the same way (``format_team_response``).
-        """
+        """Append a delta of member run ``run_id``; text from another run than the slot's last text starts a paragraph."""
         if not content:
             return
         self.append_member(member_id, content, separate=self._last_text_run.get(member_id, run_id) != run_id)
@@ -461,7 +430,6 @@ __all__ = [
     "apply_team_event",
     "finished_run_text",
     "format_team_header",
-    "format_team_response",
     "publish_team_presentation",
     "render_team_member_slots",
     "strip_team_display",

@@ -13,9 +13,8 @@ from mindroom import reply_lifecycle as rl
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
-from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
+from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target, streamed_answer
 from tests.test_reply_records_turns import (
-    _answer,
     _regeneration,
     _reply,
     _sent_bodies,
@@ -35,6 +34,17 @@ pytestmark = pytest.mark.asyncio
 def _retry() -> ResponseRequest:
     """Return the edit regenerator's retry of the regeneration ``$edit`` drives."""
     return _regeneration(answer_event_id="$sent1")
+
+
+async def _answer(bot: AgentBot, request: ResponseRequest, answer: AsyncMock) -> str | None:
+    """Run ``request`` through the bot's locked turn, delivered whole, with ``answer`` as the agent's reply."""
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    with patch_response_runner_module(
+        stream_agent_response=streamed_answer(answer),
+        should_use_streaming=AsyncMock(return_value=False),
+        typing_indicator=_noop_typing,
+    ):
+        return await runner.generate_response(request)
 
 
 async def _answered(tmp_path: Path) -> AgentBot:
@@ -84,7 +94,7 @@ async def test_a_retry_of_an_edit_a_restart_interrupted_runs_it_again(tmp_path: 
         return "Never answered."
 
     with patch_response_runner_module(
-        ai_response=AsyncMock(side_effect=interrupted),
+        stream_agent_response=streamed_answer(AsyncMock(side_effect=interrupted)),
         should_use_streaming=AsyncMock(return_value=False),
         typing_indicator=_noop_typing,
     ):

@@ -137,11 +137,14 @@ async def _persona_request(
     install_model_providers(monkeypatch, {"default": model})
     with tool_runtime_context(runtime):
         await ai_response(
-            replace(_turn_context(), persona=persona),
-            prompt=prompt,
-            runtime_paths=runtime.runtime_paths,
-            config=runtime.config,
-            execution_identity=build_execution_identity_from_runtime_context(runtime),
+            replace(
+                _turn_context(),
+                persona=persona,
+                prompt=prompt,
+                execution_identity=build_execution_identity_from_runtime_context(runtime),
+            ),
+            runtime.runtime_paths,
+            runtime.config,
         )
     [request] = model.requests
     return request

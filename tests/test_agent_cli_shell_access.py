@@ -105,12 +105,16 @@ async def test_local_minimal_bash_runs_the_real_cli_against_the_running_api(
 
     with tool_runtime_context(runtime):
         result = await ai.ai_response(
-            replace(_turn_context(), agent_mode="minimal", run_id=None),
-            prompt="List your tools",
-            runtime_paths=runtime.runtime_paths,
-            config=runtime.config,
-            execution_identity=build_execution_identity_from_runtime_context(runtime),
-            supports_native_tool_approval=True,
+            replace(
+                _turn_context(),
+                agent_mode="minimal",
+                run_id=None,
+                prompt="List your tools",
+                execution_identity=build_execution_identity_from_runtime_context(runtime),
+                supports_native_tool_approval=True,
+            ),
+            runtime.runtime_paths,
+            runtime.config,
         )
 
     assert "done" in result

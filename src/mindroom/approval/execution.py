@@ -14,12 +14,7 @@ from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agent_cli.cli_approval_recovery import CliFollowUpTurn, continue_cli_approval
 from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agents import create_agent
-from mindroom.ai import (
-    agent_run_metadata_content,
-    collect_streamed_response_content,
-    run_delegated_child_response,
-    stream_agent_response,
-)
+from mindroom.ai import agent_run_metadata_content, run_delegated_child_response, stream_agent_response
 from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import ResumeRunner, approval_decisions
 from mindroom.approval.tool_owners import (
@@ -42,6 +37,9 @@ from mindroom.response_turn import (
     ResponsePausedForApproval,
     ResponseTurnContext,
     ResumedAttempt,
+    TurnResume,
+    TurnSinks,
+    collect_streamed_response_content,
     own_approved_calls,
     pause_without_approval_error,
     paused_attempt_from_response,
@@ -330,23 +328,23 @@ async def _stream_continuation_turn(
     run_metadata: dict[str, Any] = {}
     completed: list[CompletedAttempt] = []
     stream = stream_agent_response(
-        ctx,
-        prompt=prompt,
-        runtime_paths=runtime_paths,
-        config=config,
-        knowledge=knowledge,
-        execution_identity=tool_dispatch.execution_identity,
-        refresh_scheduler=refresh_scheduler,
-        run_metadata_collector=run_metadata,
-        show_tool_calls=presentation.show_tool_calls,
-        tool_function_filter=tool_context.tool_function_filter if tool_context is not None else None,
-        supports_native_tool_approval=True,
-        reusable_build=reusable_build,
-        resumed_attempt=resumed_attempt,
-        initial_continuation_count=initial_continuation_count,
-        delegation_depth=delegation_depth,
-        media=media,
-        on_completed=completed.append,
+        replace(
+            ctx,
+            prompt=prompt,
+            media=media,
+            show_tool_calls=presentation.show_tool_calls,
+            execution_identity=tool_dispatch.execution_identity,
+            refresh_scheduler=refresh_scheduler,
+            knowledge=knowledge,
+            tool_function_filter=tool_context.tool_function_filter if tool_context is not None else None,
+            delegation_depth=delegation_depth,
+            supports_native_tool_approval=True,
+            reusable_build=reusable_build,
+        ),
+        runtime_paths,
+        config,
+        sinks=TurnSinks(run_metadata_collector=run_metadata, on_completed=completed.append),
+        resume=TurnResume(attempt=resumed_attempt, initial_continuation_count=initial_continuation_count),
     )
     try:
         response_text, tool_trace = await collect_streamed_response_content(

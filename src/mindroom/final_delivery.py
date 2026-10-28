@@ -13,19 +13,18 @@ if TYPE_CHECKING:
     from mindroom.interactive import InteractiveMetadata
     from mindroom.tool_system.events import ToolTraceEntry
 
-_StreamTerminalStatus = Literal["completed", "cancelled", "error"]
-_TerminalStatus = Literal[_StreamTerminalStatus, "suspended"]
+_TerminalStatus = Literal["completed", "cancelled", "error", "suspended"]
 _VisibleBodyState = Literal["none", "placeholder_only", "visible_body"]
 _VisibleDeliveryKind = Literal["sent", "edited"]
 
 
 @dataclass(frozen=True)
-class StreamTransportOutcome:  # noqa: D101
+class StreamTransportOutcome:
+    """What a stream that ran to its end left in Matrix; a cancelled or failed stream leaves its span exit the ending."""
+
     last_physical_stream_event_id: str | None
-    terminal_status: _StreamTerminalStatus
     rendered_body: str | None
     visible_body_state: _VisibleBodyState
-    terminal_update_committed: bool = False
     canonical_final_body_candidate: str | None = None
     failure_reason: str | None = None
     interactive_metadata: InteractiveMetadata | None = None
@@ -41,13 +40,6 @@ class StreamTransportOutcome:  # noqa: D101
     def visible_body_text(self) -> str:
         """Return the current streamed body snapshot used for hook and outcome decisions."""
         return self.rendered_body or ""
-
-    @property
-    def resolved_cancel_source(self) -> CancelSource | None:
-        """Resolve cancellation provenance from the persisted transport failure reason."""
-        if self.terminal_status != "cancelled":
-            return None
-        return cancel_source_from_failure_reason(self.failure_reason)
 
 
 @dataclass(frozen=True)

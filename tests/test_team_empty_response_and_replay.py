@@ -1,8 +1,8 @@
 """The team empty-run guard, quiet scheduled replies, and what a failed team turn records for replay.
 
 An empty completed attempt is discarded and retried once, sharing the turn's continuation budget; a second empty
-attempt answers with the shared notice. The blocking document keeps Agno's shape around tool calls: the fallback
-whatever ``show_tool_calls`` says, and a member's text joined across a hidden call. Providers are scripted at the team
+attempt answers with the shared notice. A collected reply is the streamed document: a tool-only reply shows only its
+shown tool calls, and a member's text stays two paragraphs across a hidden call. Providers are scripted at the team
 runtime seam (``tests/team_turn_helpers.py``).
 """
 # ruff: noqa: D103
@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
     from pathlib import Path
 
-NO_TEAM_RESPONSE = "🤝 **Team Response** (GeneralAgent):\n\nNo team response generated."
+HEADER = "🤝 **Team Response** (GeneralAgent):\n\n"
 
 
 @pytest.fixture(autouse=True)
@@ -95,18 +95,15 @@ def _failing(message: str) -> list[ScriptStep]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 async def test_an_empty_completed_attempt_is_discarded_and_retried_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    stream: bool,
 ) -> None:
     """The empty run leaves the store; the retry is a fresh model request the pipeline timing marks."""
     team = _team(tmp_path, monkeypatch, leader=[answer(""), answer("Recovered answer")])
     timing = DispatchPipelineTiming(source_event_id=EVENT_ID, room_id=ROOM_ID)
 
-    text = await team.reply(stream=stream, pipeline_timing=timing)
+    text = await team.respond(pipeline_timing=timing)
 
     assert text.endswith("Recovered answer")
     assert len(team.models["default"].requests) == 2
@@ -115,31 +112,26 @@ async def test_an_empty_completed_attempt_is_discarded_and_retried_once(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 async def test_the_empty_retry_runs_on_rebuilt_members(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    stream: bool,
 ) -> None:
     """The retry builds its members again, as a model-switch continuation does."""
     team = _team(tmp_path, monkeypatch, leader=[answer(""), answer("Recovered answer")])
 
     with patch("mindroom.teams.members.create_agent", wraps=create_agent) as build:
-        text = await team.reply(stream=stream)
+        text = await team.respond()
 
     assert text.endswith("Recovered answer")
     assert build.call_count == 2
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("empty", ["", "\n\n  "])
 async def test_a_second_empty_attempt_answers_with_the_shared_notice_and_records_no_text(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    stream: bool,
     empty: str,
 ) -> None:
     """Whitespace is no answer either; neither attempt's fallback document leaks ahead of the notice."""
@@ -155,7 +147,7 @@ async def test_a_second_empty_attempt_answers_with_the_shared_notice_and_records
     )
     timing = DispatchPipelineTiming(source_event_id=EVENT_ID, room_id=ROOM_ID)
 
-    text = await team.reply(stream=stream, pipeline_timing=timing)
+    text = await team.respond(pipeline_timing=timing)
 
     assert text == ai_runtime.EMPTY_RESPONSE_NOTICE
     assert len(team.models["default"].requests) == 2
@@ -229,12 +221,9 @@ async def test_the_empty_retry_shares_the_turn_s_budget_with_model_switch_contin
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 async def test_a_later_attempt_of_a_team_turn_on_a_new_scope_replays_the_run_an_earlier_attempt_saved(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    stream: bool,
 ) -> None:
     """The scope's first session stays with the turn, so the attempt after a member's switch replays the first run.
 
@@ -249,7 +238,7 @@ async def test_a_later_attempt_of_a_team_turn_on_a_new_scope_replays_the_run_an_
         general=[calls(switch)],
     )
 
-    text = await team.reply(stream=stream)
+    text = await team.respond()
 
     assert text.endswith("Done.")
     *_, last = team.models["default"].requests
@@ -282,25 +271,29 @@ async def test_a_quiet_scheduled_team_reply_is_the_no_reply_token_unless_a_membe
     if member_finding is None:
         assert text == SILENT_SCHEDULE_NO_REPLY_TOKEN
     else:
-        assert (
-            text
-            == f"🤝 **Team Response** (GeneralAgent):\n\n**GeneralAgent**: {member_finding}\n\n\n**Team Consensus**:\n\nNO_REPLY"
-        )
+        assert text == f"{HEADER}**GeneralAgent**: {member_finding}\n\n\n**Team Consensus**:\n\nNO_REPLY"
     # The turn records what it delivered: the bare token, or the document that carries the finding.
     assert team.recorder.assistant_text == text
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("show_tool_calls", [True, False])
-async def test_a_tool_only_team_reply_shows_the_fallback_document_but_records_no_text(
+@pytest.mark.parametrize(
+    ("show_tool_calls", "shown"),
+    [
+        (
+            True,
+            f"{HEADER}**GeneralAgent**:\n\n🔧 `touch` [1]\n\n\n**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]",
+        ),
+        (False, ""),
+    ],
+)
+async def test_a_tool_only_team_reply_shows_only_its_tool_calls_and_records_no_text(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     show_tool_calls: bool,
+    shown: str,
 ) -> None:
-    """The fallback line is display chrome, not an answer to replay; the attempt ran tools, so it is not retried.
-
-    A blocking reply delivers no tool trace, so shown tool calls add no marker to the fallback document either.
-    """
+    """The reply shows the tool calls it shows and no answer to replay; the attempt ran tools, so it is not retried."""
     team = _team(
         tmp_path,
         monkeypatch,
@@ -310,18 +303,18 @@ async def test_a_tool_only_team_reply_shows_the_fallback_document_but_records_no
 
     text = await team.respond(message="Run the tool.", show_tool_calls=show_tool_calls)
 
-    assert text == NO_TEAM_RESPONSE
+    assert text == shown
     assert len(team.models["default"].requests) == 2
     assert team.recorder.outcome == "completed"
     assert team.recorder.assistant_text == ""
 
 
 @pytest.mark.asyncio
-async def test_a_blocking_member_reply_split_by_a_hidden_tool_call_keeps_two_paragraphs(
+async def test_a_member_reply_split_by_a_hidden_tool_call_keeps_two_paragraphs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The member's text before and after its tool call reads as two paragraphs, as a streamed reply shows it."""
+    """The member's text before and after its tool call reads as two paragraphs."""
     team = _team(
         tmp_path,
         monkeypatch,
@@ -331,14 +324,11 @@ async def test_a_blocking_member_reply_split_by_a_hidden_tool_call_keeps_two_par
 
     text = await team.respond(message="Check.", show_tool_calls=False)
 
-    assert text == (
-        "🤝 **Team Response** (GeneralAgent):\n\n**GeneralAgent**: Let me check.\n\nDone.\n\n\n**Team Consensus**:\n\nChecked."
-    )
+    assert text == f"{HEADER}**GeneralAgent**: Let me check.\n\nDone.\n\n\n**Team Consensus**:\n\nChecked."
     assert team.recorder.assistant_text == text
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize(
     "error",
     [ProviderError("provider exploded", provider="Synthetic"), RuntimeError("transport died")],
@@ -347,7 +337,6 @@ async def test_a_team_turn_failing_after_a_member_answered_records_the_answer_in
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    stream: bool,
     error: Exception,
 ) -> None:
     async def fail() -> None:
@@ -360,7 +349,7 @@ async def test_a_team_turn_failing_after_a_member_answered_records_the_answer_in
         general=[answer("Member answer")],
     )
 
-    text = await team.reply(stream=stream)
+    text = await team.respond()
 
     assert str(error) in text
     assert team.recorder.outcome == "interrupted"
@@ -368,16 +357,13 @@ async def test_a_team_turn_failing_after_a_member_answered_records_the_answer_in
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 async def test_a_team_turn_failing_before_any_output_still_records_the_turn(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    stream: bool,
 ) -> None:
     team = _team(tmp_path, monkeypatch, leader=[_failing("provider exploded")])
 
-    text = await team.reply(stream=stream)
+    text = await team.respond()
 
     assert "provider exploded" in text
     assert team.recorder.outcome == "interrupted"

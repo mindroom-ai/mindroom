@@ -2,9 +2,8 @@
 
 A two-attempt continuation turn (the first attempt ends with a next-turn
 ``switch_thread_model`` call, the second completes) is driven through the real
-response-turn drivers (``run_blocking_response_turn`` /
-``stream_response_turn``) at the ResponseRunner seam, with a spying
-DeliveryGateway. The pins:
+response-turn driver (``stream_response_turn``, which the runner collects for
+non-streaming delivery) through ``ResponseRunner.generate_response``, with a spying DeliveryGateway. The pins:
 
 1. no ``deliver_final``/``finalize_streamed_response`` call happens between
    attempt 1 and attempt 2;
@@ -15,8 +14,8 @@ DeliveryGateway. The pins:
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import MagicMock, patch
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -32,24 +31,20 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import ToolExecution
 from mindroom.response_turn import (
     AttemptResolved,
-    BlockingTurnAdapter,
     CompletedAttempt,
     ResponseTurnContext,
-    StreamingTurnAdapter,
+    TurnAdapter,
     TurnContinuationRunState,
     TurnRunState,
     TurnSinks,
-    run_blocking_response_turn,
     stream_response_turn,
 )
-from tests.conftest import patch_response_runner_module, process_and_respond_for_test, unwrap_extracted_collaborator
-from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
+from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
+from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target, stream_transport
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable
     from pathlib import Path
-
-    from mindroom.history.turn_recorder import TurnRecorder
 
 
 def _continuing_tool_execution() -> ToolExecution:
@@ -90,52 +85,40 @@ def _noop(*_args: object) -> None:
     return None
 
 
-def _blocking_adapter(
-    run_attempt: Callable[[TurnRunState, TurnContinuationRunState], Awaitable[CompletedAttempt]],
-) -> BlockingTurnAdapter:
-    return BlockingTurnAdapter(
-        load_scope=_load_scope,
-        run_attempt=run_attempt,
-        discard_empty_run=_noop,
-    )
-
-
-def _streaming_adapter(
+def _stream_turn(
+    ctx: ResponseTurnContext,
+    sinks: TurnSinks,
     run_attempt: Callable[
         [TurnRunState, TurnContinuationRunState],
         AsyncGenerator[str | AttemptResolved, None],
     ],
-) -> StreamingTurnAdapter[str]:
-    return StreamingTurnAdapter[str](
-        load_scope=_load_scope,
-        run_attempt=run_attempt,
-        discard_empty_run=_noop,
-        make_text_chunk=lambda text: text,
-    )
-
-
-def _initial_continuation(
-    *,
-    prompt: str,
-    model_prompt: str | None,
-    current_timestamp_ms: float | None,
-    current_prompt_is_structured: bool,
-) -> TurnContinuationRunState:
-    """Mirror ``ai._initial_agent_continuation`` for the plain request prompt."""
-    return TurnContinuationRunState.initial(
-        prompt=prompt,
-        model_prompt=model_prompt,
-        current_timestamp_ms=current_timestamp_ms,
-        current_prompt_is_structured=current_prompt_is_structured,
-        current_event_id=None,
-        run_id=None,
-        continuation_model_prompt_tail="",
+) -> AsyncIterator[str]:
+    """Drive the turn as ``ai.stream_agent_response`` does, from the plain request prompt."""
+    return stream_response_turn(
+        ctx,
+        TurnAdapter[str](
+            load_scope=_load_scope,
+            run_attempt=run_attempt,
+            discard_empty_run=_noop,
+            make_text_chunk=lambda text: text,
+            user_message=ctx.prompt,
+        ),
+        sinks,
+        continuation=TurnContinuationRunState.initial(
+            prompt=ctx.prompt,
+            model_prompt=ctx.model_prompt,
+            current_timestamp_ms=ctx.current_timestamp_ms,
+            current_prompt_is_structured=ctx.current_prompt_is_structured,
+            current_event_id=None,
+            run_id=None,
+            continuation_model_prompt_tail="",
+        ),
     )
 
 
 @pytest.mark.asyncio
-async def test_blocking_continuation_delivers_final_exactly_once_after_last_attempt(tmp_path: Path) -> None:
-    """A blocking continuation turn calls deliver_final once, after the final attempt."""
+async def test_non_streaming_continuation_delivers_final_exactly_once_after_last_attempt(tmp_path: Path) -> None:
+    """A continuation turn delivered without streaming calls deliver_final once, after the final attempt."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     events: list[str] = []
@@ -147,56 +130,53 @@ async def test_blocking_continuation_delivers_final_exactly_once_after_last_atte
         delivered.append(request)
         return _completed_outcome("$response", body=request.response_text)
 
-    async def run_attempt(_run: TurnRunState, continuation: TurnContinuationRunState) -> CompletedAttempt:
+    async def run_attempt(
+        _run: TurnRunState,
+        continuation: TurnContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
         attempts.append(continuation.active_prompt)
         events.append(f"attempt:{len(attempts)}")
         # No final delivery may happen before the last attempt settles.
         assert not delivered
         if len(attempts) == 1:
-            return CompletedAttempt(
-                response_text="first-attempt draft",
-                replayable_text="first-attempt draft",
-                has_visible_content=True,
-                attempt_run_id="run-1",
-                tool_executions=(_continuing_tool_execution(),),
+            yield AttemptResolved(
+                CompletedAttempt(
+                    response_text="first-attempt draft",
+                    replayable_text="first-attempt draft",
+                    has_visible_content=True,
+                    attempt_run_id="run-1",
+                    tool_executions=(_continuing_tool_execution(),),
+                ),
             )
-        return CompletedAttempt(
-            response_text="final answer",
-            replayable_text="final answer",
-            has_visible_content=True,
-            attempt_run_id="run-2",
+            return
+        yield AttemptResolved(
+            CompletedAttempt(
+                response_text="final answer",
+                replayable_text="final answer",
+                has_visible_content=True,
+                attempt_run_id="run-2",
+            ),
         )
 
-    async def fake_ai_response(
-        *args: object,
-        prompt: str,
-        model_prompt: str | None,
-        current_timestamp_ms: float | None,
-        current_prompt_is_structured: bool,
-        turn_recorder: TurnRecorder | None,
-        run_metadata_collector: dict[str, Any] | None,
+    def fake_stream_agent_response(
+        ctx: ResponseTurnContext,
+        *_args: object,
+        sinks: TurnSinks,
         **_kwargs: object,
-    ) -> str:
-        return await run_blocking_response_turn(
-            cast("ResponseTurnContext", args[0]),
-            _blocking_adapter(run_attempt),
-            TurnSinks(
-                turn_recorder=turn_recorder,
-                run_metadata_collector=run_metadata_collector,
-            ),
-            continuation=_initial_continuation(
-                prompt=prompt,
-                model_prompt=model_prompt,
-                current_timestamp_ms=current_timestamp_ms,
-                current_prompt_is_structured=current_prompt_is_structured,
-            ),
-        )
+    ) -> AsyncIterator[str]:
+        return _stream_turn(ctx, sinks, run_attempt)
 
     with (
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$placeholder")),
         patch.object(DeliveryGateway, "deliver_final", new=spy_deliver_final),
-        patch_response_runner_module(ai_response=fake_ai_response, typing_indicator=_noop_typing),
+        patch_response_runner_module(
+            stream_agent_response=fake_stream_agent_response,
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+            apply_post_response_effects=AsyncMock(),
+        ),
     ):
-        generation = await process_and_respond_for_test(coordinator, _plain_request(_target()))
+        event_id = await coordinator.generate_response(_plain_request(_target()))
 
     assert attempts[0] == "hello"
     assert len(attempts) == 2
@@ -204,7 +184,7 @@ async def test_blocking_continuation_delivers_final_exactly_once_after_last_atte
     assert len(delivered) == 1
     assert delivered[0].response_text == "final answer"
     assert events == ["attempt:1", "attempt:2", "deliver_final"]
-    assert generation.delivery.event_id == "$response"
+    assert event_id == "$response"
 
 
 @pytest.mark.asyncio
@@ -220,12 +200,7 @@ async def test_streaming_continuation_finalizes_exactly_once_after_last_attempt(
     async def spy_deliver_stream(_self: DeliveryGateway, request: StreamingDeliveryRequest) -> StreamTransportOutcome:
         events.append("deliver_stream")
         streamed_chunks.extend([chunk async for chunk in request.response_stream])
-        return StreamTransportOutcome(
-            last_physical_stream_event_id="$stream",
-            terminal_status="completed",
-            rendered_body="".join(streamed_chunks),
-            visible_body_state="visible_body",
-        )
+        return stream_transport("$stream", "".join(streamed_chunks))
 
     async def spy_finalize(
         _self: DeliveryGateway,
@@ -264,36 +239,25 @@ async def test_streaming_continuation_finalizes_exactly_once_after_last_attempt(
         )
 
     def fake_stream_agent_response(
-        *args: object,
-        prompt: str,
-        model_prompt: str | None,
-        current_timestamp_ms: float | None,
-        current_prompt_is_structured: bool,
-        turn_recorder: TurnRecorder | None,
-        run_metadata_collector: dict[str, Any] | None,
+        ctx: ResponseTurnContext,
+        *_args: object,
+        sinks: TurnSinks,
         **_kwargs: object,
     ) -> AsyncIterator[str]:
-        return stream_response_turn(
-            cast("ResponseTurnContext", args[0]),
-            _streaming_adapter(run_attempt),
-            TurnSinks(
-                turn_recorder=turn_recorder,
-                run_metadata_collector=run_metadata_collector,
-            ),
-            continuation=_initial_continuation(
-                prompt=prompt,
-                model_prompt=model_prompt,
-                current_timestamp_ms=current_timestamp_ms,
-                current_prompt_is_structured=current_prompt_is_structured,
-            ),
-        )
+        return _stream_turn(ctx, sinks, run_attempt)
 
     with (
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$placeholder")),
         patch.object(DeliveryGateway, "deliver_stream", new=spy_deliver_stream),
         patch.object(DeliveryGateway, "finalize_streamed_response", new=spy_finalize),
-        patch_response_runner_module(stream_agent_response=fake_stream_agent_response, typing_indicator=_noop_typing),
+        patch_response_runner_module(
+            stream_agent_response=fake_stream_agent_response,
+            should_use_streaming=AsyncMock(return_value=True),
+            typing_indicator=_noop_typing,
+            apply_post_response_effects=AsyncMock(),
+        ),
     ):
-        generation = await process_and_respond_for_test(coordinator, _plain_request(_target()), streaming=True)
+        event_id = await coordinator.generate_response(_plain_request(_target()))
 
     assert attempts[0] == "hello"
     assert len(attempts) == 2
@@ -305,4 +269,4 @@ async def test_streaming_continuation_finalizes_exactly_once_after_last_attempt(
     assert "first-attempt terminal text" not in transport.visible_body_text
     assert transport.visible_body_text == "switching models… final answer"
     assert events == ["deliver_stream", "attempt:1", "attempt:2", "finalize"]
-    assert generation.delivery.event_id == "$stream"
+    assert event_id == "$stream"

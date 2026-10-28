@@ -1,4 +1,4 @@
-"""Team turns on the owned runtime, through ``team_response_stream``, ``team_response``, and the approval resume.
+"""Team turns on the owned runtime, through ``team_response_stream``, streamed or collected, and the approval resume.
 
 The seam is ``run_team`` fed by scripted providers behind the production member and leader builders: what a team
 reply streams and renders, what it stores, how a member's approval pauses and resumes it, which scope its members'
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -21,19 +22,22 @@ from unittest.mock import AsyncMock, patch
 import nio
 import pytest
 from agno.tools import Toolkit
+from structlog.testing import capture_logs
 
-from mindroom import agents, ai_runtime, loop_hooks, response_runner, response_turn
+from mindroom import agents, ai_runtime, loop_hooks, response_turn
 from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.approval.manager import get_approval_store
 from mindroom.approval.receipt import build_approval_receipt
 from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.approval.tool_approval import shutdown_approval_runtime
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.coalescing.batch import CoalescingKey, RequesterCoalescingOwner, build_prepared_turn
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.delegation.state import DelegationState, child_execution_identity
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.event_journal import ApprovalDecision
+from mindroom.history.interrupted_replay import _render_interrupted_replay_content
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, EnrichmentItem, MessageEnvelope, ToolBeforeCallContext, hook
 from mindroom.llm.errors import ProviderError
@@ -175,22 +179,6 @@ async def test_a_streamed_team_reply_renders_the_members_and_the_consensus_and_s
 
 
 @pytest.mark.asyncio
-async def test_a_blocking_team_turn_whose_attempts_all_came_back_empty_still_marks_its_trigger_seen(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Both empty runs are discarded, so the session row alone keeps the events the turn read."""
-    team = squad_turn(tmp_path, monkeypatch, leader=[answer(""), answer("")])
-
-    assert await team.respond() == ai_runtime.EMPTY_RESPONSE_NOTICE
-
-    session = team.storage.load_session(SESSION_ID, "team")
-    assert session is not None
-    assert session.runs == []
-    assert read_scope_seen_event_ids(team.storage, session, TEAM_SCOPE) == {EVENT_ID}
-
-
-@pytest.mark.asyncio
 async def test_only_a_team_turn_whose_attempt_started_hands_its_session_to_queued_notice_finalization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -213,7 +201,7 @@ async def test_only_a_team_turn_whose_attempt_started_hands_its_session_to_queue
 
 
 @pytest.mark.asyncio
-async def test_a_streamed_team_turn_whose_attempts_all_came_back_empty_leaves_its_trigger_unseen(
+async def test_a_team_turn_whose_attempts_all_came_back_empty_leaves_its_trigger_unseen(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -257,12 +245,12 @@ async def test_the_streamed_document_keeps_the_canonical_member_and_consensus_fo
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("show_tool_calls", [True, False])
-async def test_a_blocking_team_reply_is_the_marker_free_member_and_consensus_document(
+async def test_a_collected_team_reply_is_the_streamed_document(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     show_tool_calls: bool,
 ) -> None:
-    """A blocking reply carries no tool trace, so shown tool calls add no marker to the document it delivers."""
+    """The collected reply is the last document the stream showed, shown tool calls marked; the record never is."""
     team = squad_turn(
         tmp_path,
         monkeypatch,
@@ -273,18 +261,21 @@ async def test_a_blocking_team_reply_is_the_marker_free_member_and_consensus_doc
     text = await team.respond(show_tool_calls=show_tool_calls)
 
     assert ProbeToolkit.calls == ["a"]
-    assert text == f"{HEADER}**Writer**: Member answer.\n\n\n**Team Consensus**:\n\nConsensus answer."
-    assert team.recorder.assistant_text == text
+    canonical = f"{HEADER}**Writer**: Member answer.\n\n\n**Team Consensus**:\n\nConsensus answer."
+    shown = (
+        f"{HEADER}**Writer**:\n\n🔧 `touch` [1]\n\nMember answer.\n\n\n"
+        "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]\n\nConsensus answer."
+    )
+    assert text == (shown if show_tool_calls else canonical)
+    assert team.recorder.assistant_text == canonical
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [True, False])
-async def test_a_team_reply_lists_the_members_as_configured_on_either_path(
+async def test_a_team_reply_lists_the_members_as_configured(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    stream: bool,
 ) -> None:
-    """The checker finishes before the writer; both replies list the writer first, and each records what it sent."""
+    """The checker finishes before the writer; the reply lists the writer first, and the turn records what it sent."""
     team = squad_turn(
         tmp_path,
         monkeypatch,
@@ -297,34 +288,9 @@ async def test_a_team_reply_lists_the_members_as_configured_on_either_path(
         checker=[answer("Checked.")],
     )
 
-    text = await team.reply(stream=stream, show_tool_calls=False)
+    text = await team.respond(show_tool_calls=False)
 
     assert text == f"{HEADER}**Writer**: Written.\n\n**Checker**: Checked.\n\n\n**Team Consensus**:\n\nBoth done."
-    assert team.recorder.assistant_text == text
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [True, False])
-async def test_a_member_delegated_twice_shows_each_run_a_paragraph_apart_on_either_path(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    stream: bool,
-) -> None:
-    """A coordinate leader asks the writer twice; both replies, and what each records, keep the two runs apart."""
-    team = squad_turn(
-        tmp_path,
-        monkeypatch,
-        leader=[
-            delegate("call-draft", "writer", "Draft"),
-            delegate("call-revise", "writer", "Revise"),
-            answer("Both drafts done.", usage(50, 5)),
-        ],
-        writer=[answer("Draft one."), answer("Draft two.")],
-    )
-
-    text = await team.reply(stream=stream, show_tool_calls=False)
-
-    assert text == f"{HEADER}**Writer**: Draft one.\n\nDraft two.\n\n\n**Team Consensus**:\n\nBoth drafts done."
     assert team.recorder.assistant_text == text
 
 
@@ -378,7 +344,7 @@ async def _checker_overloaded() -> None:
         ),
     ],
 )
-async def test_a_blocking_team_reply_renders_each_finished_member_run_then_the_consensus(
+async def test_a_team_reply_renders_each_finished_member_run_then_the_consensus(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     leader: list[list[ScriptStep]],
@@ -389,7 +355,7 @@ async def test_a_blocking_team_reply_renders_each_finished_member_run_then_the_c
     """Each member's slot shows the text of its runs that ended, then the leader's text, and the turn records the reply.
 
     A member that failed before any text shows its error, one without text shows nothing, and a member delegated
-    twice shows both runs' text in its one slot, as a streamed reply does.
+    twice shows both runs' text in its one slot, a paragraph apart.
     """
     team = squad_turn(tmp_path, monkeypatch, leader=leader, writer=writer, checker=checker)
 
@@ -400,7 +366,7 @@ async def test_a_blocking_team_reply_renders_each_finished_member_run_then_the_c
 
 
 @pytest.mark.asyncio
-async def test_a_blocking_team_reply_renders_the_member_and_consensus_document(
+async def test_a_team_reply_renders_the_member_and_consensus_document_and_stores_the_member_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -727,7 +693,6 @@ async def _pause_on_the_checker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    stream: bool = True,
     show_tool_calls: bool = False,
 ) -> tuple[TeamTurn, ResponsePausedForApproval]:
     team = squad_turn(
@@ -738,7 +703,7 @@ async def _pause_on_the_checker(
         approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
     )
     with pytest.raises(ResponsePausedForApproval) as raised:
-        await team.reply(stream=stream, show_tool_calls=show_tool_calls)
+        await team.stream(show_tool_calls=show_tool_calls)
     return team, raised.value
 
 
@@ -781,7 +746,6 @@ _TEAM_PAUSED = "Team run paused. The following require input:\n- Checker: touch 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
 @pytest.mark.parametrize(
     ("show_tool_calls", "text", "checker_slot", "consensus_slot"),
     [
@@ -800,18 +764,17 @@ async def test_a_team_pause_shows_the_document_its_events_built_without_paused_n
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    stream: bool,
     show_tool_calls: bool,
     text: str,
     checker_slot: str,
     consensus_slot: str,
 ) -> None:
-    """A blocking pause shows the document its run's events built, as a streamed pause does.
+    """A pause shows the document its run's events built.
 
     The member and the leader paused without text of their own, so their runs hold the paused notices, which the
     pause does not show. The snapshot the resume continues holds the same slots.
     """
-    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch, stream=stream, show_tool_calls=show_tool_calls)
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch, show_tool_calls=show_tool_calls)
 
     paused = raised.paused
     assert paused.response_text == text
@@ -828,7 +791,6 @@ async def test_a_team_pause_shows_the_document_its_events_built_without_paused_n
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
 @pytest.mark.parametrize(
     ("show_tool_calls", "body"),
     [
@@ -849,16 +811,15 @@ async def test_an_approved_member_call_resumes_the_stored_team_run_and_renders_t
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    stream: bool,
     show_tool_calls: bool,
     body: str,
 ) -> None:
-    """A blocking reply and a streamed one end alike: each run's text after its approval, and no paused notice.
+    """The reply ends with each run's text after its approval, and no paused notice.
 
     The member and the leader paused without text of their own, so their runs held the paused notices, which no
     longer hold once the approved call ran.
     """
-    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch, stream=stream, show_tool_calls=show_tool_calls)
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch, show_tool_calls=show_tool_calls)
     team.models["default"] = ScriptedModel([answer("The checker touched it.", usage(50, 5))])
     team.models["checker-model"] = ScriptedModel([answer("Touched.")])
 
@@ -1305,19 +1266,16 @@ async def test_an_approved_resume_shows_each_run_s_content_in_a_slot_that_stream
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
 async def test_a_resume_that_pauses_on_another_member_s_call_shows_no_paused_notice_through_the_end(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    stream: bool,
 ) -> None:
     """A resume that pauses again on a call of the writer shows no paused notice, nor does the reply it completes.
 
     The writer the resumed leader hands a task pauses on its own gated call without text, so its run and the leader's
-    hold paused notices naming that call, which no earlier pause showed. A blocking reply and a streamed one end alike.
+    hold paused notices naming that call, which no earlier pause showed.
     """
-    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch, stream=stream)
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel([delegate("call-write", "writer", "Touch it too"), answer("Both touched.")])
     team.models["checker-model"] = ScriptedModel([answer("Touched.")])
     team.models["writer-model"] = ScriptedModel([calls(tool_call("touch", "call-touch-2", label="risky")), answer("")])
@@ -1493,17 +1451,13 @@ async def test_a_streamed_team_reply_shows_a_failed_member_run_s_reason_after_th
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
 async def test_a_team_pause_shows_a_failed_member_run_s_reason_after_the_text_it_streamed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    stream: bool,
 ) -> None:
     """The document a live pause shows, and its resume continues, holds a failed member run's reason.
 
-    The checker fails after writing; the writer the leader then hands a task pauses on its gated call. A blocking
-    pause shows the same document as a streamed one.
+    The checker fails after writing; the writer the leader then hands a task pauses on its gated call.
     """
     team = squad_turn(
         tmp_path,
@@ -1515,7 +1469,7 @@ async def test_a_team_pause_shows_a_failed_member_run_s_reason_after_the_text_it
     )
 
     with pytest.raises(ResponsePausedForApproval) as raised:
-        await team.reply(stream=stream, show_tool_calls=False)
+        await team.respond(show_tool_calls=False)
 
     paused = raised.value.paused
     slot = "Checking it\n\nChecker unavailable: api_key=***redacted***"
@@ -1528,18 +1482,15 @@ _NO_CONSENSUS = "*No team consensus - showing individual responses only*"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
 async def test_a_team_reply_shows_the_no_consensus_note_only_once_it_finishes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    stream: bool,
 ) -> None:
     """Live chunks, the pause, and the resume's progress show no no-consensus note; the finished reply ends with it.
 
     The checker writes before its gated call and the leader has not answered when the team pauses, so every
     unfinished view shows member text without a consensus. After the approval the leader says nothing, so the reply
-    finishes without one. A blocking turn sends no live chunks.
+    finishes without one.
     """
     team = squad_turn(
         tmp_path,
@@ -1549,9 +1500,8 @@ async def test_a_team_reply_shows_the_no_consensus_note_only_once_it_finishes(
         approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
     )
     live: list[TeamStreamChunk] = []
-    reply = team.stream(show_tool_calls=False, chunks=live) if stream else team.respond(show_tool_calls=False)
     with pytest.raises(ResponsePausedForApproval) as raised:
-        await reply
+        await team.stream(show_tool_calls=False, chunks=live)
     paused = raised.value.paused
     team.models["default"] = ScriptedModel([answer("")])
     team.models["checker-model"] = ScriptedModel([answer("Touched.")])
@@ -1567,7 +1517,7 @@ async def test_a_team_reply_shows_the_no_consensus_note_only_once_it_finishes(
         progress=publish,
     )
 
-    assert (len(live) > 0) is stream
+    assert live
     assert progress
     unfinished = [*(rendered(chunk) for chunk in live), paused.response_text, *(chunk.content for chunk in progress)]
     assert all("Let me touch it." in text and _NO_CONSENSUS not in text for text in unfinished)
@@ -1576,16 +1526,13 @@ async def test_a_team_reply_shows_the_no_consensus_note_only_once_it_finishes(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
 async def test_a_completed_team_reply_in_which_only_members_spoke_ends_with_the_no_consensus_note(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    stream: bool,
 ) -> None:
-    """A streamed reply's live chunks show no note and its last chunk, the finished reply, adds it, as a blocking one shows it.
+    """The reply's live chunks show no note and its last chunk, the finished reply, adds it.
 
-    Either turn records the reply it ends with, note included.
+    The turn records the reply it ends with, note included.
     """
     team = squad_turn(
         tmp_path,
@@ -1594,14 +1541,10 @@ async def test_a_completed_team_reply_in_which_only_members_spoke_ends_with_the_
         writer=[answer("Written.")],
     )
 
-    if stream:
-        chunks = await team.stream(show_tool_calls=False)
-        *live, last = [rendered(chunk) for chunk in chunks]
-        assert live
-        assert all(_NO_CONSENSUS not in text for text in live)
-        text = last
-    else:
-        text = await team.respond(show_tool_calls=False)
+    chunks = await team.stream(show_tool_calls=False)
+    *live, text = [rendered(chunk) for chunk in chunks]
+    assert live
+    assert all(_NO_CONSENSUS not in shown for shown in live)
 
     assert text == f"{HEADER}**Writer**: Written.\n\n\n{_NO_CONSENSUS}"
     assert team.recorder.assistant_text == text
@@ -1610,8 +1553,6 @@ async def test_a_completed_team_reply_in_which_only_members_spoke_ends_with_the_
 async def _pause_after_the_checker_wrote(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    stream: bool = True,
 ) -> tuple[TeamTurn, PausedAttempt]:
     """Pause the team on the checker's gated call after the leader and the checker each wrote a sentence."""
     team = squad_turn(
@@ -1627,7 +1568,7 @@ async def _pause_after_the_checker_wrote(
         approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
     )
     with pytest.raises(ResponsePausedForApproval) as raised:
-        await team.reply(stream=stream, show_tool_calls=False)
+        await team.stream(show_tool_calls=False)
     return team, raised.value.paused
 
 
@@ -1727,19 +1668,16 @@ async def test_a_member_that_pauses_again_after_approval_shows_its_earlier_text_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
 async def test_a_chained_approval_shows_the_text_each_run_wrote_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    stream: bool,
 ) -> None:
     """Two approvals in a row show the text the checker wrote before the first pause once, and no paused notice.
 
     Its first approved call leads only to a second gated call, and after the second it answers without text, as
-    the leader does. A blocking reply and a streamed one end alike.
+    the leader does.
     """
-    team, paused = await _pause_after_the_checker_wrote(tmp_path, monkeypatch, stream=stream)
+    team, paused = await _pause_after_the_checker_wrote(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel([answer("")])
     team.models["checker-model"] = ScriptedModel([calls(tool_call("touch", "call-touch-2", label="again")), answer("")])
 
@@ -1756,12 +1694,9 @@ _TOUCH_NEEDS_APPROVAL = [ApprovalRuleConfig(match="touch", action="require_appro
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
 async def test_a_collaborate_resume_hands_the_leader_the_sibling_that_finished_before_the_pause(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    stream: bool,
 ) -> None:
     """The writer finished before the checker paused; once the checker's call is approved, the leader reads both.
 
@@ -1778,7 +1713,7 @@ async def test_a_collaborate_resume_hands_the_leader_the_sibling_that_finished_b
         approval_rules=_TOUCH_NEEDS_APPROVAL,
     )
     with pytest.raises(ResponsePausedForApproval) as raised:
-        await team.reply(stream=stream, show_tool_calls=False)
+        await team.respond(show_tool_calls=False)
     team.models["default"] = ScriptedModel([answer("Both answered.")])
     team.models["checker-model"] = ScriptedModel([answer("Touched.")])
 
@@ -1887,7 +1822,10 @@ async def test_a_team_reply_that_fails_mid_turn_reports_its_stored_run_in_the_me
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A run whose leader request fails after a member answered reports that run, ended in error, as the reply's metadata."""
+    """A run whose leader request fails after a member answered reports that run, ended in error, as the reply's metadata.
+
+    The turn driver stores the failed turn as its interrupted record, in the failed run's place.
+    """
 
     async def lose_the_provider() -> None:
         msg = "provider connection lost"
@@ -1905,7 +1843,9 @@ async def test_a_team_reply_that_fails_mid_turn_reports_its_stored_run_in_the_me
 
     record, _ = team.stored_runs()
     payload = metadata[AI_RUN_METADATA_KEY]
-    assert (record.status, payload["run_id"], payload["status"]) == (RunStatus.error, record.run_id, "error")
+    assert (record.status, payload["run_id"], payload["status"]) == (RunStatus.completed, record.run_id, "error")
+    assert record.metadata is not None
+    assert record.metadata["mindroom_original_status"] == "error"
     assert payload["tools"] == {"count": 1}
 
 
@@ -1916,58 +1856,39 @@ async def _lose_the_provider() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("leader", "recorded"),
+    "leader",
     [
         pytest.param(
             [delegate("call-check", "checker", "Check"), [Await(_lose_the_provider)]],
-            "**Checker**: Checker overloaded\n\n\n**Team Consensus**:\n\nprovider connection lost",
             id="after-a-member-failed",
         ),
-        pytest.param(
-            [[Await(_lose_the_provider)]],
-            "**Team Consensus**:\n\nprovider connection lost",
-            id="on-the-first-request",
-        ),
+        pytest.param([[Await(_lose_the_provider)]], id="on-the-first-request"),
     ],
 )
-async def test_a_failed_blocking_team_turn_records_the_failed_run_s_records(
+async def test_a_team_turn_whose_leader_request_fails_records_the_text_its_reply_showed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     leader: list[list[ScriptStep]],
-    recorded: str,
 ) -> None:
-    """A blocking turn whose leader request fails records the stored team run's records, as the Agno-backed turn did.
+    """A turn whose leader request fails stores its record of the text its reply showed, here none, in the run's place.
 
-    A member that failed before any text shows its error; the leader said nothing, so the failed run's error text
-    stands as its consensus.
+    The member that failed before any text showed no reason yet, since the team run never ended, and the leader said
+    nothing; the run's error reaches the requester as the reply's error text instead.
     """
     team = squad_turn(tmp_path, monkeypatch, leader=leader, checker=[[Await(_checker_overloaded)]])
 
-    await team.respond(show_tool_calls=False)
+    text = await team.respond(show_tool_calls=False)
 
+    assert "provider connection lost" in text
     record, _ = team.stored_runs()
-    assert (record.status, record.content) == (RunStatus.error, "provider connection lost")
     assert team.recorder.outcome == "interrupted"
-    assert team.recorder.assistant_text == recorded
-
-
-async def _lose_the_provider_and_leak_its_key() -> None:
-    msg = f"provider connection lost: {_KEY}"
-    raise ProviderError(msg, provider="Synthetic")
-
-
-@pytest.mark.asyncio
-async def test_a_failed_blocking_team_turn_records_its_leader_s_redacted_reason(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The text a blocking turn records when its leader fails before writing is why it failed, credentials redacted."""
-    team = squad_turn(tmp_path, monkeypatch, leader=[[Await(_lose_the_provider_and_leak_its_key)]])
-
-    await team.respond(show_tool_calls=False)
-
-    assert team.recorder.outcome == "interrupted"
-    assert team.recorder.assistant_text == "**Team Consensus**:\n\nprovider connection lost: api_key=***redacted***"
+    assert team.recorder.assistant_text == ""
+    assert (record.status, record.content) == (
+        RunStatus.completed,
+        _render_interrupted_replay_content(team.recorder.interrupted_snapshot()),
+    )
+    assert record.metadata is not None
+    assert record.metadata["mindroom_original_status"] == "error"
 
 
 @pytest.mark.asyncio
@@ -2219,7 +2140,10 @@ async def test_two_members_approvals_under_one_call_id_are_refused_and_neither_c
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An approval names its call by call id, so two members' calls under one id are refused rather than guessed at."""
+    """An approval names its call by call id, so two members' calls under one id are refused rather than guessed at.
+
+    The members' rows stay paused; the failed turn's interrupted record takes the team run's place.
+    """
     team = squad_turn(
         tmp_path,
         monkeypatch,
@@ -2240,7 +2164,9 @@ async def test_two_members_approvals_under_one_call_id_are_refused_and_neither_c
     assert chunks[-1].endswith("Paused approval requirements contain duplicate tool-call IDs")
     assert ProbeToolkit.calls == []
     record, members = team.stored_runs()
-    assert record.status is RunStatus.paused
+    assert record.status is RunStatus.completed
+    assert record.metadata is not None
+    assert record.metadata["mindroom_original_status"] == "error"
     assert sorted((member.agent_id or "", member.status) for member in members) == [
         ("checker", RunStatus.paused),
         ("writer", RunStatus.paused),
@@ -2248,11 +2174,11 @@ async def test_two_members_approvals_under_one_call_id_are_refused_and_neither_c
 
 
 @pytest.mark.asyncio
-async def test_a_blocking_team_continues_after_a_member_s_delegation(
+async def test_a_team_continues_after_a_member_s_delegation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A blocking team turn continues its leader once a member's own delegation finished."""
+    """A team turn continues its leader once a member's own delegation finished."""
     team = squad_turn(
         tmp_path,
         monkeypatch,
@@ -2268,14 +2194,14 @@ async def test_a_blocking_team_continues_after_a_member_s_delegation(
 
 
 @pytest.mark.asyncio
-async def test_a_blocking_team_reply_shows_a_member_paused_on_its_delegation_once_with_its_resumed_text(
+async def test_a_team_reply_shows_what_a_member_wrote_before_and_after_its_delegation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A member that paused on its delegation and resumed within the turn shows once, with what its resumed run wrote.
+    """A member that paused on its delegation and resumed within the turn shows once, both its texts a paragraph apart.
 
-    Agno continued the paused member's output in place and started its content afresh, so Agno's blocking reply
-    showed only the resumed text; what the member wrote before it paused stays in its stored messages.
+    The member's slot holds what it wrote before it paused, then what its resumed run wrote; both stay in its stored
+    messages.
     """
     team = squad_turn(
         tmp_path,
@@ -2294,7 +2220,9 @@ async def test_a_blocking_team_reply_shows_a_member_paused_on_its_delegation_onc
 
     text = await team.respond(show_tool_calls=False)
 
-    assert text == f"{HEADER}**Writer**: Writer: the helper found it.\n\n\n**Team Consensus**:\n\nConsensus."
+    assert text == (
+        f"{HEADER}**Writer**: Asking the helper.\n\nWriter: the helper found it.\n\n\n**Team Consensus**:\n\nConsensus."
+    )
     assert team.recorder.assistant_text == text
     _, member, _ = _delegation_state(team)
     assert [message.content for message in member.messages if message.role == "assistant"] == [
@@ -2304,14 +2232,13 @@ async def test_a_blocking_team_reply_shows_a_member_paused_on_its_delegation_onc
 
 
 @pytest.mark.asyncio
-async def test_a_blocking_team_reply_without_content_shows_what_the_leader_wrote_before_its_member_paused(
+async def test_a_team_reply_whose_leader_is_silent_after_its_member_s_delegation_shows_what_it_wrote_before(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A leader silent after its member's delegation has no content, so the reply is what it wrote before the pause.
+    """A leader silent after its member's delegation has no content, so its consensus is what it wrote before the pause.
 
-    The leader's continuation starts its content afresh and nobody wrote anything after the delegation, so the reply is
-    the text of the leader's own messages, as Agno's blocking reply read a team run without content.
+    The leader's continuation starts its content afresh and nobody wrote anything after the delegation.
     """
     team = squad_turn(
         tmp_path,
@@ -2330,7 +2257,7 @@ async def test_a_blocking_team_reply_without_content_shows_what_the_leader_wrote
 
     text = await team.respond(show_tool_calls=False)
 
-    assert text == f"{HEADER}Asking the writer."
+    assert text == f"{HEADER}\n**Team Consensus**:\n\nAsking the writer."
     assert team.recorder.assistant_text == text
     record, _, _ = _delegation_state(team)
     assert record.content is None
@@ -2532,11 +2459,14 @@ async def test_a_member_reads_its_earlier_delegation_card_under_its_own_call_id_
 
 
 @pytest.mark.asyncio
-async def test_a_stopped_member_keeps_its_usage_and_both_rows_end_cancelled(
+async def test_a_stopped_member_keeps_its_usage_and_its_row_ends_cancelled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A Stop while a member works stores the member's cut-off request and the team's row before the stop lands."""
+    """A Stop while a member works stores the member's cut-off request and both runs' usage before the stop lands.
+
+    The member's row ends cancelled; the turn's interrupted record takes the team run's place.
+    """
     streaming = asyncio.Event()
 
     async def wait_to_be_cancelled() -> None:
@@ -2556,7 +2486,9 @@ async def test_a_stopped_member_keeps_its_usage_and_both_rows_end_cancelled(
         await task
 
     record, [member] = team.stored_runs()
-    assert (record.status, member.status) == (RunStatus.cancelled, RunStatus.cancelled)
+    assert (record.status, member.status) == (RunStatus.completed, RunStatus.cancelled)
+    assert record.metadata is not None
+    assert record.metadata["mindroom_original_status"] == "cancelled"
     assert member.parent_run_id == record.run_id
     [member_usage] = _usage_rows(team.storage, member.run_id)
     assert member_usage["metrics"]["input_tokens"] == 30
@@ -2567,14 +2499,13 @@ async def test_a_stopped_member_keeps_its_usage_and_both_rows_end_cancelled(
 
 
 @pytest.mark.asyncio
-async def test_a_stopped_blocking_team_turn_records_its_member_runs_in_configured_order(
+async def test_a_stopped_team_turn_records_the_text_its_members_streamed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A Stop of a blocking turn records the stopped team run's records, each member in its configured slot.
+    """A Stop records what the reply showed: the writer, stopped while its call ran, records what it wrote before.
 
-    The writer, stopped while its call ran, shows what it wrote before; the checker failed before any text and shows
-    its error.
+    The checker failed before any text; its reason shows only once the team run ends, so the stopped turn records none.
     """
     team = squad_turn(
         tmp_path,
@@ -2590,21 +2521,22 @@ async def test_a_stopped_blocking_team_turn_records_its_member_runs_in_configure
         await task
 
     record, members = team.stored_runs()
-    assert [run.status for run in (record, *members)] == [RunStatus.cancelled, RunStatus.error, RunStatus.cancelled]
+    assert [run.status for run in (record, *members)] == [RunStatus.completed, RunStatus.error, RunStatus.cancelled]
+    assert record.metadata is not None
+    assert record.metadata["mindroom_original_status"] == "cancelled"
     assert team.recorder.outcome == "interrupted"
-    assert team.recorder.assistant_text == "**Writer**: Drafting.\n\n**Checker**: Checker overloaded"
+    assert team.recorder.assistant_text == "**Writer**: Drafting."
 
 
 @pytest.mark.asyncio
-async def test_a_stopped_blocking_team_turn_whose_leader_has_no_content_records_no_leader_text(
+async def test_a_stopped_team_turn_records_what_its_leader_wrote_before_its_member_s_delegation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A leader stopped after its member's delegation has no content, so the turn records none of the leader's text.
+    """A leader stopped after its member's delegation has no content; the turn's record keeps what the reply showed of it.
 
-    The leader's continuation starts its content afresh and its member said nothing after the delegation. Agno's
-    stopped run then held only its cancellation notice, which the Agno-backed turn dropped, so the text the leader
-    wrote before the delegation is not recorded either.
+    The leader's continuation starts its content afresh and its member said nothing after the delegation, so the text
+    the leader wrote before the delegation is the consensus the stopped reply showed.
     """
     working = asyncio.Event()
 
@@ -2633,20 +2565,24 @@ async def test_a_stopped_blocking_team_turn_whose_leader_has_no_content_records_
         await task
 
     record, _, _ = _delegation_state(team)
-    assert (record.status, record.content) == (RunStatus.cancelled, None)
     assert team.recorder.outcome == "interrupted"
-    assert team.recorder.assistant_text == ""
+    assert team.recorder.assistant_text == "\n**Team Consensus**:\n\nAsking the writer."
+    assert (record.status, record.content) == (
+        RunStatus.completed,
+        _render_interrupted_replay_content(team.recorder.interrupted_snapshot()),
+    )
+    assert record.metadata is not None
+    assert record.metadata["mindroom_original_status"] == "cancelled"
 
 
 @pytest.mark.asyncio
-async def test_a_blocking_team_turn_stopped_after_its_run_ended_records_the_finished_runs_records(
+async def test_a_team_turn_stopped_after_its_run_ended_records_the_finished_document(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A Stop that lands after the run ended, before the turn settles, records the finished runs' records.
+    """A Stop that lands after the run ended, before the turn settles, records the finished reply's document.
 
-    The checker failed before any text and shows its error, as the reply would have shown it; the text the run's
-    events built held no checker text.
+    The checker failed before any text and shows its error, which the document added once the team run ended.
     """
     finishing = asyncio.Event()
     finalize_consumption = response_turn.finalize_consumption
@@ -2684,14 +2620,15 @@ class _ExternalProbeToolkit(ProbeToolkit):
 
 
 @pytest.mark.asyncio
-async def test_a_blocking_team_turn_that_fails_after_its_run_ended_records_the_run_s_records(
+async def test_a_team_turn_that_fails_after_its_run_ended_records_the_document_it_built(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A blocking turn whose run paused on a call nothing can resume fails, and records the paused run's records.
+    """A turn whose run paused on a call nothing can resume fails, and records the document its run built.
 
-    The members are listed as their runs ended: the checker failed before any text and shows its error, then the
-    writer paused on its call with the text it wrote before it; the text the run's events built held no checker text.
+    The members are in their configured slots: the writer paused on its call with the text it wrote before it, and the
+    checker failed before any text and shows its error, which the document added once the team run ended. The members'
+    rows stay as the run left them; the turn's interrupted record takes the team run's place.
     """
     team = squad_turn(
         tmp_path,
@@ -2706,7 +2643,9 @@ async def test_a_blocking_team_turn_that_fails_after_its_run_ended_records_the_r
 
     assert "without an approval to ask for" in reply
     record, members = team.stored_runs()
-    assert [run.status for run in (record, *members)] == [RunStatus.paused, RunStatus.error, RunStatus.paused]
+    assert [run.status for run in (record, *members)] == [RunStatus.completed, RunStatus.error, RunStatus.paused]
+    assert record.metadata is not None
+    assert record.metadata["mindroom_original_status"] == "error"
     assert (team.recorder.outcome, team.recorder.original_status) == ("interrupted", RunStatus.error)
     assert team.recorder.assistant_text == "**Writer**: Let me touch it.\n\n**Checker**: Checker overloaded"
 
@@ -2879,14 +2818,14 @@ async def test_a_configured_team_turn_is_dated_in_the_global_zone(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [True, False])
-async def test_the_runner_writes_the_interrupted_record_after_the_loop_stored_the_cancelled_team_run(
+async def test_the_driver_writes_the_interrupted_record_after_the_loop_stored_the_cancelled_team_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     streaming: bool,
 ) -> None:
     """Through ``ResponseRunner``, a stop mid-reply stores the ``CANCELLED`` team row before the interrupted record.
 
-    The record the lifecycle owner writes replaces the cancelled row, and no later save of the run overwrites it.
+    The record the turn driver writes replaces the cancelled row, and no later save of the run overwrites it.
     """
     working = asyncio.Event()
 
@@ -2902,14 +2841,14 @@ async def test_the_runner_writes_the_interrupted_record_after_the_loop_stored_th
     )
     runner = _runner(team, tmp_path)
     statuses_when_interrupted_record_written: list[RunStatus | None] = []
-    original = response_runner.persist_interrupted_replay_snapshot
+    original = response_turn.persist_interrupted_replay_snapshot
 
     def spy(**kwargs: Any) -> None:  # noqa: ANN401
         stored = team.storage.get_run(kwargs["run_id"])
         statuses_when_interrupted_record_written.append(stored.status if stored is not None else None)
         original(**kwargs)
 
-    monkeypatch.setattr(response_runner, "persist_interrupted_replay_snapshot", spy)
+    monkeypatch.setattr(response_turn, "persist_interrupted_replay_snapshot", spy)
 
     with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=streaming)):
         task = asyncio.create_task(
@@ -2931,6 +2870,75 @@ async def test_the_runner_writes_the_interrupted_record_after_the_loop_stored_th
     assert member.status is RunStatus.cancelled
     [row] = _usage_rows(team.storage, member.run_id)
     assert row["metrics"]["input_tokens"] == 30
+
+
+def _leader_writing_then_waiting(working: asyncio.Event) -> list[list[ScriptStep]]:
+    """Return a leader turn that writes a little, sets ``working``, and then waits to be stopped."""
+
+    async def wait_to_be_cancelled() -> None:
+        working.set()
+        await asyncio.Event().wait()
+
+    return [[TextDelta("Dra"), Await(wait_to_be_cancelled)]]
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_team_turn_whose_record_cannot_be_stored_still_ends_as_stopped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A store that refuses the interrupted record is logged; the stopped turn still ends with its cancellation."""
+    working = asyncio.Event()
+    team = squad_turn(tmp_path, monkeypatch, leader=_leader_writing_then_waiting(working))
+
+    def refuse(**_kwargs: Any) -> None:  # noqa: ANN401
+        msg = "database is locked"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(response_turn, "persist_interrupted_replay_snapshot", refuse)
+    task = asyncio.create_task(team.stream())
+    await asyncio.wait_for(working.wait(), timeout=5)
+    with capture_logs() as logs:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert team.recorder.outcome == "interrupted"
+    assert "Failed to persist interrupted replay state" in [log["event"] for log in logs if log["log_level"] == "error"]
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_team_turn_cancelled_again_while_its_record_is_stored_ends_and_the_record_still_lands(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second cancellation while the record is stored off the event loop ends the turn; the store finishes anyway."""
+    working = asyncio.Event()
+    team = squad_turn(tmp_path, monkeypatch, leader=_leader_writing_then_waiting(working))
+    storing = threading.Event()
+    release = threading.Event()
+    original = response_turn.persist_interrupted_replay_snapshot
+
+    def slow_store(**kwargs: Any) -> None:  # noqa: ANN401
+        storing.set()
+        assert release.wait(timeout=5)
+        original(**kwargs)
+
+    monkeypatch.setattr(response_turn, "persist_interrupted_replay_snapshot", slow_store)
+    task = asyncio.create_task(team.stream())
+    await asyncio.wait_for(working.wait(), timeout=5)
+    task.cancel()
+    assert await asyncio.to_thread(storing.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5)
+    assert task.done()
+
+    release.set()
+    assert await wait_for_background_tasks(timeout=5)
+    record, _members = team.stored_runs()
+    assert record.metadata is not None
+    assert record.metadata["mindroom_original_status"] == "cancelled"
 
 
 @asynccontextmanager
@@ -2989,7 +2997,7 @@ async def _approve(bot: AgentBot, card_event_id: str) -> None:
     assert result.consumed
     runner = bot._response_runner
     await runner.handoff_approval_source(EVENT_ID)
-    await runner.wait_for_source_owned_inbox_responses()
+    await runner.inbox.wait_for_source_owned_inbox_responses()
 
 
 def _shown(bot: AgentBot) -> str:

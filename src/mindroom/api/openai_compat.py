@@ -14,7 +14,7 @@ import asyncio
 import hashlib
 import time
 import weakref
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, cast
 from uuid import uuid4
@@ -69,8 +69,8 @@ from mindroom.llm.runs import TeamRunRecord
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
-from mindroom.response_activity import ResponseIdentity  # noqa: TC001 - FastAPI evaluates dependency annotations.
-from mindroom.response_turn import build_llm_request_log_context, stream_with_llm_request_log_context
+from mindroom.response_activity import ActiveResponseIdentity  # noqa: TC001 - FastAPI evaluates dependency annotations.
+from mindroom.response_turn import TurnSinks, build_llm_request_log_context, stream_with_llm_request_log_context
 from mindroom.routing import suggest_responder
 from mindroom.run_storage import TerminalRecord
 from mindroom.teams.envelope import prepare_materialized_team_execution, run_prepared_team
@@ -511,6 +511,10 @@ def _openai_turn_context(
     session_id: str | None,
     execution_identity: ToolExecutionIdentity,
     model_name: str | None = None,
+    prompt: str = "",
+    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
+    knowledge: AgentKnowledge | None = None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
 ) -> ResponseTurnContext:
     """Build the turn context for one OpenAI-compatible completion, which has no Matrix conversation."""
     return ResponseTurnContext(
@@ -524,6 +528,12 @@ def _openai_turn_context(
         requester_id=execution_identity.requester_id,
         matrix_run_metadata=None,
         active_model_name=model_name,
+        prompt=prompt,
+        thread_history=thread_history,
+        execution_identity=execution_identity,
+        refresh_scheduler=refresh_scheduler,
+        knowledge=knowledge,
+        include_interactive_questions=False,
     )
 
 
@@ -601,7 +611,7 @@ async def list_models(
 @router.post("/chat/completions", response_model=None)
 async def chat_completions(
     request: Request,
-    activity: Annotated[ResponseIdentity, Depends(track_openai_request, scope="request")],
+    activity: Annotated[ActiveResponseIdentity, Depends(track_openai_request, scope="request")],
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse | StreamingResponse:
     """Create a chat completion (non-streaming or streaming)."""
@@ -646,7 +656,7 @@ async def _chat_completions(  # noqa: C901, PLR0912
     prompt: str,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     authority: DetachedRequesterContext | None,
-    activity: ResponseIdentity,
+    activity: ActiveResponseIdentity,
     *,
     session_namespace: str,
 ) -> JSONResponse | StreamingResponse:
@@ -808,24 +818,21 @@ async def _non_stream_completion(
 ) -> JSONResponse:
     """Handle non-streaming chat completion."""
     run_metadata: dict[str, Any] = {}
-    response_text = await ai_response(
-        _openai_turn_context(
-            agent_name,
-            session_id=session_id,
-            model_name=model_name,
-            execution_identity=execution_identity,
-        ),
+    turn = _openai_turn_context(
+        agent_name,
+        session_id=session_id,
+        model_name=model_name,
+        execution_identity=execution_identity,
         prompt=prompt,
-        runtime_paths=runtime_paths,
-        config=config,
         thread_history=thread_history,
         knowledge=knowledge,
-        include_interactive_questions=False,
-        include_openai_compat_guidance=True,
-        show_tool_calls=False,
-        run_metadata_collector=run_metadata,
-        execution_identity=execution_identity,
         refresh_scheduler=refresh_scheduler,
+    )
+    response_text = await ai_response(
+        replace(turn, show_tool_calls=False),
+        runtime_paths,
+        config,
+        sinks=TurnSinks(run_metadata_collector=run_metadata),
     )
 
     # Detect error responses from ai_response()
@@ -877,16 +884,13 @@ async def _stream_completion(
                     session_id=session_id,
                     model_name=model_name,
                     execution_identity=execution_identity,
+                    prompt=prompt,
+                    thread_history=thread_history,
+                    knowledge=knowledge,
+                    refresh_scheduler=refresh_scheduler,
                 ),
-                prompt=prompt,
-                runtime_paths=runtime_paths,
-                config=config,
-                thread_history=thread_history,
-                knowledge=knowledge,
-                include_interactive_questions=False,
-                include_openai_compat_guidance=True,
-                execution_identity=execution_identity,
-                refresh_scheduler=refresh_scheduler,
+                runtime_paths,
+                config,
             ),
         ),
     )

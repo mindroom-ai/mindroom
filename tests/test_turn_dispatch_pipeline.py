@@ -57,7 +57,6 @@ from mindroom.response_payload_preparation import DispatchPayloadInputs, Respons
 from mindroom.response_runner import (
     ResponseRequest,
     ResponseRunner,
-    _ResponseGenerationOutcome,
 )
 from mindroom.response_sources import ResponseSources
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamResolution, TeamResolutionMember
@@ -630,7 +629,7 @@ class TestAgentBot(AgentBotTestBase):
             await cast("Any", response_function)(None)
             return None
 
-        def _prepare_memory_and_model_context(
+        def prepare_memory_and_model_context(
             prompt: str,
             thread_history: Sequence[ResolvedVisibleMessage],
             *,
@@ -661,19 +660,16 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_build_payload,
             patch.object(
                 ResponseRunner,
-                "_process_and_respond",
+                "_deliver_turn",
                 new=AsyncMock(
-                    return_value=_ResponseGenerationOutcome(
-                        delivery=FinalDeliveryOutcome(
-                            terminal_status="completed",
-                            event_id="$response",
-                            is_visible_response=True,
-                            final_visible_body="ok",
-                        ),
-                        run_succeeded=True,
+                    return_value=FinalDeliveryOutcome(
+                        terminal_status="completed",
+                        event_id="$response",
+                        is_visible_response=True,
+                        final_visible_body="ok",
                     ),
                 ),
-            ) as mock_process,
+            ) as mock_deliver,
             patch.object(
                 ResponseRunner,
                 "_run_cancellable_response",
@@ -682,7 +678,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=False),
-                _prepare_memory_and_model_context=_prepare_memory_and_model_context,
+                prepare_memory_and_model_context=prepare_memory_and_model_context,
                 apply_post_response_effects=AsyncMock(),
             ),
         ):
@@ -695,9 +691,9 @@ class TestAgentBot(AgentBotTestBase):
 
         mock_refresh_thread_history.assert_awaited_once()
         mock_build_payload.assert_awaited_once()
-        process_request = mock_process.await_args.args[0]
-        assert list(process_request.thread_history) == full_history
-        assert process_request.attachment_ids == ("att_older",)
+        delivered_turn = mock_deliver.await_args.args[0]
+        assert list(delivered_turn.delivery_request.thread_history) == full_history
+        assert delivered_turn.delivery_request.attachment_ids == ("att_older",)
         assert call_order == ["action", "payload", "generate"]
 
     @pytest.mark.asyncio
@@ -2738,7 +2734,7 @@ class TestAgentBot(AgentBotTestBase):
         failure_message = "setup failed"
 
         with patch(
-            "mindroom.response_runner._prepare_memory_and_model_context",
+            "mindroom.response_runner.prepare_memory_and_model_context",
             side_effect=RuntimeError(failure_message),
         ):
             await bot._turn_controller._execute_response_action(

@@ -15,14 +15,14 @@ from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.lifetime import cli_control_calls
 from mindroom.agent_cli.minimal_agent import minimal_attempt, minimal_turn, presented_build
 from mindroom.agent_loop.build import prompt_for_turn, tool_owners_by_agent
-from mindroom.agent_loop.run import own_answers, paused_content, run_agent
+from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import agent_build_can_overlap_file_memory, create_agent
 from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepared_history_metadata_content
 from mindroom.approval.resume import resume_from_session
 from mindroom.budgets.pricing import model_prices
-from mindroom.delegation.execution import answered_delegation_calls, drive_delegation_stream
+from mindroom.delegation.execution import drive_delegation_stream
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
     child_tool_runtime_context,
@@ -34,14 +34,12 @@ from mindroom.delegation.lifecycle import (
 from mindroom.delegation.state import child_execution_identity
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
-from mindroom.history.interrupted_replay import persist_interrupted_replay, split_interrupted_tool_trace
 from mindroom.history.mid_turn_compaction import without_fold_records
 from mindroom.history.native import with_native_history
 from mindroom.history.replay import compaction_marker
 from mindroom.history.request_messages import build_request, replayed_history
 from mindroom.history.runtime import note_prepared_history_timing
 from mindroom.history.session_context import ScopeSessionContext, load_scope_session
-from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     render_enrichment_block,
@@ -68,22 +66,20 @@ from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.pre_model_preparation import build_agent_off_loop, prepare_prompt_branches
 from mindroom.response_turn import (
     AttemptResolved,
-    BlockingAttemptResolution,
-    BlockingTurnAdapter,
     CompletedAttempt,
-    ExcludedAttempt,
     HandledAttempt,
     ResponsePausedForApproval,
     ResponseTurnContext,
-    StreamingTurnAdapter,
+    TurnAdapter,
     TurnContinuationRunState,
     TurnPartialSnapshot,
+    TurnResume,
     TurnSinks,
     build_llm_request_log_context,
     build_matrix_run_metadata,
+    collect_streamed_response_content,
     pause_without_approval_error,
     paused_attempt_from_response,
-    run_blocking_response_turn,
     skip_unapproved_attempt,
     stream_response_turn,
     stream_with_llm_request_log_context,
@@ -102,41 +98,33 @@ from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import (
     CollectedStreamPresentation,
     StreamingToolTracker,
-    format_tool_combined,
-    format_tool_completed_event,
 )
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.model_loop import LoopHooks
     from mindroom.agent_loop.spec import AgentSpec
-    from mindroom.ai_turn_state import AITurnState
     from mindroom.approval.resume import ResumeDecisions
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
     from mindroom.history.request_messages import TurnMessages
-    from mindroom.history.types import CompactionLifecycle, PreparedHistoryState, ScopeSummary
+    from mindroom.history.turn_recorder import TurnRecorder
+    from mindroom.history.types import PreparedHistoryState, ScopeSummary
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
-    from mindroom.knowledge.search import AgentKnowledge
     from mindroom.llm.events import RunEvent
     from mindroom.llm.provider import ModelRequest
     from mindroom.llm.runs import AnyRunRecord, ToolExecution
     from mindroom.llm.usage import RunMetrics
-    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_turn import (
         EmptyRunDiscard,
-        PausedAttempt,
-        ResumedAttempt,
-        StandaloneReplaySnapshot,
         TurnRunState,
     )
     from mindroom.tool_system.events import ToolTraceEntry
-    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -288,19 +276,16 @@ class _StreamingAttemptState:
 
 @dataclass(frozen=True)
 class _AgentTurnCallbacks:
-    """Adapter callbacks shared by the blocking and streaming agent turns."""
+    """The agent's adapter callbacks for its turn driver."""
 
     load_scope: Callable[[], ScopeSessionContext]
     on_scope_loaded: Callable[[ScopeSessionContext | None], None]
     discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]
-    persist_standalone_replay: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None]
 
 
 def _build_agent_turn_callbacks(
     *,
     agent_name: str,
-    prompt: str,
-    current_prompt_is_structured: bool,
     session_id: str,
     runtime_paths: RuntimePaths,
     config: Config,
@@ -332,27 +317,10 @@ def _build_agent_turn_callbacks(
             output_tokens=discard.output_tokens,
         )
 
-    def _persist_standalone_replay(
-        scope_context: ScopeSessionContext | None,
-        snapshot: StandaloneReplaySnapshot,
-    ) -> None:
-        persist_interrupted_replay(
-            scope_context=scope_context,
-            run_id=snapshot.run_id,
-            user_message=prompt,
-            user_message_is_structured=current_prompt_is_structured,
-            partial_text=snapshot.partial_text,
-            completed_tools=snapshot.completed_tools,
-            interrupted_tools=snapshot.interrupted_tools,
-            run_metadata=snapshot.run_metadata,
-            original_status=snapshot.original_status,
-        )
-
     return _AgentTurnCallbacks(
         load_scope=_load_scope,
         on_scope_loaded=_on_scope_loaded,
         discard_empty_run=_discard_empty_run,
-        persist_standalone_replay=_persist_standalone_replay,
     )
 
 
@@ -360,165 +328,24 @@ def _build_agent_turn_callbacks(
 class _AgentRunContext:
     """Prepared state shared by one top-level agent response lifecycle."""
 
+    # The attempt's turn: its prompt, model, and enrichment as this attempt runs them.
     turn: ResponseTurnContext
     # turn.session_id narrowed to non-None once at the entry boundary; read
     # this field, not turn.session_id, wherever a str is required.
     session_id: str
-    prompt: str
-    model_prompt: str | None
     prepared_run: _PreparedAgentRun
     metadata: dict[str, Any] | None
     # The settings of every request of this run: the build's, with the turn's native history filled in.
     request_template: ModelRequest
     config: Config
     runtime_paths: RuntimePaths
-    compaction_lifecycle: CompactionLifecycle | None
-    turn_recorder: TurnRecorder | None
-    # What the run's delegations need: whose turn it is, how deep it runs, and the shared knowledge refresher.
-    execution_identity: ToolExecutionIdentity | None
-    delegation_depth: int
-    refresh_scheduler: KnowledgeRefreshScheduler | None
+    # The turn's record, where the run's mid-turn compaction notes the calls a fold summarized.
+    turn_recorder: TurnRecorder
 
     @property
     def agent_name(self) -> str:
         """Return the agent name; agent turns label the context with it."""
         return self.turn.entity_label
-
-
-@dataclass(frozen=True)
-class _FailedAgentAttempt:
-    """A blocking agent attempt that raised: its error, and the record its run stored before it failed, if any."""
-
-    error: Exception
-    record: RunRecord | None
-
-
-async def collect_streamed_response_content(
-    response_stream: AsyncIterator[AIStreamChunk],
-    *,
-    presentation: CollectedStreamPresentation,
-    on_update: Callable[[], Awaitable[None]] | None = None,
-) -> tuple[str, list[ToolTraceEntry]]:
-    """Collect a stream into its presentation owner, retaining pending text and tool state.
-
-    ``on_update`` runs after each chunk has been applied to ``presentation``. The stream is closed before any failure
-    propagates, so its producer stops then.
-    """
-    try:
-        async with closing_async_stream(response_stream):
-            async for chunk in response_stream:
-                if isinstance(chunk, str):
-                    presentation.append_text(chunk)
-                elif isinstance(chunk, TextDelta):
-                    presentation.append_text(chunk.text)
-                elif isinstance(chunk, RunFinished):
-                    if chunk.record.content is not None:
-                        presentation.canonical_final_body_candidate = chunk.record.content
-                elif isinstance(chunk, ToolStarted):
-                    presentation.start_tool(chunk.call, origin=chunk.origin)
-                elif isinstance(chunk, ToolCompleted):
-                    presentation.complete_tool(chunk.call, origin=chunk.origin)
-                if on_update is not None:
-                    await on_update()
-    except ResponsePausedForApproval as error:
-        error.capture_collected_presentation(
-            response_text=presentation.final_text().rstrip(),
-            tool_trace=presentation.tool_trace,
-        )
-        raise
-
-    return presentation.final_text(), presentation.tool_trace
-
-
-async def _collect_response_body_with_trace(
-    response_stream: AsyncIterator[AIStreamChunk],
-    *,
-    show_tool_calls: bool,
-    tool_trace_collector: list[ToolTraceEntry] | None,
-) -> str:
-    """Collect a stream to one body, bridging the trace to an optional collector."""
-    body, tool_trace = await collect_streamed_response_content(
-        response_stream,
-        presentation=CollectedStreamPresentation(show_tool_calls=show_tool_calls),
-    )
-    if tool_trace_collector is not None:
-        tool_trace_collector.extend(tool_trace)
-    return body
-
-
-def _extract_response_content(record: AnyRunRecord, *, show_tool_calls: bool) -> str:
-    response_parts: list[str] = []
-
-    # Add main content if present
-    if record.content:
-        response_parts.append(record.content)
-
-    # Add formatted tool call sections when present (and enabled).
-    if show_tool_calls and record.tools:
-        tool_sections: list[str] = []
-        for tool_index, tool in enumerate(record.tools, start=1):
-            tool_args = tool.tool_args or {}
-            combined, _ = format_tool_combined(tool.tool_name, tool_args, tool.result, tool_index=tool_index)
-            tool_sections.append(combined.strip())
-        if tool_sections:
-            response_parts.append("\n\n".join(tool_sections))
-
-    return "\n".join(response_parts) if response_parts else ""
-
-
-def _extract_tool_trace(record: AnyRunRecord) -> list[ToolTraceEntry]:
-    """Extract structured tool-trace metadata from a run record."""
-    return [format_tool_completed_event(tool.call) for tool in record.tools or ()]
-
-
-def _attach_blocking_pause_presentation(
-    paused: PausedAttempt,
-    record: AnyRunRecord,
-    *,
-    show_tool_calls: bool,
-) -> PausedAttempt:
-    """Render a blocking pause once, before it crosses the approval boundary.
-
-    A run that paused without text of its own holds the paused notice as its content (``paused_content``), which the
-    pause does not show, as a pause collected from the run's events does not: the approval card says what it waits for.
-    """
-    presentation = CollectedStreamPresentation(
-        show_tool_calls=show_tool_calls,
-        track_hidden_tools=True,
-    )
-    content = _extract_response_content(record, show_tool_calls=False)
-    presentation.append_text("" if content == paused_content(record) else content)
-    # A paused call stays started: a call waiting for approval, or a delegation that still waits for its child,
-    # or for its turn after a sibling's, until the driver answers it.
-    answered = answered_delegation_calls(record)
-    seen_ids: set[str] = set()
-    for tool in (*tuple(record.tools or ()), *paused.tools):
-        call = tool.call
-        call_id = call.tool_call_id
-        if call_id in seen_ids:
-            continue
-        seen_ids.add(call_id)
-        presentation.start_tool(call)
-        # An agent's own calls name no member.
-        if not tool.is_paused or (None, call_id) in answered:
-            presentation.complete_tool(call)
-
-    return replace(
-        paused,
-        response_text=presentation.final_text(),
-        tool_trace=tuple(presentation.tool_trace),
-    )
-
-
-def _own_assistant_text(record: AnyRunRecord | None) -> str:
-    """Return the last text this run's own model requests produced (``own_answers``), never an earlier reply.
-
-    A failed run whose model said nothing holds the error's text as its ``content``, so the partial text an
-    interrupted-turn record keeps comes from the run's own answers only.
-    """
-    if record is None:
-        return ""
-    return next((part for answer in reversed(own_answers(record)) if (part := answer.strip())), "")
 
 
 def _reported_tokens(usage: RunMetrics | None) -> TokenCounts:
@@ -619,8 +446,8 @@ def _attempt_request_log_context(run_context: _AgentRunContext) -> dict[str, obj
             requester_id=ctx.requester_id,
             correlation_id=ctx.correlation_id,
         ),
-        prompt=run_context.prompt,
-        model_prompt=run_context.model_prompt,
+        prompt=ctx.prompt,
+        model_prompt=ctx.model_prompt,
         full_prompt=run_context.prepared_run.prompt_text,
         metadata=run_context.metadata,
     )
@@ -644,8 +471,6 @@ def _begin_attempt(
         run_id=continuation.active_run_id or str(uuid4()),
         stream_state=stream_state,
     )
-    if run_context.turn_recorder is not None:
-        run_context.turn_recorder.set_run_id(attempt.run_id)
     return storage, attempt
 
 
@@ -669,7 +494,7 @@ def _agent_loop_hooks(
             storage=storage,
             replay_plan=prepared.prepared_history.replay_plan,
             prompt_id=prepared.turn.prompt.id,
-            lifecycle=run_context.compaction_lifecycle,
+            lifecycle=ctx.compaction_lifecycle,
             turn_recorder=run_context.turn_recorder,
         ),
         participation=ctx.participation,
@@ -711,8 +536,8 @@ async def _start_agent_run(
             storage=storage,
             response_context=run_context.turn,
             context_documents=prepared.cli_context,
-            delegation_depth=run_context.delegation_depth,
-            refresh_scheduler=run_context.refresh_scheduler,
+            delegation_depth=run_context.turn.delegation_depth,
+            refresh_scheduler=run_context.turn.refresh_scheduler,
         )
     elif build.surface.cli_shell:
         await bind_standard_cli(
@@ -720,8 +545,8 @@ async def _start_agent_run(
             run=run,
             storage=storage,
             response_context=run_context.turn,
-            delegation_depth=run_context.delegation_depth,
-            refresh_scheduler=run_context.refresh_scheduler,
+            delegation_depth=run_context.turn.delegation_depth,
+            refresh_scheduler=run_context.turn.refresh_scheduler,
         )
     events = run_agent(
         spec,
@@ -740,9 +565,9 @@ async def _start_agent_run(
         run_child=run_delegated_child_response,
         config=run_context.config,
         runtime_paths=run_context.runtime_paths,
-        execution_identity=run_context.execution_identity,
-        delegation_depth=run_context.delegation_depth,
-        refresh_scheduler=run_context.refresh_scheduler,
+        execution_identity=run_context.turn.execution_identity,
+        delegation_depth=run_context.turn.delegation_depth,
+        refresh_scheduler=run_context.turn.refresh_scheduler,
     )
     if build.surface.mode == "minimal" or build.surface.cli_shell:
         driven = stream_cli_events(driven)
@@ -782,56 +607,6 @@ class _TurnRunContinuation:
             persist=persist_into(self.terminal, self.storage),
             request_template=self.run_context.request_template,
         )
-
-
-@timed("model_request_to_completion")
-async def _run_blocking_agent_attempt(
-    run_context: _AgentRunContext,
-    attempt: _AgentAttempt,
-    *,
-    storage: RunStorage,
-    terminal: TerminalRecord[RunRecord],
-    on_attempt_start: Callable[[str, str], None] | None,
-    pipeline_timing: DispatchPipelineTiming | None,
-) -> RunRecord:
-    """Run one non-streaming agent attempt and return its finished record."""
-    if on_attempt_start is not None:
-        on_attempt_start(attempt.run_id, run_context.prepared_run.runtime_model_name)
-    if pipeline_timing is not None:
-        pipeline_timing.mark_model_request()
-    events = _start_agent_run(run_context, attempt, storage=storage, terminal=terminal)
-    async with closing_async_stream(events):
-        async for event in events:
-            terminal.collect(event)
-    return terminal.terminal(attempt.run_id)
-
-
-async def _try_blocking_agent_attempt(
-    *,
-    run_context: _AgentRunContext,
-    attempt: _AgentAttempt,
-    storage: RunStorage,
-    on_attempt_start: Callable[[str, str], None] | None,
-    scope_context: ScopeSessionContext | None,
-    pipeline_timing: DispatchPipelineTiming | None,
-) -> RunRecord | _FailedAgentAttempt:
-    """Run one non-streaming agent response attempt: its finished record, or how it failed."""
-    terminal = TerminalRecord(RunRecord)
-    try:
-        with bind_llm_request_log_context(**_attempt_request_log_context(run_context)):
-            return await _run_blocking_agent_attempt(
-                run_context,
-                attempt,
-                storage=storage,
-                terminal=terminal,
-                on_attempt_start=on_attempt_start,
-                pipeline_timing=pipeline_timing,
-            )
-    except Exception as e:
-        logger.exception("Error generating AI response", agent=run_context.agent_name)
-        return _FailedAgentAttempt(error=e, record=terminal.record)
-    finally:
-        ai_runtime.register_scope_notice_storage(scope_context=scope_context, entity_name=run_context.agent_name)
 
 
 def _assert_agent_target(agent_name: str, config: Config) -> None:
@@ -960,33 +735,19 @@ async def _system_messages_after_compaction(
 async def _prepare_agent_and_prompt(
     ctx: ResponseTurnContext,
     *,
-    prompt: str,
     runtime_paths: RuntimePaths,
     config: Config,
     scope_context: ScopeSessionContext | None,
-    thread_history: Sequence[ResolvedVisibleMessage] | None,
-    knowledge: AgentKnowledge | None,
-    include_interactive_questions: bool,
-    tool_function_filter: Callable[[ToolFunction], bool] | None,
-    execution_identity: ToolExecutionIdentity | None,
-    compaction_lifecycle: CompactionLifecycle | None,
-    delegation_depth: int,
-    refresh_scheduler: KnowledgeRefreshScheduler | None,
-    include_openai_compat_guidance: bool,
-    model_prompt: str | None,
-    current_timestamp_ms: float | None,
     current_event_id: str | None,
-    current_prompt_is_structured: bool,
-    pipeline_timing: DispatchPipelineTiming | None,
-    eager_deferred_tools: bool,
-    supports_native_tool_approval: bool,
-    reusable_build: AgentBuild | None,
 ) -> _PreparedAgentRun:
     """Prepare the agent build, this turn's system messages (stable, then turn), and its request input.
 
     Returns the prepared run input plus history bookkeeping for one agent turn.
     """
     agent_name = ctx.entity_label
+    prompt = ctx.prompt
+    execution_identity = ctx.execution_identity
+    pipeline_timing = ctx.pipeline_timing
 
     def _resolve_model_and_build_agent() -> tuple[ResolvedRuntimeModel, AgentBuild]:
         """Resolve the runtime model and build the agent off the event loop (#1260).
@@ -1001,7 +762,7 @@ async def _prepare_agent_and_prompt(
             thread_id=ctx.thread_id,
             runtime_paths=runtime_paths,
         )
-        build = reusable_build
+        build = ctx.reusable_build
         if build is None:
             build = create_agent(
                 agent_name,
@@ -1009,15 +770,15 @@ async def _prepare_agent_and_prompt(
                 runtime_paths,
                 history_storage=scope_context.storage if scope_context is not None else None,
                 active_model_name=runtime_model.model_name,
-                knowledge=knowledge,
-                include_interactive_questions=include_interactive_questions,
-                tool_function_filter=tool_function_filter,
-                include_openai_compat_guidance=include_openai_compat_guidance,
+                knowledge=ctx.knowledge,
+                include_interactive_questions=ctx.include_interactive_questions,
+                tool_function_filter=ctx.tool_function_filter,
+                include_openai_compat_guidance=ctx.include_openai_compat_guidance,
                 execution_identity=execution_identity,
-                delegation_depth=delegation_depth,
-                refresh_scheduler=refresh_scheduler,
-                supports_native_tool_approval=supports_native_tool_approval,
-                eager_deferred_tools=eager_deferred_tools,
+                delegation_depth=ctx.delegation_depth,
+                refresh_scheduler=ctx.refresh_scheduler,
+                supports_native_tool_approval=ctx.supports_native_tool_approval,
+                eager_deferred_tools=ctx.eager_deferred_tools,
                 agent_mode=ctx.agent_mode,
                 agent_cli_in_shell=True,
                 persona=ctx.persona,
@@ -1029,7 +790,7 @@ async def _prepare_agent_and_prompt(
     parallel_branches = memory_backend == "mem0"
     serial_reason: str | None = None
     if memory_backend == "file":
-        parallel_branches = reusable_build is not None or await asyncio.to_thread(
+        parallel_branches = ctx.reusable_build is not None or await asyncio.to_thread(
             agent_build_can_overlap_file_memory,
             agent_name,
             config,
@@ -1043,7 +804,7 @@ async def _prepare_agent_and_prompt(
             prompt_branches_memory_backend=memory_backend,
             prompt_branches_serial_reason=serial_reason,
         )
-    current_turn_prompt = _compose_current_turn_prompt(raw_prompt=prompt, model_prompt=model_prompt)
+    current_turn_prompt = _compose_current_turn_prompt(raw_prompt=prompt, model_prompt=ctx.model_prompt)
     if parallel_branches:
         _mark_pipeline_timing(pipeline_timing, "prompt_branches_start")
         with timed_block(
@@ -1114,16 +875,16 @@ async def _prepare_agent_and_prompt(
             if transient_turn_context
             else ()
         ),
-        thread_history=thread_history,
+        thread_history=ctx.thread_history,
         runtime_paths=runtime_paths,
         config=config,
         resolved_runtime_model=runtime_model,
-        compaction_lifecycle=compaction_lifecycle,
-        current_sender_id=None if include_openai_compat_guidance else ctx.current_sender_id or ctx.requester_id,
-        current_timestamp_ms=current_timestamp_ms,
+        compaction_lifecycle=ctx.compaction_lifecycle,
+        current_sender_id=None if ctx.include_openai_compat_guidance else ctx.current_sender_id or ctx.requester_id,
+        current_timestamp_ms=ctx.current_timestamp_ms,
         current_event_id=current_event_id,
-        current_prompt_is_structured=current_prompt_is_structured,
-        include_openai_compat_guidance=include_openai_compat_guidance,
+        current_prompt_is_structured=ctx.current_prompt_is_structured,
+        include_openai_compat_guidance=ctx.include_openai_compat_guidance,
         pipeline_timing=pipeline_timing,
     )
     system_messages = await _system_messages_after_compaction(
@@ -1182,54 +943,29 @@ async def _prepare_agent_run_context(
     runtime_paths: RuntimePaths,
     config: Config,
     scope_context: ScopeSessionContext | None,
-    thread_history: Sequence[ResolvedVisibleMessage] | None,
-    knowledge: AgentKnowledge | None,
-    include_interactive_questions: bool,
-    tool_function_filter: Callable[[ToolFunction], bool] | None,
-    include_openai_compat_guidance: bool,
-    execution_identity: ToolExecutionIdentity | None,
-    compaction_lifecycle: CompactionLifecycle | None,
-    delegation_depth: int,
-    refresh_scheduler: KnowledgeRefreshScheduler | None,
-    turn_recorder: TurnRecorder | None,
-    pipeline_timing: DispatchPipelineTiming | None,
-    eager_deferred_tools: bool,
-    supports_native_tool_approval: bool,
-    reusable_build: AgentBuild | None,
+    turn_recorder: TurnRecorder,
 ) -> _AgentRunContext:
     """Prepare one attempt of an agent response, as its ``continuation`` state asks, through metadata assembly."""
-    if continuation.active_model_name is not None:
-        ctx = replace(ctx, active_model_name=continuation.active_model_name)
-    prompt = continuation.active_prompt
-    model_prompt = continuation.active_model_prompt
+    ctx = replace(
+        ctx,
+        prompt=continuation.active_prompt,
+        model_prompt=continuation.active_model_prompt,
+        current_timestamp_ms=continuation.active_current_timestamp_ms,
+        current_prompt_is_structured=continuation.active_current_prompt_is_structured,
+        active_model_name=continuation.active_model_name or ctx.active_model_name,
+    )
+    pipeline_timing = ctx.pipeline_timing
     if pipeline_timing is not None:
         pipeline_timing.mark("ai_prepare_start", overwrite=True)
-    if delegation_depth == 0 and ctx.agent_mode != "minimal":
+    if ctx.delegation_depth == 0 and ctx.agent_mode != "minimal":
         # Only a top-level standard reply can collect jobs, so only it hears which ended.
         ctx = replace(ctx, transient_enrichment_items=await append_turn_start_job_note(ctx.transient_enrichment_items))
     prepared_run = await _prepare_agent_and_prompt(
         ctx,
-        prompt=prompt,
         runtime_paths=runtime_paths,
         config=config,
         scope_context=scope_context,
-        thread_history=thread_history,
-        knowledge=knowledge,
-        include_interactive_questions=include_interactive_questions,
-        tool_function_filter=tool_function_filter,
-        execution_identity=execution_identity,
-        compaction_lifecycle=compaction_lifecycle,
-        delegation_depth=delegation_depth,
-        refresh_scheduler=refresh_scheduler,
-        include_openai_compat_guidance=include_openai_compat_guidance,
-        model_prompt=model_prompt,
-        current_timestamp_ms=continuation.active_current_timestamp_ms,
         current_event_id=continuation.active_current_event_id,
-        current_prompt_is_structured=continuation.active_current_prompt_is_structured,
-        pipeline_timing=pipeline_timing,
-        eager_deferred_tools=eager_deferred_tools,
-        supports_native_tool_approval=supports_native_tool_approval,
-        reusable_build=reusable_build,
     )
     if pipeline_timing is not None:
         pipeline_timing.mark("history_ready", overwrite=True)
@@ -1250,24 +986,16 @@ async def _prepare_agent_run_context(
     )
     if ctx.agent_mode == "minimal":
         metadata = dict(metadata or {}) | {"agent_mode": "minimal"}
-    if turn_recorder is not None:
-        turn_recorder.set_run_metadata(metadata)
 
     return _AgentRunContext(
         turn=ctx,
         session_id=session_id,
-        prompt=prompt,
-        model_prompt=model_prompt,
         prepared_run=prepared_run,
         metadata=metadata,
         request_template=request_template,
         config=config,
         runtime_paths=runtime_paths,
-        compaction_lifecycle=compaction_lifecycle,
         turn_recorder=turn_recorder,
-        execution_identity=execution_identity,
-        delegation_depth=delegation_depth,
-        refresh_scheduler=refresh_scheduler,
     )
 
 
@@ -1326,34 +1054,31 @@ async def run_delegated_child_response(
         matrix_run_metadata=None,
         active_model_name=child.model_name,
         transient_enrichment_items=tuple(append_knowledge_availability_enrichment((), knowledge.unavailable)),
+        prompt=prompt,
+        show_tool_calls=False,
+        execution_identity=identity,
+        refresh_scheduler=refresh_scheduler,
+        knowledge=knowledge.knowledge,
+        include_interactive_questions=False,
+        tool_function_filter=context.tool_function_filter if context is not None else None,
+        delegation_depth=child.depth,
+        supports_native_tool_approval=supports_native_tool_approval and child.agent_mode == "standard",
+    )
+    sinks = TurnSinks(
+        # Delegation recovery records a child's interruption.
+        persist_interrupted=False,
+        on_attempt_start=lambda run_id, model_name: note_child_run_id(
+            child,
+            run_id,
+            runtime_paths,
+            model_name=model_name,
+        ),
     )
     # The child's tools run as the child, whichever adapter runs it; its caller's identity stays with the caller.
     with tool_runtime_context(child_context):
         return await run_with_tool_execution_identity(
             identity,
-            operation=lambda: ai_response(
-                turn,
-                prompt=prompt,
-                runtime_paths=runtime_paths,
-                config=active_config,
-                knowledge=knowledge.knowledge,
-                on_attempt_start=lambda run_id, model_name: note_child_run_id(
-                    child,
-                    run_id,
-                    runtime_paths,
-                    model_name=model_name,
-                ),
-                include_interactive_questions=False,
-                include_openai_compat_guidance=identity.channel == "openai_compat",
-                tool_function_filter=context.tool_function_filter if context is not None else None,
-                execution_identity=identity,
-                delegation_depth=child.depth,
-                refresh_scheduler=refresh_scheduler,
-                supports_native_tool_approval=supports_native_tool_approval and child.agent_mode == "standard",
-                collect_streamed_response=True,
-                show_tool_calls=False,
-                turn_recorder=TurnRecorder(user_message=prompt),
-            ),
+            operation=lambda: ai_response(turn, runtime_paths, active_config, sinks=sinks),
         )
 
 
@@ -1369,251 +1094,35 @@ def _with_background_tool_jobs(
     )
 
 
-async def ai_response(  # noqa: C901
+async def ai_response(
     ctx: ResponseTurnContext,
-    prompt: str,
     runtime_paths: RuntimePaths,
     config: Config,
-    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
-    model_prompt: str | None = None,
-    current_timestamp_ms: float | None = None,
-    current_prompt_is_structured: bool = False,
-    knowledge: AgentKnowledge | None = None,
-    on_attempt_start: Callable[[str, str], None] | None = None,
-    include_interactive_questions: bool = True,
-    tool_function_filter: Callable[[ToolFunction], bool] | None = None,
-    include_openai_compat_guidance: bool = False,
-    media: MediaInputs | None = None,
-    show_tool_calls: bool = True,
-    collect_streamed_response: bool = False,
-    tool_trace_collector: list[ToolTraceEntry] | None = None,
-    run_metadata_collector: dict[str, Any] | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
-    compaction_lifecycle: CompactionLifecycle | None = None,
-    delegation_depth: int = 0,
-    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
-    turn_recorder: TurnRecorder | None = None,
-    pipeline_timing: DispatchPipelineTiming | None = None,
-    eager_deferred_tools: bool = False,
-    supports_native_tool_approval: bool = False,
-    reusable_build: AgentBuild | None = None,
+    *,
+    sinks: TurnSinks | None = None,
 ) -> str:
-    """Generate one agent response with memory integration and return its text.
+    """Generate one agent response and return its text, collected from the turn's stream.
 
-    Takes the arguments ``stream_agent_response`` documents, without its resume inputs and completion sink, plus
-    ``collect_streamed_response``, which runs the turn as a stream and collects it into one body (as a minimal-mode
-    turn always does), and ``tool_trace_collector``, an optional list that receives the run's structured tool-trace
-    entries.
+    ``sinks.tool_trace``, when given, receives the run's structured tool-trace entries.
     """
-    ctx = _with_background_tool_jobs(ctx, config, runtime_paths)
-    agent_name = ctx.entity_label
-    logger.info("AI request", agent=agent_name, room_id=ctx.room_id)
-    if collect_streamed_response or ctx.agent_mode == "minimal":
-        return await _collect_response_body_with_trace(
-            stream_agent_response(
-                ctx,
-                prompt=prompt,
-                runtime_paths=runtime_paths,
-                config=config,
-                thread_history=thread_history,
-                model_prompt=model_prompt,
-                current_timestamp_ms=current_timestamp_ms,
-                current_prompt_is_structured=current_prompt_is_structured,
-                knowledge=knowledge,
-                on_attempt_start=on_attempt_start,
-                include_interactive_questions=include_interactive_questions,
-                tool_function_filter=tool_function_filter,
-                include_openai_compat_guidance=include_openai_compat_guidance,
-                media=media,
-                show_tool_calls=show_tool_calls,
-                run_metadata_collector=run_metadata_collector,
-                execution_identity=execution_identity,
-                compaction_lifecycle=compaction_lifecycle,
-                delegation_depth=delegation_depth,
-                refresh_scheduler=refresh_scheduler,
-                turn_recorder=turn_recorder,
-                pipeline_timing=pipeline_timing,
-                eager_deferred_tools=eager_deferred_tools,
-                supports_native_tool_approval=supports_native_tool_approval,
-                reusable_build=reusable_build,
-            ),
-            show_tool_calls=show_tool_calls,
-            tool_trace_collector=tool_trace_collector,
-        )
-
-    session_id = _turn_session_id(ctx)
-    media_inputs = media or MediaInputs()
-    try:
-        _assert_agent_target(agent_name, config)
-    except ValueError as e:
-        return get_user_friendly_error_message(e, agent_name, runtime_paths=runtime_paths)
-
-    callbacks = _build_agent_turn_callbacks(
-        agent_name=agent_name,
-        prompt=_compose_current_turn_prompt(raw_prompt=prompt, model_prompt=model_prompt),
-        current_prompt_is_structured=current_prompt_is_structured,
-        session_id=session_id,
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=execution_identity,
+    sinks = sinks or TurnSinks()
+    body, tool_trace = await collect_streamed_response_content(
+        stream_agent_response(ctx, runtime_paths, config, sinks=sinks),
+        # Hidden tool calls still separate the text around them, as a streamed reply shows it.
+        presentation=CollectedStreamPresentation(show_tool_calls=ctx.show_tool_calls, track_hidden_tools=True),
     )
-
-    async def _run_blocking_attempt(
-        run: TurnRunState,
-        continuation_state: TurnContinuationRunState,
-    ) -> BlockingAttemptResolution:
-        """Run one prepared agent attempt."""
-        try:
-            run_context = await _prepare_agent_run_context(
-                ctx,
-                continuation_state,
-                session_id=session_id,
-                runtime_paths=runtime_paths,
-                config=config,
-                scope_context=run.scope_context,
-                thread_history=thread_history,
-                knowledge=knowledge,
-                include_interactive_questions=include_interactive_questions,
-                tool_function_filter=tool_function_filter,
-                include_openai_compat_guidance=include_openai_compat_guidance,
-                execution_identity=execution_identity,
-                compaction_lifecycle=compaction_lifecycle,
-                delegation_depth=delegation_depth,
-                refresh_scheduler=refresh_scheduler,
-                turn_recorder=turn_recorder,
-                pipeline_timing=pipeline_timing,
-                eager_deferred_tools=eager_deferred_tools,
-                supports_native_tool_approval=supports_native_tool_approval,
-                reusable_build=reusable_build,
-            )
-        except Exception as e:
-            logger.exception("Error preparing agent", agent=agent_name)
-            # A failure before the participation decision stays quiet; an approved turn replies with the error.
-            return skip_unapproved_attempt(ctx.participation, reason="preparation_failed") or ExcludedAttempt(
-                response_text=get_user_friendly_error_message(e, agent_name, runtime_paths=runtime_paths),
-            )
-        prepared_run = run_context.prepared_run
-        storage, attempt = _begin_attempt(run, run_context, continuation_state, media_inputs)
-
-        outcome = await _try_blocking_agent_attempt(
-            run_context=run_context,
-            attempt=attempt,
-            storage=storage,
-            on_attempt_start=on_attempt_start,
-            scope_context=run.scope_context,
-            pipeline_timing=pipeline_timing,
-        )
-        if isinstance(outcome, _FailedAgentAttempt):
-            failed_record = outcome.record
-            if skipped := skip_unapproved_attempt(
-                ctx.participation,
-                reason="run_failed_before_decision",
-                session_id=session_id,
-                run_id=attempt.run_id,
-            ):
-                return skipped
-            completed_tools, interrupted_tools = split_interrupted_tool_trace(
-                failed_record.tools if failed_record is not None else None,
-            )
-            return ExcludedAttempt(
-                response_text=get_user_friendly_error_message(outcome.error, agent_name, runtime_paths=runtime_paths),
-                partial_text=_own_assistant_text(failed_record),
-                completed_tools=tuple(completed_tools),
-                interrupted_tools=tuple(interrupted_tools),
-                run_id=attempt.run_id,
-                metadata_content=_attempt_run_metadata(
-                    run_metadata_collector,
-                    run_context,
-                    failed_record,
-                    RunStatus.error,
-                    run_id=attempt.run_id,
-                ),
-            )
-        record = outcome
-        if record.status is RunStatus.completed and (
-            skipped := skip_unapproved_attempt(
-                ctx.participation,
-                reason="participation_declined",
-                session_id=session_id,
-                run_id=record.run_id,
-                output_tokens=_reported_tokens(record.metrics).output_tokens or None,
-            )
-        ):
-            return skipped
-
-        response_tool_trace = _extract_tool_trace(record)
-        if tool_trace_collector is not None:
-            tool_trace_collector.extend(response_tool_trace)
-        metadata_content = _attempt_run_metadata(
-            run_metadata_collector,
-            run_context,
-            record,
-            record.status,
-            run_id=record.run_id,
-        )
-
-        if record.status is RunStatus.paused:
-            paused_attempt = paused_attempt_from_response(
-                record,
-                toolkit_owners=tool_owners_by_agent(prepared_run.build),
-            )
-            if paused_attempt is None:
-                raise pause_without_approval_error(record, entity_label="agent")
-            return replace(
-                _attach_blocking_pause_presentation(
-                    paused_attempt,
-                    record,
-                    show_tool_calls=show_tool_calls,
-                ),
-                runtime_model_name=prepared_run.runtime_model_name,
-            )
-        return CompletedAttempt(
-            status=record.status,
-            response_text=_extract_response_content(record, show_tool_calls=show_tool_calls),
-            replayable_text=_extract_response_content(record, show_tool_calls=False),
-            has_visible_content=bool(record.content),
-            is_empty=ai_runtime.is_empty_completed_run(record),
-            session_id=record.session_id,
-            run_id=record.run_id,
-            attempt_run_id=attempt.run_id,
-            runtime_model_name=prepared_run.runtime_model_name,
-            output_tokens=_reported_tokens(record.metrics).output_tokens or None,
-            tool_executions=tuple(record.tools or ()),
-            control_calls=cli_control_calls(attempt.run_id),
-            completed_tools=tuple(response_tool_trace),
-            metadata_content=metadata_content,
-        )
-
-    adapter = BlockingTurnAdapter(
-        load_scope=callbacks.load_scope,
-        run_attempt=_run_blocking_attempt,
-        discard_empty_run=callbacks.discard_empty_run,
-        on_scope_loaded=callbacks.on_scope_loaded,
-        persist_standalone_replay=callbacks.persist_standalone_replay,
-    )
-    return await run_blocking_response_turn(
-        ctx,
-        adapter,
-        TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
-        continuation=_initial_agent_continuation(
-            prompt=prompt,
-            model_prompt=model_prompt,
-            current_timestamp_ms=current_timestamp_ms,
-            current_prompt_is_structured=current_prompt_is_structured,
-            current_event_id=ctx.reply_to_event_id,
-            run_id=ctx.run_id,
-        ),
-    )
+    if sinks.tool_trace is not None:
+        sinks.tool_trace.extend(tool_trace)
+    return body
 
 
 @timed("model_request_to_completion")
-async def _process_stream_events(  # noqa: C901, PLR0912
+async def _process_stream_events(  # noqa: C901
     events: AsyncIterator[RunEvent],
     *,
     state: _StreamingAttemptState,
     show_tool_calls: bool,
     agent_name: str,
-    state_updated: Callable[[], None] | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> AsyncGenerator[AIStreamChunk, None]:
     """Consume one streaming attempt, yielding chunks and mutating *state*."""
@@ -1628,8 +1137,6 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                     if pipeline_timing is not None:
                         pipeline_timing.mark("model_first_token")
                 state.assistant_text += event.text
-                if state_updated is not None:
-                    state_updated()
                 yield event
                 continue
 
@@ -1643,8 +1150,6 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                     show_tool_calls=show_tool_calls,
                 )
                 _track_stream_tool_started(state, event)
-                if state_updated is not None:
-                    state_updated()
                 yield event
                 continue
 
@@ -1658,16 +1163,12 @@ async def _process_stream_events(  # noqa: C901, PLR0912
                     show_tool_calls=show_tool_calls,
                 )
                 state.tool_tracker.complete(event.call, origin=event.origin)
-                if state_updated is not None:
-                    state_updated()
                 yield event
                 continue
 
             if isinstance(event, RunFinished):
                 state.finished = True
                 state.terminal.keep(event.record)
-                if state_updated is not None:
-                    state_updated()
                 if event.record.status is RunStatus.completed and event.record.content is not None:
                     yield event
                 continue
@@ -1688,7 +1189,6 @@ async def _stream_agent_attempt_chunks(
     state: _StreamingAttemptState,
     show_tool_calls: bool,
     on_attempt_start: Callable[[str, str], None] | None,
-    state_updated: Callable[[], None] | None,
     pipeline_timing: DispatchPipelineTiming | None,
 ) -> AsyncGenerator[AIStreamChunk, None]:
     """Start and consume one streaming agent attempt."""
@@ -1706,7 +1206,6 @@ async def _stream_agent_attempt_chunks(
             state=state,
             show_tool_calls=show_tool_calls,
             agent_name=run_context.agent_name,
-            state_updated=state_updated,
             pipeline_timing=pipeline_timing,
         )
         async with closing_async_stream(run_events), closing_async_stream(events), aclosing(chunks):
@@ -1721,86 +1220,28 @@ async def _stream_agent_attempt_chunks(
 
 async def stream_agent_response(  # noqa: C901, PLR0915
     ctx: ResponseTurnContext,
-    prompt: str,
     runtime_paths: RuntimePaths,
     config: Config,
-    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
-    model_prompt: str | None = None,
-    current_timestamp_ms: float | None = None,
-    current_prompt_is_structured: bool = False,
-    knowledge: AgentKnowledge | None = None,
-    on_attempt_start: Callable[[str, str], None] | None = None,
-    include_interactive_questions: bool = True,
-    tool_function_filter: Callable[[ToolFunction], bool] | None = None,
-    include_openai_compat_guidance: bool = False,
-    media: MediaInputs | None = None,
-    show_tool_calls: bool = True,
-    run_metadata_collector: dict[str, Any] | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
-    compaction_lifecycle: CompactionLifecycle | None = None,
-    delegation_depth: int = 0,
-    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
-    turn_recorder: TurnRecorder | None = None,
-    pipeline_timing: DispatchPipelineTiming | None = None,
-    eager_deferred_tools: bool = False,
-    supports_native_tool_approval: bool = False,
-    reusable_build: AgentBuild | None = None,
-    resumed_attempt: ResumedAttempt | None = None,
-    initial_continuation_count: int = 0,
-    on_completed: Callable[[CompletedAttempt], None] | None = None,
+    *,
+    sinks: TurnSinks | None = None,
+    resume: TurnResume | None = None,
 ) -> AsyncIterator[AIStreamChunk]:
-    """Generate one streaming agent response on the agent loop.
+    """Generate one streaming agent response on the agent loop, yielding chunks and events as they become available.
 
-    Args:
-        ctx: Per-turn identity constants for this response turn. ``entity_label``
-            names the agent, ``session_id`` is required, and ``requester_id`` is
-            the Matrix sender used for prompt attribution.
-        prompt: User prompt
-        runtime_paths: Runtime config/storage paths for agent data and config-aware tools
-        config: Application configuration
-        thread_history: Optional thread history
-        model_prompt: Optional model-facing current-turn prompt additions.
-        current_timestamp_ms: Optional source Matrix event timestamp in milliseconds.
-        current_prompt_is_structured: Whether the current prompt already carries trusted message tags.
-        knowledge: Optional shared knowledge base for RAG-enabled agents
-        on_attempt_start: Optional callback that receives each attempt's run id and configured model name
-            before the attempt starts.
-        include_interactive_questions: Whether to include the interactive
-            question authoring prompt. Set to False for channels that do not
-            support Matrix reaction-based question flows.
-        tool_function_filter: Optional policy applied to each resolved agent tool function.
-        include_openai_compat_guidance: Whether to omit Matrix-style sender
-            attribution for OpenAI-compatible prompt formatting.
-        media: Optional multimodal inputs (audio/images/files/videos)
-        show_tool_calls: Whether to include tool call details inline in the streamed response.
-        run_metadata_collector: Optional mapping that receives versioned
-            run/model/token metadata for Matrix message content.
-        execution_identity: Request execution identity used to resolve scoped
-            agent state, sessions, and memory consistently for this run.
-        compaction_lifecycle: Optional lifecycle sink for ordered foreground
-            compaction notices.
-        delegation_depth: Current nested delegation depth for delegated-agent runs.
-        refresh_scheduler: Optional runtime-owned shared knowledge refresh scheduler
-            passed through to delegated child agents.
-        turn_recorder: Optional lifecycle-owned recorder updated with trusted turn state.
-        pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
-        eager_deferred_tools: Whether to send deferred toolkits as ordinary tools instead of through `call_tool`;
-            models with native tool search keep native deferral.
-        supports_native_tool_approval: Whether this caller can resume confirmation pauses.
-        reusable_build: Optional caller-owned agent build materialized for repeated sequential turns.
-        resumed_attempt: Restored attempt to settle before preparing a fresh model request.
-        initial_continuation_count: Same-turn attempts consumed before the first fresh request.
-        on_completed: Optional sink for the terminal typed attempt, independent of display metadata.
-
-    Yields:
-        Streaming chunks/events as they become available
-
+    ``ctx`` carries every input of the turn (``entity_label`` names the agent, ``session_id`` is required, and
+    ``requester_id`` is the Matrix sender used for prompt attribution); ``sinks`` receives what the turn writes back,
+    and ``resume`` restores an attempt to settle, or counts the same-turn attempts spent, before the first fresh
+    request.
     """
     ctx = _with_background_tool_jobs(ctx, config, runtime_paths)
+    sinks = sinks or TurnSinks()
     agent_name = ctx.entity_label
     logger.info("AI streaming request", agent=agent_name, room_id=ctx.room_id)
     session_id = _turn_session_id(ctx)
-    media_inputs = media or MediaInputs()
+    media_inputs = ctx.media or MediaInputs()
+    show_tool_calls = ctx.show_tool_calls
+    pipeline_timing = ctx.pipeline_timing
+    run_metadata_collector = sinks.run_metadata_collector
     try:
         _assert_agent_target(agent_name, config)
     except ValueError as e:
@@ -1809,12 +1250,10 @@ async def stream_agent_response(  # noqa: C901, PLR0915
 
     callbacks = _build_agent_turn_callbacks(
         agent_name=agent_name,
-        prompt=_compose_current_turn_prompt(raw_prompt=prompt, model_prompt=model_prompt),
-        current_prompt_is_structured=current_prompt_is_structured,
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
-        execution_identity=execution_identity,
+        execution_identity=ctx.execution_identity,
     )
 
     attempt_started = False
@@ -1840,57 +1279,28 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 runtime_paths=runtime_paths,
                 config=config,
                 scope_context=run.scope_context,
-                thread_history=thread_history,
-                knowledge=knowledge,
-                include_interactive_questions=include_interactive_questions,
-                tool_function_filter=tool_function_filter,
-                include_openai_compat_guidance=include_openai_compat_guidance,
-                execution_identity=execution_identity,
-                compaction_lifecycle=compaction_lifecycle,
-                delegation_depth=delegation_depth,
-                refresh_scheduler=refresh_scheduler,
-                turn_recorder=turn_recorder,
-                pipeline_timing=pipeline_timing,
-                eager_deferred_tools=eager_deferred_tools,
-                supports_native_tool_approval=supports_native_tool_approval,
-                reusable_build=reusable_build,
+                turn_recorder=run.record,
             )
         except Exception as e:
             logger.exception("Error preparing agent for streaming", agent=agent_name)
             if skipped := skip_unapproved_attempt(ctx.participation, reason="preparation_failed"):
                 yield AttemptResolved(skipped)
                 return
-            yield get_user_friendly_error_message(e, agent_name, runtime_paths=runtime_paths)
-            yield AttemptResolved(HandledAttempt())
+            yield AttemptResolved(
+                HandledAttempt(get_user_friendly_error_message(e, agent_name, runtime_paths=runtime_paths)),
+            )
             return
         prepared_run = run_context.prepared_run
         state = _StreamingAttemptState()
         storage, attempt = _begin_attempt(run, run_context, continuation_state, media_inputs, stream_state=state)
         attempt_started = True
-        turn_state = run.turn_state
-
-        def _sync_live_turn_recorder(
-            *,
-            state_ref: _StreamingAttemptState = state,
-            turn_state_ref: AITurnState = turn_state,
-            metadata_ref: dict[str, Any] | None = run.run_metadata,
-        ) -> None:
-            turn_state_ref.sync_partial(
-                turn_recorder,
-                run_metadata=metadata_ref,
-                assistant_text=state_ref.assistant_text,
-                completed_tools=state_ref.completed_tools,
-                interrupted_tools=[pending.trace_entry for pending in state_ref.pending_tools],
-            )
-
         attempt_stream = _stream_agent_attempt_chunks(
             run_context=run_context,
             attempt=attempt,
             storage=storage,
             state=state,
             show_tool_calls=show_tool_calls,
-            on_attempt_start=on_attempt_start,
-            state_updated=_sync_live_turn_recorder,
+            on_attempt_start=sinks.on_attempt_start,
             pipeline_timing=pipeline_timing,
         )
         async with closing_async_stream(attempt_stream):
@@ -1910,9 +1320,9 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             ):
                 yield AttemptResolved(skipped)
             else:
-                yield get_user_friendly_error_message(state.error, agent_name, runtime_paths=runtime_paths)
                 yield AttemptResolved(
                     HandledAttempt(
+                        get_user_friendly_error_message(state.error, agent_name, runtime_paths=runtime_paths),
                         metadata_content=_attempt_run_metadata(
                             run_metadata_collector,
                             run_context,
@@ -1944,7 +1354,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             if paused_attempt is None:
                 raise pause_without_approval_error(record, entity_label="agent")
             for tool_event in _materialize_paused_agent_tool_events(state, paused_attempt.tools):
-                _sync_live_turn_recorder()
                 yield tool_event
             yield AttemptResolved(
                 replace(
@@ -1986,30 +1395,25 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             ),
         )
 
-    adapter = StreamingTurnAdapter[AIStreamChunk](
+    adapter = TurnAdapter[AIStreamChunk](
         load_scope=callbacks.load_scope,
         run_attempt=_run_streaming_attempt,
         discard_empty_run=callbacks.discard_empty_run,
         on_scope_loaded=callbacks.on_scope_loaded,
         finalize_attempt=_finalize_streaming_attempt,
         make_text_chunk=TextDelta,
-        persist_standalone_replay=callbacks.persist_standalone_replay,
+        user_message=_compose_current_turn_prompt(raw_prompt=ctx.prompt, model_prompt=ctx.model_prompt),
     )
     response_stream = stream_response_turn(
         ctx,
         adapter,
-        TurnSinks(
-            turn_recorder=turn_recorder,
-            run_metadata_collector=run_metadata_collector,
-            on_completed=on_completed,
-        ),
-        resumed_attempt=resumed_attempt,
-        initial_continuation_count=initial_continuation_count,
+        sinks,
+        resume=resume,
         continuation=_initial_agent_continuation(
-            prompt=prompt,
-            model_prompt=model_prompt,
-            current_timestamp_ms=current_timestamp_ms,
-            current_prompt_is_structured=current_prompt_is_structured,
+            prompt=ctx.prompt,
+            model_prompt=ctx.model_prompt,
+            current_timestamp_ms=ctx.current_timestamp_ms,
+            current_prompt_is_structured=ctx.current_prompt_is_structured,
             current_event_id=ctx.reply_to_event_id,
             run_id=ctx.run_id,
         ),

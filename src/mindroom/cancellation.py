@@ -25,7 +25,6 @@ __all__ = [
     "task_is_process_shutdown",
 ]
 
-_TASK_CANCEL_SOURCES: dict[asyncio.Task[Any], TaskCancelSource] = {}
 _PROCESS_SHUTDOWN_TASKS: set[asyncio.Task[Any]] = set()
 
 
@@ -47,27 +46,20 @@ def task_cancel_source_from_message(cancel_msg: str | None) -> TaskCancelSource 
     return None
 
 
-def _clear_task_cancel_metadata(task: asyncio.Task[Any]) -> None:
-    """Drop recorded cancellation metadata once one task finishes."""
-    _TASK_CANCEL_SOURCES.pop(task, None)
-    _PROCESS_SHUTDOWN_TASKS.discard(task)
-
-
 def request_task_cancel(
     task: asyncio.Task[Any],
     *,
     cancel_source: TaskCancelSource | None = None,
     process_shutdown: bool = False,
 ) -> None:
-    """Cancel one task while preserving the first explicit cancellation source."""
-    had_metadata = task in _TASK_CANCEL_SOURCES or task in _PROCESS_SHUTDOWN_TASKS
+    """Cancel one task, its cancellation carrying ``cancel_source`` as its message (``classify_cancel_source``).
+
+    ``process_shutdown`` tags the task as handed to a successor runtime until it finishes.
+    """
     cancel_msg = cancel_message_for_source(cancel_source)
-    if cancel_source is not None and task not in _TASK_CANCEL_SOURCES:
-        _TASK_CANCEL_SOURCES[task] = cancel_source
-    if process_shutdown:
+    if process_shutdown and task not in _PROCESS_SHUTDOWN_TASKS:
         _PROCESS_SHUTDOWN_TASKS.add(task)
-    if not had_metadata and (cancel_source is not None or process_shutdown):
-        task.add_done_callback(_clear_task_cancel_metadata)
+        task.add_done_callback(_PROCESS_SHUTDOWN_TASKS.discard)
     if cancel_msg is None:
         task.cancel()
     else:

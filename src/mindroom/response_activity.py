@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 
 @dataclass(eq=False)
-class ResponseIdentity:
+class ActiveResponseIdentity:
     """Mutable metadata for one response; equal names still identify distinct responses."""
 
     responder: str | None = None

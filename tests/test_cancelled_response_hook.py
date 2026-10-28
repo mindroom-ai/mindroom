@@ -890,7 +890,6 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
                 target=MessageTarget.resolve("!room:localhost", None, "$event"),
                 stream_transport_outcome=StreamTransportOutcome(
                     last_physical_stream_event_id="$thinking",
-                    terminal_status="completed",
                     rendered_body="Thinking...",
                     visible_body_state="placeholder_only",
                     canonical_final_body_candidate="final body",

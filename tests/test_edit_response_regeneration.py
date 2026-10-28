@@ -64,6 +64,7 @@ from tests.conftest import (
 from tests.identity_helpers import fixture_entity_matrix_id, persist_entity_accounts
 from tests.reply_span_helpers import final_in_span, seed_finished_reply
 from tests.response_attempt_helpers import install_direct_response_admission
+from tests.response_runner_helpers import streamed_answer
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -444,7 +445,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
     with (
         patch_response_runner_module(
             should_use_streaming=mock_streaming,
-            ai_response=mock_ai_response,
+            stream_agent_response=streamed_answer(mock_ai_response),
         ),
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch(
@@ -910,7 +911,7 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch_response_runner_module(
-            team_response=mock_team_response,
+            team_response_stream=streamed_answer(mock_team_response),
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=noop_typing_indicator,
         ),
@@ -2557,7 +2558,7 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
 
         # Process the reaction event
         await dispatch_reaction_durably(bot, room, reaction_event)
-        await bot._response_runner.drain_inbox_responses()
+        await bot._response_runner.inbox.drain_inbox_responses()
 
         assert bot._turn_store.is_handled("$question:example.com")
 
@@ -2656,7 +2657,7 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
         # The worker records the failure and leaves the event pending rather
         # than propagating it, so the question stays retryable.
         await dispatch_reaction_durably(bot, room, reaction_event)
-        await bot._response_runner.drain_inbox_responses()
+        await bot._response_runner.inbox.drain_inbox_responses()
 
         assert await bot._journal_dispatcher.store.is_pending(reaction_event.event_id)
         assert bot._turn_store.is_handled("$question:example.com") is False
@@ -2761,7 +2762,7 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
         await bot._on_message(room, message_event)
         # The selection runs as a reaction's does, on a runner-owned task behind the conversation's earlier messages.
         await bot._coalescing_gate.drain_all()
-        await bot._response_runner.drain_inbox_responses()
+        await bot._response_runner.inbox.drain_inbox_responses()
 
     interactive_questions.claim_interactive_text.assert_awaited_once()
     mock_dispatch_text.assert_not_awaited()
@@ -2888,7 +2889,7 @@ async def test_on_reaction_respects_responder_access(tmp_path: Path) -> None:
         mock_generate_response.assert_not_called()
 
         await dispatch_reaction_durably(bot, room, allowed_reaction)
-        await bot._response_runner.drain_inbox_responses()
+        await bot._response_runner.inbox.drain_inbox_responses()
 
     claim_interactive.assert_awaited_once()
     mock_send_text.assert_called_once()

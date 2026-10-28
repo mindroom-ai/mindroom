@@ -124,7 +124,6 @@ from mindroom.history.session_context import (
     load_scope_session,
     resolve_bound_team_scope,
 )
-from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import (
     CompactionLifecycle,
     HistoryScope,
@@ -161,9 +160,6 @@ from mindroom.response_runner import (
     PostLockRequestPreparationError,
     ResponseRequest,
     ResponseRunner,
-    _agent_run_metadata,
-    _PreparedResponseRuntime,
-    _ResponseGenerationOutcome,
 )
 from mindroom.response_sources import ResponseSources
 from mindroom.session_storage.agent_storage import create_state_storage
@@ -497,7 +493,6 @@ __all__ = [
     "prepare_history_for_run_for_test",
     "prepare_payload_via_seam",
     "prepared_dispatch_result",
-    "process_and_respond_for_test",
     "replace_delivery_gateway_deps",
     "replace_edit_regenerator_deps",
     "replace_response_runner_deps",
@@ -530,82 +525,22 @@ async def prepare_agent_and_prompt_for_test(
     prompt: str,
     runtime_paths: RuntimePaths,
     config: Config,
-    **options: Any,  # noqa: ANN401
+    scope_context: ScopeSessionContext | None = None,
+    current_event_id: str | None = None,
+    **turn_inputs: Any,  # noqa: ANN401
 ) -> Any:  # noqa: ANN401
-    """Prepare one agent turn through ``ai._prepare_agent_and_prompt`` with a plain top-level turn's options.
+    """Prepare one agent turn through ``ai._prepare_agent_and_prompt`` with a plain top-level turn's inputs.
 
-    ``options`` names the turn options a test sets; every other one is unset (None, empty, or off).
+    ``turn_inputs`` names the ``ResponseTurnContext`` fields a test sets beyond ``prompt``; every other one keeps
+    ``ctx``'s value.
     """
-    turn_options: dict[str, Any] = {
-        "scope_context": None,
-        "thread_history": None,
-        "knowledge": None,
-        "include_interactive_questions": True,
-        "tool_function_filter": None,
-        "execution_identity": None,
-        "compaction_lifecycle": None,
-        "delegation_depth": 0,
-        "refresh_scheduler": None,
-        "include_openai_compat_guidance": False,
-        "model_prompt": None,
-        "current_timestamp_ms": None,
-        "current_event_id": None,
-        "current_prompt_is_structured": False,
-        "pipeline_timing": None,
-        "eager_deferred_tools": False,
-        "supports_native_tool_approval": False,
-        "reusable_build": None,
-    }
     return await mindroom_ai._prepare_agent_and_prompt(
-        ctx,
-        prompt=prompt,
+        replace(ctx, prompt=prompt, **turn_inputs),
         runtime_paths=runtime_paths,
         config=config,
-        **(turn_options | options),
+        scope_context=scope_context,
+        current_event_id=current_event_id,
     )
-
-
-def agent_turn_recorder_for_test(
-    runner: ResponseRunner,
-    request: ResponseRequest,
-    runtime: _PreparedResponseRuntime,
-) -> TurnRecorder:
-    """Return the recorder the runner gives an agent turn of ``request`` under ``runtime``."""
-    return runner._build_turn_recorder(
-        user_message=runtime.model_prompt,
-        user_message_is_structured=request.current_prompt_is_structured,
-        reply_to_event_id=request.reply_to_event_id,
-        room_id=request.room_id,
-        thread_id=runtime.resolved_target.resolved_thread_id,
-        requester_id=request.user_id,
-        matrix_run_metadata=_agent_run_metadata(request),
-    )
-
-
-async def process_and_respond_for_test(
-    runner: ResponseRunner,
-    request: ResponseRequest,
-    *,
-    streaming: bool = False,
-    **options: Any,  # noqa: ANN401
-) -> _ResponseGenerationOutcome:
-    """Deliver ``request`` through the runner's streaming or non-streaming driver with a plain turn's options.
-
-    ``options`` names the driver options a test sets; otherwise the turn runs under a fresh run id in the bot's
-    history scope, ignores its delivery start, prepares its runtime from ``request``, and records into the recorder
-    the runner gives such a turn.
-    """
-    driver = runner._process_and_respond_streaming if streaming else runner._process_and_respond
-    runtime = options.pop("runtime", None) or await runner.prepare_response_runtime(request)
-    driver_options: dict[str, Any] = {
-        "run_id": str(uuid.uuid4()),
-        "on_delivery_started": lambda _event_id: None,
-        "runtime": runtime,
-        "history_scope": runner.deps.state_writer.history_scope(),
-    }
-    if "turn_recorder" not in options:
-        driver_options["turn_recorder"] = agent_turn_recorder_for_test(runner, request, runtime)
-    return await driver(request, **(driver_options | options))
 
 
 def build_unseen_context_messages_for_test(
@@ -972,9 +907,9 @@ async def drain_coalescing(*bots: RuntimeBot) -> None:
             # runner drain settles.
             await asyncio.gather(
                 bot._coalescing_gate.drain_all(),
-                runner.drain_inbox_responses(),
+                runner.inbox.drain_inbox_responses(),
             )
-            if not runner._inbox_response_tasks and not bot._coalescing_gate._gates:
+            if not runner.inbox._inbox_response_tasks and not bot._coalescing_gate._gates:
                 break
 
 
@@ -2718,7 +2653,7 @@ def replace_response_runner_deps(bot: RuntimeBot, **changes: object) -> Response
 async def finish_edit_regenerations(bot: RuntimeBot) -> None:
     """Wait for the regenerations edits started off the room's lane, as a test checks their effects."""
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    await asyncio.gather(*tuple(runner._inbox_response_tasks), return_exceptions=True)
+    await asyncio.gather(*tuple(runner.inbox._inbox_response_tasks), return_exceptions=True)
 
 
 def journal_edit_regenerator_deps(bot: RuntimeBot, principal: PrincipalStore) -> dict[str, object]:
@@ -2961,14 +2896,12 @@ def install_shutdown_drain_mocks(
     response_recovery_complete: bool,
 ) -> None:
     """Install exact shutdown drain outcomes through stable collaborator seams."""
-    wrap_extracted_collaborators(bot, "_coalescing_gate", "_response_runner")
+    wrap_extracted_collaborators(bot, "_coalescing_gate")
     bot._coalescing_gate.drain_all = AsyncMock(
         return_value=coalescing_drain_result,
     )
-    bot._response_runner.drain_inbox_responses = AsyncMock(return_value=responses_drained)
-    unwrap_extracted_collaborator(
-        bot._response_runner,
-    )._incomplete_inbox_responses_recoverable = response_recovery_complete
+    bot._response_runner.inbox.drain_inbox_responses = AsyncMock(return_value=responses_drained)
+    bot._response_runner.inbox._incomplete_inbox_responses_recoverable = response_recovery_complete
 
 
 def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> None:

@@ -394,13 +394,18 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
             mode = resolve_agent_mode(paths, state_root, "helper", runtime.session_id)
             with tool_runtime_context(runtime):
                 return await ai.ai_response(
-                    replace(_turn_context(), session_id=runtime.session_id, agent_mode=mode, run_id=None),
-                    prompt=prompt,
-                    runtime_paths=paths,
-                    config=config,
-                    execution_identity=identity,
-                    supports_native_tool_approval=True,
-                    show_tool_calls=True,
+                    replace(
+                        _turn_context(),
+                        session_id=runtime.session_id,
+                        agent_mode=mode,
+                        run_id=None,
+                        prompt=prompt,
+                        execution_identity=identity,
+                        supports_native_tool_approval=True,
+                        show_tool_calls=True,
+                    ),
+                    paths,
+                    config,
                 )
 
         provider.steps = ["standard history sentinel"]

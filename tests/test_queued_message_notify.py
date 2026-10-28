@@ -7,7 +7,7 @@ import threading
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Literal, Protocol, Self, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, Self, cast
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import nio
@@ -79,7 +79,6 @@ from mindroom.response_runner import (
     PostLockRequestPreparationError,
     ResponseRequest,
     ResponseRunner,
-    _ResponseGenerationOutcome,
 )
 from mindroom.response_sources import ResponseSources
 from mindroom.session_storage.agent_storage import create_state_storage
@@ -110,6 +109,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.response_runner_helpers import streamed_answer
 from tests.turn_dispatch_helpers import dispatch_test_turn, prepared_turn_recorder
 
 if TYPE_CHECKING:
@@ -1487,17 +1487,14 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
         with (
             patch.object(
                 ResponseRunner,
-                "_process_and_respond",
+                "_deliver_turn",
                 new=AsyncMock(
-                    return_value=_ResponseGenerationOutcome(
-                        delivery=FinalDeliveryOutcome(
-                            terminal_status="completed",
-                            event_id="$response",
-                            is_visible_response=True,
-                            final_visible_body="ok",
-                            delivery_kind="sent",
-                        ),
-                        run_succeeded=True,
+                    return_value=FinalDeliveryOutcome(
+                        terminal_status="completed",
+                        event_id="$response",
+                        is_visible_response=True,
+                        final_visible_body="ok",
+                        delivery_kind="sent",
                     ),
                 ),
             ),
@@ -1639,20 +1636,14 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
         await response_function(None)
         return "$response"
 
-    async def fake_process_and_respond(
-        request: ResponseRequest,
-        **_kwargs: object,
-    ) -> _ResponseGenerationOutcome:
-        observed_delivery_targets.append(request.response_envelope.target)
-        return _ResponseGenerationOutcome(
-            delivery=FinalDeliveryOutcome(
-                terminal_status="completed",
-                event_id="$response",
-                is_visible_response=True,
-                final_visible_body="ok",
-                delivery_kind="sent",
-            ),
-            run_succeeded=True,
+    async def fake_deliver_turn(turn: object, **_kwargs: object) -> FinalDeliveryOutcome:
+        observed_delivery_targets.append(cast("Any", turn).delivery_request.response_envelope.target)
+        return FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$response",
+            is_visible_response=True,
+            final_visible_body="ok",
+            delivery_kind="sent",
         )
 
     with (
@@ -1662,11 +1653,7 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
             "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
-        patch.object(
-            coordinator,
-            "_process_and_respond",
-            new=AsyncMock(side_effect=fake_process_and_respond),
-        ),
+        patch.object(coordinator, "_deliver_turn", new=AsyncMock(side_effect=fake_deliver_turn)),
         patch("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=False)),
     ):
         result = await coordinator.generate_response(
@@ -1719,20 +1706,14 @@ async def test_generate_response_keeps_locked_target_when_payload_preparation_re
         await response_function(None)
         return "$response"
 
-    async def fake_process_and_respond(
-        request: ResponseRequest,
-        **_kwargs: object,
-    ) -> _ResponseGenerationOutcome:
-        observed_delivery_targets.append(request.response_envelope.target)
-        return _ResponseGenerationOutcome(
-            delivery=FinalDeliveryOutcome(
-                terminal_status="completed",
-                event_id="$response",
-                is_visible_response=True,
-                final_visible_body="ok",
-                delivery_kind="sent",
-            ),
-            run_succeeded=True,
+    async def fake_deliver_turn(turn: object, **_kwargs: object) -> FinalDeliveryOutcome:
+        observed_delivery_targets.append(cast("Any", turn).delivery_request.response_envelope.target)
+        return FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$response",
+            is_visible_response=True,
+            final_visible_body="ok",
+            delivery_kind="sent",
         )
 
     def fake_build_lifecycle(**kwargs: object) -> _NoopResponseLifecycle:
@@ -1753,11 +1734,7 @@ async def test_generate_response_keeps_locked_target_when_payload_preparation_re
             "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
-        patch.object(
-            coordinator,
-            "_process_and_respond",
-            new=AsyncMock(side_effect=fake_process_and_respond),
-        ),
+        patch.object(coordinator, "_deliver_turn", new=AsyncMock(side_effect=fake_deliver_turn)),
         patch("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=False)),
     ):
         result = await coordinator.generate_response(
@@ -1829,7 +1806,10 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
         ),
         patch("mindroom.delivery_gateway.DeliveryGateway.deliver_final", new=AsyncMock(side_effect=fake_deliver_final)),
         patch("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=False)),
-        patch("mindroom.response_runner.team_response", AsyncMock(return_value="team ok")),
+        patch(
+            "mindroom.response_runner.team_response_stream",
+            new=streamed_answer(AsyncMock(return_value="team ok")),
+        ),
     ):
         result = await coordinator.generate_team_response_helper(
             ResponseRequest(
@@ -1913,7 +1893,10 @@ async def test_generate_team_response_keeps_locked_target_when_payload_preparati
         ),
         patch("mindroom.delivery_gateway.DeliveryGateway.deliver_final", new=AsyncMock(side_effect=fake_deliver_final)),
         patch("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=False)),
-        patch("mindroom.response_runner.team_response", AsyncMock(return_value="team ok")),
+        patch(
+            "mindroom.response_runner.team_response_stream",
+            new=streamed_answer(AsyncMock(return_value="team ok")),
+        ),
     ):
         result = await coordinator.generate_team_response_helper(
             ResponseRequest(

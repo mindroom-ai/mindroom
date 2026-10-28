@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -28,10 +30,13 @@ from tests.conftest import (
 from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+    from mindroom.final_delivery import FinalDeliveryOutcome, _VisibleBodyState
+    from mindroom.history.turn_recorder import TurnRecorder
+    from mindroom.response_turn import TurnSinks
 
 
 def _config(tmp_path: Path) -> Config:
@@ -102,3 +107,58 @@ def _plain_request(target: MessageTarget, *, source_event_id: str = "$event") ->
 @asynccontextmanager
 async def _noop_typing(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
     yield
+
+
+def streamed_answer(answer: Callable[..., Awaitable[str]]) -> Callable[..., AsyncIterator[str]]:
+    """Return a turn stream (``stream_agent_response`` or ``team_response_stream``) that yields ``answer``'s text.
+
+    ``answer`` receives the stream's arguments; like the turn driver, the stream records the turn completed before it
+    yields the text that ends it.
+    """
+
+    async def stream(*args: object, sinks: TurnSinks | None = None, **kwargs: object) -> AsyncIterator[str]:
+        text = await answer(*args, sinks=sinks, **kwargs)
+        if sinks is not None and sinks.turn_recorder is not None:
+            sinks.turn_recorder.record_completed(
+                run_id=None,
+                run_metadata=None,
+                assistant_text=text,
+                completed_tools=(),
+            )
+        yield text
+
+    return stream
+
+
+def stream_transport(
+    event_id: str | None = "$stream",
+    body: str = "streamed body",
+    *,
+    visible_body_state: _VisibleBodyState = "visible_body",
+    failure_reason: str | None = None,
+) -> StreamTransportOutcome:
+    """Return what a stream that ran to its end left in Matrix: its last event and the body it showed."""
+    return StreamTransportOutcome(
+        last_physical_stream_event_id=event_id,
+        rendered_body=body,
+        visible_body_state=visible_body_state,
+        failure_reason=failure_reason,
+    )
+
+
+def delivered_turn(delivery: FinalDeliveryOutcome) -> AsyncMock:
+    """Return a ``ResponseRunner._deliver_turn`` that records its turn completed, as the turn driver does.
+
+    It delivers ``delivery``; its await arguments name the prepared turn it was given.
+    """
+
+    async def deliver(_turn: object, *, recorder: TurnRecorder, **_kwargs: object) -> FinalDeliveryOutcome:
+        recorder.record_completed(
+            run_id=None,
+            run_metadata=None,
+            assistant_text=delivery.final_visible_body or "",
+            completed_tools=(),
+        )
+        return delivery
+
+    return AsyncMock(side_effect=deliver)

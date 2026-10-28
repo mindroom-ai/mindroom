@@ -361,15 +361,13 @@ def _one_continuation() -> list[list[ScriptStep]]:
     return [_switch(1, content=_INTERMEDIATE), answer(_ANSWER)]
 
 
-async def _run_blocking_agent_turn(
+async def _run_non_streaming_agent_turn(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     turns: list[list[ScriptStep]],
 ) -> _Turn:
-    """Drive one blocking agent turn whose model plays *turns* in order."""
+    """Drive one agent turn, delivered without streaming, whose model plays *turns* in order."""
     bot = _bot(tmp_path)
-    # Visible tool calls route the "non-streaming" agent turn through the
-    # collected-stream driver instead; the blocking driver is the one here.
     bot.config.agents["general"].show_tool_calls = False
     turn = _watch(bot, monkeypatch, turns, streaming=False)
     await turn.runner.generate_response(_plain_request(_target()))
@@ -377,24 +375,27 @@ async def _run_blocking_agent_turn(
 
 
 class TestAgentContinuation:
-    """The blocking agent driver: one answer, from the attempt that produced it."""
+    """An agent turn delivered without streaming: one answer, sent after its last attempt."""
 
     async def test_one_final_delivery_carries_the_last_attempt(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Two attempts, one `FINAL`, and it holds what the second attempt said."""
-        turn = await _run_blocking_agent_turn(tmp_path, monkeypatch, _one_continuation())
+        """Two attempts, one `FINAL`, and it holds what the attempts streamed, ending with the second's answer.
+
+        The collected reply is the text the turn streamed, as a streamed reply shows it: the narration before the
+        tool call, once, then the answer a paragraph below it, where the hidden call sat.
+        """
+        turn = await _run_non_streaming_agent_turn(tmp_path, monkeypatch, _one_continuation())
 
         assert turn.attempts == 2, "the model switch did not force a second attempt"
         assert turn.timeline.count("enqueue:final") == 1
         assert turn.timeline.count("claim:final") == 1
-        assert _last_answer(await turn.final()) == _ANSWER
+        assert _last_answer(await turn.final()) == f"{_INTERMEDIATE}\n\n{_ANSWER}"
         # A claim is what freezes the payload, so a claim taken while attempts
         # remain is the defect -- not merely an early enqueue.
         assert turn.final_claim_follows_every_attempt
-        assert not turn.room_showed(_INTERMEDIATE)
 
     async def test_the_placeholder_is_sent_once_not_once_per_attempt(
         self,
@@ -402,7 +403,7 @@ class TestAgentContinuation:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The `INITIAL` stage belongs to the turn, not to an attempt."""
-        turn = await _run_blocking_agent_turn(tmp_path, monkeypatch, _one_continuation())
+        turn = await _run_non_streaming_agent_turn(tmp_path, monkeypatch, _one_continuation())
 
         assert turn.attempts == 2
         assert turn.timeline.count("enqueue:initial") == 1
@@ -423,7 +424,7 @@ class TestAgentContinuation:
         """
         never_converges = [_switch(index, content=None) for index in range(TURN_CONTINUATION_LIMIT + 1)]
 
-        turn = await _run_blocking_agent_turn(tmp_path, monkeypatch, never_converges)
+        turn = await _run_non_streaming_agent_turn(tmp_path, monkeypatch, never_converges)
 
         assert turn.attempts == TURN_CONTINUATION_LIMIT + 1
         assert turn.timeline.count("enqueue:final") == 1

@@ -320,7 +320,7 @@ async def test_placeholder_progressive_edits_and_final_tool_trace(config: Config
     assert final.content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
     assert final.content[_TOOL_TRACE_KEY]["events"] == completed_trace
 
-    assert outcome.terminal_status == "completed"
+    assert outcome.failure_reason is None
     assert outcome.visible_body_state == "visible_body"
     assert outcome.visible_event_id == "$stream_1"
     assert outcome.visible_body_text == final.display_text
@@ -576,7 +576,7 @@ async def test_stream_reuses_markdown_without_reusing_delivery_metadata(config: 
                 await streaming._send_or_edit_message(client)
                 outcome = await streaming.finalize(client)
 
-            assert outcome.terminal_update_committed
+            assert outcome.failure_reason is None
             assert [op.content[STREAM_STATUS_KEY] for op in gateway.ops] == ["pending", "streaming", "completed"]
             assert [op.content["msgtype"] for op in gateway.ops] == ["m.notice", "m.notice", "m.text"]
             assert all(op.content["formatted_body"] == "<p>Hello <strong>world</strong></p>\n" for op in gateway.ops)
@@ -936,13 +936,13 @@ def test_in_progress_edits_render_every_complete_interactive_block(config: Confi
 @pytest.mark.usefixtures("fake_clock")
 @pytest.mark.parametrize("terminal", ["restart", "user_stop", "error"])
 @pytest.mark.parametrize(("allowed", "existing"), [(False, False), (True, False), (False, True)])
-async def test_terminal_cleanup_requires_permission_to_create_response(
+async def test_a_stream_cut_short_writes_no_ending_of_its_own(
     config: Config,
     terminal: str,
     allowed: bool,
     existing: bool,
 ) -> None:
-    """Cleanup preserves cancellation facts without creating an unapproved response."""
+    """A stopped or failed stream writes nothing, whether or not it may create a response: its span exit ends it."""
     gateway = _FakeGateway()
 
     async def interrupted_stream() -> AsyncIterator[object]:
@@ -955,7 +955,7 @@ async def test_terminal_cleanup_requires_permission_to_create_response(
     with (
         patch("mindroom.streaming.send_message_result", new=gateway.send),
         patch("mindroom.streaming.edit_message_result", new=gateway.edit),
-        pytest.raises(StreamingDeliveryError) as raised,
+        pytest.raises(StreamingDeliveryError if terminal == "error" else asyncio.CancelledError) as raised,
     ):
         await send_streaming_response(
             client=make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
@@ -968,24 +968,19 @@ async def test_terminal_cleanup_requires_permission_to_create_response(
             allow_new_terminal_message=lambda: allowed,
         )
 
-    outcome = raised.value.transport_outcome
-    assert outcome.terminal_status == ("error" if terminal == "error" else "cancelled")
-    if terminal != "error":
-        assert outcome.resolved_cancel_source == ("sync_restart" if terminal == "restart" else "user_stop")
-    if allowed or existing:
-        assert len(gateway.ops) == 1
-        assert gateway.ops[0].kind == ("edit" if existing else "send")
+    if terminal == "error":
+        assert isinstance(raised.value, StreamingDeliveryError)
+        assert str(raised.value.error) == "Provider failed"
+        assert raised.value.tool_trace == []
     else:
-        assert gateway.ops == []
-        assert outcome.last_physical_stream_event_id is None
-        assert outcome.rendered_body is None
-        assert raised.value.accumulated_text == ""
+        assert raised.value.args == (SYNC_RESTART_CANCEL_MSG if terminal == "restart" else USER_STOP_CANCEL_MSG,)
+    assert gateway.ops == []
 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_clock")
-async def test_cancellation_mid_stream_appends_cancelled_note(config: Config) -> None:
-    """User cancellation mid-stream finalizes the partial text with the cancelled note."""
+async def test_cancellation_mid_stream_leaves_the_partial_text_without_a_note(config: Config) -> None:
+    """A user stop mid-stream leaves what the stream showed: the reply's span exit, not the stream, adds the note."""
     gateway = _FakeGateway()
 
     async def cancelling_stream() -> AsyncIterator[object]:
@@ -996,24 +991,15 @@ async def test_cancellation_mid_stream_appends_cancelled_note(config: Config) ->
     with (
         patch("mindroom.streaming.send_message_result", new=gateway.send),
         patch("mindroom.streaming.edit_message_result", new=gateway.edit),
-        pytest.raises(StreamingDeliveryError) as exc_info,
+        pytest.raises(asyncio.CancelledError) as exc_info,
     ):
         await _run_stream(config, cancelling_stream())
 
-    kinds = [op.kind for op in gateway.ops]
-    assert kinds == ["send", "edit"]
-
-    partial, cancelled = gateway.ops
+    [partial] = gateway.ops
+    assert partial.kind == "send"
     assert partial.content["body"] == "Partial answer"
     assert partial.content["msgtype"] == "m.notice"
-    assert cancelled.display_text == f"Partial answer\n\n{CANCELLED_RESPONSE_NOTE}"
-    assert cancelled.content["msgtype"] == "m.text"
-    assert cancelled.content[STREAM_STATUS_KEY] == STREAM_STATUS_CANCELLED
-
-    transport_outcome = exc_info.value.transport_outcome
-    assert transport_outcome.terminal_status == "cancelled"
-    assert transport_outcome.failure_reason == "cancelled_by_user"
-    assert transport_outcome.visible_event_id == "$stream_1"
+    assert exc_info.value.args == (USER_STOP_CANCEL_MSG,)
 
 
 def _progress_edits(config: Config) -> AbstractAsyncContextManager[ProgressPublisher]:
@@ -1317,7 +1303,7 @@ async def test_a_resumed_team_stream_numbers_its_tools_after_the_stopped_ones(co
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_clock")
 async def test_stopping_a_resumed_stream_keeps_the_stopped_text(config: Config) -> None:
-    """A user stop during the continuation ends the whole reply, earlier attempt included."""
+    """A user stop during the continuation leaves the reply showing the earlier attempt and what followed it."""
     gateway = _FakeGateway()
 
     async def stopped_continuation() -> AsyncIterator[object]:
@@ -1327,15 +1313,14 @@ async def test_stopping_a_resumed_stream_keeps_the_stopped_text(config: Config) 
 
     with (
         patch("mindroom.streaming.edit_message_result", new=gateway.edit),
-        pytest.raises(StreamingDeliveryError) as raised,
+        pytest.raises(asyncio.CancelledError),
     ):
         await _run_resumed_stream(config, stopped_continuation())
 
-    final = gateway.ops[-1]
-    assert final.content[STREAM_STATUS_KEY] == STREAM_STATUS_CANCELLED
-    assert final.display_text == f"{_RESUMED_PREFIX}The second\n\n{CANCELLED_RESPONSE_NOTE}"
-    assert _trace_names(final.content) == ["counter"]
-    assert raised.value.accumulated_text.startswith(_RESUMED_PREFIX)
+    [shown] = gateway.ops
+    assert shown.content[STREAM_STATUS_KEY] == STREAM_STATUS_STREAMING
+    assert shown.display_text == f"{_RESUMED_PREFIX}The second"
+    assert _trace_names(shown.content) == ["counter"]
 
 
 @pytest.mark.asyncio
@@ -1359,14 +1344,13 @@ async def test_a_failed_first_resumed_edit_keeps_the_stopped_text(config: Config
 
     with (
         patch("mindroom.streaming.edit_message_result", new=edit_failing_first),
-        pytest.raises(StreamingDeliveryError),
+        pytest.raises(StreamingDeliveryError) as raised,
     ):
         await _run_resumed_stream(config, failing_continuation())
 
-    final = gateway.ops[-1]
-    assert final.content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
-    assert final.display_text.startswith(_RESUMED_PREFIX)
-    assert _trace_names(final.content) == ["counter"]
+    # Nothing landed, so the reply still shows the stopped attempt, whose tool calls the failure reports.
+    assert gateway.ops == []
+    assert [entry.tool_name for entry in raised.value.tool_trace] == ["counter"]
 
 
 @pytest.mark.asyncio

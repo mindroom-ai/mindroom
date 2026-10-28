@@ -62,7 +62,7 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import close_toolkits, connect_toolkits
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator, Sequence
+    from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
     from contextlib import AbstractAsyncContextManager
 
     from livekit.agents.llm import RawFunctionTool
@@ -727,12 +727,15 @@ async def _run_authorized_call_agent(
 ) -> CallAgentResponse:
     """Run one admitted call transcript through the normal MindRoom agent."""
     from mindroom.ai import ResponseTurnContext, ai_response  # noqa: PLC0415 - heavy optional call path
+    from mindroom.response_turn import TurnSinks  # noqa: PLC0415 - heavy optional call path
 
     if active_model_name is not None:
         # Spend can cross the cap during a call, so each reply checks the budget again.
         active_model_name = budget_model(config, runtime_paths, context.budget_monitor, requester_id, active_model_name)
         context = replace(context, active_model_name=active_model_name)
+    # Seeded here too: a cancellation before the turn driver starts still stores the transcript it answered.
     recorder = TurnRecorder(user_message=transcript)
+    run_metadata: dict[str, Any] = {}
     fallback_run_id = f"{session_id}:turn:{uuid4().hex}"
     try:
         refresh_scheduler = (
@@ -763,27 +766,22 @@ async def _run_authorized_call_agent(
             transient_enrichment_items=transient_enrichment_items,
             system_enrichment_items=voice_enrichment_items,
             inline_tools=True,
+            prompt=transcript,
+            show_tool_calls=False,
+            execution_identity=execution_identity,
+            refresh_scheduler=refresh_scheduler,
+            knowledge=knowledge_resolution.knowledge,
+            eager_deferred_tools=True,
         )
-        run_metadata: dict[str, Any] = {}
 
         async def _respond(build: AgentBuild) -> str:
-            try:
-                return await ai_response(
-                    turn,
-                    prompt=transcript,
-                    runtime_paths=runtime_paths,
-                    config=config,
-                    knowledge=knowledge_resolution.knowledge,
-                    show_tool_calls=False,
-                    run_metadata_collector=run_metadata,
-                    execution_identity=execution_identity,
-                    refresh_scheduler=refresh_scheduler,
-                    turn_recorder=recorder,
-                    eager_deferred_tools=True,
-                    reusable_build=build,
-                )
-            finally:
-                recorder.set_run_metadata({**(recorder.run_metadata or {}), **run_metadata})
+            return await ai_response(
+                replace(turn, reusable_build=build),
+                runtime_paths,
+                config,
+                # The call stores what it spoke of an interrupted reply itself.
+                sinks=TurnSinks(turn_recorder=recorder, run_metadata_collector=run_metadata, persist_interrupted=False),
+            )
 
         async def _run_with_build(build: AgentBuild) -> str:
             return await tool_support.run_in_context(
@@ -798,18 +796,18 @@ async def _run_authorized_call_agent(
             operation=_run_with_build,
         )
     except asyncio.CancelledError:
-        state = _call_agent_run_state(recorder, session_id=session_id, fallback_run_id=fallback_run_id)
+        state = _call_agent_run_state(recorder, run_metadata, session_id=session_id, fallback_run_id=fallback_run_id)
         await response_tracker.persist_unspoken(state, default_status=RunStatus.cancelled)
         raise
     except Exception:
-        state = _call_agent_run_state(recorder, session_id=session_id, fallback_run_id=fallback_run_id)
+        state = _call_agent_run_state(recorder, run_metadata, session_id=session_id, fallback_run_id=fallback_run_id)
         await response_tracker.persist_unspoken(state, default_status=RunStatus.error)
         raise
     finally:
         tool_names = tuple(dict.fromkeys(entry.tool_name for entry in recorder.completed_tools))
         if on_tools_executed is not None and tool_names:
             on_tools_executed(list(tool_names))
-    state = _call_agent_run_state(recorder, session_id=session_id, fallback_run_id=fallback_run_id)
+    state = _call_agent_run_state(recorder, run_metadata, session_id=session_id, fallback_run_id=fallback_run_id)
     # Live commentary can be paraphrased or omitted; only cascaded TTS owns a
     # one-to-one mapping between this answer and the eventual spoken turn.
     turn_id = response_tracker.register(state) if response and reconcile_spoken_response else None
@@ -820,11 +818,12 @@ async def _run_authorized_call_agent(
 
 def _call_agent_run_state(
     recorder: TurnRecorder,
+    published_metadata: Mapping[str, Any],
     *,
     session_id: str,
     fallback_run_id: str,
 ) -> _CallAgentRunState:
-    """Snapshot one real agent run for later spoken-text reconciliation.
+    """Snapshot one real agent run, with the run metadata its reply published, for later spoken-text reconciliation.
 
     The recorder's snapshot leaves out the calls a mid-turn fold summarized, as any interrupted record does.
     """
@@ -835,7 +834,7 @@ def _call_agent_run_state(
         user_message=recorder.user_message,
         completed_tools=snapshot.completed_tools,
         interrupted_tools=snapshot.interrupted_tools,
-        run_metadata=dict(recorder.run_metadata or {}),
+        run_metadata={**(recorder.run_metadata or {}), **published_metadata},
         outcome=recorder.outcome,
         original_status=recorder.original_status,
     )

@@ -359,7 +359,6 @@ def _build_response_runner(
         AsyncMock(
             return_value=StreamTransportOutcome(
                 last_physical_stream_event_id="$msg_id",
-                terminal_status="completed",
                 rendered_body="Hello!",
                 visible_body_state="visible_body",
             ),

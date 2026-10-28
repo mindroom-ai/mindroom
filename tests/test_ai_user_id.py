@@ -10,9 +10,10 @@ import asyncio
 import json
 from contextvars import Context
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 from structlog.testing import capture_logs
 
@@ -26,11 +27,9 @@ from mindroom.ai import (
     agent_run_metadata_content,
     ai_response,
     build_matrix_run_metadata,
-    collect_streamed_response_content,
     stream_agent_response,
 )
 from mindroom.ai_run_metadata import _ReplyUsage, build_ai_run_metadata_content
-from mindroom.bot import AgentBot
 from mindroom.budgets.pricing import PricedModel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
@@ -72,14 +71,16 @@ from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.registry import build_model_provider
+from mindroom.reply_turn.enrichment import prepare_memory_and_model_context
 from mindroom.response_runner import (
     _paused_with_committed_presentation,
-    _prepare_memory_and_model_context,
 )
 from mindroom.response_turn import (
     CompletedAttempt,
     PausedAttempt,
     ResponsePausedForApproval,
+    TurnSinks,
+    collect_streamed_response_content,
     stream_with_llm_request_log_context,
 )
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -99,29 +100,25 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
 from tests.ai_user_id_helpers import (
-    _build_response_runner,
     _config,
     _config_with_team,
-    _knowledge_access_support,
     _metadata_config,
-    _response_request,
     _runtime_paths,
     bind_runtime_paths,
-)
-from tests.bot_helpers import (
-    _stream_outcome,
 )
 from tests.conftest import (
     install_model_providers,
     make_turn_context,
     make_visible_message,
+    patch_response_runner_module,
     prepare_agent_and_prompt_for_test,
-    process_and_respond_for_test,
     seed_session,
+    unwrap_extracted_collaborator,
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.identity_helpers import persist_entity_accounts
 from tests.providers.golden_support import pipeline_provider
+from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target, streamed_answer
 from tests.scripted_agent_helpers import (
     PROBE_TOOL,
     ProbeTools,
@@ -136,10 +133,10 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterator, Sequence
     from pathlib import Path
 
-    from mindroom.final_delivery import StreamTransportOutcome
     from mindroom.llm.provider import ModelProvider
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.tool_system.events import ToolTraceEntry
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 @pytest.fixture
@@ -231,25 +228,11 @@ async def _respond(
     config: Config,
     runtime_paths: RuntimePaths,
     *,
-    streaming: bool,
-    **kwargs: Any,  # noqa: ANN401
+    sinks: TurnSinks = TurnSinks(),  # noqa: B008 - an immutable value
+    **turn_inputs: Any,  # noqa: ANN401
 ) -> str:
-    """Run one reply through the streaming or the blocking driver and return its text."""
-    if not streaming:
-        return await ai_response(ctx, prompt="test", runtime_paths=runtime_paths, config=config, **kwargs)
-    chunks = [
-        chunk
-        async for chunk in stream_agent_response(
-            ctx,
-            prompt="test",
-            runtime_paths=runtime_paths,
-            config=config,
-            **kwargs,
-        )
-    ]
-    return "".join(
-        chunk if isinstance(chunk, str) else chunk.text for chunk in chunks if isinstance(chunk, str | TextDelta)
-    )
+    """Run one reply of ``test``, with the other turn inputs ``turn_inputs`` name, and return its collected text."""
+    return await ai_response(replace(ctx, prompt="test", **turn_inputs), runtime_paths, config, sinks=sinks)
 
 
 def _answered(model_id: str, provider: str, **counters: int) -> RunRecord:
@@ -280,6 +263,26 @@ def _model_runtime_context(
         conversation_reader=MagicMock(),
         relations=MagicMock(),
         active_model_name=active_model_name,
+    )
+
+
+def _execution_identity(
+    runtime_paths: RuntimePaths,
+    *,
+    channel: Literal["matrix", "openai_compat"],
+    requester_id: str,
+    session_id: str | None = None,
+) -> ToolExecutionIdentity:
+    """Return a general-agent turn's identity on ``channel``, which decides whether the prompt names its sender."""
+    return build_tool_execution_identity(
+        channel=channel,
+        agent_name="general",
+        runtime_paths=runtime_paths,
+        requester_id=requester_id,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=session_id,
     )
 
 
@@ -739,7 +742,7 @@ class TestUserIdPassthrough:
         runtime_paths = _runtime_paths(tmp_path)
         persist_entity_accounts(config, runtime_paths)
 
-        memory_prompt, memory_thread_history, model_prompt, model_thread_history = _prepare_memory_and_model_context(
+        memory_prompt, memory_thread_history, model_prompt, model_thread_history = prepare_memory_and_model_context(
             "report",
             [],
             config=config,
@@ -766,7 +769,7 @@ class TestUserIdPassthrough:
 
         existing_model_prompt = "[2026-03-20 08:15 PDT] report\n\nAvailable attachment IDs: att_report."
 
-        _memory_prompt, _memory_thread_history, model_prompt, _model_thread_history = _prepare_memory_and_model_context(
+        _memory_prompt, _memory_thread_history, model_prompt, _model_thread_history = prepare_memory_and_model_context(
             "report",
             [],
             config=config,
@@ -786,7 +789,7 @@ class TestUserIdPassthrough:
         runtime_paths = _runtime_paths(tmp_path)
         persist_entity_accounts(config, runtime_paths)
 
-        memory_prompt, _memory_thread_history, model_prompt, _model_thread_history = _prepare_memory_and_model_context(
+        memory_prompt, _memory_thread_history, model_prompt, _model_thread_history = prepare_memory_and_model_context(
             "plain text message",
             [],
             config=config,
@@ -806,7 +809,7 @@ class TestUserIdPassthrough:
         runtime_paths = _runtime_paths(tmp_path)
         persist_entity_accounts(config, runtime_paths)
 
-        _memory_prompt, memory_thread_history, _model_prompt, model_thread_history = _prepare_memory_and_model_context(
+        _memory_prompt, memory_thread_history, _model_prompt, model_thread_history = prepare_memory_and_model_context(
             "current",
             [
                 make_visible_message(
@@ -824,121 +827,40 @@ class TestUserIdPassthrough:
         assert model_thread_history[0].body == "[2026-03-20 08:00 PDT] older text"
 
     @pytest.mark.asyncio
-    async def test_non_streaming_passes_user_id(self, tmp_path: Path) -> None:
-        """Test that _process_and_respond passes user_id through to ai_response."""
-        runtime_paths = _runtime_paths(tmp_path)
-        config = bind_runtime_paths(_config(), runtime_paths)
-        bot = MagicMock(spec=AgentBot)
-        bot.logger = MagicMock()
-        bot.client = AsyncMock()
-        bot.agent_name = "general"
-        bot.storage_path = tmp_path
-        bot.config = config
-        bot.runtime_paths = runtime_paths
-        bot._knowledge_access_support = _knowledge_access_support()
-        with patch("mindroom.response_runner.ai_response") as mock_ai:
-            coordinator = _build_response_runner(
-                bot,
-                config=config,
-                runtime_paths=runtime_paths,
-                storage_path=tmp_path,
-                requester_id="@alice:localhost",
-            )
+    @pytest.mark.parametrize("streaming", [False, True])
+    async def test_a_reply_runs_its_turn_for_its_requester(self, tmp_path: Path, streaming: bool) -> None:
+        """A reply, streamed or delivered whole, runs its turn for the requester, under the requester's tool context."""
+        bot = _bot(tmp_path)
+        coordinator = unwrap_extracted_collaborator(bot._response_runner)
+        assert bot.client is not None
+        bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
 
-            async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
-                context = get_tool_runtime_context()
-                assert context is not None
-                assert context.room_id == "!test:localhost"
-                assert context.thread_id is None
-                assert context.requester_id == "@alice:localhost"
-                return "Hello!"
+        async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
+            context = get_tool_runtime_context()
+            assert context is not None
+            assert context.room_id == "!room:localhost"
+            assert context.thread_id is None
+            assert context.requester_id == "@user:localhost"
+            return "Hello!"
 
-            mock_ai.side_effect = fake_ai_response
+        mock_ai = AsyncMock(side_effect=fake_ai_response)
+        with patch_response_runner_module(
+            stream_agent_response=streamed_answer(mock_ai),
+            should_use_streaming=AsyncMock(return_value=streaming),
+            typing_indicator=_noop_typing,
+            apply_post_response_effects=AsyncMock(),
+        ):
+            await coordinator.generate_response(_plain_request(_target()))
 
-            await process_and_respond_for_test(
-                coordinator,
-                _response_request(prompt="Hello", user_id="@alice:localhost"),
-            )
-
-            mock_ai.assert_called_once()
-            assert mock_ai.call_args.args[0].requester_id == "@alice:localhost"
-            assert mock_ai.call_args.kwargs["turn_recorder"] is not None
-
-    @pytest.mark.asyncio
-    async def test_streaming_passes_user_id(self, tmp_path: Path) -> None:
-        """Test that _process_and_respond_streaming passes user_id through to stream_agent_response."""
-        runtime_paths = _runtime_paths(tmp_path)
-        config = bind_runtime_paths(_config(), runtime_paths)
-        bot = MagicMock(spec=AgentBot)
-        bot.logger = MagicMock()
-        bot.client = AsyncMock()
-        bot.agent_name = "general"
-        bot.matrix_id = MagicMock()
-        bot.matrix_id.domain = "localhost"
-        bot.config = config
-        bot.storage_path = tmp_path
-        bot.runtime_paths = runtime_paths
-        bot._knowledge_access_support = _knowledge_access_support()
-        with patch("mindroom.response_runner.stream_agent_response") as mock_stream:
-            coordinator = _build_response_runner(
-                bot,
-                config=config,
-                runtime_paths=runtime_paths,
-                storage_path=tmp_path,
-                requester_id="@bob:localhost",
-            )
-
-            async def consume_delivery(request: object) -> StreamTransportOutcome:
-                response_stream = request.response_stream
-                chunks = [chunk async for chunk in response_stream]
-                return _stream_outcome("$msg_id", "".join(chunks))
-
-            coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery
-
-            def fake_stream_agent_response(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
-                async def fake_stream() -> AsyncIterator[str]:
-                    context = get_tool_runtime_context()
-                    assert context is not None
-                    assert context.room_id == "!test:localhost"
-                    assert context.thread_id is None
-                    assert context.requester_id == "@bob:localhost"
-                    yield "Hello!"
-
-                return fake_stream()
-
-            mock_stream.side_effect = fake_stream_agent_response
-
-            await process_and_respond_for_test(
-                coordinator,
-                _response_request(prompt="Hello", user_id="@bob:localhost"),
-                streaming=True,
-            )
-
-            mock_stream.assert_called_once()
-            assert mock_stream.call_args.args[0].requester_id == "@bob:localhost"
-            assert mock_stream.call_args.kwargs["turn_recorder"] is not None
+        mock_ai.assert_called_once()
+        assert mock_ai.call_args.args[0].requester_id == "@user:localhost"
+        assert mock_ai.call_args.kwargs["sinks"].turn_recorder is not None
 
     @pytest.mark.asyncio
     async def test_streaming_tool_context_cleanup_survives_cross_task_close(self, tmp_path: Path) -> None:
         """Wrapped response streams should clean up across task-context boundaries."""
-        runtime_paths = _runtime_paths(tmp_path)
-        config = bind_runtime_paths(_config(), runtime_paths)
-        bot = MagicMock(spec=AgentBot)
-        bot.logger = MagicMock()
-        bot.client = AsyncMock()
-        bot.agent_name = "general"
-        bot.storage_path = tmp_path
-        bot.config = config
-        bot.runtime_paths = runtime_paths
-
-        coordinator = _build_response_runner(
-            bot,
-            config=config,
-            runtime_paths=runtime_paths,
-            storage_path=tmp_path,
-            requester_id="@alice:localhost",
-        )
-        target = MessageTarget.resolve("!test:localhost", None, "$user_msg", room_mode=True)
+        coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+        target = _target()
         tool_context = coordinator.deps.tool_runtime.build_context(
             target,
             user_id="@alice:localhost",
@@ -1002,24 +924,8 @@ class TestUserIdPassthrough:
     @pytest.mark.asyncio
     async def test_tool_runtime_stream_factory_masks_outer_context(self, tmp_path: Path) -> None:
         """Factory setup should not inherit an outer tool runtime context when None is explicit."""
-        runtime_paths = _runtime_paths(tmp_path)
-        config = bind_runtime_paths(_config(), runtime_paths)
-        bot = MagicMock(spec=AgentBot)
-        bot.logger = MagicMock()
-        bot.client = AsyncMock()
-        bot.agent_name = "general"
-        bot.storage_path = tmp_path
-        bot.config = config
-        bot.runtime_paths = runtime_paths
-
-        coordinator = _build_response_runner(
-            bot,
-            config=config,
-            runtime_paths=runtime_paths,
-            storage_path=tmp_path,
-            requester_id="@alice:localhost",
-        )
-        target = MessageTarget.resolve("!test:localhost", None, "$user_msg", room_mode=True)
+        coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+        target = _target()
         outer_context = coordinator.deps.tool_runtime.build_context(
             target,
             user_id="@outer:localhost",
@@ -1043,13 +949,11 @@ class TestUserIdPassthrough:
         assert observed_context == [None]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("streaming", [False, True])
     @pytest.mark.usefixtures("probe")
     async def test_a_reply_runs_under_the_turns_requester_and_run_id(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        streaming: bool,
     ) -> None:
         """The run carries the requester as its user and the turn's run id, which cancellation and usage need."""
         config, runtime_paths = _bound(tmp_path)
@@ -1059,7 +963,6 @@ class TestUserIdPassthrough:
             make_turn_context("general", session_id="session1", requester_id="@user:localhost", run_id="run-123"),
             config,
             runtime_paths,
-            streaming=streaming,
         )
 
         [run] = stored_runs(config, runtime_paths, "session1")
@@ -1076,7 +979,7 @@ class TestUserIdPassthrough:
         config, runtime_paths = _bound(tmp_path)
         _install(monkeypatch, answer("Response"))
 
-        await _respond(make_turn_context("general", session_id="session1"), config, runtime_paths, streaming=False)
+        await _respond(make_turn_context("general", session_id="session1"), config, runtime_paths)
 
         [run] = stored_runs(config, runtime_paths, "session1")
         assert run.user_id is None
@@ -1248,7 +1151,11 @@ class TestUserIdPassthrough:
                 prompt="test",
                 runtime_paths=runtime_paths,
                 config=config,
-                include_openai_compat_guidance=include_openai_compat_guidance,
+                execution_identity=_execution_identity(
+                    runtime_paths,
+                    channel="openai_compat" if include_openai_compat_guidance else "matrix",
+                    requester_id="@alice:example.com",
+                ),
             )
 
         prompt = str(prepared_run.turn.prompt.content)
@@ -1281,13 +1188,11 @@ class TestUserIdPassthrough:
         assert "@alice:example.com" not in prompt
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("streaming", [False, True])
     @pytest.mark.usefixtures("probe")
     async def test_a_reply_prepares_against_the_runtime_config_path(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        streaming: bool,
     ) -> None:
         """Replies build agents against the orchestrator-owned config file and pass the compat guidance through."""
         config_path = tmp_path / "custom-config.yaml"
@@ -1299,22 +1204,24 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1", requester_id="user-123"),
                 config,
                 runtime_paths,
-                streaming=streaming,
-                include_openai_compat_guidance=True,
+                execution_identity=_execution_identity(
+                    runtime_paths,
+                    channel="openai_compat",
+                    requester_id="user-123",
+                    session_id="session1",
+                ),
             )
 
         assert prepare.await_args.kwargs["runtime_paths"].config_path == config_path
-        assert prepare.await_args.kwargs["include_openai_compat_guidance"] is True
+        assert prepare.await_args.args[0].include_openai_compat_guidance is True
         assert prepare.await_args.args[0].requester_id == "user-123"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("streaming", [False, True])
     @pytest.mark.usefixtures("probe")
     async def test_a_matrix_reply_keeps_its_current_sender(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        streaming: bool,
     ) -> None:
         """Matrix turns preserve the sender who produced the current prompt in what the model reads."""
         config, runtime_paths = _bound(tmp_path)
@@ -1324,7 +1231,6 @@ class TestUserIdPassthrough:
             make_turn_context("general", session_id="session1", requester_id="@alice:example.com"),
             config,
             runtime_paths,
-            streaming=streaming,
         )
 
         [request] = model.requests
@@ -1343,15 +1249,17 @@ class TestUserIdPassthrough:
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(wraps=_prepare_agent_and_prompt)) as prepare:
             await ai_response(
-                make_turn_context("general", session_id="session1"),
-                prompt="raw prompt",
-                model_prompt="model metadata",
-                runtime_paths=runtime_paths,
-                config=config,
+                replace(
+                    make_turn_context("general", session_id="session1"),
+                    prompt="raw prompt",
+                    model_prompt="model metadata",
+                ),
+                runtime_paths,
+                config,
             )
 
-        assert prepare.await_args.kwargs["prompt"] == "raw prompt"
-        assert prepare.await_args.kwargs["model_prompt"] == "model metadata"
+        assert prepare.await_args.args[0].prompt == "raw prompt"
+        assert prepare.await_args.args[0].model_prompt == "model metadata"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1373,11 +1281,10 @@ class TestUserIdPassthrough:
 
         await collect_streamed_response_content(
             stream_agent_response(
-                make_turn_context("general", session_id="session1"),
-                prompt="test",
-                runtime_paths=runtime_paths,
-                config=config,
-                on_completed=completed.append,
+                replace(make_turn_context("general", session_id="session1"), prompt="test"),
+                runtime_paths,
+                config,
+                sinks=TurnSinks(on_completed=completed.append),
             ),
             presentation=CollectedStreamPresentation(show_tool_calls=False),
         )
@@ -1397,7 +1304,7 @@ class TestUserIdPassthrough:
         model = _install(monkeypatch, [TextDelta("Half done"), stop_turn()])
 
         with pytest.raises(asyncio.CancelledError):
-            await _respond(make_turn_context("general", session_id="session1"), config, runtime_paths, streaming=False)
+            await _respond(make_turn_context("general", session_id="session1"), config, runtime_paths)
 
         assert len(model.requests) == 1
 
@@ -1421,7 +1328,6 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1", correlation_id="e1", reply_to_event_id="e1"),
                 config,
                 runtime_paths,
-                streaming=True,
                 show_tool_calls=False,
             )
 
@@ -1479,7 +1385,6 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1", correlation_id="e1", reply_to_event_id="e1"),
                 config,
                 runtime_paths,
-                streaming=True,
                 show_tool_calls=False,
             )
 
@@ -1497,13 +1402,11 @@ class TestUserIdPassthrough:
         ]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("streaming", [False, True])
     @pytest.mark.usefixtures("probe", "failing_inspect")
     async def test_a_stopped_continuations_replay_says_an_earlier_attempts_failed_tool_call_failed(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        streaming: bool,
     ) -> None:
         """A call that failed in an attempt the turn continued past replays as failed when the user stops the turn."""
         config, runtime_paths = _bound(tmp_path)
@@ -1521,7 +1424,6 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1", run_id="run-1"),
                 config,
                 runtime_paths,
-                streaming=streaming,
                 show_tool_calls=False,
             )
 
@@ -1553,14 +1455,21 @@ class TestUserIdPassthrough:
 
         with pytest.raises(ResponsePausedForApproval) as raised:
             await ai_response(
-                make_turn_context("general", session_id="session1", run_id="run-paused", reply_to_event_id="$source"),
-                prompt="Run the action",
-                runtime_paths=runtime_paths,
-                config=config,
-                supports_native_tool_approval=True,
+                replace(
+                    make_turn_context(
+                        "general",
+                        session_id="session1",
+                        run_id="run-paused",
+                        reply_to_event_id="$source",
+                    ),
+                    prompt="Run the action",
+                    supports_native_tool_approval=True,
+                ),
+                runtime_paths,
+                config,
             )
 
-        paused = raised.value.paused
+        paused = _paused_with_committed_presentation(raised.value, show_tool_calls=True)
         assert [(tool.tool_call_id, tool.tool_name, tool.tool_args) for tool in paused.tools] == [
             ("call-1", "dangerous", {"value": 1}),
         ]
@@ -1608,7 +1517,6 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1", run_id="run-123", reply_to_event_id="e1"),
                 config,
                 runtime_paths,
-                streaming=True,
                 show_tool_calls=False,
             )
 
@@ -1621,12 +1529,12 @@ class TestUserIdPassthrough:
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("probe")
-    async def test_a_reply_with_turn_recorder_defers_interrupted_persistence_to_runner(
+    async def test_a_stopped_reply_records_and_stores_its_interrupted_turn_once(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Lifecycle-owned calls record the interrupted state and leave the interrupted record to the runner."""
+        """The turn driver records the stopped turn and stores it once, over the cancelled run the loop stored."""
         config, runtime_paths = _bound(tmp_path)
         _install(
             monkeypatch,
@@ -1640,14 +1548,14 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1", correlation_id="e1", reply_to_event_id="e1"),
                 config,
                 runtime_paths,
-                streaming=True,
                 show_tool_calls=False,
-                turn_recorder=recorder,
+                sinks=TurnSinks(turn_recorder=recorder),
             )
 
         [stored] = stored_runs(config, runtime_paths, "session1")
-        assert stored.status is RunStatus.cancelled
-        assert "mindroom_replay_state" not in (stored.metadata or {})
+        assert is_interrupted_replay_run(stored)
+        assert (stored.metadata or {})["mindroom_original_status"] == "cancelled"
+        assert stored.run_id == recorder.run_id
         snapshot = recorder.interrupted_snapshot()
         assert snapshot.user_message == "test"
         assert snapshot.partial_text == "Half done"
@@ -1670,7 +1578,6 @@ class TestUserIdPassthrough:
             make_turn_context("general", session_id="session1"),
             config,
             runtime_paths,
-            streaming=False,
         )
 
         assert response == get_user_friendly_error_message(error, "general", runtime_paths=runtime_paths)
@@ -1686,10 +1593,9 @@ class TestUserIdPassthrough:
             return_value="friendly-error",
         ) as mock_friendly_error:
             response = await ai_response(
-                make_turn_context("ultimate", session_id="session1"),
-                prompt="test",
-                runtime_paths=_runtime_paths(tmp_path),
-                config=_config_with_team(),
+                replace(make_turn_context("ultimate", session_id="session1"), prompt="test"),
+                _runtime_paths(tmp_path),
+                _config_with_team(),
             )
 
         assert response == "friendly-error"
@@ -1708,10 +1614,9 @@ class TestUserIdPassthrough:
             chunks = [
                 chunk
                 async for chunk in stream_agent_response(
-                    make_turn_context("ultimate", session_id="session1"),
-                    prompt="test",
-                    runtime_paths=_runtime_paths(tmp_path),
-                    config=_config_with_team(),
+                    replace(make_turn_context("ultimate", session_id="session1"), prompt="test"),
+                    _runtime_paths(tmp_path),
+                    _config_with_team(),
                 )
             ]
 
@@ -1722,13 +1627,11 @@ class TestUserIdPassthrough:
         assert "team/ultimate" in str(error)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("streaming", [False, True])
     @pytest.mark.usefixtures("probe")
     async def test_a_reply_passes_every_file_to_the_model(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        streaming: bool,
     ) -> None:
         """The AI layer never drops a file before the provider decides what its model accepts."""
         config, runtime_paths = _bound(tmp_path)
@@ -1740,7 +1643,6 @@ class TestUserIdPassthrough:
             make_turn_context("general", session_id="session1"),
             config,
             runtime_paths,
-            streaming=streaming,
             media=MediaInputs(files=[pdf_file, zip_file]),
         )
 
@@ -1748,13 +1650,11 @@ class TestUserIdPassthrough:
         assert request.messages[-1].files == [pdf_file, zip_file]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("streaming", [False, True])
     @pytest.mark.usefixtures("probe")
     async def test_a_safeguard_refusal_is_reported_without_a_media_retry(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        streaming: bool,
     ) -> None:
         """A refused request with media gets the refusal notice; the request pipeline never resends it without media."""
         config, runtime_paths = _bound(tmp_path)
@@ -1767,7 +1667,6 @@ class TestUserIdPassthrough:
             make_turn_context("general", session_id="session1"),
             config,
             runtime_paths,
-            streaming=streaming,
             media=MediaInputs(files=[document_file]),
         )
 
@@ -1792,18 +1691,20 @@ class TestUserIdPassthrough:
         chunks = [
             chunk
             async for chunk in stream_agent_response(
-                make_turn_context(
-                    "general",
-                    session_id="session1",
-                    correlation_id="$reply:example.com",
-                    reply_to_event_id="$reply:example.com",
-                    room_id="!room:example.com",
-                    thread_id="$thread:example.com",
+                replace(
+                    make_turn_context(
+                        "general",
+                        session_id="session1",
+                        correlation_id="$reply:example.com",
+                        reply_to_event_id="$reply:example.com",
+                        room_id="!room:example.com",
+                        thread_id="$thread:example.com",
+                    ),
+                    prompt="raw prompt",
+                    model_prompt="expanded prompt",
                 ),
-                prompt="raw prompt",
-                model_prompt="expanded prompt",
-                runtime_paths=runtime_paths,
-                config=config,
+                runtime_paths,
+                config,
             )
         ]
 
@@ -1847,8 +1748,7 @@ class TestUserIdPassthrough:
             make_turn_context("general", session_id="session1"),
             config,
             runtime_paths,
-            streaming=True,
-            run_metadata_collector=run_metadata,
+            sinks=TurnSinks(run_metadata_collector=run_metadata),
         )
 
         assert "provider failed" in response
@@ -1858,13 +1758,11 @@ class TestUserIdPassthrough:
         assert payload["usage"]["output_tokens"] == 60
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("streaming", [False, True])
     @pytest.mark.usefixtures("probe")
     async def test_a_reply_that_fails_after_its_model_answered_shows_that_answer_s_context(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        streaming: bool,
     ) -> None:
         """A reply whose next request fails, such as on a rate limit after a tool round, shows its last answer's context."""
         config, runtime_paths = _bound(
@@ -1889,8 +1787,7 @@ class TestUserIdPassthrough:
             make_turn_context("general", session_id="session1"),
             config,
             runtime_paths,
-            streaming=streaming,
-            run_metadata_collector=run_metadata,
+            sinks=TurnSinks(run_metadata_collector=run_metadata),
         )
 
         payload = run_metadata[AI_RUN_METADATA_KEY]
@@ -1899,36 +1796,12 @@ class TestUserIdPassthrough:
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("probe")
-    async def test_ai_response_collects_tool_trace_when_tool_calls_hidden(
+    async def test_a_reply_that_hides_its_tool_calls_leaves_them_out_of_its_text_but_traces_them(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The blocking path still surfaces structured tool metadata when the reply hides its tool calls."""
-        config, runtime_paths = _bound(tmp_path)
-        _install(monkeypatch, calls(tool_call("read_file", "call-1", path="README.md")), answer("Done."))
-        tool_trace: list[object] = []
-
-        response = await _respond(
-            make_turn_context("general", session_id="session1"),
-            config,
-            runtime_paths,
-            streaming=False,
-            show_tool_calls=False,
-            tool_trace_collector=tool_trace,
-        )
-
-        assert response == "Done."
-        assert [entry.tool_name for entry in tool_trace] == ["read_file"]
-
-    @pytest.mark.asyncio
-    @pytest.mark.usefixtures("probe")
-    async def test_a_blocking_reply_that_shows_its_tool_calls_names_each_tool(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The blocking path writes each tool the run called into the reply's text and its tool trace."""
+        """A collected reply that hides its tool calls names none of them in its text; its trace keeps them."""
         config, runtime_paths = _bound(tmp_path)
         _install(monkeypatch, calls(tool_call("read_file", "call-1", path="README.md")), answer("Done."))
         tool_trace: list[ToolTraceEntry] = []
@@ -1937,28 +1810,46 @@ class TestUserIdPassthrough:
             make_turn_context("general", session_id="session1"),
             config,
             runtime_paths,
-            streaming=False,
-            show_tool_calls=True,
-            tool_trace_collector=tool_trace,
+            show_tool_calls=False,
+            sinks=TurnSinks(tool_trace=tool_trace),
         )
 
-        assert response.startswith("Done.\n")
-        assert "`read_file`" in response
+        assert response == "Done."
+        assert [(entry.type, entry.tool_name) for entry in tool_trace] == [("tool_call_completed", "read_file")]
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
+    async def test_a_reply_that_shows_its_tool_calls_names_each_tool(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A collected reply writes each tool the run called into its text, where it streamed, and its tool trace."""
+        config, runtime_paths = _bound(tmp_path)
+        _install(monkeypatch, calls(tool_call("read_file", "call-1", path="README.md")), answer("Done."))
+        tool_trace: list[ToolTraceEntry] = []
+
+        response = await _respond(
+            make_turn_context("general", session_id="session1"),
+            config,
+            runtime_paths,
+            show_tool_calls=True,
+            sinks=TurnSinks(tool_trace=tool_trace),
+        )
+
+        assert response.strip() == "🔧 `read_file` [1]\n\nDone."
         assert [entry.tool_name for entry in tool_trace] == ["read_file"]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("streaming", [False, True])
     @pytest.mark.usefixtures("probe")
     async def test_a_reply_continues_after_next_turn_model_switch(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        streaming: bool,
     ) -> None:
         """A next-turn model switch rebuilds the agent and continues the same task under a fresh run id."""
         config, runtime_paths = _bound(tmp_path)
         _install(monkeypatch, _switch("call-switch", "large", "next-turn"), answer("Finished the task."))
-        tool_trace: list[object] = []
         run_ids: list[str] = []
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(wraps=_prepare_agent_and_prompt)) as prepare:
@@ -1966,33 +1857,27 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1", run_id="run-1"),
                 config,
                 runtime_paths,
-                streaming=streaming,
                 model_prompt="test\n\nUse attachment att_1.",
-                on_attempt_start=lambda run_id, _model_name: run_ids.append(run_id),
                 show_tool_calls=False,
-                **({} if streaming else {"tool_trace_collector": tool_trace}),
+                sinks=TurnSinks(on_attempt_start=lambda run_id, _model_name: run_ids.append(run_id)),
             )
 
         assert response == "Finished the task."
         assert prepare.await_count == 2
-        assert prepare.await_args_list[0].kwargs["model_prompt"] == "test\n\nUse attachment att_1."
-        assert prepare.await_args_list[1].kwargs["model_prompt"] == "Use attachment att_1."
-        assert "Continue the same task" in prepare.await_args_list[1].kwargs["prompt"]
+        assert prepare.await_args_list[0].args[0].model_prompt == "test\n\nUse attachment att_1."
+        assert prepare.await_args_list[1].args[0].model_prompt == "Use attachment att_1."
+        assert "Continue the same task" in prepare.await_args_list[1].args[0].prompt
         assert run_ids[0] == "run-1"
         assert len(run_ids) == 2
         assert run_ids[1] != "run-1"
         assert [run.run_id for run in stored_runs(config, runtime_paths, "session1")] == run_ids
-        if not streaming:
-            assert len(tool_trace) == 1
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("streaming", [False, True])
     @pytest.mark.usefixtures("probe")
     async def test_a_reply_rebuilds_with_after_toolcall_model(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        streaming: bool,
     ) -> None:
         """An after-toolcall switch rebuilds the agent on the new model, which the tools then see as active."""
         config, runtime_paths = _bound(tmp_path)
@@ -2037,7 +1922,6 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1", run_id="run-1"),
                 config,
                 runtime_paths,
-                streaming=streaming,
                 show_tool_calls=False,
             )
 
@@ -2069,9 +1953,8 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1", run_id="run-1"),
                 config,
                 runtime_paths,
-                streaming=True,
                 show_tool_calls=False,
-                turn_recorder=recorder,
+                sinks=TurnSinks(turn_recorder=recorder),
             )
 
         snapshot = recorder.interrupted_snapshot()
@@ -2080,13 +1963,11 @@ class TestUserIdPassthrough:
         assert [tool.tool_name for tool in snapshot.completed_tools] == ["switch_thread_model", "run_shell_command"]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("streaming", [False, True])
     @pytest.mark.usefixtures("probe")
     async def test_a_reply_returns_message_after_continuation_limit(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        streaming: bool,
     ) -> None:
         """Repeated rejected model switches end with visible fallback text after the continuation limit."""
         config, runtime_paths = _bound(tmp_path)
@@ -2101,7 +1982,6 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1"),
                 config,
                 runtime_paths,
-                streaming=streaming,
                 show_tool_calls=False,
             )
 
@@ -2110,13 +1990,11 @@ class TestUserIdPassthrough:
         assert len(model.requests) == attempts
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("streaming", [False, True])
     @pytest.mark.usefixtures("probe")
     async def test_a_reply_collects_run_metadata(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        streaming: bool,
     ) -> None:
         """A reply exposes its model, usage, and context metadata, with the context taken from the provider counters."""
         config, runtime_paths = _bound(
@@ -2135,8 +2013,7 @@ class TestUserIdPassthrough:
             make_turn_context("general", session_id="session1", run_id="run-1"),
             config,
             runtime_paths,
-            streaming=streaming,
-            run_metadata_collector=run_metadata,
+            sinks=TurnSinks(run_metadata_collector=run_metadata),
         )
 
         payload = run_metadata[AI_RUN_METADATA_KEY]
@@ -2156,13 +2033,11 @@ class TestUserIdPassthrough:
         assert payload["tools"]["count"] == 0
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("streaming", [False, True])
     @pytest.mark.usefixtures("probe")
     async def test_a_reply_persists_its_prepared_history_metadata(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        streaming: bool,
     ) -> None:
         """A reply stores the same prepared-history metadata it hands its turn recorder."""
         config, runtime_paths = _bound(tmp_path)
@@ -2173,8 +2048,7 @@ class TestUserIdPassthrough:
             make_turn_context("general", session_id="session1", correlation_id="$event", reply_to_event_id="$event"),
             config,
             runtime_paths,
-            streaming=streaming,
-            turn_recorder=recorder,
+            sinks=TurnSinks(turn_recorder=recorder),
         )
 
         [stored] = stored_runs(config, runtime_paths, "session1")
@@ -2216,8 +2090,7 @@ class TestUserIdPassthrough:
             make_turn_context("general", session_id="session1"),
             config,
             runtime_paths,
-            streaming=False,
-            run_metadata_collector=run_metadata,
+            sinks=TurnSinks(run_metadata_collector=run_metadata),
         )
 
         payload = run_metadata[AI_RUN_METADATA_KEY]
@@ -2309,11 +2182,10 @@ class TestUserIdPassthrough:
         chunks = [
             chunk
             async for chunk in stream_agent_response(
-                make_turn_context("general", session_id="session1"),
-                prompt="test",
-                runtime_paths=runtime_paths,
-                config=config,
-                turn_recorder=recorder,
+                replace(make_turn_context("general", session_id="session1"), prompt="test"),
+                runtime_paths,
+                config,
+                sinks=TurnSinks(turn_recorder=recorder),
             )
         ]
 
@@ -2322,13 +2194,11 @@ class TestUserIdPassthrough:
         assert "".join(streamed_text(chunks)) == streamed
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("streaming", [False, True])
     @pytest.mark.usefixtures("probe")
     async def test_a_reply_metadata_uses_room_resolved_runtime_model(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        streaming: bool,
     ) -> None:
         """Reply metadata reports the room-resolved runtime model and its context window."""
         config, runtime_paths = _bound(
@@ -2352,8 +2222,7 @@ class TestUserIdPassthrough:
                 make_turn_context("general", session_id="session1", room_id="!test:localhost"),
                 config,
                 runtime_paths,
-                streaming=streaming,
-                run_metadata_collector=run_metadata,
+                sinks=TurnSinks(run_metadata_collector=run_metadata),
             )
 
         assert built == ["large"]
@@ -2376,16 +2245,18 @@ class TestUserIdPassthrough:
         with pytest.raises(ResponsePausedForApproval) as raised:
             await collect_streamed_response_content(
                 stream_agent_response(
-                    make_turn_context(
-                        "general",
-                        session_id="session1",
-                        run_id="run-paused",
-                        reply_to_event_id="$source",
+                    replace(
+                        make_turn_context(
+                            "general",
+                            session_id="session1",
+                            run_id="run-paused",
+                            reply_to_event_id="$source",
+                        ),
+                        prompt="Run the action",
+                        supports_native_tool_approval=True,
                     ),
-                    prompt="Run the action",
-                    runtime_paths=runtime_paths,
-                    config=config,
-                    supports_native_tool_approval=True,
+                    runtime_paths,
+                    config,
                 ),
                 presentation=CollectedStreamPresentation(show_tool_calls=True),
             )
@@ -2416,12 +2287,14 @@ class TestUserIdPassthrough:
         with pytest.raises(ResponsePausedForApproval) as raised:
             await collect_streamed_response_content(
                 stream_agent_response(
-                    make_turn_context("general", session_id="session1", reply_to_event_id="$source"),
-                    prompt="Run the action",
-                    runtime_paths=runtime_paths,
-                    config=config,
-                    show_tool_calls=False,
-                    supports_native_tool_approval=True,
+                    replace(
+                        make_turn_context("general", session_id="session1", reply_to_event_id="$source"),
+                        prompt="Run the action",
+                        show_tool_calls=False,
+                        supports_native_tool_approval=True,
+                    ),
+                    runtime_paths,
+                    config,
                 ),
                 presentation=CollectedStreamPresentation(show_tool_calls=False),
             )
@@ -2500,11 +2373,13 @@ class TestUserIdPassthrough:
 
         async def consume() -> None:
             async for _chunk in stream_agent_response(
-                make_turn_context("general", session_id="session1", correlation_id="e1", reply_to_event_id="e1"),
-                prompt="test",
-                runtime_paths=runtime_paths,
-                config=config,
-                show_tool_calls=False,
+                replace(
+                    make_turn_context("general", session_id="session1", correlation_id="e1", reply_to_event_id="e1"),
+                    prompt="test",
+                    show_tool_calls=False,
+                ),
+                runtime_paths,
+                config,
             ):
                 pass
 
@@ -2551,12 +2426,14 @@ class TestUserIdPassthrough:
 
         async def consume_stream() -> None:
             async for _chunk in stream_agent_response(
-                make_turn_context("general", session_id="session1", correlation_id="e1", reply_to_event_id="e1"),
-                prompt="test",
-                model_prompt="test\n\n<mindroom_message_context>persist me</mindroom_message_context>",
-                runtime_paths=runtime_paths,
-                config=config,
-                show_tool_calls=False,
+                replace(
+                    make_turn_context("general", session_id="session1", correlation_id="e1", reply_to_event_id="e1"),
+                    prompt="test",
+                    model_prompt="test\n\n<mindroom_message_context>persist me</mindroom_message_context>",
+                    show_tool_calls=False,
+                ),
+                runtime_paths,
+                config,
             ):
                 first_chunk_seen.set()
 
@@ -2594,11 +2471,10 @@ class TestUserIdPassthrough:
         run_metadata: dict[str, Any] = {}
 
         async for _chunk in stream_agent_response(
-            make_turn_context("general", session_id="session1"),
-            prompt="test",
-            runtime_paths=runtime_paths,
-            config=config,
-            run_metadata_collector=run_metadata,
+            replace(make_turn_context("general", session_id="session1"), prompt="test"),
+            runtime_paths,
+            config,
+            sinks=TurnSinks(run_metadata_collector=run_metadata),
         ):
             pass
 
@@ -2615,13 +2491,11 @@ class TestUserIdPassthrough:
         assert "utilization_pct" not in payload["context"]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("streaming", [False, True])
     @pytest.mark.usefixtures("probe")
     async def test_a_reply_s_context_reads_its_last_request(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        streaming: bool,
     ) -> None:
         """Usage sums every request while the context block reads the last request's counters."""
         config, runtime_paths = _bound(
@@ -2648,8 +2522,7 @@ class TestUserIdPassthrough:
             make_turn_context("general", session_id="session1"),
             config,
             runtime_paths,
-            streaming=streaming,
-            run_metadata_collector=run_metadata,
+            sinks=TurnSinks(run_metadata_collector=run_metadata),
         )
 
         payload = run_metadata[AI_RUN_METADATA_KEY]
@@ -2668,13 +2541,11 @@ class TestUserIdPassthrough:
         assert isinstance(payload["prepared_context"]["tokens"], int)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("streaming", [False, True])
     @pytest.mark.usefixtures("probe")
     async def test_a_reply_s_context_does_not_backfill_cache_counters_from_earlier_requests(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        streaming: bool,
     ) -> None:
         """Cache counters the last request did not report stay unknown instead of reusing the run's totals."""
         config, runtime_paths = _bound(
@@ -2701,8 +2572,7 @@ class TestUserIdPassthrough:
             make_turn_context("general", session_id="session1"),
             config,
             runtime_paths,
-            streaming=streaming,
-            run_metadata_collector=run_metadata,
+            sinks=TurnSinks(run_metadata_collector=run_metadata),
         )
 
         payload = run_metadata[AI_RUN_METADATA_KEY]
@@ -2711,13 +2581,11 @@ class TestUserIdPassthrough:
         assert payload["context"] == {"input_tokens": 120, "window_tokens": 1000}
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("streaming", [False, True])
     @pytest.mark.usefixtures("probe")
     async def test_a_claude_reply_s_context_reads_its_last_request_s_final_iteration(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        streaming: bool,
     ) -> None:
         """A Claude reply's context reads its last request's final iteration, not the counters that request billed.
 
@@ -2759,8 +2627,7 @@ class TestUserIdPassthrough:
             make_turn_context("general", session_id="session1"),
             config,
             runtime_paths,
-            streaming=streaming,
-            run_metadata_collector=run_metadata,
+            sinks=TurnSinks(run_metadata_collector=run_metadata),
         )
 
         payload = run_metadata[AI_RUN_METADATA_KEY]
@@ -2810,8 +2677,7 @@ class TestUserIdPassthrough:
             make_turn_context("general", session_id="session1"),
             config,
             runtime_paths,
-            streaming=True,
-            run_metadata_collector=run_metadata,
+            sinks=TurnSinks(run_metadata_collector=run_metadata),
         )
 
         assert len(model.requests) == 2
@@ -2821,18 +2687,15 @@ class TestUserIdPassthrough:
         assert payload["context"] == {"input_tokens": estimate, "window_tokens": 100_000}
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("streaming", [False, True])
     @pytest.mark.usefixtures("probe")
     async def test_a_reply_whose_retried_request_is_cut_off_shows_the_estimate(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        streaming: bool,
     ) -> None:
         """A request whose every attempt failed mid-stream after reporting its input describes no single context.
 
-        The reply's usage bills every attempt, while its context shows the estimate instead of the attempts' sum. Every
-        request streams, so a blocking reply's requests are retried as a streamed reply's are.
+        The reply's usage bills every attempt, while its context shows the estimate instead of the attempts' sum.
         """
         config, runtime_paths = _bound(
             tmp_path,
@@ -2860,8 +2723,7 @@ class TestUserIdPassthrough:
             make_turn_context("general", session_id="session1"),
             config,
             runtime_paths,
-            streaming=streaming,
-            run_metadata_collector=run_metadata,
+            sinks=TurnSinks(run_metadata_collector=run_metadata),
         )
 
         assert len(model.requests) == 6
@@ -2916,11 +2778,10 @@ class TestUserIdPassthrough:
         run_metadata: dict[str, Any] = {}
 
         async for _chunk in stream_agent_response(
-            make_turn_context("general", session_id="session1"),
-            prompt="test",
-            runtime_paths=runtime_paths,
-            config=config,
-            run_metadata_collector=run_metadata,
+            replace(make_turn_context("general", session_id="session1"), prompt="test"),
+            runtime_paths,
+            config,
+            sinks=TurnSinks(run_metadata_collector=run_metadata),
         ):
             pass
 

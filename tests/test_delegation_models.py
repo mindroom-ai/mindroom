@@ -94,7 +94,7 @@ async def test_subagent_model_selection(
                 run_id="parent-run",
             )
             assert isinstance(text, str)
-            assert text.startswith("Parent done")
+            assert text == "\n\n🔧 `run_subagent` [1]\n\nParent done"
             stored = create_session_storage("leader", config, paths, identity).get_run("parent-run")
             assert isinstance(stored, RunRecord)
             assert stored.status is RunStatus.completed

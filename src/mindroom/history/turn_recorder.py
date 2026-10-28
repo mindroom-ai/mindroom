@@ -1,9 +1,9 @@
-"""Live top-level turn recording for canonical interrupted replay."""
+"""The record of one top-level turn, which canonical interrupted replay is built from."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.history.interrupted_replay import InterruptedReplaySnapshot, build_interrupted_replay_snapshot
 from mindroom.llm.runs import RunStatus
@@ -13,113 +13,91 @@ if TYPE_CHECKING:
 
     from mindroom.tool_system.events import ToolTraceEntry
 
+type _TurnOutcome = Literal["pending", "completed", "skipped", "suspended", "interrupted"]
+
 
 @dataclass
 class TurnRecorder:
-    """Accumulate trusted runtime facts for one top-level turn."""
+    """What one top-level turn was asked, how it ended, and what an interruption keeps of it.
 
-    user_message: str
+    Only the turn driver writes it, besides the run's mid-turn compaction, which notes the calls a fold summarized;
+    callers read it once the turn ended.
+    """
+
+    user_message: str = ""
     user_message_is_structured: bool = False
     run_metadata: dict[str, Any] | None = None
     run_id: str | None = None
-    response_event_id: str | None = None
     assistant_text: str = ""
     completed_tools: list[ToolTraceEntry] = field(default_factory=list)
     interrupted_tools: list[ToolTraceEntry] = field(default_factory=list)
-    outcome: str = "pending"
+    outcome: _TurnOutcome = "pending"
     original_status: RunStatus | None = None
-    interrupted_persisted: bool = False
     # Tool calls a mid-turn compaction folded into its summary; an interrupted record leaves their previews out.
     folded_tool_call_ids: set[str] = field(default_factory=set)
 
-    def set_run_metadata(self, metadata: Mapping[str, Any] | None) -> None:
-        """Replace the current Matrix run metadata snapshot."""
-        self.run_metadata = dict(metadata) if metadata is not None else None
+    def start(self, *, user_message: str, user_message_is_structured: bool, run_metadata: Mapping[str, Any]) -> None:
+        """Seed the record of a turn that starts: its user message, and the Matrix metadata it runs with."""
+        self.user_message = user_message
+        self.user_message_is_structured = user_message_is_structured
+        self.run_metadata = dict(run_metadata)
 
     def record_folded_tool_calls(self, tool_call_ids: Iterable[str]) -> None:
         """Remember tool calls a mid-turn compaction folded, so an interrupted record keeps only the work after it."""
         self.folded_tool_call_ids.update(tool_call_ids)
 
-    def set_run_id(self, run_id: str | None) -> None:
-        """Replace the current top-level run identifier."""
-        self.run_id = run_id or None
-
-    def set_response_event_id(self, response_event_id: str | None) -> None:
-        """Replace the current visible Matrix response event identifier."""
-        self.response_event_id = response_event_id or None
-
-    def sync_partial_state(
-        self,
-        *,
-        run_metadata: Mapping[str, Any] | None,
-        assistant_text: str,
-        completed_tools: Sequence[ToolTraceEntry],
-        interrupted_tools: Sequence[ToolTraceEntry],
-    ) -> None:
-        """Refresh the latest observed streaming state without deciding the final outcome."""
-        if run_metadata is not None:
-            self.set_run_metadata(run_metadata)
-        self.assistant_text = assistant_text
-        self.completed_tools = list(completed_tools)
-        self.interrupted_tools = list(interrupted_tools)
-
     def record_completed(
         self,
         *,
+        run_id: str | None,
         run_metadata: Mapping[str, Any] | None,
         assistant_text: str,
         completed_tools: Sequence[ToolTraceEntry],
     ) -> None:
-        """Record one completed top-level turn."""
-        self.sync_partial_state(
-            run_metadata=run_metadata,
-            assistant_text=assistant_text,
-            completed_tools=completed_tools,
-            interrupted_tools=(),
-        )
-        self.mark_completed()
+        """Record a turn that completed."""
+        self._record(run_id, run_metadata, assistant_text, completed_tools, ())
+        self.outcome = "completed"
 
     def record_interrupted(
         self,
         *,
+        run_id: str | None,
         run_metadata: Mapping[str, Any] | None,
         assistant_text: str,
         completed_tools: Sequence[ToolTraceEntry],
         interrupted_tools: Sequence[ToolTraceEntry],
-        original_status: RunStatus = RunStatus.cancelled,
+        original_status: RunStatus,
     ) -> None:
-        """Record one interrupted top-level turn."""
-        self.sync_partial_state(
-            run_metadata=run_metadata,
-            assistant_text=assistant_text,
-            completed_tools=completed_tools,
-            interrupted_tools=interrupted_tools,
-        )
-        self.mark_interrupted(original_status)
+        """Record a turn a cancellation or a failure cut short, with the partial output its attempt had."""
+        self._record(run_id, run_metadata, assistant_text, completed_tools, interrupted_tools)
+        self.outcome = "interrupted"
+        self.original_status = original_status
 
-    def mark_completed(self) -> None:
-        """Record successful completion."""
-        self.outcome = "completed"
+    def _record(
+        self,
+        run_id: str | None,
+        run_metadata: Mapping[str, Any] | None,
+        assistant_text: str,
+        completed_tools: Sequence[ToolTraceEntry],
+        interrupted_tools: Sequence[ToolTraceEntry],
+    ) -> None:
+        self.run_id = run_id or self.run_id
+        if run_metadata is not None:
+            self.run_metadata = dict(run_metadata)
+        self.assistant_text = assistant_text
+        self.completed_tools = list(completed_tools)
+        self.interrupted_tools = list(interrupted_tools)
 
     def mark_skipped(self) -> None:
         """Record quiet nonparticipation without success or interrupted replay."""
         self.outcome = "skipped"
-        self.original_status = None
-        self.assistant_text = ""
-        self.completed_tools = []
-        self.interrupted_tools = []
 
     def mark_suspended(self) -> None:
         """Record a native pause without classifying it as terminal."""
         self.outcome = "suspended"
 
-    def mark_interrupted(self, original_status: RunStatus = RunStatus.cancelled) -> None:
-        """Record interruption."""
-        self.outcome = "interrupted"
-        self.original_status = original_status
-
-    def interrupted_snapshot(self) -> InterruptedReplaySnapshot:
-        """Build one canonical interrupted snapshot from the recorded facts."""
+    def interrupted_snapshot(self, *, response_event_id: str | None = None) -> InterruptedReplaySnapshot:
+        """Build one canonical interrupted snapshot from the recorded facts and the event the reply shows."""
         return build_interrupted_replay_snapshot(
             user_message=self.user_message,
             user_message_is_structured=self.user_message_is_structured,
@@ -127,14 +105,7 @@ class TurnRecorder:
             completed_tools=self.completed_tools,
             interrupted_tools=self.interrupted_tools,
             run_metadata=self.run_metadata,
-            response_event_id=self.response_event_id,
+            response_event_id=response_event_id,
             original_status=self.original_status or RunStatus.cancelled,
             folded_tool_call_ids=self.folded_tool_call_ids,
         )
-
-    def claim_interrupted_persistence(self) -> bool:
-        """Return whether one interrupted turn should be persisted now."""
-        if self.outcome != "interrupted" or self.interrupted_persisted:
-            return False
-        self.interrupted_persisted = True
-        return True

@@ -14,12 +14,7 @@ from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
-from mindroom.response_turn import (
-    CompletedAttempt,
-    TurnRunState,
-    TurnSinks,
-    run_blocking_response_turn,
-)
+from mindroom.response_turn import AttemptResolved, CompletedAttempt, TurnRunState
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.control import pending_human_messages_context
@@ -29,7 +24,7 @@ from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
-from tests.test_response_turn import _AdapterLog, _blocking_adapter, _continuation, _ctx
+from tests.test_tool_job_follow_ups import _drive_jobs_turn
 from tests.test_tool_job_turn_integration import _wait_until_ready
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
@@ -44,6 +39,7 @@ from tests.tool_job_helpers import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.llm.runs import RunRecord
@@ -147,7 +143,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
         async def interrupted_attempt(
             _run: TurnRunState,
             state: TurnContinuationRunState,
-        ) -> CompletedAttempt:
+        ) -> AsyncIterator[AttemptResolved]:
             response = await run_job_turn(
                 controls,
                 interrupted_model,
@@ -156,32 +152,27 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
                 session_id=context.session_id,
                 store=interrupted_storage,
             )
-            return CompletedAttempt(
-                response_text=str(response.content or ""),
-                replayable_text=str(response.content or ""),
-                has_visible_content=bool(response.content),
-                session_id=response.session_id,
-                attempt_run_id=response.run_id,
+            yield AttemptResolved(
+                CompletedAttempt(
+                    response_text=str(response.content or ""),
+                    replayable_text=str(response.content or ""),
+                    has_visible_content=bool(response.content),
+                    session_id=response.session_id,
+                    attempt_run_id=response.run_id,
+                ),
             )
 
         with tool_runtime_context(context):
             interrupted_task = asyncio.create_task(
-                run_blocking_response_turn(
-                    _ctx(
-                        entity_label="leader",
-                        session_id=context.session_id,
-                        room_id=owner.room_id,
-                        thread_id=owner.resolved_thread_id,
-                        requester_id=owner.requester_id,
-                        background_tool_jobs=True,
-                    ),
-                    _blocking_adapter(
-                        _AdapterLog(),
-                        interrupted_attempt,
-                        load_scope=lambda: crash_scope,
-                    ),
-                    TurnSinks(),
-                    continuation=_continuation("Retrieve retained work"),
+                _drive_jobs_turn(
+                    interrupted_attempt,
+                    prompt="Retrieve retained work",
+                    load_scope=lambda: crash_scope,
+                    entity_label="leader",
+                    session_id=context.session_id,
+                    room_id=owner.room_id,
+                    thread_id=owner.resolved_thread_id,
+                    requester_id=owner.requester_id,
                 ),
             )
             await asyncio.wait_for(result_observed.wait(), JOB_TEST_TIMEOUT)

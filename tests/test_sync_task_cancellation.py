@@ -70,7 +70,8 @@ from mindroom.orchestrator import (
     _MultiAgentOrchestrator,
     _run_shutdown_step,
 )
-from mindroom.response_runner import ResponseRunner, ResponseShutdownTimeoutError, _InboxResponseOwnership
+from mindroom.reply_turn.inbox import InboxResponses, _InboxResponseOwnership
+from mindroom.response_runner import ResponseRunner
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
     GENERIC_SHUTDOWN,
@@ -78,6 +79,7 @@ from mindroom.runtime_shutdown import (
     RESPONSE_FINALIZATION_TIMEOUT_SECONDS,
     SYNC_RESTART_SHUTDOWN,
     SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS,
+    ResponseShutdownTimeoutError,
     RuntimeShutdownIntent,
     ShutdownBudget,
     shutdown_intent_for_entity,
@@ -646,7 +648,7 @@ async def test_process_shutdown_signals_responses_before_coalescing_drain() -> N
         response_started.set()
         await asyncio.Event().wait()
 
-    response_task = runner.track_inbox_response(
+    response_task = runner.inbox.track_inbox_response(
         response(),
         name="test_early_process_shutdown_response",
         recovery_proof_ready=lambda: True,
@@ -2037,9 +2039,11 @@ async def test_prepare_then_stop_reuses_one_total_shutdown_budget() -> None:
     bot._delivery_recovery_wake = MagicMock()
     bot._response_runner = MagicMock(
         refuse_pending_admissions=MagicMock(),
-        drain_inbox_responses=AsyncMock(side_effect=drain_responses),
-        pending_inbox_response_count=0,
-        incomplete_inbox_responses_recoverable=True,
+        inbox=MagicMock(
+            drain_inbox_responses=AsyncMock(side_effect=drain_responses),
+            pending_inbox_response_count=0,
+            incomplete_inbox_responses_recoverable=True,
+        ),
         in_flight_response_count=0,
     )
     bot._coalescing_gate = MagicMock(
@@ -2089,7 +2093,7 @@ async def test_stop_does_not_close_runtime_resources_under_live_response_owner()
     bot._sync_shutting_down = False
     bot._emit_agent_lifecycle_event = AsyncMock()
     bot._call_manager = None
-    bot._response_runner = MagicMock(pending_inbox_response_count=1)
+    bot._response_runner = MagicMock(inbox=MagicMock(pending_inbox_response_count=1))
     bot.prepare_for_sync_shutdown = AsyncMock(side_effect=shutdown_failure)
     bot.begin_process_shutdown = MagicMock()
     bot._journal_dispatcher = journal_dispatcher
@@ -2133,7 +2137,7 @@ async def test_orderly_stop_defers_saturated_response_timeouts_without_traceback
         bot._sync_shutting_down = False
         bot._emit_agent_lifecycle_event = AsyncMock()
         bot._call_manager = None
-        bot._response_runner = MagicMock(pending_inbox_response_count=index % 3 + 1)
+        bot._response_runner = MagicMock(inbox=MagicMock(pending_inbox_response_count=index % 3 + 1))
         bot.prepare_for_sync_shutdown = AsyncMock(side_effect=failure)
         bot.begin_process_shutdown = MagicMock()
         bot._journal_dispatcher = MagicMock(stop=AsyncMock())
@@ -2331,19 +2335,19 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
     bot.storage_path = Path("/nonexistent/storage")
     bot.logger = MagicMock()
     bot.prepare_for_sync_shutdown = AsyncMock()
-    bot._response_runner = MagicMock(pending_inbox_response_count=0)
+    bot._response_runner = MagicMock(inbox=MagicMock(pending_inbox_response_count=0))
     bot._emit_agent_lifecycle_event = AsyncMock()
     bot._call_manager = None
-    bot._response_runner = MagicMock(pending_inbox_response_count=0)
-    bot._response_runner.drain_inbox_responses = AsyncMock(return_value=True)
-    bot._response_runner.wait_for_source_owned_inbox_responses = AsyncMock()
+    bot._response_runner = MagicMock(inbox=MagicMock(pending_inbox_response_count=0))
+    bot._response_runner.inbox.drain_inbox_responses = AsyncMock(return_value=True)
+    bot._response_runner.inbox.wait_for_source_owned_inbox_responses = AsyncMock()
 
     await AgentBot.stop(bot, shutdown_intent=SYNC_RESTART_SHUTDOWN)
 
     bot._emit_agent_lifecycle_event.assert_awaited_once_with("agent:stopped", stop_reason="restart")
     assert bot.hook_registry is not active_hook_registry
     bot.prepare_for_sync_shutdown.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
-    bot._response_runner.wait_for_source_owned_inbox_responses.assert_awaited_once_with()
+    bot._response_runner.inbox.wait_for_source_owned_inbox_responses.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -2366,8 +2370,8 @@ async def test_restart_stop_reports_failed_release_over_reply_drain_timeout() ->
     bot.prepare_for_sync_shutdown = AsyncMock(side_effect=ResponseShutdownTimeoutError("reply outlived the drain"))
     bot._emit_agent_lifecycle_event = AsyncMock()
     bot._call_manager = None
-    bot._response_runner = MagicMock(pending_inbox_response_count=1)
-    bot._response_runner.wait_for_source_owned_inbox_responses = AsyncMock()
+    bot._response_runner = MagicMock(inbox=MagicMock(pending_inbox_response_count=1))
+    bot._response_runner.inbox.wait_for_source_owned_inbox_responses = AsyncMock()
 
     with pytest.raises(RuntimeError, match="journal store close failed") as raised:
         await AgentBot.stop(bot, shutdown_intent=SYNC_RESTART_SHUTDOWN)
@@ -3822,7 +3826,7 @@ async def test_deferred_agent_stop_exposes_each_real_resource_release_phase() ->
         return 0
 
     runner = MagicMock()
-    runner.finish_process_shutdown_recovery = AsyncMock(side_effect=finish_recovery)
+    runner.inbox.finish_process_shutdown_recovery = AsyncMock(side_effect=finish_recovery)
     dispatcher = MagicMock()
     dispatcher.stop = AsyncMock(side_effect=gated_call("journal_dispatcher"))
     dispatcher.wait_stopped = AsyncMock(return_value=True)
@@ -3911,7 +3915,7 @@ async def test_ordinary_agent_stop_exposes_real_resource_release_phase() -> None
 async def test_deferred_agent_stop_clears_phase_after_failed_recovery_proof() -> None:
     """A terminal failed bot cannot masquerade as another bot's live phase."""
     runner = MagicMock()
-    runner.finish_process_shutdown_recovery = AsyncMock(return_value=False)
+    runner.inbox.finish_process_shutdown_recovery = AsyncMock(return_value=False)
     bot = object.__new__(AgentBot)
     bot._journal_dispatcher = MagicMock(
         spec=JournalDispatcher,
@@ -4233,16 +4237,16 @@ async def test_deferred_agent_stop_waits_for_retained_proof_before_resources() -
                 proof_cancelled.set()
         return True
 
-    response_task = runner.track_inbox_response(
+    response_task = runner.inbox.track_inbox_response(
         interrupted_response(),
         name="test_deferred_agent_stop_response",
         recovery_proof_ready=retained_proof,
         room_id="!room:example.org",
     )
     await response_started.wait()
-    runner.begin_process_shutdown()
+    runner.inbox.begin_process_shutdown()
     with pytest.raises(ResponseShutdownTimeoutError, match="recovery proof"):
-        await runner.drain_inbox_responses(
+        await runner.inbox.drain_inbox_responses(
             cancel_after_seconds=0.01,
             shutdown_intent=ORDERLY_SHUTDOWN,
         )
@@ -4277,7 +4281,7 @@ async def test_deferred_agent_stop_waits_for_retained_proof_before_resources() -
 
     bot._release_stopped_resources.assert_awaited_once_with([], shutdown_intent=ORDERLY_SHUTDOWN)
     assert not bot.deferred_stop_required
-    assert runner.pending_inbox_response_count == 0
+    assert runner.inbox.pending_inbox_response_count == 0
     await asyncio.gather(response_task, return_exceptions=True)
 
 
@@ -4308,16 +4312,16 @@ async def test_deferred_agent_stop_replaces_settled_cancelling_proof() -> None: 
             await release_first_proof.wait()
             raise
 
-    response_task = runner.track_inbox_response(
+    response_task = runner.inbox.track_inbox_response(
         interrupted_response(),
         name="test_deferred_agent_stop_cancelling_proof",
         recovery_proof_ready=retryable_proof,
         room_id="!room:example.org",
     )
     await response_started.wait()
-    runner.begin_process_shutdown()
+    runner.inbox.begin_process_shutdown()
     with pytest.raises(ResponseShutdownTimeoutError, match="recovery proof"):
-        await runner.drain_inbox_responses(
+        await runner.inbox.drain_inbox_responses(
             cancel_after_seconds=0.01,
             shutdown_intent=ORDERLY_SHUTDOWN,
         )
@@ -4336,22 +4340,22 @@ async def test_deferred_agent_stop_replaces_settled_cancelling_proof() -> None: 
     bot._release_stopped_resources = AsyncMock()
     bot.logger = MagicMock()
     deferred_ensure_called = asyncio.Event()
-    original_ensure = ResponseRunner._ensure_recovery_proof_task
+    original_ensure = InboxResponses._ensure_recovery_proof_task
 
     def observe_deferred_ensure(
-        runner_self: ResponseRunner,
+        inbox_self: InboxResponses,
         response_task: asyncio.Task[None],
         ownership: _InboxResponseOwnership,
     ) -> asyncio.Task[bool]:
         deferred_ensure_called.set()
         return original_ensure(
-            runner_self,
+            inbox_self,
             response_task,
             ownership,
         )
 
     with patch.object(
-        ResponseRunner,
+        InboxResponses,
         "_ensure_recovery_proof_task",
         new=observe_deferred_ensure,
     ):
@@ -4374,7 +4378,7 @@ async def test_deferred_agent_stop_replaces_settled_cancelling_proof() -> None: 
     assert proof_calls == 2
     bot._release_stopped_resources.assert_awaited_once_with([], shutdown_intent=ORDERLY_SHUTDOWN)
     assert not bot.deferred_stop_required
-    assert runner.pending_inbox_response_count == 0
+    assert runner.inbox.pending_inbox_response_count == 0
     await asyncio.gather(response_task, return_exceptions=True)
 
 
@@ -4457,16 +4461,16 @@ async def test_deferred_agent_stop_deadline_keeps_resources_under_live_proof() -
                 await release_proof.wait()
         return True
 
-    response_task = runner.track_inbox_response(
+    response_task = runner.inbox.track_inbox_response(
         interrupted_response(),
         name="test_deferred_agent_stop_deadline_response",
         recovery_proof_ready=resistant_proof,
         room_id="!room:example.org",
     )
     await response_started.wait()
-    runner.begin_process_shutdown()
+    runner.inbox.begin_process_shutdown()
     with pytest.raises(ResponseShutdownTimeoutError, match="recovery proof"):
-        await runner.drain_inbox_responses(
+        await runner.inbox.drain_inbox_responses(
             cancel_after_seconds=0.01,
             shutdown_intent=ORDERLY_SHUTDOWN,
         )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -15,6 +16,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
+from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.hooks import (
@@ -50,7 +52,6 @@ from tests.conftest import (
     make_turn_context,
     message_origin,
     patch_response_runner_module,
-    process_and_respond_for_test,
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
@@ -58,13 +59,14 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer
-from tests.reply_span_helpers import response_span
+from tests.response_runner_helpers import stream_transport
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+    from mindroom.response_turn import ResponseTurnContext
 
 
 def _config(tmp_path: Path) -> Config:
@@ -298,10 +300,9 @@ async def test_a_reply_renders_system_enrichment_into_its_system_message(
     install_model_providers(monkeypatch, {"default": model})
 
     await ai_response(
-        make_turn_context("code", system_enrichment_items=system_items),
-        prompt="prompt",
-        runtime_paths=runtime_paths_for(config),
-        config=config,
+        replace(make_turn_context("code", system_enrichment_items=system_items), prompt="prompt"),
+        runtime_paths_for(config),
+        config,
     )
 
     [request] = model.requests
@@ -329,10 +330,12 @@ async def test_a_reply_keeps_transient_enrichment_out_of_its_system_message_and_
     )
 
     await ai_response(
-        make_turn_context("code", session_id="session-1", transient_enrichment_items=transient_items),
-        prompt="prompt",
-        runtime_paths=runtime_paths_for(config),
-        config=config,
+        replace(
+            make_turn_context("code", session_id="session-1", transient_enrichment_items=transient_items),
+            prompt="prompt",
+        ),
+        runtime_paths_for(config),
+        config,
     )
 
     [request] = model.requests
@@ -462,82 +465,28 @@ async def test_a_prepared_team_turn_sends_the_prompt_without_unseen_context(
 
 
 @pytest.mark.asyncio
-async def test_process_and_respond_threads_system_enrichment_items(tmp_path: Path) -> None:
-    """Non-streaming agent delivery should forward system enrichment items into the AI layer."""
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_agent_delivery_threads_system_enrichment_items(tmp_path: Path, streaming: bool) -> None:
+    """Agent delivery, streamed or delivered whole, forwards system enrichment items into the AI layer."""
     bot = _make_bot(tmp_path)
     system_items = (
         EnrichmentItem(key="alpha", text="stable", cache_policy="stable"),
         EnrichmentItem(key="omega", text="volatile", cache_policy="volatile"),
     )
+    seen_items: list[object] = []
 
-    async def fake_ai_response(*args: object, **_kwargs: object) -> str:
-        assert args[0].system_enrichment_items == system_items
-        return "handled"
-
-    with (
-        patch(
-            "mindroom.delivery_gateway.DeliveryGateway.deliver_final",
-            new=AsyncMock(
-                return_value=FinalDeliveryOutcome(
-                    terminal_status="completed",
-                    event_id="$response",
-                    is_visible_response=True,
-                    final_visible_body="handled",
-                    delivery_kind="sent",
-                ),
-            ),
-        ),
-        patch_response_runner_module(
-            typing_indicator=_noop_typing_indicator,
-            ai_response=AsyncMock(side_effect=fake_ai_response),
-        ),
-    ):
-        generation = await process_and_respond_for_test(
-            bot._response_runner,
-            ResponseRequest(
-                sources=ResponseSources(
-                    pending_event_ids=("$event",),
-                    logical_source_event_ids=("$event",),
-                ),
-                thread_history=[],
-                prompt="Please reply",
-                user_id="@user:localhost",
-                response_envelope=request_envelope(
-                    room_id="!room:localhost",
-                    reply_to_event_id="$event",
-                    prompt="Please reply",
-                    user_id="@user:localhost",
-                ),
-                system_enrichment_items=system_items,
-            ),
-        )
-
-    assert generation.delivery.event_id == "$response"
-    assert generation.delivery.response_text == "handled"
-
-
-@pytest.mark.asyncio
-async def test_process_and_respond_streaming_threads_system_enrichment_items(tmp_path: Path) -> None:
-    """Streaming agent delivery should forward system enrichment items into the AI layer."""
-    bot = _make_bot(tmp_path)
-    system_items = (
-        EnrichmentItem(key="alpha", text="stable", cache_policy="stable"),
-        EnrichmentItem(key="omega", text="volatile", cache_policy="volatile"),
-    )
-
-    async def fake_stream_agent_response(*args: object, **_kwargs: object) -> AsyncIterator[str]:
-        assert args[0].system_enrichment_items == system_items
-        yield "stream chunk"
+    async def fake_stream_agent_response(
+        ctx: ResponseTurnContext,
+        *_args: object,
+        **_kwargs: object,
+    ) -> AsyncIterator[str]:
+        seen_items.append(ctx.system_enrichment_items)
+        yield "handled"
 
     async def fake_send_streaming_response(*args: object, **_kwargs: object) -> StreamTransportOutcome:
         response_stream = args[4]
         chunks = [str(chunk) async for chunk in response_stream]
-        return StreamTransportOutcome(
-            last_physical_stream_event_id="$response",
-            terminal_status="completed",
-            rendered_body="".join(chunks),
-            visible_body_state="visible_body",
-        )
+        return stream_transport("$response", "".join(chunks))
 
     request = ResponseRequest(
         sources=ResponseSources(
@@ -557,17 +506,44 @@ async def test_process_and_respond_streaming_threads_system_enrichment_items(tmp
     )
     runner = unwrap_extracted_collaborator(bot._response_runner)
     with (
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$placeholder")),
+        patch.object(
+            DeliveryGateway,
+            "deliver_final",
+            new=AsyncMock(
+                return_value=FinalDeliveryOutcome(
+                    terminal_status="completed",
+                    event_id="$response",
+                    is_visible_response=True,
+                    final_visible_body="handled",
+                    delivery_kind="sent",
+                ),
+            ),
+        ),
         patch(
             "mindroom.delivery_gateway.send_streaming_response",
             new=AsyncMock(side_effect=fake_send_streaming_response),
         ),
+        patch.object(
+            DeliveryGateway,
+            "finalize_streamed_response",
+            new=AsyncMock(
+                return_value=FinalDeliveryOutcome(
+                    terminal_status="completed",
+                    event_id="$response",
+                    is_visible_response=True,
+                    final_visible_body="handled",
+                    delivery_kind="sent",
+                ),
+            ),
+        ),
         patch_response_runner_module(
             typing_indicator=_noop_typing_indicator,
             stream_agent_response=fake_stream_agent_response,
+            should_use_streaming=AsyncMock(return_value=streaming),
+            apply_post_response_effects=AsyncMock(),
         ),
     ):
-        async with response_span(runner, request):
-            generation = await process_and_respond_for_test(runner, request, streaming=True)
+        assert await runner.generate_response(request) == "$response"
 
-    assert generation.delivery.event_id == "$response"
-    assert generation.delivery.response_text == "stream chunk"
+    assert seen_items == [system_items]

@@ -2,29 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
 from mindroom.message_target import MessageTarget
 from mindroom.turn_origin import TurnIntent
-from tests.conftest import process_and_respond_for_test, unwrap_extracted_collaborator
-from tests.response_runner_helpers import _bot, _plain_request
+from tests.bot_helpers import unique_room_send_responses
+from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
+from tests.response_runner_helpers import _bot, _noop_typing, _plain_request
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.response_runner import ResponseRequest
     from mindroom.response_turn import ResponseTurnContext
-
-pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
-
-
-class _BuiltRecorder(Exception):  # noqa: N818
-    """Stops a turn as soon as its recorder is built."""
 
 
 def _request(hook_source: str | None, intent: TurnIntent) -> ResponseRequest:
@@ -43,11 +39,14 @@ async def _turn(tmp_path: Path, hook_source: str | None, intent: TurnIntent) -> 
         runtime=runtime,
         run_id="run",
         active_event_ids={"$event"},
+        knowledge=None,
         transient_enrichment_items=(),
+        compaction_lifecycle=None,
     )
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 @pytest.mark.parametrize(
     ("hook_source", "intent"),
     [("automation/exploration", TurnIntent.USER_MESSAGE), (None, TurnIntent.JOB_FOLLOW_UP)],
@@ -65,41 +64,30 @@ async def test_agent_turn_records_its_origin_in_run_metadata(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
-async def test_a_turn_stopped_before_its_run_starts_keeps_its_origin(tmp_path: Path, *, streaming: bool) -> None:
-    """A turn's recorder is built with the turn's origin before its run starts."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    request = _request("automation/exploration", TurnIntent.JOB_FOLLOW_UP)
+async def test_a_turn_stopped_before_its_run_starts_keeps_its_origin_and_room(
+    tmp_path: Path,
+    *,
+    streaming: bool,
+) -> None:
+    """A turn stopped before its run starts records the turn's origin, room, and thread for its replay."""
+    bot = _bot(tmp_path)
+    unique_room_send_responses(bot.client)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    persist = MagicMock()
 
     with (
-        patch.object(runner, "_build_turn_recorder", side_effect=_BuiltRecorder) as build,
-        pytest.raises(_BuiltRecorder),
+        patch("mindroom.ai._prepare_agent_run_context", new=AsyncMock(side_effect=asyncio.CancelledError)),
+        patch("mindroom.response_turn.persist_interrupted_replay_snapshot", new=persist),
+        patch_response_runner_module(
+            should_use_streaming=AsyncMock(return_value=streaming),
+            typing_indicator=_noop_typing,
+            apply_post_response_effects=AsyncMock(),
+        ),
     ):
-        await process_and_respond_for_test(runner, request, streaming=streaming)
+        await runner.generate_response(_request("automation/exploration", TurnIntent.JOB_FOLLOW_UP))
 
-    metadata = build.call_args.kwargs["matrix_run_metadata"]
+    persist.assert_called_once()
+    metadata = persist.call_args.kwargs["snapshot"].run_metadata
     assert metadata[TURN_INTENT_RUN_METADATA_KEY] == TurnIntent.JOB_FOLLOW_UP
     assert metadata[HOOK_SOURCE_RUN_METADATA_KEY] == "automation/exploration"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("streaming", [False, True])
-async def test_a_turn_stopped_before_its_run_starts_keeps_its_room(tmp_path: Path, *, streaming: bool) -> None:
-    """A turn's recorder is built with the turn's room and thread before its run starts."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    build_recorder = runner._build_turn_recorder
-    recorders = []
-
-    def build_then_stop(**kwargs: object) -> None:
-        recorders.append(build_recorder(**kwargs))
-        raise _BuiltRecorder
-
-    request = _request(None, TurnIntent.USER_MESSAGE)
-
-    with (
-        patch.object(runner, "_build_turn_recorder", side_effect=build_then_stop),
-        pytest.raises(_BuiltRecorder),
-    ):
-        await process_and_respond_for_test(runner, request, streaming=streaming)
-
-    metadata = recorders[0].run_metadata
     assert (metadata["room_id"], metadata["thread_id"]) == ("!room:localhost", "$thread")

@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.spec import RunContext
     from mindroom.ai import ResponseTurnContext
+    from mindroom.response_turn import TurnSinks
     from mindroom.tool_system.tool_function import AdaptedToolkit
 
 import pytest
@@ -1071,17 +1072,17 @@ class TestChatCompletions:
         assert data["choices"][0]["message"]["content"] == "Hello! How can I help?"
         assert data["choices"][0]["finish_reason"] == "stop"
         assert data["usage"]["prompt_tokens"] == 0
-        assert mock_ai.call_args.kwargs["show_tool_calls"] is False
+        assert mock_ai.call_args.args[0].show_tool_calls is False
 
     def test_non_stream_completion_reports_run_token_usage(self, app_client: TestClient) -> None:
         """Non-streaming usage comes from the run's own token metrics instead of zeros."""
 
-        async def respond(_ctx: object, **kwargs: object) -> str:
-            collector = kwargs.get("run_metadata_collector")
-            if isinstance(collector, dict):
-                collector[constants.AI_RUN_METADATA_KEY] = {
-                    "usage": {"input_tokens": 1200, "output_tokens": 34, "total_tokens": 1234},
-                }
+        async def respond(*_args: object, sinks: TurnSinks) -> str:
+            collector = sinks.run_metadata_collector
+            assert collector is not None
+            collector[constants.AI_RUN_METADATA_KEY] = {
+                "usage": {"input_tokens": 1200, "output_tokens": 34, "total_tokens": 1234},
+            }
             return "Hello!"
 
         with patch("mindroom.api.openai_compat.ai_response", side_effect=respond):
@@ -1096,35 +1097,35 @@ class TestChatCompletions:
     def test_non_stream_usage_counts_cached_prompt_tokens_for_anthropic(self, app_client: TestClient) -> None:
         """Anthropic reports cache reads and writes outside input_tokens; prompt_tokens must include them."""
 
-        async def respond(_ctx: object, **kwargs: object) -> str:
-            collector = kwargs.get("run_metadata_collector")
-            if isinstance(collector, dict):
-                collector.update(
-                    build_ai_run_metadata_content(
-                        prices={},
-                        config=Config(
-                            agents={},
-                            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
-                            router=RouterConfig(model="default"),
-                        ),
-                        model_name="default",
-                        run_id="run-1",
-                        session_id="session-1",
-                        status=RunStatus.completed,
-                        model="claude-sonnet-5-5",
-                        model_provider="Anthropic",
-                        tool_count=0,
-                        metrics=RunMetrics(
-                            tokens=TokenCounts(
-                                input_tokens=40,
-                                output_tokens=200,
-                                total_tokens=240,
-                                cache_read_tokens=30000,
-                                cache_write_tokens=500,
-                            ),
+        async def respond(*_args: object, sinks: TurnSinks) -> str:
+            collector = sinks.run_metadata_collector
+            assert collector is not None
+            collector.update(
+                build_ai_run_metadata_content(
+                    prices={},
+                    config=Config(
+                        agents={},
+                        models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+                        router=RouterConfig(model="default"),
+                    ),
+                    model_name="default",
+                    run_id="run-1",
+                    session_id="session-1",
+                    status=RunStatus.completed,
+                    model="claude-sonnet-5-5",
+                    model_provider="Anthropic",
+                    tool_count=0,
+                    metrics=RunMetrics(
+                        tokens=TokenCounts(
+                            input_tokens=40,
+                            output_tokens=200,
+                            total_tokens=240,
+                            cache_read_tokens=30000,
+                            cache_write_tokens=500,
                         ),
                     ),
-                )
+                ),
+            )
             return "Hello!"
 
         with patch("mindroom.api.openai_compat.ai_response", side_effect=respond):
@@ -1140,7 +1141,7 @@ class TestChatCompletions:
         """Cancellation after lock acquisition must not leave the OpenAI session locked."""
         completion_lock = asyncio.Lock()
 
-        async def cancelled_response(_ctx: object, **_kwargs: object) -> str:
+        async def cancelled_response(*_args: object, **_kwargs: object) -> str:
             raise asyncio.CancelledError
 
         with (
@@ -1172,7 +1173,7 @@ class TestChatCompletions:
             )
 
             assert "include_default_tools" not in mock_ai.call_args.kwargs
-            assert mock_ai.call_args.kwargs["include_interactive_questions"] is False
+            assert mock_ai.call_args.args[0].include_interactive_questions is False
             assert mock_ai.call_args.args[0].active_event_ids == frozenset()
 
     def test_agent_completion_mints_fresh_uuid_correlation_id(self, app_client: TestClient) -> None:
@@ -1207,7 +1208,7 @@ class TestChatCompletions:
                 },
             )
 
-            assert mock_ai.call_args.kwargs["knowledge"] is None
+            assert mock_ai.call_args.args[0].knowledge is None
 
     def test_request_body_user_is_not_passed_as_ai_requester(self, app_client: TestClient) -> None:
         """OpenAI user must not be written as Matrix requester metadata."""
@@ -1691,7 +1692,7 @@ class TestStreamingCompletion:
     def test_streaming_sse_format(self, app_client: TestClient) -> None:
         """Streaming returns valid SSE format."""
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[TextDelta]:
             yield TextDelta("Hello ")
             yield TextDelta("world!")
 
@@ -1745,7 +1746,7 @@ class TestStreamingCompletion:
     ) -> None:
         """A run that streamed no text sends its finished reply as one chunk; a streamed reply is not repeated."""
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta | RunFinished]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[TextDelta | RunFinished]:
             for delta in deltas:
                 yield TextDelta(delta)
             yield RunFinished(RunRecord(run_id="run", status=RunStatus.completed, content="Whole answer"))
@@ -1762,7 +1763,7 @@ class TestStreamingCompletion:
     def test_streaming_passes_include_interactive_questions_false(self, app_client: TestClient) -> None:
         """Streaming disables interactive question prompting for OpenAI compatibility."""
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[TextDelta]:
             yield TextDelta("ok")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream) as mock_stream_fn:
@@ -1777,13 +1778,13 @@ class TestStreamingCompletion:
 
         assert response.status_code == 200
         assert "include_default_tools" not in mock_stream_fn.call_args.kwargs
-        assert mock_stream_fn.call_args.kwargs["include_interactive_questions"] is False
+        assert mock_stream_fn.call_args.args[0].include_interactive_questions is False
         assert mock_stream_fn.call_args.args[0].active_event_ids == frozenset()
 
     def test_streaming_consistent_id(self, app_client: TestClient) -> None:
         """All streaming chunks have the same completion ID."""
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[TextDelta]:
             yield TextDelta("test")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
@@ -1812,7 +1813,7 @@ class TestStreamingCompletion:
         """Worker-routing identity must stay active after the first streamed event."""
         observed_session_ids: list[str | None] = []
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[TextDelta]:
             identity = get_tool_execution_identity()
             observed_session_ids.append(identity.session_id if identity is not None else None)
             yield TextDelta("Hello ")
@@ -1917,7 +1918,7 @@ class TestStreamingCompletion:
         )
         observed_final_identities: list[ToolExecutionIdentity | None] = []
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[TextDelta]:
             try:
                 assert get_tool_execution_identity() == execution_identity
                 yield TextDelta("Hello")
@@ -1948,7 +1949,7 @@ class TestStreamingCompletion:
     def test_streaming_cached_response(self, app_client: TestClient) -> None:
         """Cached full response (string) is streamed correctly."""
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[str]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[str]:
             yield "This is a cached response"
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
@@ -1969,7 +1970,7 @@ class TestStreamingCompletion:
     def test_streaming_first_event_error_returns_500(self, app_client: TestClient) -> None:
         """If first stream event is an error string, return HTTP 500 instead of SSE."""
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[str]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[str]:
             yield "❌ Authentication failed (openai): Invalid API key"
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
@@ -2001,7 +2002,7 @@ class TestStreamingCompletion:
             result="3 results",
         )
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[object]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[object]:
             yield TextDelta("Let me search. ")
             yield ToolStarted(tool_started.call)
             yield ToolCompleted(tool_completed.call)
@@ -2050,7 +2051,7 @@ class TestStreamingCompletion:
             result="</tool><i>boom</i>" + ("x" * 600),
         )
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[object]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[object]:
             yield ToolStarted(tool_started.call)
             yield ToolCompleted(tool_completed.call)
 
@@ -2111,7 +2112,7 @@ class TestStreamingCompletion:
             result="two-result",
         )
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[object]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[object]:
             yield TextDelta("Start ")
             yield ToolStarted(first_started.call)
             yield ToolCompleted(first_completed.call)
@@ -2680,7 +2681,7 @@ def _completion_session_ids(client: TestClient, authorization_headers: list[str]
     """Post one completion per Authorization header with the same X-Session-Id and return the session IDs."""
     session_ids: list[str] = []
 
-    async def capture(ctx: ResponseTurnContext, **_kwargs: object) -> str:
+    async def capture(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
         session_ids.append(ctx.session_id)
         return "Response"
 
@@ -3062,7 +3063,7 @@ class TestAutoRouting:
     def test_auto_streaming(self, app_client: TestClient) -> None:
         """Auto model works with streaming, chunks carry resolved agent name."""
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[TextDelta]:
             yield TextDelta("Streamed!")
 
         with (
@@ -3412,11 +3413,11 @@ def test_agent_turn_names_the_mapped_keys_requester(test_config: Config, stream:
     initialize_api_app(app, runtime_paths)
     contexts: list[ResponseTurnContext] = []
 
-    async def respond(ctx: ResponseTurnContext, **_kwargs: object) -> str:
+    async def respond(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
         contexts.append(ctx)
         return "Response"
 
-    async def stream_response(ctx: ResponseTurnContext, **_kwargs: object) -> AsyncIterator[TextDelta]:
+    async def stream_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[TextDelta]:
         contexts.append(ctx)
         yield TextDelta("Response")
 
@@ -5022,7 +5023,7 @@ class TestKnowledgeIntegration:
             )
 
         assert response.status_code == 200
-        assert _knowledge_indexes(mock_ai.call_args.kwargs["knowledge"]) == [mock_reader]
+        assert _knowledge_indexes(mock_ai.call_args.args[0].knowledge) == [mock_reader]
 
     def test_knowledge_lookup_uses_explicit_runtime_key(self, knowledge_config: Config) -> None:
         """Shared knowledge lookup should resolve by config/runtime, not the static fallback map."""
@@ -5067,7 +5068,7 @@ class TestKnowledgeIntegration:
             )
 
         assert response.status_code == 200
-        assert _knowledge_indexes(mock_ai.call_args.kwargs["knowledge"]) == [mock_reader]
+        assert _knowledge_indexes(mock_ai.call_args.args[0].knowledge) == [mock_reader]
         assert observed_calls == [("docs", knowledge_config, runtime_paths)]
 
     def test_knowledge_none_when_not_configured(self, knowledge_app_client: TestClient) -> None:
@@ -5083,7 +5084,7 @@ class TestKnowledgeIntegration:
                 },
             )
 
-        assert mock_ai.call_args.kwargs["knowledge"] is None
+        assert mock_ai.call_args.args[0].knowledge is None
 
     def test_chat_completions_does_not_await_request_path_reindex(
         self,
@@ -5146,10 +5147,10 @@ class TestKnowledgeIntegration:
             )
 
         assert response.status_code == 200
-        assert mock_ai.call_args.kwargs["knowledge"] is None
+        assert mock_ai.call_args.args[0].knowledge is None
         assert (
             "Knowledge base `docs` is initializing and unavailable for semantic search this turn."
-            in mock_ai.call_args.kwargs["prompt"]
+            in mock_ai.call_args.args[0].prompt
         )
         assert scheduled_base_ids == ["docs"]
 
@@ -5157,7 +5158,7 @@ class TestKnowledgeIntegration:
         """Knowledge is passed through in streaming mode too."""
         mock_reader = MagicMock()
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[TextDelta]:
             yield TextDelta("Streamed!")
 
         with (
@@ -5177,7 +5178,7 @@ class TestKnowledgeIntegration:
             )
 
         assert response.status_code == 200
-        assert _knowledge_indexes(mock_stream_fn.call_args.kwargs["knowledge"]) == [mock_reader]
+        assert _knowledge_indexes(mock_stream_fn.call_args.args[0].knowledge) == [mock_reader]
 
     def test_multi_knowledge_bases_merged(self, knowledge_config: Config) -> None:
         """Agent with multiple knowledge_bases gets a merged Knowledge object."""
@@ -5225,7 +5226,7 @@ class TestKnowledgeIntegration:
             )
 
         assert response.status_code == 200
-        knowledge_arg = mock_ai.call_args.kwargs["knowledge"]
+        knowledge_arg = mock_ai.call_args.args[0].knowledge
         assert _knowledge_indexes(knowledge_arg) == [mock_reader_docs, mock_reader_wiki]
         assert [source.description.base_id for source in knowledge_arg.sources] == ["docs", "wiki"]
         assert knowledge_arg.max_results == 10
@@ -5251,7 +5252,7 @@ class TestKnowledgeIntegration:
             )
 
         assert response.status_code == 200
-        assert mock_ai.call_args.kwargs["knowledge"] is None
+        assert mock_ai.call_args.args[0].knowledge is None
         data = response.json()
         assert data["choices"][0]["message"]["content"] == "Response without knowledge"
 

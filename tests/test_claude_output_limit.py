@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from itertools import chain, repeat
 from typing import TYPE_CHECKING, Any
 
@@ -19,6 +20,7 @@ from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
 from mindroom.llm.errors import ModelOutputLimitError
 from mindroom.llm.messages import Message
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, make_turn_context, runtime_paths_for, test_runtime_paths
 from tests.providers.golden_support import httpx2_transport
 
@@ -187,32 +189,37 @@ def _tool_results(body: dict[str, Any]) -> list[dict[str, Any]]:
     return [block for block in body["messages"][-1]["content"] if block["type"] == "tool_result"]
 
 
-async def _reply(config: Config, prompt: str, *, stream: bool) -> str:
-    """Answer one prompt the way the OpenAI-compatible endpoint does, or through the streaming path chat uses."""
-    return await ai_response(
+async def _reply(config: Config, prompt: str) -> str:
+    """Answer one prompt the way the OpenAI-compatible endpoint does."""
+    identity = ToolExecutionIdentity(
+        channel="openai_compat",
+        agent_name="coder",
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-1",
+    )
+    turn = replace(
         make_turn_context("coder", session_id="session-1"),
         prompt=prompt,
-        runtime_paths=runtime_paths_for(config),
-        config=config,
-        include_interactive_questions=False,
-        include_openai_compat_guidance=True,
         show_tool_calls=False,
-        collect_streamed_response=stream,
+        execution_identity=identity,
+        include_interactive_questions=False,
     )
+    return await ai_response(turn, runtime_paths_for(config), config)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 async def test_cut_off_tool_call_is_answered_instead_of_run(
     config: Config,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    stream: bool,
 ) -> None:
     """The cut-off call never runs; the model is told why and gets another request instead of the run ending."""
     bodies = _fake_claude(monkeypatch, [_cut_off_write(), _answer("Wrote big.py in two parts.")])
 
-    response = await _reply(config, "Write the full simulation script to big.py.", stream=stream)
+    response = await _reply(config, "Write the full simulation script to big.py.")
 
     assert not list(tmp_path.rglob("big.py"))
     assert "Wrote big.py in two parts." in response
@@ -223,17 +230,15 @@ async def test_cut_off_tool_call_is_answered_instead_of_run(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 async def test_run_that_keeps_cutting_off_its_tool_calls_fails_visibly(
     config: Config,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    stream: bool,
 ) -> None:
     """Two corrective retries per run, then a clear error instead of a silent or endless run."""
     bodies = _fake_claude(monkeypatch, [_cut_off_write()])
 
-    response = await _reply(config, "Write the full simulation script to big.py.", stream=stream)
+    response = await _reply(config, "Write the full simulation script to big.py.")
 
     assert not list(tmp_path.rglob("big.py"))
     assert len(bodies) == 3
@@ -243,12 +248,10 @@ async def test_run_that_keeps_cutting_off_its_tool_calls_fails_visibly(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 async def test_complete_responses_between_cut_offs_do_not_renew_the_retries(
     config: Config,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    stream: bool,
 ) -> None:
     """A model that keeps returning to its oversized call between small ones still ends at its third cut-off."""
     bodies = _fake_claude(
@@ -256,7 +259,7 @@ async def test_complete_responses_between_cut_offs_do_not_renew_the_retries(
         [_cut_off_write(), _small_write(), _cut_off_write(), _small_write(), _cut_off_write(), _answer("Wrote it.")],
     )
 
-    response = await _reply(config, "Write the full simulation script to big.py.", stream=stream)
+    response = await _reply(config, "Write the full simulation script to big.py.")
 
     assert len(bodies) == 5
     assert "Wrote it." not in response
@@ -265,12 +268,10 @@ async def test_complete_responses_between_cut_offs_do_not_renew_the_retries(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 async def test_compaction_between_cut_offs_does_not_renew_the_retries(
     compacting_config: Config,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    stream: bool,
 ) -> None:
     """Compaction folds the earlier cut-off responses into its summary, and the third one still ends the run."""
     bodies = _fake_claude(
@@ -278,7 +279,7 @@ async def test_compaction_between_cut_offs_does_not_renew_the_retries(
         [_cut_off_write(), _cut_off_write(), _cut_off_write(), _answer("Wrote big.py in two parts.")],
     )
 
-    response = await _reply(compacting_config, "Write the full simulation script to big.py.", stream=stream)
+    response = await _reply(compacting_config, "Write the full simulation script to big.py.")
 
     requests = [body for body in bodies if "tools" in body]
     assert len(requests) == 3
@@ -324,11 +325,9 @@ def test_each_run_gets_its_own_cut_off_retries() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 async def test_cut_off_text_is_delivered_as_is_and_logged(
     config: Config,
     monkeypatch: pytest.MonkeyPatch,
-    stream: bool,
 ) -> None:
     """Text cut off at the output limit is already visible, so it is kept without another request."""
     cut_off_text = _message(
@@ -339,7 +338,7 @@ async def test_cut_off_text_is_delivered_as_is_and_logged(
     bodies = _fake_claude(monkeypatch, [cut_off_text])
 
     with capture_logs() as logs:
-        response = await _reply(config, "Write the whole report inline.", stream=stream)
+        response = await _reply(config, "Write the whole report inline.")
 
     assert response == "Chapter one of the report, which goes on and"
     assert len(bodies) == 1

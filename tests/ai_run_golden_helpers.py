@@ -1,8 +1,7 @@
-"""The ``io.mindroom.ai_run`` metadata each golden run publishes, replayed through the entry point that published it.
+"""The ``io.mindroom.ai_run`` metadata each golden run publishes, replayed through the reply's turn driver.
 
 ``tests/fixtures/agno_parity/events/ai_run.json`` holds the metadata, keyed by run id. A new run replays through
-``ai_response``, ``stream_agent_response``, ``team_response``, or ``team_response_stream`` with a run-metadata
-collector. Each scripted model answers every request as the run's stored assistant messages did, with their usage
+``ai_response`` or ``team_response_stream`` collected, each the one turn driver's stream, with a run-metadata collector. Each scripted model answers every request as the run's stored assistant messages did, with their usage
 and tool calls, or fails as a failed run did, and the history preparation returns what the run's stored metadata says
 it prepared: the capture kept that result, not the stored history and prompt it came from. An approval resume
 prepares no history, so the resumes run from the stores the capture dumped just before them
@@ -16,19 +15,20 @@ import copy
 import json
 import sqlite3
 from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from mindroom import execution_preparation
-from mindroom.ai import ai_response, stream_agent_response
+from mindroom.ai import ai_response
 from mindroom.config.main import Config
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.history.types import CompactionDecision, PreparedHistoryState, ResolvedReplayPlan
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.runs import AnyRunRecord, RunRecord, RunStatus, TeamRunRecord
 from mindroom.message_target import MessageTarget
-from mindroom.response_turn import CompletedApprovalRun, paused_attempt_from_response
+from mindroom.response_turn import CompletedApprovalRun, TurnSinks, paused_attempt_from_response
 from mindroom.teams.presentation import TeamStreamPresentation
 from mindroom.teams.resume import continued_team_pause
 from mindroom.teams.spec import TeamMode
@@ -98,8 +98,6 @@ _AUTHORED = authored_team_config(
 _AUTHORED["models"]["code"] |= {"display_name": "Code Model", "context_window": 200000}
 _AUTHORED["models"]["leader"]["context_window"] = 100000
 _AUTHORED["tool_approval"] = {"default": "auto_approve", "rules": [{"match": "multiply", "action": "require_approval"}]}
-# The runs whose replies streamed; the rest were blocking.
-_STREAMED = {"run-tools", "panel-completed"}
 
 
 def _stored_runs() -> dict[str, AnyRunRecord]:
@@ -185,7 +183,7 @@ def _member_runs(run_id: str) -> list[RunRecord]:
 
 
 async def _agent_reply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_id: str) -> dict[str, Any]:
-    """Replay the agent run ``run_id`` through its reply's entry point and return the metadata it published."""
+    """Replay the agent run ``run_id`` as a reply and return the metadata it published."""
     record = _RUNS[run_id]
     # MindRoom's interrupted-turn record replaced the failed run's row and keeps no usage, model, or provider. The
     # failed run's own record held what Agno stored for the same failing request when no turn record replaced it.
@@ -214,35 +212,28 @@ async def _agent_reply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_id: 
         correlation_id="correlation-1",
         membership_turn_id="$current",
     )
-    ctx = make_turn_context(
-        "code",
-        session_id=record.session_id,
-        run_id=run_id,
-        correlation_id="correlation-1",
-        reply_to_event_id="$current",
-        room_id=room_id,
-        thread_id=thread_id,
-        requester_id=_REQUESTER,
+    ctx = replace(
+        make_turn_context(
+            "code",
+            session_id=record.session_id,
+            run_id=run_id,
+            correlation_id="correlation-1",
+            reply_to_event_id="$current",
+            room_id=room_id,
+            thread_id=thread_id,
+            requester_id=_REQUESTER,
+        ),
+        prompt="Hello",
+        execution_identity=build_execution_identity_from_runtime_context(runtime),
     )
     published: dict[str, Any] = {}
-    reply = {
-        "ctx": ctx,
-        "prompt": "Hello",
-        "runtime_paths": paths,
-        "config": config,
-        "execution_identity": build_execution_identity_from_runtime_context(runtime),
-        "run_metadata_collector": published,
-    }
     with tool_runtime_context(runtime):
-        if run_id in _STREAMED:
-            _ = [chunk async for chunk in stream_agent_response(**reply)]
-        else:
-            await ai_response(**reply)
+        await ai_response(ctx, paths, config, sinks=TurnSinks(run_metadata_collector=published))
     return published
 
 
 async def _team_reply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_id: str) -> dict[str, Any]:
-    """Replay the team run ``run_id`` through its reply's entry point and return the metadata it published."""
+    """Replay the team run ``run_id`` as a reply and return the metadata it published."""
     record = _RUNS[run_id]
     assert isinstance(record, TeamRunRecord)
     assert record.team_id is not None
@@ -261,11 +252,7 @@ async def _team_reply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_id: s
         team.models[member.model] = _model(member)
     _prepares(monkeypatch, record)
     published: dict[str, Any] = {}
-    ctx = team.ctx(session_id=record.session_id, run_id=run_id)
-    if run_id in _STREAMED:
-        await team.stream(ctx=ctx, run_metadata_collector=published)
-    else:
-        await team.respond(ctx=ctx, run_metadata_collector=published)
+    await team.respond(ctx=team.ctx(session_id=record.session_id, run_id=run_id), run_metadata_collector=published)
     # The stored team run is identified by its team alone; the members' label it held before is not stored.
     stored = team.storage.get_run(run_id)
     assert isinstance(stored, TeamRunRecord)

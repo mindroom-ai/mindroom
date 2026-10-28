@@ -188,6 +188,8 @@ class CollectedStreamPresentation:
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
     track_hidden_tools: bool = False
     canonical_final_body_candidate: str | None = None
+    # The structured state of a team document the stream showed whole, which a resume restores.
+    document_state: dict[str, object] | None = None
     tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker, init=False)
     separate_next_text: bool = field(default=False, init=False, repr=False)
 
@@ -236,6 +238,12 @@ class CollectedStreamPresentation:
                 tool_index=pending_tool.visible_tool_index,
             )
         self.tool_tracker.update_visible_trace_entry(self.tool_trace, pending_tool, completed_trace)
+
+    def show_document(self, chunk: StructuredStreamChunk) -> None:
+        """Replace the collected presentation with a document the stream sent whole."""
+        self.response_text = chunk.content
+        self.tool_trace = list(chunk.tool_trace or ())
+        self.document_state = chunk.presentation_state
 
     def final_text(self) -> str:
         """Return collected deltas, falling back to the provider's canonical final body."""

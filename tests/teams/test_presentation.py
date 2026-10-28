@@ -1,6 +1,6 @@
 """The team reply document: member slots, consensus, tool markers, the durable snapshot, member ids, finished runs.
 
-The finished runs are the records a team run hands over, in the order a blocking reply lists them.
+The finished runs are the records a team run hands over.
 """
 # ruff: noqa: D103
 
@@ -11,7 +11,7 @@ import pytest
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.llm.events import ReportedCall, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.redaction import redact_sensitive_text
 from mindroom.response_turn import PausedAttempt
 from mindroom.teams.presentation import (
@@ -19,7 +19,6 @@ from mindroom.teams.presentation import (
     apply_team_event,
     finished_run_text,
     format_team_header,
-    format_team_response,
     render_team_member_slots,
     strip_team_display,
     url_safe_member_id,
@@ -160,17 +159,13 @@ def test_a_finished_run_without_content_reads_as_the_text_its_model_wrote() -> N
     )
 
     assert finished_run_text(scout) == "Three vendors.\n\nTwo more."
-    team = TeamRunRecord(run_id="team-run", content="Five in all.", ended_member_runs=[scout], team_id=None)
-    assert format_team_response(team, TeamStreamPresentation.new(["scout"], ["Scout"], show_tool_calls=False)) == (
-        "**Scout**: Three vendors.\n\nTwo more.\n\n\n**Team Consensus**:\n\nFive in all."
-    )
 
 
 _RAW_FAILURE = "checker provider down: api_key=example-secret"
 
 
 @pytest.mark.parametrize("source", ["live", "loaded"])
-def test_a_failed_member_shows_its_redacted_reason_in_the_team_document(source: str) -> None:
+def test_a_failed_member_run_shows_its_redacted_reason(source: str) -> None:
     """A member whose run failed shows why, credentials redacted, whether its record is live or loaded from storage.
 
     The live record carries the reason the loop recorded, though its model wrote text first; a loaded one holds only
@@ -186,13 +181,10 @@ def test_a_failed_member_shows_its_redacted_reason_in_the_team_document(source: 
         error=reason if source == "live" else None,
     )
 
-    document = format_team_response(
-        TeamRunRecord(run_id="team-run", content="Unchecked.", ended_member_runs=[checker], team_id=None),
-        TeamStreamPresentation.new(["checker"], ["Checker"], show_tool_calls=False),
-    )
+    text = finished_run_text(checker)
 
-    assert document == f"**Checker**: {reason}\n\n\n**Team Consensus**:\n\nUnchecked."
-    assert "example-secret" not in document
+    assert text == reason
+    assert "example-secret" not in text
 
 
 def test_hidden_tool_calls_separate_the_text_that_follows_them_and_survive_the_snapshot() -> None:

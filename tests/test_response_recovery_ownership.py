@@ -40,7 +40,7 @@ from tests.test_response_redaction_recovery import _message, _redaction
 from tests.test_turn_store import _store
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -197,7 +197,7 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
             correlation_id=SOURCE,
             envelope=_envelope(target, source_event_id=SOURCE),
         )
-        task = runner.track_inbox_response(
+        task = runner.inbox.track_inbox_response(
             controller._execute_response_action(
                 callback_room,
                 event,
@@ -221,12 +221,16 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
     dispatcher = _dispatcher(principal, callback)
     model_requests = []
 
-    async def model(*args: object, **kwargs: object) -> str:
+    def model(*args: object, **kwargs: object) -> AsyncIterator[str]:
         model_requests.append((args, kwargs))
-        if scenario == "deleted_after_model":
-            captured.set()
-            await release.wait()
-        return "survivor answer"
+
+        async def answer() -> AsyncIterator[str]:
+            if scenario == "deleted_after_model":
+                captured.set()
+                await release.wait()
+            yield "survivor answer"
+
+        return answer()
 
     await admit_dispatch_event(
         dispatcher,
@@ -236,7 +240,7 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
         EventClass.ACTIONABLE,
     )
     with patch_response_runner_module(
-        ai_response=AsyncMock(side_effect=model),
+        stream_agent_response=model,
         should_use_streaming=AsyncMock(return_value=False),
         typing_indicator=_noop_typing,
         apply_post_response_effects=AsyncMock(),

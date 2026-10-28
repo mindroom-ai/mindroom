@@ -32,7 +32,7 @@ from mindroom.llm.messages import system_text
 from mindroom.llm.provider import ToolSpec
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.providers.gemini import wire as gemini_wire
-from mindroom.response_runner import _agent_has_matrix_messaging_tool
+from mindroom.reply_turn.enrichment import agent_has_matrix_messaging_tool
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, offered_refusal
 from mindroom.tool_system.dynamic_toolkits import (
     DeferredToolkit,
@@ -803,11 +803,11 @@ def test_scope_incompatible_deferred_tools_reject_at_config_and_runtime(tmp_path
 def test_matrix_metadata_injection_follows_configured_matrix_message(tmp_path: Path, *, defer: bool) -> None:
     """Matrix prompt metadata appears whenever matrix_message is configured, deferred or not."""
     raw = _base_config_data()
-    assert not _agent_has_matrix_messaging_tool(_validated_config(tmp_path, raw), "code")
+    assert not agent_has_matrix_messaging_tool(_validated_config(tmp_path, raw), "code")
 
     raw["agents"]["code"]["tools"] = [{"matrix_message": {"defer": defer}}]  # type: ignore[index]
 
-    assert _agent_has_matrix_messaging_tool(_validated_config(tmp_path, raw), "code")
+    assert agent_has_matrix_messaging_tool(_validated_config(tmp_path, raw), "code")
 
 
 def test_openclaw_compat_implies_matrix_messaging_tool(tmp_path: Path) -> None:
@@ -816,7 +816,7 @@ def test_openclaw_compat_implies_matrix_messaging_tool(tmp_path: Path) -> None:
     raw["agents"]["code"]["tools"] = ["openclaw_compat"]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    assert _agent_has_matrix_messaging_tool(config, "code")
+    assert agent_has_matrix_messaging_tool(config, "code")
 
 
 def test_native_tool_search_attaches_deferred_toolkits_and_skips_portable_tool_search(tmp_path: Path) -> None:
