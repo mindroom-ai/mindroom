@@ -1087,3 +1087,38 @@ async def test_suppressed_placeholder_cleanup_exception_returns_typed_outcome_af
     assert len(cancelled_seen) == 1
     assert cancelled_seen[0].visible_response_event_id is None
     assert cancelled_seen[0].failure_reason == outcome.failure_reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("run_succeeded", "applied"), [(True, 1), (False, 0)], ids=["owed-answer", "approval-pause"])
+async def test_a_suspended_reply_applies_its_run_effects_only_once_its_run_finished(
+    tmp_path: Path,
+    run_succeeded: bool,
+    applied: int,
+) -> None:
+    """An answer recorded but not yet in the room finished its run, so memory and skill review take it now.
+
+    A run paused for approval has not finished and applies nothing; neither fires a delivery hook before the reply is
+    in the room.
+    """
+    _, response_hooks = _response_hook_service(tmp_path, HookRegistry.from_plugins([]))
+    lifecycle = _response_lifecycle(response_hooks, response_envelope=_envelope(), correlation_id="corr-owed")
+    post_effects = AsyncMock()
+    after_response = AsyncMock()
+    cancelled = AsyncMock()
+
+    with (
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=post_effects),
+        patch.object(response_hooks, "emit_after_response", new=after_response),
+        patch.object(response_hooks, "emit_cancelled_response", new=cancelled),
+    ):
+        outcome = await lifecycle.finalize(
+            FinalDeliveryOutcome(terminal_status="suspended", event_id=None, failure_reason="delivery_failed"),
+            build_post_response_outcome=lambda _outcome: ResponseOutcome(run_succeeded=run_succeeded),
+            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        )
+
+    assert outcome.terminal_status == "suspended"
+    assert post_effects.await_count == applied
+    after_response.assert_not_awaited()
+    cancelled.assert_not_awaited()

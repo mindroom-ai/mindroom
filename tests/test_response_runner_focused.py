@@ -6294,11 +6294,14 @@ async def test_duplicate_queued_request_without_reservation_registers_one_notice
 # ---------------------------------------------------------------------------
 
 
+_SUSPENDED = FinalDeliveryOutcome(terminal_status="suspended", event_id="$response", is_visible_response=True)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("delivery_outcome", "hands_off", "process_shutdown_requested"),
+    ("delivery_outcome", "run_succeeded", "process_shutdown_requested", "applies_effects"),
     [
-        (_completed_outcome(), False, False),
+        (_completed_outcome(), True, False, True),
         (
             FinalDeliveryOutcome(
                 terminal_status="cancelled",
@@ -6308,6 +6311,7 @@ async def test_duplicate_queued_request_without_reservation_registers_one_notice
             ),
             False,
             False,
+            True,
         ),
         (
             FinalDeliveryOutcome(
@@ -6318,35 +6322,34 @@ async def test_duplicate_queued_request_without_reservation_registers_one_notice
             ),
             False,
             False,
-        ),
-        (
-            FinalDeliveryOutcome(
-                terminal_status="suspended",
-                event_id="$response",
-                is_visible_response=True,
-            ),
-            True,
-            False,
-        ),
-        (
-            FinalDeliveryOutcome(
-                terminal_status="suspended",
-                event_id="$response",
-                is_visible_response=True,
-            ),
-            True,
             True,
         ),
+        (_SUSPENDED, False, False, False),
+        (_SUSPENDED, True, False, True),
+        (_SUSPENDED, True, True, False),
     ],
-    ids=["completed", "cancelled", "error", "suspended", "suspended_during_process_shutdown"],
+    ids=[
+        "completed",
+        "cancelled",
+        "error",
+        "approval_pause",
+        "owed_answer",
+        "owed_answer_during_process_shutdown",
+    ],
 )
 async def test_response_settlement_finalizes_and_transfers_ownership_once(
     tmp_path: Path,
     delivery_outcome: FinalDeliveryOutcome,
-    hands_off: bool,
+    *,
+    run_succeeded: bool,
     process_shutdown_requested: bool,
+    applies_effects: bool,
 ) -> None:
-    """Each outcome finalizes once and only a durable pause transfers source ownership."""
+    """Each outcome finalizes once and only a durable pause transfers source ownership.
+
+    A suspended reply applies its run's effects only when its run finished, as an owed answer's did.
+    """
+    hands_off = delivery_outcome.terminal_status == "suspended"
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     request = replace(
@@ -6355,7 +6358,7 @@ async def test_response_settlement_finalizes_and_transfers_ownership_once(
     )
     progress = response_runner._DeliveryProgress()
     post_effects = AsyncMock()
-    build_post_outcome = MagicMock(return_value=ResponseOutcome())
+    build_post_outcome = MagicMock(return_value=ResponseOutcome(run_succeeded=run_succeeded))
 
     async def generate(_message_id: str | None) -> None:
         progress.settle(delivery_outcome)
@@ -6398,10 +6401,7 @@ async def test_response_settlement_finalizes_and_transfers_ownership_once(
     assert progress.delivery_outcome is delivery_outcome
     build_post_outcome.assert_called_once_with(delivery_outcome)
     finalize.assert_awaited_once()
-    if hands_off:
-        post_effects.assert_not_awaited()
-    else:
-        post_effects.assert_awaited_once()
+    assert post_effects.await_count == int(applies_effects)
     assert request.source_handoff is not None
     assert request.source_handoff.is_set() is hands_off
 

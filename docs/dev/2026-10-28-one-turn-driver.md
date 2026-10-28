@@ -30,6 +30,8 @@ A non-success reply ending was decided by the streamer (a terminal row with the 
   A stopped stream's final message therefore keeps what it last showed plus the note; text generated after its last progress edit stays in history, not in the message.
 - A whole delivery with nothing to show ends as a stream that showed only its placeholder does: the placeholder goes, instead of the placeholder text standing as a completed answer.
 - Approval-resumed replies keep `message:before_response`, because they are delivered whole once the approved run finishes; only a stream that finishes successfully runs `message:final_response_transform`.
+- An ordinary answer whose final write is recorded but not yet acknowledged reports `suspended`, and its run-only effects (finished notification, memory, skill review) apply at once, because its run finished and nothing applies them when the outbox later delivers it.
+  Effects and hooks that need a delivered completed answer (`message:after_response`, buttons, thread summary) still skip it; an approval's owed final keeps running everything after acknowledgement, so it reports its run unfinished until then.
 
 ## Rejected alternatives
 
@@ -44,5 +46,4 @@ A non-success reply ending was decided by the streamer (a terminal row with the 
 
 ## Open
 
-- An ordinary answer whose final write is recorded but not yet acknowledged reports `suspended`, so its after-response work never runs (only approvals re-run it after acknowledgement); whether its run-only effects should run at once is a product decision.
 - After a Stop the streamer waits 0.5 s for its stream task to unwind, and that task now stores the interrupted turn; a store slower than that still lands the row, but possibly after the conversation's next turn started.
