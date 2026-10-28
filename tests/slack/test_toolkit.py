@@ -600,7 +600,8 @@ async def test_download_keeps_an_html_file(
     assert result["file"]["size"] == len(page)
 
 
-@pytest.mark.parametrize(
+_DOCUMENT_REFUSAL = "Slack canvases and posts can't be downloaded as files; open them in Slack"
+_DOCUMENT_KINDS = pytest.mark.parametrize(
     ("mimetype", "filetype"),
     [
         ("application/vnd.slack-docs", "quip"),
@@ -610,32 +611,77 @@ async def test_download_keeps_an_html_file(
     ],
     ids=["canvas by mimetype and quip", "by mimetype", "canvas by filetype", "post by filetype"],
 )
+
+
+def _document(mimetype: str, filetype: str | None, download_url: str) -> dict[str, object]:
+    file: dict[str, object] = {
+        "id": FILE_ID,
+        "name": "Launch plan",
+        "mimetype": mimetype,
+        "size": 7,
+        "url_private_download": download_url,
+    }
+    if filetype is not None:
+        file["filetype"] = filetype
+    return file
+
+
+@_DOCUMENT_KINDS
 @pytest.mark.asyncio
-async def test_download_keeps_a_slack_document_whose_page_differs_in_length(
+async def test_download_refuses_a_slack_document_without_fetching_it(
     mimetype: str,
     filetype: str | None,
     tmp_path: Path,
     paths: RuntimePaths,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A canvas or post downloads as HTML of another length than `files.info` reports, which is no error page."""
+    """A canvas or post has no file to download, so no request reaches the file host and nothing is written."""
     _connect_alice(paths)
     download_url = f"https://files.slack.com/files-pri/T0123ABCD-{FILE_ID}/canvas"
-    page = "<html><body><h1>Launch plan</h1></body></html>"
-    file = {"id": FILE_ID, "name": "Launch plan", "mimetype": mimetype, "size": 7, "url_private_download": download_url}
-    if filetype is not None:
-        file["filetype"] = filetype
-    FakeSlack(
-        {"files.info": {"ok": True, "file": file}, download_url: lambda _request: httpx.Response(200, html=page)},
+    fake = FakeSlack(
+        {
+            "files.info": {"ok": True, "file": _document(mimetype, filetype, download_url)},
+            download_url: lambda _request: httpx.Response(200, html="<html>Sign in</html>"),
+        },
     ).install(monkeypatch)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
     result = json.loads(await _tools(paths, tool_output_workspace_root=workspace).slack_download(FILE_ID))
 
-    saved = workspace / "slack-downloads" / f"{FILE_ID}-Launch plan"
-    assert result["path"] == str(saved)
-    assert saved.read_text() == page
+    assert result["message"] == _DOCUMENT_REFUSAL
+    assert fake.methods() == ["files.info"]
+    assert not any(request.url.host == "files.slack.com" for request in fake.requests)
+    assert list(workspace.iterdir()) == []
+
+
+@_DOCUMENT_KINDS
+@pytest.mark.asyncio
+async def test_download_of_a_slack_document_leaves_an_earlier_download_untouched(
+    mimetype: str,
+    filetype: str | None,
+    tmp_path: Path,
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _connect_alice(paths)
+    download_url = f"https://files.slack.com/files-pri/T0123ABCD-{FILE_ID}/canvas"
+    FakeSlack(
+        {
+            "files.info": {"ok": True, "file": _document(mimetype, filetype, download_url)},
+            download_url: lambda _request: httpx.Response(200, html="<html>Sign in</html>"),
+        },
+    ).install(monkeypatch)
+    workspace = tmp_path / "workspace"
+    earlier = workspace / "slack-downloads" / f"{FILE_ID}-Launch plan"
+    earlier.parent.mkdir(parents=True)
+    earlier.write_text("<html>Launch plan</html>")
+
+    result = json.loads(await _tools(paths, tool_output_workspace_root=workspace).slack_download(FILE_ID))
+
+    assert result["message"] == _DOCUMENT_REFUSAL
+    assert earlier.read_text() == "<html>Launch plan</html>"
+    assert [path.name for path in earlier.parent.iterdir()] == [earlier.name]
 
 
 @pytest.mark.asyncio

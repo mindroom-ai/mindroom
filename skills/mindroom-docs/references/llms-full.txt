@@ -13181,6 +13181,7 @@ The 👀 reaction and the reply MindRoom posts to a Slack mention are not tool c
 | `Invite the MindRoom app to <#C0123ABCD>` | The app has not joined that listed channel. Invite it. |
 | `Not one of this agent's Slack channels` | The conversation is not in the agent's `channels`, or it is a direct message. |
 | `This file is not in one of this agent's Slack channels` | A project agent downloads only files shared in its channels. |
+| `Slack canvases and posts can't be downloaded as files; open them in Slack` | `slack_download` takes files, not canvases or posts. |
 | `Message and people search need a personal Slack connection` | A project agent searches only conversations. |
 | `Slack needs the <scope> permission; reconnect Slack to grant it` | A personal connection lacks a user scope. Reconnect Slack. |
 | `Slack needs the <scope> permission; add it to the MindRoom Slack app` | A project call needs a bot scope. Add it in the app and reinstall the app. |
