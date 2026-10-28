@@ -6,7 +6,6 @@ import asyncio
 import json
 import threading
 import time
-from collections.abc import Awaitable, Callable
 from contextlib import contextmanager, suppress
 from contextvars import Context
 from dataclasses import dataclass, field
@@ -14,21 +13,21 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 from weakref import WeakValueDictionary
 
-from mindroom.approval.events import PendingApproval, parse_approval_datetime
+from mindroom.approval.events import card_approvable
 from mindroom.event_journal import (
     SCHEDULED_APPROVAL_WINDOW_NS,
+    TIMEOUT_REASON,
     ApprovalCardReservation,
+    ApprovalCardView,
     ApprovalDecisionMetadata,
     BackgroundApprovalDecision,
+    CallKey,
     DeliveryStage,
-    MatrixDelivery,
     ScheduledCall,
     ScheduledCallBinding,
     ScheduledCallClaim,
     ScheduledCallOutcome,
     ScheduledCallRefusal,
-    StoredApprovalCard,
-    UnreadableApprovalCard,
 )
 from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
 from mindroom.logging_config import get_logger
@@ -45,24 +44,21 @@ from mindroom.tool_approval_grants import (
 from mindroom.tool_system.tool_calls import sanitize_failure_text, sanitize_failure_value
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 
     from mindroom.approval.recovery import ApprovalRecovery
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
+    from mindroom.approval.transport import ApprovalMatrixTransport
     from mindroom.constants import RuntimePaths
-    from mindroom.event_journal import ApprovalDeliveryView, RecordedApprovalDecision, ScheduledApprovalArmState
+    from mindroom.event_journal import (
+        ApprovalDeliveryView,
+        DecisionStatus,
+        RecordedApprovalDecision,
+        ScheduledApprovalArmState,
+    )
+    from mindroom.event_journal.approval_signals import DecidedCard
 
-_ApprovalStatus = Literal["approved", "denied", "expired"]
 _ResolutionStatus = Literal["approved", "denied"]
-_MatrixEventPreparer = Callable[[str, str | None, dict[str, Any]], Awaitable[dict[str, Any] | None]]
-_MatrixDeliverySender = Callable[[MatrixDelivery], Awaitable[str]]
-_MatrixDeliveryResolver = Callable[[MatrixDelivery], Awaitable[str | None]]
-_ApprovalActionDeliveryResolver = Callable[[str, str], Awaitable[str | None]]
-_TransportSenderProvider = Callable[[], str | None]
-_SendingDeviceProvider = Callable[[], str | None]
-_ContinuationReadyHandler = Callable[[str, str, tuple[str, ...]], Awaitable[None] | None]
-_ResponderPrincipalProvider = Callable[[str], str | None]
-_RouterMissingProvider = Callable[[str], bool]
 
 _STARTUP_RECOVERY_SCAN_PAGE = 256
 _DEADLINE_SWEEP_SECONDS = 60.0
@@ -71,7 +67,8 @@ DEFAULT_ROUTER_MANAGED_ROOM_REASON = (
     "Tool approval needs the router in this room. If `router.accept_invites` allows this Matrix transport account, "
     "call `invite_router` and wait for the router to join; otherwise enable it or add the router manually, then retry."
 )
-_DEFAULT_TIMEOUT_REASON = "Tool approval request timed out."
+# What an approval request or settlement meets before the approval runtime and the router's card store are bound.
+RUNTIME_NOT_READY_REASON = "Tool approval runtime is not ready."
 _DEFAULT_TRUNCATED_APPROVAL_REASON = (
     "Cannot approve: the tool arguments cannot be shown in full, so a human cannot review "
     "exactly what would run. Retry with a smaller or simpler payload — for example save large content to a "
@@ -84,13 +81,9 @@ _MANAGER: ApprovalManager | None = None
 logger = get_logger(__name__)
 
 
-def _approval_action_authorized(
-    pending: PendingApproval,
-    stored: StoredApprovalCard,
-    authorize_responder: Callable[[str], bool],
-) -> bool:
+def _approval_action_authorized(card: ApprovalCardView, authorize_responder: Callable[[str], bool]) -> bool:
     """Authorize an actionable card against its trusted originating responder."""
-    entity_name = stored.continuation_entity_name if stored.target_kind == "continuation" else pending.agent_name
+    entity_name = card.responder_entity_name if card.owner_kind == "reply" else card.invoking_agent
     return entity_name is not None and authorize_responder(entity_name)
 
 
@@ -227,19 +220,10 @@ class ApprovalManager:
     """Own approval semantics while the generic worker owns Matrix delivery."""
 
     runtime_paths: RuntimePaths
-    prepare_event: _MatrixEventPreparer | None = None
-    send_delivery: _MatrixDeliverySender | None = None
-    resolve_delivery: _MatrixDeliveryResolver | None = None
-    resolve_action_delivery: _ApprovalActionDeliveryResolver | None = None
+    # Prepares, sends, and verifies cards through the router, and wakes the replies their decisions unblock.
+    transport: ApprovalMatrixTransport
     cards: ApprovalDeliveryView | None = None
-    transport_sender: _TransportSenderProvider | None = None
-    sending_device: _SendingDeviceProvider | None = None
-    continuation_ready: _ContinuationReadyHandler | None = None
     recovery: ApprovalRecovery | None = None
-    # Names the journal principal of an entity's Matrix account, which timed approvals on detached cards bind to.
-    responder_principal: _ResponderPrincipalProvider | None = None
-    # Says whether a room lacks the router, so gated calls there are denied before any card is attempted.
-    router_missing: _RouterMissingProvider | None = None
     _resolving_card_event_ids: set[str] = field(default_factory=set, init=False, repr=False)
     _live_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _deadline_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
@@ -250,53 +234,15 @@ class ApprovalManager:
         init=False,
         repr=False,
     )
+    # The terminal edits of cards decided as they committed, wherever the decision was written.
+    _decided_flushes: set[asyncio.Task[bool]] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Attach recovery to its owning runtime after construction."""
         if self.recovery is not None:
             self.recovery.bind(self)
 
-    def _configure_transport(  # noqa: C901 - each collaborator rebinds independently
-        self,
-        *,
-        prepare_event: _MatrixEventPreparer | None = None,
-        send_delivery: _MatrixDeliverySender | None = None,
-        resolve_delivery: _MatrixDeliveryResolver | None = None,
-        resolve_action_delivery: _ApprovalActionDeliveryResolver | None = None,
-        cards: ApprovalDeliveryView | None = None,
-        transport_sender: _TransportSenderProvider | None = None,
-        sending_device: _SendingDeviceProvider | None = None,
-        continuation_ready: _ContinuationReadyHandler | None = None,
-        recovery: ApprovalRecovery | None = None,
-        responder_principal: _ResponderPrincipalProvider | None = None,
-        router_missing: _RouterMissingProvider | None = None,
-    ) -> None:
-        """Rebind transport collaborators after runtime reload."""
-        if prepare_event is not None:
-            self.prepare_event = prepare_event
-        if send_delivery is not None:
-            self.send_delivery = send_delivery
-        if resolve_delivery is not None:
-            self.resolve_delivery = resolve_delivery
-        if resolve_action_delivery is not None:
-            self.resolve_action_delivery = resolve_action_delivery
-        if cards is not None:
-            self.cards = cards
-        if transport_sender is not None:
-            self.transport_sender = transport_sender
-        if sending_device is not None:
-            self.sending_device = sending_device
-        if continuation_ready is not None:
-            self.continuation_ready = continuation_ready
-        if recovery is not None:
-            self.recovery = recovery
-            recovery.bind(self)
-        if responder_principal is not None:
-            self.responder_principal = responder_principal
-        if router_missing is not None:
-            self.router_missing = router_missing
-
-    async def prepare_detached_approval(
+    async def prepare_reply_card(
         self,
         *,
         approval_id: str,
@@ -315,7 +261,7 @@ class ApprovalManager:
         thread_id: str | None,
         grant_operation: ApprovalOperation | None,
     ) -> ApprovalCardReservation | None:
-        """Prepare one exact frozen payload without creating delivery debt."""
+        """Prepare the frozen card payload of one paused-reply call without creating delivery debt."""
         return await self._prepare_approval_card(
             approval_id=approval_id,
             tool_call_id=tool_call_id,
@@ -345,6 +291,7 @@ class ApprovalManager:
         self,
         *,
         origin: BackgroundScriptToolOrigin,
+        owner_kind: Literal["job", "script"],
         room_id: str,
         thread_id: str | None,
         agent_name: str,
@@ -362,8 +309,8 @@ class ApprovalManager:
         of ``entity_name``, and an active grant of that scope approves the call without a card.
         """
         cards = self.cards
-        if self.prepare_event is None or cards is None or self.send_delivery is None:
-            return BackgroundApprovalDecision(status="denied", reason="Tool approval runtime is not ready.")
+        if cards is None:
+            return BackgroundApprovalDecision(status="denied", reason=RUNTIME_NOT_READY_REASON)
         delivery_id = f"script-approval:{origin.run_id}:{origin.call_id}"
         expires_at_ns = time.time_ns() + max(0, round(timeout_seconds * 1_000_000_000))
         grant_scope = (
@@ -404,34 +351,49 @@ class ApprovalManager:
         )
         if reservation is None:
             return BackgroundApprovalDecision(status="denied", reason="Tool approval card could not be prepared.")
-        reserved = await cards.reserve_background_approval_card(
-            room_id=room_id,
-            thread_id=thread_id,
-            run_id=origin.run_id,
-            call_id=origin.call_id,
-            expires_at_ns=expires_at_ns,
-            card=reservation,
-            grant_scope=grant_scope,
-        )
-        if not reserved:
-            return BackgroundApprovalDecision(
-                status="denied",
-                reason="Approval card could not be published in this room.",
+        call = CallKey.detached(origin.run_id, origin.call_id)
+        # Registered before the card is reserved, so a decision that commits at any point after it, an active grant's
+        # included, ends the wait.
+        with cards.approvals.signals.decision_wakeup(call) as decided:
+            reserved = await cards.approvals.reserve_detached_card(
+                call=call,
+                owner_kind=owner_kind,
+                tool_name=tool_name,
+                toolkit_name=origin.toolkit_name,
+                invoking_agent=agent_name,
+                room_id=room_id,
+                thread_id=thread_id,
+                expires_at_ns=expires_at_ns,
+                card=reservation,
+                grant_scope=grant_scope,
             )
-        await self._publish_reserved_cards([delivery_id])
-        deadline = asyncio.get_running_loop().time() + max(0.0, timeout_seconds)
-        while True:
-            decision = await cards.background_approval_decision(run_id=origin.run_id, call_id=origin.call_id)
-            if decision is not None:
-                return decision
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                await self.recover_cards_on_startup()
-                decision = await cards.background_approval_decision(run_id=origin.run_id, call_id=origin.call_id)
+            if not reserved:
+                return BackgroundApprovalDecision(
+                    status="denied",
+                    reason="Approval card could not be published in this room.",
+                )
+            await self._publish_reserved_cards([delivery_id])
+            while True:
+                # Cleared before each read, so a decision that commits on either side of the read is seen.
+                decided.clear()
+                decision = await cards.approvals.detached_decision(call)
                 if decision is not None:
                     return decision
-                return BackgroundApprovalDecision(status="denied", reason=_DEFAULT_TIMEOUT_REASON)
-            await asyncio.sleep(min(1.0, remaining))
+                remaining = (expires_at_ns - time.time_ns()) / 1_000_000_000
+                if remaining <= 0:
+                    expired = await cards.approvals.resolve_approval_call(
+                        call,
+                        requested_status="expired",
+                        reason=TIMEOUT_REASON,
+                    )
+                    await self._flush_decided(expired)
+                    decision = await cards.approvals.detached_decision(call)
+                    if decision is not None:
+                        return decision
+                    return BackgroundApprovalDecision(status="denied", reason=TIMEOUT_REASON)
+                with suppress(TimeoutError):
+                    async with asyncio.timeout(remaining):
+                        await decided.wait()
 
     def _grant_scope(
         self,
@@ -443,7 +405,7 @@ class ApprovalManager:
         invoking_agent: str,
     ) -> ApprovalGrantScope | None:
         """Bind a detached call's timed approvals to its conversation's responder, or None while that is unknown."""
-        responder_principal_id = None if self.responder_principal is None else self.responder_principal(entity_name)
+        responder_principal_id = self.transport.responder_principal_id(entity_name)
         if responder_principal_id is None:
             return None
         return ApprovalGrantScope(
@@ -465,7 +427,7 @@ class ApprovalManager:
     ) -> bool:
         """Publish one card approving the call a scheduled task stores for later."""
         cards = self.cards
-        if self.prepare_event is None or cards is None or self.send_delivery is None:
+        if cards is None:
             return False
         delivery_id = f"scheduled-approval:{binding.task_id}"
         reservation = await self._prepare_approval_card(
@@ -486,16 +448,20 @@ class ApprovalManager:
                 "body": f"🔒 Approval required: {binding.tool_name} (scheduled for {scheduled_for_text})",
             },
         )
-        if reservation is None or reservation.payload.get("approvable", True) is not True:
+        if reservation is None or not reservation.approvable:
             return False
-        if not await cards.reserve_scheduled_call_approval(binding=binding, card=reservation):
+        if not await cards.approvals.reserve_scheduled_call_approval(
+            binding=binding,
+            card=reservation,
+            any_arguments_offered=any_arguments_offered,
+        ):
             return False
         await self._publish_reserved_cards([delivery_id])
         return True
 
     async def scheduled_call(self, task_id: str) -> ScheduledCall | None:
         """Read the call one scheduled task stored."""
-        return None if self.cards is None else await self.cards.scheduled_call(task_id=task_id)
+        return None if self.cards is None else await self.cards.approvals.scheduled_call(task_id=task_id)
 
     async def claim_scheduled_call(
         self,
@@ -509,7 +475,7 @@ class ApprovalManager:
         Returns None when the approval runtime cannot prepare the receipt, which claims nothing.
         """
         cards = self.cards
-        if self.prepare_event is None or cards is None or self.send_delivery is None:
+        if cards is None:
             return None
         delivery_id = f"scheduled-receipt:{call.task_id}"
         receipt = await self._prepare_approval_card(
@@ -527,7 +493,7 @@ class ApprovalManager:
         )
         if receipt is None:
             return None
-        claimed = await cards.claim_scheduled_call(call=call, arguments_json=arguments_json, receipt=receipt)
+        claimed = await cards.approvals.claim_scheduled_call(call=call, arguments_json=arguments_json, receipt=receipt)
         if isinstance(claimed, ScheduledCallClaim):
             await self._publish_reserved_cards([delivery_id])
         return claimed
@@ -535,7 +501,7 @@ class ApprovalManager:
     async def record_scheduled_call_outcome(self, task_id: str, outcome: ScheduledCallOutcome) -> None:
         """Record how one claimed scheduled call ended."""
         if self.cards is not None:
-            await self.cards.record_scheduled_call_outcome(task_id=task_id, outcome=outcome)
+            await self.cards.approvals.record_scheduled_call_outcome(task_id=task_id, outcome=outcome)
 
     async def arm_scheduled_call_approval(
         self,
@@ -547,19 +513,19 @@ class ApprovalManager:
         """Arm one approved scheduled call as its unchanged task fires."""
         if self.cards is None:
             return "none"
-        return await self.cards.arm_scheduled_call_approval(
+        return await self.cards.approvals.arm_scheduled_call_approval(
             task_id=task_id,
             workflow_digest=workflow_digest,
             any_arguments_allowed=any_arguments_allowed,
         )
 
     async def withdraw_scheduled_call_approval(self, task_id: str, *, reason: str) -> None:
-        """Withdraw a cancelled task's approval and deny its card if it is still pending."""
-        if self.cards is None or self.send_delivery is None:
-            return
-        recorded = await self.cards.withdraw_scheduled_call_approval(task_id=task_id, reason=reason)
-        if recorded.recorded and recorded.delivery_id is not None:
-            await self._flush_card_delivery(recorded.delivery_id, recorded.card_event_id)
+        """Withdraw a cancelled task's approval and deny its card if it is still pending, or raise while it cannot."""
+        if self.cards is None:
+            raise RuntimeError(RUNTIME_NOT_READY_REASON)
+        await self._flush_decided(
+            await self.cards.approvals.withdraw_scheduled_call_approval(task_id=task_id, reason=reason),
+        )
 
     async def _prepare_approval_card(
         self,
@@ -578,8 +544,6 @@ class ApprovalManager:
         grant_operation: ApprovalOperation | None = None,
     ) -> ApprovalCardReservation | None:
         """Prepare one shared pending-card payload for a typed exact-call target."""
-        if self.prepare_event is None:
-            return None
         event_arguments = await asyncio.to_thread(_build_event_arguments, raw_arguments)
         content = self._pending_event_content(
             approval_id=approval_id,
@@ -607,7 +571,7 @@ class ApprovalManager:
         content.update(target_fields)
         if grant_operation is None:
             content.pop("approval_scope", None)
-        prepared = await self.prepare_event(room_id, thread_id, content)
+        prepared = await self.transport.prepare_approval_event(room_id, thread_id, content)
         if prepared is None:
             return None
         if prepared.get("approvable", True) is not True:
@@ -619,6 +583,8 @@ class ApprovalManager:
             tool_call_id=tool_call_id,
             event_type=_EVENT_TYPE,
             payload=prepared,
+            approver_user_id=approver_user_id,
+            approvable=card_approvable(prepared),
             grant_operation=grant_operation,
         )
 
@@ -629,36 +595,32 @@ class ApprovalManager:
         reason: str,
     ) -> bool:
         """Deny one cancelled exact call and drive its shared terminal delivery."""
-        if self.cards is None or self.send_delivery is None:
+        if self.cards is None:
             return False
-        recorded = await self.cards.resolve_background_approval_call(
-            run_id=origin.run_id,
-            call_id=origin.call_id,
+        recorded = await self.cards.approvals.resolve_approval_call(
+            CallKey.detached(origin.run_id, origin.call_id),
             requested_status="denied",
             reason=reason,
         )
         if recorded.resolution is None:
             return False
-        await self.recover_cards_on_startup()
+        await self._flush_decided(recorded)
         return recorded.recorded
 
     async def settle_pending_background_approvals(self, run_id: str, *, reason: str) -> int:
-        """Deny only the still-pending approval targets owned by one run."""
-        if self.cards is None or self.send_delivery is None:
+        """Deny only the still-pending approval targets owned by one run, and deliver their cards' terminal edits."""
+        if self.cards is None:
             return 0
-        recorded = await self.cards.resolve_pending_background_approval_calls(
-            run_id=run_id,
-            reason=reason,
-        )
-        if recorded:
-            await self.recover_cards_on_startup()
-        return recorded
+        decided = await self.cards.approvals.deny_pending_detached_calls(owner_id=run_id, reason=reason)
+        for recorded in decided:
+            await self._flush_decided(recorded)
+        return len(decided)
 
     async def prune_background_approvals(self, run_id: str) -> bool:
         """Prune settled background targets only after terminal card retirement."""
         if self.cards is None:
             return False
-        return await self.cards.prune_background_approvals(run_id=run_id)
+        return await self.cards.approvals.prune_detached_calls(owner_id=run_id)
 
     async def reserve_and_publish(
         self,
@@ -669,9 +631,9 @@ class ApprovalManager:
         cards: tuple[ApprovalCardReservation, ...],
     ) -> bool:
         """Reserve a complete generation atomically, then best-effort flush its cards."""
-        if self.cards is None or self.send_delivery is None:
+        if self.cards is None:
             return False
-        reserved = await self.cards.reserve_approval_card_deliveries(
+        reserved = await self.cards.approvals.reserve_reply_cards(
             continuation_principal_id=continuation_principal_id,
             continuation_id=continuation_id,
             expected_generation=continuation_generation,
@@ -697,18 +659,17 @@ class ApprovalManager:
         self._ensure_deadline_sweep()
 
     def _worker(self) -> MatrixDeliveryWorker:
-        if self.cards is None or self.send_delivery is None:
-            msg = "Approval Matrix delivery is not configured"
-            raise ToolApprovalTransportError(msg)
+        if self.cards is None:
+            raise ToolApprovalTransportError(RUNTIME_NOT_READY_REASON)
         return MatrixDeliveryWorker(
             store=self.cards,
-            send=self.send_delivery,
+            send=self.transport.send_approval_delivery,
             event_type=_EVENT_TYPE,
             resend_after_reconciliation_miss=lambda delivery: (
                 delivery.payload.get("status") == "approved" and delivery.payload.get("approvable") is False
             ),
-            sending_device_id=None if self.sending_device is None else self.sending_device(),
-            resolve_delivered=self.resolve_delivery,
+            sending_device_id=self.transport.transport_device_id(),
+            resolve_delivered=self.transport.resolve_approval_delivery,
             delivery_locks=self._delivery_locks,
         )
 
@@ -732,73 +693,54 @@ class ApprovalManager:
                 await before_consume()
             return ApprovalActionResult(consumed=True, card_event_id=card_event_id)
         cards = self.cards
-        stored = (
-            None
-            if cards is None
-            else await cards.pending_approval_card(
-                room_id=room_id,
-                card_event_id=card_event_id,
-            )
-        )
-        if stored is None:
-            terminal = cards is not None and await cards.is_terminal_approval_card(
-                room_id=room_id,
-                card_event_id=card_event_id,
-            )
-            if not terminal and cards is not None and self.resolve_action_delivery is not None:
-                try:
-                    stored = await self._bind_action_delivery(
-                        cards,
-                        room_id=room_id,
-                        card_event_id=card_event_id,
-                    )
-                except UnverifiableApprovalCardError as exc:
-                    if before_consume is not None:
-                        await before_consume()
-                    logger.warning(
-                        "unverifiable_legacy_approval_action_ignored",
-                        room_id=room_id,
-                        card_event_id=card_event_id,
-                        transport_reason=exc.reason,
-                    )
-                    return ApprovalActionResult(consumed=True, card_event_id=card_event_id)
-                terminal = stored is None and await cards.is_terminal_approval_card(
+        if cards is None:
+            return ApprovalActionResult(consumed=False, card_event_id=card_event_id)
+        card = await cards.approvals.approval_card(room_id=room_id, card_event_id=card_event_id)
+        if card is None:
+            try:
+                card = await self._bind_action_delivery(cards, room_id=room_id, card_event_id=card_event_id)
+            except UnverifiableApprovalCardError as exc:
+                if before_consume is not None:
+                    await before_consume()
+                logger.warning(
+                    "unverifiable_legacy_approval_action_ignored",
                     room_id=room_id,
                     card_event_id=card_event_id,
+                    transport_reason=exc.reason,
                 )
-            if stored is None:
-                if terminal and before_consume is not None:
-                    await before_consume()
-                return ApprovalActionResult(consumed=terminal, card_event_id=card_event_id)
-        if stored.resolution is not None:
+                return ApprovalActionResult(consumed=True, card_event_id=card_event_id)
+        if card is None:
+            return ApprovalActionResult(consumed=False, card_event_id=card_event_id)
+        if card.terminal:
+            if before_consume is not None:
+                await before_consume()
+            return ApprovalActionResult(consumed=True, card_event_id=card_event_id)
+        if not card.current:
+            return ApprovalActionResult(consumed=False, card_event_id=card_event_id)
+        if card.decided:
             if before_consume is not None:
                 await before_consume()
             self._ensure_deadline_sweep()
             return ApprovalActionResult(consumed=True, card_event_id=card_event_id)
-        pending = self._trusted_pending_from_card_event(
-            stored.card,
-            room_id=room_id,
-            expected_card_event_id=card_event_id,
-        )
         if (
-            pending is None
-            or pending.approver_user_id != sender_id
-            or not _approval_action_authorized(pending, stored, authorize_responder)
+            not self._transport_ready()
+            or card.approver_user_id != sender_id
+            or not _approval_action_authorized(card, authorize_responder)
             or (
                 auto_approve_seconds is not None
                 and (
                     status != "approved"
                     or not valid_auto_approve_seconds(auto_approve_seconds)
-                    or auto_approve_seconds not in pending.auto_approve_options
-                    or not pending.approvable
+                    or not card.offers_timed_approval
+                    or not card.approvable
                 )
             )
             or (
                 scheduled_scope is not None
                 and (
                     status != "approved"
-                    or stored.target_kind != "scheduled_call"
-                    or scheduled_scope not in pending.scheduled_scope_options
+                    or not card.any_arguments_offered
+                    or scheduled_scope not in SCHEDULED_SCOPE_OPTIONS
                 )
             )
         ):
@@ -806,53 +748,53 @@ class ApprovalManager:
         if before_consume is not None:
             await before_consume()
         resolved_status, resolved_reason, resolution_was_truncated = self._normalized_resolution_request(
-            pending,
+            card,
             status=status,
             reason=reason,
         )
-        if auto_approve_seconds is not None:
+        # A timed approval that normalizes to an expiry or a denial is recorded as that decision, like any other click.
+        if auto_approve_seconds is not None and resolved_status == "approved":
             return await self._approve_with_grant(
-                pending,
+                cards,
+                card,
+                card_event_id=card_event_id,
                 sender_id=sender_id,
                 seconds=auto_approve_seconds,
-                status=resolved_status,
                 reason=reason,
                 current_binding=current_binding,
             )
         with self._claimed_resolution(card_event_id):
             await self._record_and_flush_resolution(
-                pending,
-                stored,
+                card,
                 status=resolved_status,
                 reason=resolved_reason,
                 resolved_by=sender_id if resolved_status == status else None,
                 scheduled_scope=(scheduled_scope or EXACT_ARGUMENTS)
-                if stored.target_kind == "scheduled_call" and resolved_status == "approved"
+                if card.owner_kind == "scheduled" and resolved_status == "approved"
                 else None,
             )
         return ApprovalActionResult(
             consumed=True,
             error_reason=_DEFAULT_TRUNCATED_APPROVAL_REASON if resolution_was_truncated else None,
-            thread_id=pending.thread_id,
+            thread_id=card.thread_id,
             card_event_id=card_event_id,
         )
 
     async def _approve_with_grant(
         self,
-        pending: PendingApproval,
+        cards: ApprovalDeliveryView,
+        card: ApprovalCardView,
         *,
+        card_event_id: str,
         sender_id: str,
         seconds: int,
-        status: _ApprovalStatus,
         reason: str | None,
         current_binding: str | None,
     ) -> ApprovalActionResult:
         """Commit the grant batch and wake every newly executable continuation."""
-        if status != "approved" or self.cards is None:
-            return ApprovalActionResult(consumed=True, card_event_id=pending.card_event_id)
-        decisions = await self.cards.create_approval_grant(
-            room_id=pending.room_id,
-            card_event_id=pending.card_event_id,
+        decisions = await cards.approvals.create_approval_grant(
+            room_id=card.room_id,
+            card_event_id=card_event_id,
             sender_id=sender_id,
             seconds=seconds,
             metadata=ApprovalDecisionMetadata(resolved_by=sender_id, resolved_at=_utcnow().isoformat()),
@@ -864,12 +806,12 @@ class ApprovalManager:
                 await self._wake_continuation(decision)
         for decision in decisions:
             if decision.delivery_id is not None:
-                await self._flush_card_delivery(decision.delivery_id, decision.card_event_id, room_id=pending.room_id)
+                await self._flush_card_delivery(decision.delivery_id, decision.card_event_id, room_id=card.room_id)
         self._ensure_deadline_sweep()
         return ApprovalActionResult(
             consumed=True,
-            thread_id=pending.thread_id,
-            card_event_id=pending.card_event_id,
+            thread_id=card.thread_id,
+            card_event_id=card_event_id,
         )
 
     async def handle_grant_revocation(
@@ -885,7 +827,7 @@ class ApprovalManager:
         """Authenticate a retained grant and deliver its durable revocation edit."""
         if self.cards is None:
             return ApprovalActionResult(consumed=False)
-        grant = await self.cards.approval_grant_for_card(room_id=room_id, card_event_id=card_event_id)
+        grant = await self.cards.approvals.approval_grant_for_card(room_id=room_id, card_event_id=card_event_id)
         if (
             grant is None
             or grant.grant_id != grant_id
@@ -895,7 +837,7 @@ class ApprovalManager:
             return ApprovalActionResult(consumed=False)
         if before_consume is not None:
             await before_consume()
-        revocation = await self.cards.revoke_approval_grant(
+        revocation = await self.cards.approvals.revoke_approval_grant(
             room_id=room_id,
             card_event_id=card_event_id,
             sender_id=sender_id,
@@ -918,11 +860,9 @@ class ApprovalManager:
         *,
         room_id: str,
         card_event_id: str,
-    ) -> StoredApprovalCard | None:
+    ) -> ApprovalCardView | None:
         """Bind the exact visible action target to generic delivery debt."""
-        if self.resolve_action_delivery is None:
-            return None
-        delivery_id = await self.resolve_action_delivery(room_id, card_event_id)
+        delivery_id = await self.transport.resolve_approval_action_delivery(room_id, card_event_id)
         if delivery_id is None:
             return None
         delivery = await cards.load_matrix_delivery(
@@ -943,28 +883,27 @@ class ApprovalManager:
                 delivered_projections=(),
             )
             if acknowledgement.settled_event_id == card_event_id:
-                return await cards.pending_approval_card(room_id=room_id, card_event_id=card_event_id)
-        await cards.remember_terminal_approval_alias(
+                return await cards.approvals.approval_card(room_id=room_id, card_event_id=card_event_id)
+        await cards.approvals.remember_terminal_approval_alias(
             room_id=room_id,
             card_event_id=card_event_id,
             delivery_id=delivery_id,
         )
-        return None
+        return await cards.approvals.approval_card(room_id=room_id, card_event_id=card_event_id)
 
     async def _record_and_flush_resolution(
         self,
-        pending: PendingApproval,
-        stored: StoredApprovalCard,
+        card: ApprovalCardView,
         *,
-        status: _ApprovalStatus,
+        status: DecisionStatus,
         reason: str | None,
         resolved_by: str | None,
         scheduled_scope: str | None = None,
     ) -> bool:
         if self.cards is None:
             return False
-        recorded = await self.cards.resolve_continuation_approval_card(
-            card_event_id=pending.card_event_id,
+        recorded = await self.cards.approvals.resolve_approval_call(
+            card.call,
             requested_status=status,
             reason=reason,
             metadata=ApprovalDecisionMetadata(
@@ -977,7 +916,12 @@ class ApprovalManager:
             return False
         if recorded.recorded and recorded.continuation_ready:
             await self._wake_continuation(recorded)
-        return await self._flush_card_delivery(stored.delivery_id, pending.card_event_id, room_id=pending.room_id)
+        return await self._flush_card_delivery(card.delivery_id, recorded.card_event_id, room_id=card.room_id)
+
+    async def _flush_decided(self, recorded: RecordedApprovalDecision) -> None:
+        """Deliver the terminal edit of the card that shows one decided call; the deadline sweep retries what fails."""
+        if recorded.delivery_id is not None:
+            await self._flush_card_delivery(recorded.delivery_id, recorded.card_event_id)
 
     async def _flush_card_delivery(
         self,
@@ -986,14 +930,13 @@ class ApprovalManager:
         *,
         room_id: str | None = None,
     ) -> bool:
-        """Deliver one committed card decision, preserving INITIAL before FINAL."""
+        """Deliver one committed card decision, preserving INITIAL before FINAL; return whether the card retired."""
         assert self.cards is not None
         try:
             if card_event_id is None:
                 card_event_id = await self._worker().flush(delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
-                if card_event_id is None:
-                    return False
-            edit_event_id = await self._worker().flush(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
+            if card_event_id is not None:
+                await self._worker().flush(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
         except Exception:
             logger.warning(
                 "approval_terminal_delivery_deferred",
@@ -1002,40 +945,36 @@ class ApprovalManager:
                 exc_info=True,
             )
             return False
-        return edit_event_id is not None and await self.cards.retire_approval_card(
-            delivery_id=delivery_id,
-            card_event_id=card_event_id,
-        )
+        # A card retires once its terminal edit is acknowledged, and one that another flush of the same decision
+        # already retired is delivered too.
+        return await self.cards.approvals.retire_approval_card(delivery_id=delivery_id)
 
-    async def expire_continuation_cards(self, continuation_id: str) -> bool:
-        """Enqueue and flush expiry for every card owned by one failed continuation."""
+    async def expire_continuation_cards(self, continuation_id: str, reason: str) -> bool:
+        """Enqueue and flush expiry for every card owned by one failed continuation, with its failure's reason."""
         if self.cards is None:
             return False
         complete = True
-        for room_id in await self.cards.pending_approval_room_ids():
-            async for stored in self._pending_cards(self.cards, room_id):
-                if isinstance(stored, UnreadableApprovalCard):
-                    if stored.continuation_id == continuation_id:
-                        complete = False
-                    continue
-                if stored.target_kind == "continuation" and stored.continuation_id == continuation_id:
-                    complete = await self._expire_stored(room_id, stored) and complete
+        for room_id in await self.cards.approvals.pending_approval_room_ids():
+            async for card in self._pending_cards(self.cards, room_id):
+                if card.owner_kind == "reply" and card.call.owner_id == continuation_id:
+                    complete = await self._expire_stored(card, reason=reason) and complete
         return complete
 
     @staticmethod
-    async def _pending_cards(
-        cards: ApprovalDeliveryView,
-        room_id: str,
-    ) -> AsyncIterator[StoredApprovalCard | UnreadableApprovalCard]:
-        """Yield one room's recorded cards oldest first, one page at a time."""
+    async def _pending_cards(cards: ApprovalDeliveryView, room_id: str) -> AsyncIterator[ApprovalCardView]:
+        """Yield one room's live request cards oldest first, one page at a time."""
         cursor: tuple[int, str] | None = None
         while True:
-            page = await cards.pending_approval_cards(room_id=room_id, limit=_STARTUP_RECOVERY_SCAN_PAGE, after=cursor)
+            page = await cards.approvals.pending_approval_cards(
+                room_id=room_id,
+                limit=_STARTUP_RECOVERY_SCAN_PAGE,
+                after=cursor,
+            )
             if not page:
                 return
             cursor = (page[-1].created_at_ns, page[-1].delivery_id)
-            for stored in page:
-                yield stored
+            for card in page:
+                yield card
             if len(page) < _STARTUP_RECOVERY_SCAN_PAGE:
                 return
 
@@ -1049,98 +988,69 @@ class ApprovalManager:
         """Return the unexpired, unanswered, approvable cards one approver has in one conversation, scheduled calls aside."""
         if self.cards is None:
             return ()
-        event_ids = []
-        now = _utcnow()
-        async for stored in self._pending_cards(self.cards, room_id):
-            if (
-                not isinstance(stored, StoredApprovalCard)
-                or stored.resolution is not None
-                or stored.card_event_id is None
-                or stored.target_kind == "scheduled_call"
-            ):
-                continue
-            content = stored.card["content"]
-            if (
-                content.get("thread_id") != thread_id
-                or content.get("approver_user_id") != approver_user_id
-                or content.get("approvable", True) is not True
-            ):
-                continue
-            # A card past its deadline expires when answered, until the deadline sweep retires it.
-            expires_at = parse_approval_datetime(content.get("expires_at"))
-            if expires_at is not None and expires_at > now:
-                event_ids.append(stored.card_event_id)
-        return tuple(event_ids)
+        now_ns = time.time_ns()
+        # A card past its deadline expires when answered, until the deadline sweep retires it.
+        return tuple(
+            [
+                card.card_event_id
+                async for card in self._pending_cards(self.cards, room_id)
+                if card.card_event_id is not None
+                and not card.decided
+                and card.owner_kind not in {None, "scheduled"}
+                and card.thread_id == thread_id
+                and card.approver_user_id == approver_user_id
+                and card.approvable
+                and card.expires_at_ns is not None
+                and card.expires_at_ns > now_ns
+            ],
+        )
 
-    async def _expire_stored(self, room_id: str, stored: StoredApprovalCard) -> bool:
-        if self.cards is None or (stored.card_event_id is None and stored.resolution is not None):
+    async def _expire_stored(self, card: ApprovalCardView, *, reason: str = TIMEOUT_REASON) -> bool:
+        if self.cards is None:
             return False
-        if stored.card_event_id is None:
-            recorded = await self.cards.expire_unacknowledged_approval_card(delivery_id=stored.delivery_id)
+        if card.card_event_id is None and card.decided:
+            # Outbox recovery owns sending it; it is finished here only once Matrix refused it for good.
+            return await self.cards.approvals.retire_approval_card(delivery_id=card.delivery_id)
+        if card.card_event_id is None:
+            recorded = await self.cards.approvals.resolve_approval_call(
+                card.call,
+                requested_status="expired",
+                reason=reason,
+            )
             if recorded.recorded and recorded.continuation_ready:
                 await self._wake_continuation(recorded)
             return False
-        pending = self._trusted_pending_from_card_event(
-            stored.card,
-            room_id=room_id,
-            expected_card_event_id=stored.card_event_id,
-        )
-        if pending is None:
+        if not self._transport_ready():
             return False
-        if stored.resolution is not None:
-            return await self._flush_card_delivery(stored.delivery_id, stored.card_event_id, room_id=room_id)
+        if card.decided:
+            return await self._flush_card_delivery(card.delivery_id, card.card_event_id, room_id=card.room_id)
         return await self._record_and_flush_resolution(
-            pending,
-            stored,
+            card,
             status="expired",
-            reason=_DEFAULT_TIMEOUT_REASON,
+            reason=reason,
             resolved_by=None,
         )
 
     async def _wake_continuation(self, recorded: RecordedApprovalDecision) -> None:
-        if (
-            recorded.continuation_entity_name is None
-            or recorded.continuation_room_id is None
-            or self.continuation_ready is None
-        ):
+        if recorded.continuation_entity_name is None or recorded.continuation_room_id is None:
             return
-        wake = self.continuation_ready(
+        await self.transport.wake_continuation_sources(
             recorded.continuation_entity_name,
             recorded.continuation_room_id,
             recorded.source_event_ids,
         )
-        if wake is not None:
-            await wake
 
-    async def _settle_startup_card(
-        self,
-        room_id: str,
-        stored: StoredApprovalCard | UnreadableApprovalCard,
-    ) -> bool | None:
+    async def _settle_startup_card(self, card: ApprovalCardView) -> bool | None:
         """Settle due recovery work, or return None when none is currently due."""
-        if isinstance(stored, UnreadableApprovalCard):
-            return False
-        if stored.resolution is not None:
-            return await self._expire_stored(room_id, stored)
-        try:
-            expires_at = parse_approval_datetime(
-                cast("str | None", stored.card["content"].get("expires_at")),
-            )
-        except (TypeError, ValueError):
-            logger.warning(
-                "approval_card_expiry_unreadable",
-                delivery_id=stored.delivery_id,
-            )
-            return False
-        if expires_at is not None and expires_at <= _utcnow():
-            return await self._expire_stored(room_id, stored)
+        if card.decided or card.expires_at_ns is None or card.expires_at_ns <= time.time_ns():
+            return await self._expire_stored(card)
         return None
 
     async def _maintain_automatic_approvals(self, *, grant_id: str | None = None) -> set[tuple[str, DeliveryStage]]:
         """Retire spent payloads and flush newly unblocked acknowledgements."""
         assert self.cards is not None
         failed: set[tuple[str, DeliveryStage]] = set()
-        for delivery_id in await self.cards.maintain_automatic_approvals(grant_id=grant_id):
+        for delivery_id in await self.cards.approvals.maintain_automatic_approvals(grant_id=grant_id):
             try:
                 acknowledged = await self._worker().flush(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
             except Exception:
@@ -1152,7 +1062,7 @@ class ApprovalManager:
 
     async def recover_cards_on_startup(self) -> _ApprovalStartupSweep:
         """Run generic delivery recovery, deadline decisions, and domain retirement."""
-        if self.cards is None or self.send_delivery is None:
+        if self.cards is None:
             return _ApprovalStartupSweep(discarded=0, failed=1)
         outcome = await self._worker().recover()
         transport_failures = set(outcome.failed_deliveries)
@@ -1160,16 +1070,16 @@ class ApprovalManager:
         transport_failures.update(await self._maintain_automatic_approvals())
         scanned = 0
         retired = 0
-        for room_id in await self.cards.pending_approval_room_ids():
-            async for stored in self._pending_cards(self.cards, room_id):
+        for room_id in await self.cards.approvals.pending_approval_room_ids():
+            async for card in self._pending_cards(self.cards, room_id):
                 scanned += 1
-                settled = await self._settle_startup_card(room_id, stored)
+                settled = await self._settle_startup_card(card)
                 had_transport_failure = any(
-                    delivery_id == stored.delivery_id for delivery_id, _stage in transport_failures
+                    delivery_id == card.delivery_id for delivery_id, _stage in transport_failures
                 )
                 if settled is True:
                     transport_failures = {
-                        delivery for delivery in transport_failures if delivery[0] != stored.delivery_id
+                        delivery for delivery in transport_failures if delivery[0] != card.delivery_id
                     }
                     retired += 1
                 elif settled is False and not had_transport_failure:
@@ -1192,17 +1102,34 @@ class ApprovalManager:
         self._deadline_wakeup.set()
 
     async def _run_deadline_sweep(self) -> None:
-        while True:
-            self._deadline_wakeup.clear()
-            with suppress(TimeoutError):
-                await asyncio.wait_for(self._deadline_wakeup.wait(), timeout=_DEADLINE_SWEEP_SECONDS)
-            try:
-                await self.recover_cards_on_startup()
-            except Exception:
-                logger.warning("approval_deadline_sweep_failed", exc_info=True)
+        # While the sweep runs, a decision written outside the manager, such as a job's end or a departure, reaches
+        # Matrix as it commits instead of at the next sweep; one the manager writes itself is sent once all the same.
+        assert self.cards is not None, "only a manager with a card store sweeps deadlines"
+        stop_following = self.cards.approvals.signals.follow_decided_cards(self._card_decided)
+        try:
+            while True:
+                self._deadline_wakeup.clear()
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(self._deadline_wakeup.wait(), timeout=_DEADLINE_SWEEP_SECONDS)
+                try:
+                    await self.recover_cards_on_startup()
+                except Exception:
+                    logger.warning("approval_deadline_sweep_failed", exc_info=True)
+        finally:
+            stop_following()
+
+    def _card_decided(self, card: DecidedCard) -> None:
+        """Send the terminal edit of a card whose call was just decided."""
+        flush = asyncio.create_task(
+            self._flush_card_delivery(card.delivery_id, card.card_event_id, room_id=card.room_id),
+            name=f"approval_decided_card:{card.delivery_id}",
+            context=Context(),
+        )
+        self._decided_flushes.add(flush)
+        flush.add_done_callback(self._decided_flushes.discard)
 
     async def shutdown(self) -> None:
-        """Stop the domain deadline scanner; durable delivery debt remains in the outbox."""
+        """Stop the domain deadline scanner and decided-card sends; durable delivery debt remains in the outbox."""
         if self.recovery is not None:
             await self.recovery.close()
         task = self._deadline_task
@@ -1210,6 +1137,10 @@ class ApprovalManager:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        flushes = tuple(self._decided_flushes)
+        for flush in flushes:
+            flush.cancel()
+        await asyncio.gather(*flushes, return_exceptions=True)
 
     def _has_live_work(self) -> bool:
         """Report decisions currently committing in this process."""
@@ -1231,26 +1162,9 @@ class ApprovalManager:
             with self._live_lock:
                 self._resolving_card_event_ids.discard(card_event_id)
 
-    def _trusted_pending_from_card_event(
-        self,
-        card_event: dict[str, Any],
-        *,
-        room_id: str,
-        expected_card_event_id: str,
-    ) -> PendingApproval | None:
-        """Return the still-pending card this process's transport account sent, or None without one."""
-        transport_sender = None if self.transport_sender is None else self.transport_sender()
-        if transport_sender is None:
-            return None
-        event = dict(card_event)
-        event.setdefault("sender", transport_sender)
-        try:
-            pending = PendingApproval.from_card_event(event, room_id=room_id)
-        except (TypeError, ValueError):
-            return None
-        if pending.card_event_id != expected_card_event_id or pending.card_sender_id != transport_sender:
-            return None
-        return pending if pending.initial_status == "pending" else None
+    def _transport_ready(self) -> bool:
+        """Return whether this process's transport account is known, without which no card is acted on."""
+        return self.transport.transport_sender_id() is not None
 
     @staticmethod
     def _pending_event_content(
@@ -1292,16 +1206,15 @@ class ApprovalManager:
 
     @staticmethod
     def _normalized_resolution_request(
-        pending: PendingApproval,
+        card: ApprovalCardView,
         *,
         status: _ResolutionStatus,
         reason: str | None,
-    ) -> tuple[_ApprovalStatus, str | None, bool]:
-        expires_at = parse_approval_datetime(pending.expires_at)
-        if expires_at is not None and expires_at <= _utcnow():
-            return "expired", _DEFAULT_TIMEOUT_REASON, False
-        arguments_unreviewable = pending.arguments_preview_truncated and not pending.full_arguments_available
-        if status == "approved" and (not pending.approvable or arguments_unreviewable):
+    ) -> tuple[DecisionStatus, str | None, bool]:
+        """Expire a card past its deadline, and deny an approval no reviewer could see in full."""
+        if card.expires_at_ns is not None and card.expires_at_ns <= time.time_ns():
+            return "expired", TIMEOUT_REASON, False
+        if status == "approved" and not card.approvable:
             return "denied", _DEFAULT_TRUNCATED_APPROVAL_REASON, True
         return status, reason, False
 
@@ -1314,52 +1227,27 @@ def get_approval_store() -> ApprovalManager | None:
 def initialize_approval_store(
     runtime_paths: RuntimePaths,
     *,
-    prepare_event: _MatrixEventPreparer | None,
-    send_delivery: _MatrixDeliverySender | None,
-    resolve_delivery: _MatrixDeliveryResolver | None,
-    resolve_action_delivery: _ApprovalActionDeliveryResolver | None,
+    transport: ApprovalMatrixTransport,
     cards: ApprovalDeliveryView | None,
-    transport_sender: _TransportSenderProvider | None,
-    sending_device: _SendingDeviceProvider | None,
-    continuation_ready: _ContinuationReadyHandler | None,
     recovery: ApprovalRecovery | None,
-    responder_principal: _ResponderPrincipalProvider | None,
-    router_missing: _RouterMissingProvider | None,
 ) -> ApprovalManager:
-    """Initialize the module-level approval domain for one runtime context."""
+    """Initialize the module-level approval domain for one runtime context, or rebind it after a reload.
+
+    A rebind keeps the bound card store and recovery when it is given none, as before the router bot is built.
+    """
     global _MANAGER
     if _MANAGER is not None and _MANAGER.runtime_paths.storage_root == runtime_paths.storage_root:
-        _MANAGER._configure_transport(
-            prepare_event=prepare_event,
-            send_delivery=send_delivery,
-            resolve_delivery=resolve_delivery,
-            resolve_action_delivery=resolve_action_delivery,
-            cards=cards,
-            transport_sender=transport_sender,
-            sending_device=sending_device,
-            continuation_ready=continuation_ready,
-            recovery=recovery,
-            responder_principal=responder_principal,
-            router_missing=router_missing,
-        )
+        _MANAGER.transport = transport
+        if cards is not None:
+            _MANAGER.cards = cards
+        if recovery is not None:
+            _MANAGER.recovery = recovery
+            recovery.bind(_MANAGER)
         return _MANAGER
     if _MANAGER is not None and _MANAGER._has_live_work():
         msg = "Cannot reinitialize approval store while a decision is committing"
         raise RuntimeError(msg)
-    _MANAGER = ApprovalManager(
-        runtime_paths,
-        prepare_event=prepare_event,
-        send_delivery=send_delivery,
-        resolve_delivery=resolve_delivery,
-        resolve_action_delivery=resolve_action_delivery,
-        cards=cards,
-        transport_sender=transport_sender,
-        sending_device=sending_device,
-        continuation_ready=continuation_ready,
-        recovery=recovery,
-        responder_principal=responder_principal,
-        router_missing=router_missing,
-    )
+    _MANAGER = ApprovalManager(runtime_paths, transport=transport, cards=cards, recovery=recovery)
     return _MANAGER
 
 

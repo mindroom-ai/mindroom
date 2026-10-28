@@ -1449,7 +1449,7 @@ class TestAgentBot(AgentBotTestBase):
             await release_resume.wait()
             return False
 
-        with patch.object(bot._response_runner, "_resume_approval_source", new=resume):
+        with patch.object(bot._response_runner._approvals, "_resume_approval_source", new=resume):
             handoff = asyncio.create_task(
                 bot._journal_dispatcher.callbacks.on_approval_continuation("$source"),
             )
@@ -1534,12 +1534,12 @@ class TestAgentBot(AgentBotTestBase):
 
             initialize_approval_store_for_test(
                 runtime_paths,
-                prepare_event=prepare_event,
-                send_delivery=send_delivery,
-                resolve_delivery=AsyncMock(return_value=None),
+                prepare_approval_event=prepare_event,
+                send_approval_delivery=send_delivery,
+                resolve_approval_delivery=AsyncMock(return_value=None),
                 cards=first._journal_store.principal(router_principal_id),
-                transport_sender=lambda: "@mindroom_router:localhost",
-                sending_device=lambda: "DEVICE",
+                transport_sender_id=lambda: "@mindroom_router:localhost",
+                transport_device_id=lambda: "DEVICE",
             )
         source = InboundEvent(
             event_id="$source",
@@ -1579,7 +1579,7 @@ class TestAgentBot(AgentBotTestBase):
             async with first_runner.deps.replies.span_scope():
                 claimed_request = await first_runner._claim_reply_span(request, history_scope=history_scope)
                 assert claimed_request is not None
-                suspended = await first_runner._suspend_for_approval(
+                suspended = await first_runner._approvals.suspend_for_approval(
                     paused,
                     request=claimed_request,
                     target=target,
@@ -1591,7 +1591,7 @@ class TestAgentBot(AgentBotTestBase):
 
         assert suspended.terminal_status == "suspended"
         assert report_tool.written == []
-        persisted = await first.approval_store.approval_continuation_for_source("$source")
+        persisted = await first.approval_store.approvals.approval_continuation_for_source("$source")
         if requires_human:
             await shutdown_approval_runtime()
         assert persisted is not None
@@ -1610,15 +1610,17 @@ class TestAgentBot(AgentBotTestBase):
         if requires_human:
             manager = initialize_approval_store_for_test(
                 runtime_paths,
-                prepare_event=prepare_event,
-                send_delivery=send_delivery,
-                resolve_delivery=AsyncMock(return_value=None),
+                prepare_approval_event=prepare_event,
+                send_approval_delivery=send_delivery,
+                resolve_approval_delivery=AsyncMock(return_value=None),
                 cards=restarted._journal_store.principal(router_principal_id),
-                transport_sender=lambda: "@mindroom_router:localhost",
-                sending_device=lambda: "DEVICE",
-                continuation_ready=lambda _entity_name, room_id, source_ids: restarted.retry_approval_sources(
-                    room_id,
-                    source_ids,
+                transport_sender_id=lambda: "@mindroom_router:localhost",
+                transport_device_id=lambda: "DEVICE",
+                wake_continuation_sources=AsyncMock(
+                    side_effect=lambda _entity_name, room_id, source_ids: restarted.retry_approval_sources(
+                        room_id,
+                        source_ids,
+                    ),
                 ),
             )
             restarted._journal_dispatcher.release_turn_replay()
@@ -1638,7 +1640,7 @@ class TestAgentBot(AgentBotTestBase):
         else:
             await drain_restarted_runtime()
 
-        remaining = await restarted.approval_store.approval_continuation_for_source("$source")
+        remaining = await restarted.approval_store.approvals.approval_continuation_for_source("$source")
         assert report_tool.written == ["written"], remaining
         assert model.turns == []
         assert remaining is None
@@ -2124,7 +2126,7 @@ class TestAgentBot(AgentBotTestBase):
             initialize_approval_store_for_test(
                 runtime_paths,
                 cards=cards,
-                resolve_action_delivery=transport.resolve_approval_action_delivery,
+                resolve_approval_action_delivery=transport.resolve_approval_action_delivery,
             )
             on_approval = bot._journal_dispatcher.callbacks.on_approval
 

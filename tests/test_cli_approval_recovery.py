@@ -10,7 +10,7 @@ import time
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -23,7 +23,6 @@ from mindroom.agent_cli import cli_approval_recovery, response_owner
 from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agent_cli.bash import minimal_bash_toolkit
 from mindroom.agent_cli.checkpoint import BatchCheckpoint
-from mindroom.agent_cli.cli_approval_waits import CliApprovalWaits
 from mindroom.agent_cli.delegation import approval_calls_for_cli_pause
 from mindroom.agent_cli.events import emit_cli_suspension
 from mindroom.agent_cli.lifetime import current_cli_lifetime
@@ -193,7 +192,11 @@ def _knowledge(searches: list[str]) -> AgentKnowledge:
 
 def _approval_execution(tmp_path: Path, runtime: ToolRuntimeContext, monkeypatch, knowledge: AgentKnowledge | None):
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-    execution = replace(runner._approval_execution, config=lambda: runtime.config, runtime_paths=runtime.runtime_paths)
+    execution = replace(
+        runner._approvals._approval_execution,
+        config=lambda: runtime.config,
+        runtime_paths=runtime.runtime_paths,
+    )
     monkeypatch.setattr(
         execution.knowledge_access,
         "resolve_for_agent_async",
@@ -1361,98 +1364,3 @@ async def test_an_approved_call_of_an_implied_toolkit_runs_after_its_bash_stoppe
     assert "Exact saved tool attachments.list_attachments decision/result:" in follow_up.text
     assert [entry.toolkit_name for entry in response.await_args.args[1].tool_trace] == ["attachments"]
     assert '"status": "ok"' in follow_up.text
-
-
-@pytest.mark.parametrize(
-    ("answered", "shutting_down"),
-    [(False, False), (False, True), (True, False)],
-    ids=["fenced", "fenced-during-shutdown", "answered-after-fence"],
-)
-@pytest.mark.asyncio
-async def test_a_cli_wait_a_stop_fenced_settles_through_failure_so_its_cards_expire(
-    *,
-    answered: bool,
-    shutting_down: bool,
-) -> None:
-    """The cancelled note reached the room, but only failure settlement expires the approval's pending card.
-
-    A run that answered after its fence finishes as an answered one does, so its after-response work runs once.
-    """
-    continuation = SimpleNamespace(
-        approval_id="approval-1",
-        state="failing",
-        failure_reason="cancelled_by_user",
-        runtime_generation=None,
-        cli_call={"kind": "agent_cli"},
-        room_id="!room",
-        source_event_ids=("$source",),
-    )
-    final = SimpleNamespace(permanently_failed=False)
-    responses = SimpleNamespace(
-        final_delivery=AsyncMock(return_value=final),
-        successful_final_delivery=AsyncMock(return_value=final if answered else None),
-        finish_approval=AsyncMock(return_value=True),
-        request_failure=AsyncMock(return_value=None),
-        settle_failure=AsyncMock(return_value=True),
-    )
-    waits = CliApprovalWaits(
-        store=SimpleNamespace(approval_continuation_for_source=AsyncMock(return_value=continuation)),  # type: ignore[arg-type]
-        responses=responses,  # type: ignore[arg-type]
-        runtime_generation="runtime-a",
-        retry_sources=lambda _room_id, _sources: None,
-        claim=AsyncMock(),
-        advance=AsyncMock(),
-    )
-    progress = SimpleNamespace(failure_reason=None, delivery_outcome=None)
-
-    with patch("mindroom.agent_cli.cli_approval_waits.current_task_is_process_shutdown", return_value=shutting_down):
-        await waits._settle("$source", suspended=False, progress=progress, settle_terminal=True)  # type: ignore[arg-type]
-
-    responses.request_failure.assert_not_awaited()
-    if answered:
-        responses.finish_approval.assert_awaited_once_with("approval-1")
-        responses.settle_failure.assert_not_awaited()
-        return
-    responses.finish_approval.assert_not_awaited()
-    if shutting_down:
-        # Approval recovery settles it at the next start.
-        responses.settle_failure.assert_not_awaited()
-    else:
-        responses.settle_failure.assert_awaited_once_with(continuation, "cancelled_by_user")
-
-
-@pytest.mark.parametrize("permanently_failed", [False, True])
-@pytest.mark.asyncio
-async def test_a_cli_wait_fails_an_approval_whose_final_matrix_refused(*, permanently_failed: bool) -> None:
-    """A FINAL Matrix refused for good is no answer: the wait fails the approval instead of finishing it."""
-    continuation = SimpleNamespace(
-        approval_id="approval-1",
-        state="claimed",
-        runtime_generation="runtime-a",
-        cli_call={"kind": "agent_cli"},
-        room_id="!room",
-        source_event_ids=("$source",),
-    )
-    responses = SimpleNamespace(
-        final_delivery=AsyncMock(return_value=SimpleNamespace(permanently_failed=permanently_failed)),
-        finish_approval=AsyncMock(return_value=True),
-        request_failure=AsyncMock(return_value=None),
-    )
-    waits = CliApprovalWaits(
-        store=SimpleNamespace(approval_continuation_for_source=AsyncMock(return_value=continuation)),  # type: ignore[arg-type]
-        responses=responses,  # type: ignore[arg-type]
-        runtime_generation="runtime-a",
-        retry_sources=lambda _room_id, _sources: None,
-        claim=AsyncMock(),
-        advance=AsyncMock(),
-    )
-    progress = SimpleNamespace(failure_reason=None, delivery_outcome=None)
-
-    await waits._settle("$source", suspended=False, progress=progress, settle_terminal=True)  # type: ignore[arg-type]
-
-    if permanently_failed:
-        responses.finish_approval.assert_not_awaited()
-        responses.request_failure.assert_awaited_once()
-    else:
-        responses.finish_approval.assert_awaited_once_with("approval-1")
-        responses.request_failure.assert_not_awaited()
