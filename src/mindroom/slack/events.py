@@ -16,8 +16,9 @@ if TYPE_CHECKING:
 
 _SIGNATURE_WINDOW_SECONDS = 300
 _TIMESTAMP = re.compile(r"[0-9]{1,15}")
-_MESSAGE_EVENT_TYPES = frozenset({"message", "app_mention"})
-_ALLOWED_SUBTYPES = frozenset({None, "thread_broadcast", "file_share"})
+# Tuples, not sets: a list or object in the payload must compare unequal, not raise `TypeError` as an unhashable key.
+_MESSAGE_EVENT_TYPES = ("message", "app_mention")
+_ALLOWED_SUBTYPES = (None, "thread_broadcast", "file_share")
 _DIRECT_CHANNEL_TYPES = frozenset({"im", "mpim"})
 # `<@U0123ABCD>` and `<@U0123ABCD|name>`; Slack user IDs start with U, or W on Enterprise Grid.
 _USER_MENTION = re.compile(r"<@([UW][A-Z0-9]+)(?:\|[^>]*)?>")
@@ -39,7 +40,6 @@ class SlackMessageEvent:
     """One Slack message or app mention worth classifying.
 
     `team_id` is the workspace that received the event.
-    `author_team_id` is the author's own workspace when the event names a different one, as in a shared channel.
     """
 
     event_id: str
@@ -51,7 +51,6 @@ class SlackMessageEvent:
     thread_ts: str | None
     text: str
     is_app_mention: bool
-    author_team_id: str | None = None
 
 
 def _text(value: object) -> str | None:
@@ -96,7 +95,6 @@ def parse_message_event(payload: Mapping[str, Any], *, bot_user_id: str) -> Slac
         return None
     if thread_ts is not None and not _text(thread_ts):
         return None
-    author_team = _text(event.get("team"))
     return SlackMessageEvent(
         event_id=event_id,
         team_id=team_id,
@@ -107,7 +105,6 @@ def parse_message_event(payload: Mapping[str, Any], *, bot_user_id: str) -> Slac
         thread_ts=thread_ts,
         text=text,
         is_app_mention=is_app_mention,
-        author_team_id=author_team if author_team != team_id else None,
     )
 
 

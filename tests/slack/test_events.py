@@ -36,7 +36,7 @@ DM = "D0123ABCD"
 NOW = 1_700_000_000
 
 
-def _sign(body: bytes, timestamp: int = NOW, secret: str = SECRET) -> str:
+def _sign(body: bytes, timestamp: int | str = NOW, secret: str = SECRET) -> str:
     base = b"v0:" + str(timestamp).encode() + b":" + body
     return "v0=" + hmac.new(secret.encode(), base, hashlib.sha256).hexdigest()
 
@@ -98,10 +98,20 @@ def _answering(agent: str, *channels: str) -> SlackAnsweringAgent:
         (str(NOW), _sign(b"{}")[3:], SECRET, NOW, False),
         (str(NOW), "", SECRET, NOW, False),
         (str(NOW), "v0=é", SECRET, NOW, False),
-        ("", _sign(b"{}"), SECRET, NOW, False),
-        ("abc", _sign(b"{}"), SECRET, NOW, False),
-        (f"{NOW}.5", _sign(b"{}"), SECRET, NOW, False),
-        (f" {NOW}", _sign(b"{}"), SECRET, NOW, False),
+        # Each odd timestamp is signed as sent, so only the digit-only rule can reject it.
+        *(
+            (odd, _sign(b"{}", odd), SECRET, NOW, False)
+            for odd in (
+                "",
+                "abc",
+                f"{NOW}.5",
+                f" {NOW}",
+                f"+{NOW}",
+                f"{NOW}_0",
+                "\uff11\uff17\uff10\uff10\uff10\uff10\uff10\uff10\uff10\uff10",
+                "1" * 5000,
+            )
+        ),
         (str(NOW), _sign(b"{}", secret=""), "", NOW, False),
     ],
 )
@@ -141,13 +151,10 @@ def test_parse_keeps_allowed_subtypes(subtype: str) -> None:
     assert parse_message_event(_envelope(subtype=subtype), bot_user_id=BOT) is not None
 
 
-def test_shared_channel_keeps_the_receiving_team_and_exposes_the_author_team() -> None:
-    other = parse_message_event(_envelope(team="T0OTHER99"), bot_user_id=BOT)
-    same = parse_message_event(_envelope(team=TEAM), bot_user_id=BOT)
-    assert other is not None
-    assert (other.team_id, other.author_team_id) == (TEAM, "T0OTHER99")
-    assert same is not None
-    assert (same.team_id, same.author_team_id) == (TEAM, None)
+def test_shared_channel_event_keeps_the_receiving_team() -> None:
+    parsed = parse_message_event(_envelope(team="T0OTHER99"), bot_user_id=BOT)
+    assert parsed is not None
+    assert parsed.team_id == TEAM
 
 
 @pytest.mark.parametrize(
@@ -158,6 +165,9 @@ def test_shared_channel_keeps_the_receiving_team_and_exposes_the_author_team() -
         {key: value for key, value in _envelope().items() if key != "event"},
         {**_envelope(), "event": "message"},
         _envelope("reaction_added"),
+        _envelope(type=["message"]),
+        _envelope(subtype=["file_share"]),
+        _envelope(subtype={"kind": "file_share"}),
         _envelope(bot_id="B0123ABCD"),
         _envelope(app_id="A0123ABCD"),
         _envelope(user=BOT),
