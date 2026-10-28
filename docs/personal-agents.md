@@ -171,7 +171,7 @@ agents:
 
 The person asks `mind` for a helper, and `mind` calls `create_agent` with a `name`, a `display_name`, a `role`, and optionally `instructions` and `tools`.
 
-- The new agent's ID is the creator's name, an underscore, and the `name` lowercased with other characters turned into underscores and cut to 30 characters, so `Research Helper` from `mind` gives `mind_research_helper`.
+- The new agent's ID is the creator's name, an underscore, and the `name` lowercased with other characters turned into underscores, trimmed of leading and trailing underscores, and cut to 30 characters, so `Research Helper` from `mind` gives `mind_research_helper`.
   The tool replies with its Matrix ID.
 - `tools` come from the creator's tools, with the creator's settings for each, and omitting `tools` gives the new agent all of them.
   Asking for a tool the creator lacks is refused with the list of names it may use.
@@ -207,7 +207,7 @@ Only the owner may change `co_owners` or delete the agent with `delete_agent`.
 `create_agent`, `update_agent`, and `delete_agent` each show an [approval card](tool-approval.md#approving-and-denying) to the person asking, whatever `tool_approval` says, because the agent asking may have read text its owner did not write.
 The card shows the exact arguments, and only that person can approve it.
 The 5, 10, and 30 minute options on a card are never offered for these calls, but the person asking can skip their cards in a thread with [`!auto_approve`](tool-approval.md#auto-approve-everything).
-`agent_settings` only reads, so it shows no card.
+`agent_settings` only reads and asks for no approval of its own, so it shows a card only when a `tool_approval` default or rule requires one.
 
 In a room without the router the call is denied with `Tool approval needs the router in this room`.
 The agent then calls `invite_router` and retries, as described in [When the Router Is Missing](tool-approval.md#when-the-router-is-missing).
