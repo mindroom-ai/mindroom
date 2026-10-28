@@ -296,9 +296,17 @@ class RequestUsage:
     ``model`` is None when the usage report names no model.
     """
 
-    created_at: int
+    created_at: float
     metrics: MessageMetrics
     model: ModelProvenance | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class VoiceDuration:
+    """The billed duration of a live voice session so far, and whether the session has ended."""
+
+    seconds: float
+    finalized: bool
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -310,8 +318,10 @@ class HelperUsage:
     ``ModelIdentity.provider``, while other writers store a label of their own, such as the name Mem0's usage is
     priced by (``"OpenAI Chat"``). ``metrics`` sums its requests by model, and ``requests`` lists each request whose
     usage describes it alone: a retried request's usage sums its attempts, so ``metrics`` counts it but ``requests``
-    does not list it. ``created_at`` defaults to when the value is built, which is when a helper prompt finished;
-    Mem0 dates it by its first call, and voice transcription by when its request was sent.
+    does not list it. ``voice`` is set for a live voice session, which is billed by duration and lists no requests.
+    ``created_at`` defaults to when the value is built, which is when a helper prompt finished; Mem0 dates it by its
+    first call, voice transcription by when its request was sent, a helper run by its start, a live voice or realtime
+    call by its start, and a compaction summary by when it was stored.
     """
 
     run_id: str
@@ -319,7 +329,8 @@ class HelperUsage:
     provider: str | None
     metrics: RunMetrics
     requests: tuple[RequestUsage, ...] = ()
-    created_at: int = field(default_factory=lambda: int(time()))
+    voice: VoiceDuration | None = None
+    created_at: float = field(default_factory=lambda: int(time()))
 
 
 @dataclass(slots=True, kw_only=True)
@@ -393,5 +404,6 @@ __all__ = [
     "RunMetrics",
     "SessionMetrics",
     "TokenCounts",
+    "VoiceDuration",
     "add_usage",
 ]

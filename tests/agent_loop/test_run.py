@@ -1,8 +1,8 @@
 """Agent runs end in exactly one stored record, and approval resumes run exactly the approved calls.
 
-The resume tests replay the storage goldens' paused rows (``run-paused-approval``, the ``team-paused`` member, and
-``run-paused-delegation``) through ``resume_agent`` and compare the result with the rows Agno stored after the
-same resume (``run-approved``, ``run-rejected``, the ``team-approved`` member, ``run-delegation-approved``).
+The resume tests continue paused runs Agno stored (``run-paused-approval``, the ``team-paused`` member, and
+``run-paused-delegation`` of the storage goldens) through ``resume_agent``, as a run paused before the upgrade resumes
+after it, and assert the resumed records as typed values.
 """
 # ruff: noqa: D103
 
@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -35,7 +34,7 @@ from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from tests.agent_loop.helpers import add, boom, collect, context, echo, external, gated, spec, toolkit
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
-from tests.llm.agno_dict_helpers import expected_run_dict
+from tests.run_record_helpers import PRODUCT, approved_call, denied_call, result, resumed, settled, waiting_call
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -590,56 +589,6 @@ def _model(model_id: str, *turns: list[Any]) -> ScriptedModel:
     )
 
 
-def _comparable(run: dict[str, Any], *, paused: RunRecord) -> dict[str, Any]:
-    """Return a run dict without the identity and wall-clock values that differ between two sessions.
-
-    Only the messages the resume added are compared: the stored paused messages are the sessions' own prompts,
-    which the capture worded differently, and the completed row no longer holds the system message.
-    """
-    run = expected_run_dict(run)
-    result = {
-        key: value
-        for key, value in run.items()
-        if key not in {"run_id", "session_id", "parent_run_id", "metadata", "created_at"}
-    }
-    stored = [message for message in run["messages"] if message["role"] != "system"]
-    skipped = sum(message.role != "system" for message in paused.messages)
-    result["messages"] = [_comparable_message(message) for message in stored[skipped:]]
-    result["tools"] = [_comparable_tool(tool) for tool in run.get("tools", [])]
-    result["requirements"] = [_comparable_requirement(item) for item in run.get("requirements", [])]
-    result["metrics"] = {key: value for key, value in run["metrics"].items() if key != "duration"}
-    return result
-
-
-def _comparable_message(message: dict[str, Any]) -> dict[str, Any]:
-    result = {key: value for key, value in message.items() if key not in {"id", "created_at"}}
-    if isinstance(result.get("content"), str):
-        # Each capture session prompted with its own Matrix event id.
-        result["content"] = re.sub(r'event_id="[^"]+"', 'event_id="<event>"', result["content"])
-    if "tool_call_id" in result:
-        result["tool_call_id"] = "<call>"
-    if "tool_calls" in result:
-        result["tool_calls"] = [{**call, "id": "<call>"} for call in result["tool_calls"]]
-    return result
-
-
-def _comparable_tool(tool: dict[str, Any]) -> dict[str, Any]:
-    # Timing is wall clock, and Agno recorded none for a resumed call; the owned loop times every call it runs.
-    return {
-        **{key: value for key, value in tool.items() if key not in {"created_at", "metrics"}},
-        "tool_call_id": "<call>",
-    }
-
-
-def _comparable_requirement(item: dict[str, Any]) -> dict[str, Any]:
-    # Agno's team resume handed the member the team's requirement, which names the member; the owned resume takes
-    # decisions, not requirement objects, so a member row keeps its own requirement and the team run names the member.
-    dropped = {"id", "created_at", "member_agent_id", "member_agent_name", "member_run_id"}
-    result = {key: value for key, value in item.items() if key not in dropped}
-    result["tool_execution"] = _comparable_tool(result["tool_execution"])
-    return result
-
-
 async def _resume(
     agent: AgentSpec,
     paused: RunRecord,
@@ -668,10 +617,11 @@ async def _resume(
 
 
 @pytest.mark.asyncio
-async def test_an_approved_call_resumes_into_the_run_approved_row() -> None:
+async def test_an_approved_call_resumes_into_a_completed_run_with_its_result() -> None:
     paused = RunRecord.from_dict(_golden_run("agent_code", "!room:example.org:$conversation", "run-paused-approval"))
     before = paused.to_dict()
-    model = _model("code-model", answer("6 x 7 = 42.", usage(260, 9, time_to_first_token=0.25)))
+    answered = ("6 x 7 = 42.", usage(260, 9, time_to_first_token=0.25))
+    model = _model("code-model", answer(*answered))
 
     events, record, store = await _resume(
         _agent(model, [_gated_calculator()]),
@@ -679,8 +629,16 @@ async def test_an_approved_call_resumes_into_the_run_approved_row() -> None:
         approved=[_approval("call-multiply", "multiply", {"a": 6, "b": 7})],
     )
 
-    expected = _golden_run("agent_code", "!room:example.org:$approved", "run-approved")
-    assert _comparable(record.to_dict(), paused=paused) == _comparable(expected, paused=paused)
+    call, waiting = waiting_call(paused)
+    assert settled(record) == settled(
+        resumed(
+            paused,
+            decided=approved_call(waiting, PRODUCT),
+            added=[result(call, PRODUCT)],
+            answered=answered,
+            confirmation=True,
+        ),
+    )
     assert record.messages[: len(paused.messages)] == paused.messages
     assert len(record.messages) == len(paused.messages) + 2
     assert store.saved == [record.to_dict()]
@@ -694,21 +652,25 @@ async def test_an_approved_call_resumes_into_the_run_approved_row() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_denied_call_resumes_into_the_run_rejected_row() -> None:
+async def test_a_denied_call_resumes_into_a_completed_run_that_answers_it_with_the_reason() -> None:
     paused = RunRecord.from_dict(_golden_run("agent_code", "!room:example.org:$conversation", "run-paused-approval"))
-    model = _model(
-        "code-model",
-        answer("I did not multiply, because the call was declined.", usage(260, 9, time_to_first_token=0.25)),
-    )
+    answered = ("I did not multiply, because the call was declined.", usage(260, 9, time_to_first_token=0.25))
+    model = _model("code-model", answer(*answered))
+    reason = "Alice declined the multiplication."
 
-    events, record, _ = await _resume(
-        _agent(model, [_gated_calculator()]),
-        paused,
-        denied={"call-multiply": "Alice declined the multiplication."},
-    )
+    events, record, _ = await _resume(_agent(model, [_gated_calculator()]), paused, denied={"call-multiply": reason})
 
-    expected = _golden_run("agent_code", "!room:example.org:$rejected", "run-rejected")
-    assert _comparable(record.to_dict(), paused=paused) == _comparable(expected, paused=paused)
+    call, waiting = waiting_call(paused)
+    assert settled(record) == settled(
+        resumed(
+            paused,
+            decided=denied_call(waiting, reason),
+            added=[result(call, reason, is_error=True)],
+            answered=answered,
+            confirmation=False,
+            confirmation_note=reason,
+        ),
+    )
     assert not any(isinstance(event, ToolStarted | ToolCompleted) for event in events)
     assert model.requests[0].messages[-1].content == "Alice declined the multiplication."
 
@@ -726,11 +688,12 @@ async def test_a_call_denied_without_a_reason_tells_the_model_it_was_not_approve
 
 
 @pytest.mark.asyncio
-async def test_a_team_member_s_approved_call_resumes_into_the_member_s_completed_row() -> None:
+async def test_a_team_member_s_approved_call_resumes_into_the_member_s_completed_run() -> None:
     paused = RunRecord.from_dict(
         _golden_run("team_squad", "!room:example.org:$squad", "00000000-0000-4000-8000-00000000005a"),
     )
-    model = _model("checker-model", answer("42", usage(95, 1, time_to_first_token=0.25)))
+    answered = ("42", usage(95, 1, time_to_first_token=0.25))
+    model = _model("checker-model", answer(*answered))
 
     _, record, _ = await _resume(
         _agent(model, [_gated_calculator()], agent_id="checker", name="Checker"),
@@ -738,24 +701,44 @@ async def test_a_team_member_s_approved_call_resumes_into_the_member_s_completed
         approved=[_approval("call-checker-multiply", "multiply", {"a": 6, "b": 7}, agent="checker")],
     )
 
-    expected = _golden_run("team_squad", "!room:example.org:$squad-approved", "00000000-0000-4000-8000-000000000063")
-    assert _comparable(record.to_dict(), paused=paused) == _comparable(expected, paused=paused)
+    call, waiting = waiting_call(paused)
+    assert settled(record) == settled(
+        resumed(
+            paused,
+            decided=approved_call(waiting, PRODUCT),
+            added=[result(call, PRODUCT)],
+            answered=answered,
+            confirmation=True,
+        ),
+    )
     assert record.parent_run_id == "team-paused"
 
 
 @pytest.mark.asyncio
-async def test_an_external_result_resumes_into_the_run_delegation_approved_row() -> None:
+async def test_an_external_result_resumes_into_a_completed_run_that_answers_the_call_with_it() -> None:
     paused = RunRecord.from_dict(_golden_run("agent_code", "!room:example.org:$delegation", "run-paused-delegation"))
-    expected = _golden_run("agent_code", "!room:example.org:$delegation-approved", "run-delegation-approved")
-    model = _model("code-model", answer("The helper found 42.", usage(330, 6, time_to_first_token=0.25)))
+    answered = ("The helper found 42.", usage(330, 6, time_to_first_token=0.25))
+    model = _model("code-model", answer(*answered))
+    helper_result = "42\n\nSubagent ID: 0123"
 
     events, record, _ = await _resume(
         _agent(model, [_delegate()]),
         paused,
-        external_results={"call-delegate": expected["tools"][0]["result"]},
+        external_results={"call-delegate": helper_result},
     )
 
-    assert _comparable(record.to_dict(), paused=paused) == _comparable(expected, paused=paused)
+    call, waiting = waiting_call(paused)
+    # An externally executed call's result answers it as is, never as a failure.
+    executed = replace(waiting, result=helper_result, external_execution_required=False)
+    assert settled(record) == settled(
+        resumed(
+            paused,
+            decided=executed,
+            added=[result(call, helper_result, is_error=None)],
+            answered=answered,
+            external_execution_result=helper_result,
+        ),
+    )
     assert not any(isinstance(event, ToolStarted | ToolCompleted) for event in events)
 
 

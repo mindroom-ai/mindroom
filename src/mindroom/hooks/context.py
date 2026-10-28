@@ -46,7 +46,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.types import HistoryScope
-    from mindroom.llm.messages import Message
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.message_target import MessageTarget
     from mindroom.scheduling.tasks import ScheduledWorkflow
@@ -149,7 +148,6 @@ class HookContextSupport:
     """Own live hook bindings and shared hook-context base fields."""
 
     runtime: SupportsClientConfigOrchestrator
-    logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     agent_name: str
     hook_registry_state: HookRegistryState
@@ -213,11 +211,8 @@ class HookContextSupport:
         """Return shared base fields for hook context construction."""
         return {
             "event_name": event_name,
-            "plugin_name": "",
-            "settings": {},
             "config": self.runtime.config,
             "runtime_paths": self.runtime_paths,
-            "logger": self.logger.bind(event_name=event_name),
             "correlation_id": correlation_id,
             "runtime_started_at": self.runtime.runtime_started_at,
             "message_sender": self.message_sender(),
@@ -332,12 +327,13 @@ class HookContext(_HookLifecycleContext):
     """Base fields available to every hook."""
 
     event_name: str
-    plugin_name: str
-    settings: dict[str, Any]
     config: Config
     runtime_paths: RuntimePaths
-    logger: structlog.stdlib.BoundLogger
     correlation_id: str
+    # `emit` fills these three with each hook's own before calling it.
+    plugin_name: str = field(default="", kw_only=True)
+    settings: dict[str, Any] = field(default_factory=dict, kw_only=True)
+    logger: structlog.stdlib.BoundLogger = field(default_factory=lambda: get_logger("mindroom.hooks"), kw_only=True)
     runtime_started_at: float | None = field(default=None, kw_only=True)
     message_sender: HookMessageSender | None = field(default=None, kw_only=True)
     agent_message_snapshot_reader: HookAgentMessageSnapshotReader | None = field(
@@ -561,13 +557,11 @@ class CompactionHookContext(HookContext):
     scope: HistoryScope
     room_id: str
     thread_id: str | None
-    messages: list[Message]
+    transcript: tuple[TranscriptLine, ...]
     session_id: str
     token_count_before: int
     token_count_after: int | None
     compaction_summary: str | None
-    # Optional only while plugins still build this context without it; required once `messages` goes.
-    transcript: tuple[TranscriptLine, ...] = field(default=(), kw_only=True)
 
 
 @dataclass(slots=True)

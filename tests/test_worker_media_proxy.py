@@ -10,11 +10,11 @@ from typing import TYPE_CHECKING
 
 import httpcore
 import pytest
-from agno.media import File
-from agno.tools.function import ToolResult
 
+from mindroom.llm.media import File
 from mindroom.tool_system import media_transport
 from mindroom.tool_system.media_transport import decode_media_result
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_media import serialize_worker_tool_result
 
 if TYPE_CHECKING:
@@ -128,15 +128,13 @@ def _capture_connections(
 
 
 def _inline_file(url: str) -> File:
-    result = ToolResult(content="Media", files=[File(url=url)])
+    result = ToolValue(content="Media", files=(File(url=url),))
     decoded = decode_media_result(json.loads(json.dumps(serialize_worker_tool_result(result))))
-    assert isinstance(decoded, ToolResult)
+    assert isinstance(decoded, ToolValue)
     assert decoded.files
     item = decoded.files[0]
     assert item.url is None
     assert item.filepath is None
-    assert item.media_reference is None
-    assert item.external is None
     return item
 
 

@@ -10,9 +10,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
-from agno.media import Audio, File, Video
 from agno.tools import Toolkit
-from agno.tools.function import ToolResult
 
 from mindroom.attachments.storage import (
     AttachmentRecord,
@@ -23,6 +21,7 @@ from mindroom.attachments.storage import (
 )
 from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.file_access import AuthorizedFile, resolve_agent_file
+from mindroom.llm.media import DOCUMENT_MIME_TYPES, Audio, File, Video
 from mindroom.matrix.client_delivery import send_file_message, send_runtime_encrypted_media_message
 from mindroom.matrix.media import resolve_image_mime_type
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
@@ -50,6 +49,7 @@ from mindroom.tool_system.sandbox_proxy import (
     save_attachment_to_worker,
     view_file_from_worker,
 )
+from mindroom.tool_system.tool_function import ToolValue
 
 if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
@@ -199,7 +199,7 @@ def _view_attachment(  # noqa: PLR0911
     *,
     metadata: dict[str, object],
     images_only: bool,
-) -> ToolResult:
+) -> ToolValue:
     """Read authorized attachment bytes and use shared preparation for every image view."""
     attachment, error = _resolve_context_attachment_record(context, attachment_id)
     if error is not None or attachment is None:
@@ -228,13 +228,13 @@ def _view_attachment(  # noqa: PLR0911
     filename = attachment.filename or attachment.local_path.name
     media_format = Path(filename).suffix.lstrip(".").lower()
     if attachment.kind == "audio":
-        return ToolResult(content=content, audios=[Audio(content=payload, mime_type=mime_type, format=media_format)])
+        return ToolValue(content=content, audios=(Audio(content=payload, mime_type=mime_type, format=media_format),))
     if attachment.kind == "video":
-        return ToolResult(content=content, videos=[Video(content=payload, mime_type=mime_type, format=media_format)])
-    if mime_type in File.valid_mime_types():
-        return ToolResult(
+        return ToolValue(content=content, videos=(Video(content=payload, mime_type=mime_type, format=media_format),))
+    if mime_type in DOCUMENT_MIME_TYPES:
+        return ToolValue(
             content=content,
-            files=[File(content=payload, mime_type=mime_type, filename=filename, format=media_format)],
+            files=(File(content=payload, mime_type=mime_type, filename=filename, format=media_format),),
         )
     return media_error(
         "This file type cannot be sent as model media. Use get_attachment without view to inspect or save it.",
@@ -481,7 +481,7 @@ class AttachmentTools(Toolkit):
         )
         self._describe_get_attachment_schema()
 
-    async def view_file(self, path: str | None = None, attachment_id: str | None = None) -> ToolResult:
+    async def view_file(self, path: str | None = None, attachment_id: str | None = None) -> ToolValue:
         """View an image in your own model context without posting or invoking another model.
 
         Supply exactly one source: a workspace path or an authorized attachment ID.
@@ -510,9 +510,7 @@ class AttachmentTools(Toolkit):
         else:
             assert path is not None
             result = await self._view_path_image(context, path)
-        finalized = await asyncio.to_thread(finalize_tool_media, result)
-        assert isinstance(finalized, ToolResult)
-        return finalized
+        return await asyncio.to_thread(finalize_tool_media, result)
 
     def _tools_use_worker(self, context: ToolRuntimeContext) -> bool:
         """Return whether this agent's workspace tools run in a worker, away from runtime attachment storage."""
@@ -521,7 +519,7 @@ class AttachmentTools(Toolkit):
             worker_tools_override=self._worker_tools_override,
         )
 
-    async def _view_path_image(self, context: ToolRuntimeContext, path: str) -> ToolResult:
+    async def _view_path_image(self, context: ToolRuntimeContext, path: str) -> ToolValue:
         runtime_paths = self._runtime_paths or context.runtime_paths
         metadata: dict[str, object] = {"tool": "view_file", "path": path}
         if self._tools_use_worker(context):
@@ -587,7 +585,7 @@ class AttachmentTools(Toolkit):
         attachment_id: str,
         mindroom_output_path: str | None = None,
         view: bool = False,
-    ) -> str | ToolResult:
+    ) -> str | ToolValue:
         """Inspect metadata, save a file, or send attachment content to the model.
 
         Args:
@@ -664,9 +662,7 @@ class AttachmentTools(Toolkit):
                     attachment_id=requested_attachment_id,
                     message=receipt["message"],
                 )
-            finalized = await asyncio.to_thread(finalize_tool_media, result)
-            assert isinstance(finalized, ToolResult)
-            return finalized
+            return await asyncio.to_thread(finalize_tool_media, result)
         return json.dumps(metadata, sort_keys=True)
 
     def _resolve_output_path_argument(

@@ -29,18 +29,25 @@ from mindroom import routing, thread_summary, topic_generator
 from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import CompactionOverrideConfig, ModelConfig
 from mindroom.config.voice import VoiceConfig, VoiceSTTConfig
 from mindroom.custom_tools import claude_agent
 from mindroom.custom_tools.dynamic_workflow import _run_room_agent_turn
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context
+from mindroom.history.runtime import _compact_before_reply, resolve_entity_preparation_inputs
+from mindroom.history.storage import _with_scope_state, read_scope_state
+from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.knowledge.chunk_context import chunk_contexts
 from mindroom.knowledge_graph.clients import MindRoomLLMClient
 from mindroom.knowledge_graph.usage import UsageTarget, usage_target
-from mindroom.llm.messages import AGGREGATE_USAGE_KEY
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
 from mindroom.llm.provider import ModelIdentity, TurnCompleted
+from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.usage import TokenCounts
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix_rtc.call_tools import record_call_token_usage, record_call_voice_usage
+from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage, RealtimeCallUsage, _RealtimeResponseUsage
 from mindroom.memory._mem0_backend import Mem0MemoryBackend
 from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture
 from mindroom.memory.auto_flush import _extract_memory_summary
@@ -50,10 +57,11 @@ from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.tools import ReviewProgress
 from mindroom.teams.formation import select_ad_hoc_team_mode
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.voice import handler as voice_handler
-from tests.conftest import bind_runtime_paths, install_model_providers, test_runtime_paths
+from tests.conftest import bind_runtime_paths, install_model_providers, seed_session, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, usage
-from tests.history_helpers import _forced_compaction_context, _session
+from tests.history_helpers import _forced_compaction_context, _make_config, _reported, _session
 from tests.identity_helpers import persist_actual_entity_accounts, persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -325,14 +333,98 @@ async def _skill_learning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
     return paths.storage_root
 
 
+async def _compaction_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Compact a stored run before the next reply, with one summary request to the scripted model."""
+    config, paths = _make_config(tmp_path, compaction=CompactionOverrideConfig(enabled=True))
+    storage = create_session_storage("test_agent", config, paths, execution_identity=None)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    run = RunRecord(
+        run_id="run-1",
+        agent_id="test_agent",
+        session_id="session",
+        status=RunStatus.completed,
+        messages=[Message(role="user", content="Synthetic question."), Message(role="assistant", content="Answer.")],
+    )
+    session = _session(
+        "session",
+        runs=[run],
+        metadata=_with_scope_state(None, scope, HistoryScopeState(force_compact_before_next_run=True)),
+    )
+    seed_session(storage, session)
+    _scripted(monkeypatch, "A summary of the conversation.")
+    inputs = resolve_entity_preparation_inputs(
+        config=config,
+        entity_name="test_agent",
+        history_settings=config.resolve_entity("test_agent").history_settings,
+        static_prompt_tokens=0,
+        active_model_name=None,
+        active_context_window=None,
+    )
+    outcome = await _compact_before_reply(
+        None,
+        _reported,
+        storage=storage,
+        session=session,
+        scope=scope,
+        state=read_scope_state(session, scope),
+        resolved_inputs=inputs,
+        history_budget=None,
+        before_tokens=0,
+        replay_estimator=None,
+        config=config,
+        runtime_paths=paths,
+    )
+    assert outcome is not None
+    return paths.storage_root
+
+
+def _call_identity() -> ToolExecutionIdentity:
+    return ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="helper",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="call",
+    )
+
+
+async def _live_voice(tmp_path: Path, _monkeypatch: pytest.MonkeyPatch) -> Path:
+    paths = test_runtime_paths(tmp_path)
+    config = Config(agents={"helper": AgentConfig(display_name="Helper")})
+    usage = LiveVoiceUsage("provider-session", "gpt-live-1", NOW, duration_seconds=12.5, finalized=True)
+    await record_call_voice_usage(usage, config=config, runtime_paths=paths, execution_identity=_call_identity())
+    return paths.storage_root
+
+
+async def _realtime_voice(tmp_path: Path, _monkeypatch: pytest.MonkeyPatch) -> Path:
+    paths = test_runtime_paths(tmp_path)
+    config = Config(agents={"helper": AgentConfig(display_name="Helper")})
+    responses = (
+        _RealtimeResponseUsage(
+            created_at=NOW + 10,
+            tokens=TokenCounts(input_tokens=900, output_tokens=300, cache_read_tokens=400, audio_input_tokens=800),
+        ),
+        # A response that reported no tokens.
+        _RealtimeResponseUsage(created_at=NOW + 20, tokens=TokenCounts()),
+    )
+    usage = RealtimeCallUsage(usage_id="call-1", model="gpt-realtime-2.1", created_at=NOW, responses=responses)
+    await record_call_token_usage(usage, config=config, runtime_paths=paths, execution_identity=_call_identity())
+    return paths.storage_root
+
+
 _CASES: dict[str, Callable[[Path, pytest.MonkeyPatch], Awaitable[Path]]] = {
     "claude_agent": _claude_agent,
+    "compaction_summary": _compaction_summary,
     "dynamic_workflow": _dynamic_workflow,
     "knowledge_chunk_context": _knowledge_chunk_context,
     "knowledge_graph": _knowledge_graph,
+    "live_voice": _live_voice,
     "memory_auto_flush": _memory_auto_flush,
     "memory_extraction": lambda tmp_path, _monkeypatch: _memory_extraction(tmp_path, owned=True),
     "memory_extraction_system": lambda tmp_path, _monkeypatch: _memory_extraction(tmp_path, owned=False),
+    "realtime_voice": _realtime_voice,
     "room_topic": _room_topic,
     "routing": _routing,
     "routing_retried": lambda tmp_path, monkeypatch: _routing(tmp_path, monkeypatch, sums_attempts=True),

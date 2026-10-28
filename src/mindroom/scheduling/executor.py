@@ -194,11 +194,8 @@ async def _prepare_scheduled_trigger(
     if hook_registry.has_hooks(EVENT_SCHEDULE_FIRED):
         context = ScheduleFiredContext(
             event_name=EVENT_SCHEDULE_FIRED,
-            plugin_name="",
-            settings={},
             config=config,
             runtime_paths=runtime_paths,
-            logger=logger.bind(event_name=EVENT_SCHEDULE_FIRED),
             correlation_id=correlation_id,
             message_sender=build_hook_message_sender(
                 client,
