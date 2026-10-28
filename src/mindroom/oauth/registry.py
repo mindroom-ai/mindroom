@@ -31,6 +31,7 @@ from mindroom.oauth.microsoft import (
     outlook_mail_oauth_provider,
 )
 from mindroom.oauth.providers import OAuthProvider
+from mindroom.slack.oauth import slack_oauth_provider
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.plugins import load_plugin_module
@@ -79,6 +80,7 @@ def _builtin_oauth_providers() -> tuple[OAuthProvider, ...]:
         microsoft_meetings_oauth_provider(),
         microsoft_onenote_oauth_provider(),
         microsoft_people_oauth_provider(),
+        slack_oauth_provider(),
     )
 
 

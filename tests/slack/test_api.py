@@ -10,7 +10,6 @@ import httpx
 import pytest
 
 from mindroom.slack.api import (
-    SLACK_API_BASE,
     SlackApiError,
     SlackTarget,
     parse_slack_target,
@@ -151,7 +150,7 @@ async def test_token_sent_as_bearer_header_only() -> None:
 
     (request,) = seen
     assert request.method == "POST"
-    assert str(request.url) == f"{SLACK_API_BASE}chat.postMessage"
+    assert str(request.url) == "https://slack.com/api/chat.postMessage"
     assert request.headers["Authorization"] == "Bearer xoxb-secret-token"
     assert request.headers["Content-Type"] == "application/x-www-form-urlencoded"
     assert "xoxb-secret-token" not in str(request.url)

@@ -200,7 +200,7 @@ Agno behavior the golden pins as it is:
 ### `tools/schemas_all_enabled.json`
 
 The file maps each captured tool that has function switches to `{"overrides", "instructions", "guidance", "functions"}`, built as for `tools/schemas.json` but with `overrides` as the agent's authored tool config.
-`overrides` sets every boolean `all` and `enable_*` field to true, plus the extra settings in `EXTRA_ENABLING_OVERRIDES` that some functions need (`agentql_query`, `google_drive`'s `download_file`, `usage_stats`'s `admin_scope`); the dummy Slack credentials include a user token so `search_messages` registers.
+`overrides` sets every boolean `all` and `enable_*` field to true, plus the extra settings in `EXTRA_ENABLING_OVERRIDES` that some functions need (`agentql_query`, `google_drive`'s `download_file`, `usage_stats`'s `admin_scope`).
 Some switches replace a default function instead of adding one, such as `tavily`'s `enable_search_context`, so a tool's functions are the union of both files.
 
 When the files were captured, every name in a tool's `ToolMetadata.function_names` appeared in one of them, except async method names that Agno registers under their sync name, helper methods, and `wikipedia`'s knowledge-base function, which needs a knowledge base object that config cannot supply.

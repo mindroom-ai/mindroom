@@ -10,7 +10,13 @@ import httpx
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.oauth.providers import OAuthProvider, OAuthProviderError, OAuthRuntimeEndpoints, OAuthTokenResult
 from mindroom.slack.api import SlackApiError, slack_http_client
-from mindroom.slack.app import SlackAppCredentials, cached_slack_bot_identity, load_slack_app, slack_bot_identity
+from mindroom.slack.app import (
+    SLACK_APP_NOT_CONFIGURED,
+    SlackAppCredentials,
+    cached_slack_bot_identity,
+    load_slack_app,
+    slack_bot_identity,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -37,14 +43,13 @@ SLACK_USER_SCOPES = (
     "reactions:write",
     "files:read",
 )
-_NOT_CONFIGURED = "The MindRoom Slack app is not configured"
 
 
 def _load_slack_app(runtime_paths: RuntimePaths) -> SlackAppCredentials:
     """Read the app from the runtime's own credential store; a requester-scoped store would be the wrong one."""
     app = load_slack_app(get_runtime_credentials_manager(runtime_paths))
     if app is None:
-        raise OAuthProviderError(_NOT_CONFIGURED)
+        raise OAuthProviderError(SLACK_APP_NOT_CONFIGURED)
     return app
 
 
@@ -59,7 +64,7 @@ async def _slack_runtime_endpoints(provider: OAuthProvider, runtime_paths: Runti
         async with slack_http_client() as client:
             await slack_bot_identity(client, app)
     except (SlackApiError, httpx.HTTPError) as exc:
-        raise OAuthProviderError(_NOT_CONFIGURED) from exc
+        raise OAuthProviderError(SLACK_APP_NOT_CONFIGURED) from exc
     return OAuthRuntimeEndpoints(
         authorization_url=provider.authorization_url,
         token_url=provider.token_url,
@@ -93,7 +98,7 @@ def _parse_slack_token(
         raise OAuthProviderError(msg)
     identity = cached_slack_bot_identity(_load_slack_app(runtime_paths))
     if identity is None:
-        raise OAuthProviderError(_NOT_CONFIGURED)
+        raise OAuthProviderError(SLACK_APP_NOT_CONFIGURED)
     team_id = _text(_object(payload, "team"), "id")
     if team_id != identity.team_id:
         msg = "This Slack account belongs to another workspace"

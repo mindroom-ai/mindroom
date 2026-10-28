@@ -302,8 +302,6 @@ def test_every_toolkit_s_instructions_reach_the_prompt_whatever_its_add_instruct
         ("gmail", {}, {"send_email": False}),
         ("google_calendar", {}, {"allow_update": False}),
         ("reasoning", {}, {"enable_think": False}),
-        # Slack's guide names list_users, which the default configuration leaves out.
-        ("slack", {"enable_list_users": True}, {}),
         ("zep", {}, {"enable_add_zep_message": False}),
     ],
 )

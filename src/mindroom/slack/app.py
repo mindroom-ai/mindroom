@@ -13,7 +13,8 @@ if TYPE_CHECKING:
 
     from mindroom.credentials.manager import CredentialsManager
 
-SLACK_APP_SERVICE = "slack_app"
+_SLACK_APP_SERVICE = "slack_app"
+SLACK_APP_NOT_CONFIGURED = "The MindRoom Slack app is not configured"
 
 
 @dataclass(frozen=True)
@@ -45,7 +46,7 @@ def _stored_text(credentials: dict[str, object], key: str) -> str | None:
 
 def load_slack_app(credentials_manager: CredentialsManager) -> SlackAppCredentials | None:
     """Return the Slack app from the shared credential store, or None until it has a bot token and signing secret."""
-    credentials = credentials_manager.shared_manager().load_credentials(SLACK_APP_SERVICE) or {}
+    credentials = credentials_manager.shared_manager().load_credentials(_SLACK_APP_SERVICE) or {}
     bot_token = _stored_text(credentials, "bot_token")
     signing_secret = _stored_text(credentials, "signing_secret")
     if bot_token is None or signing_secret is None:

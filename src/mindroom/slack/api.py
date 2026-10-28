@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
-SLACK_API_BASE = "https://slack.com/api/"
+_SLACK_API_BASE = "https://slack.com/api/"
 _TIMEOUT_SECONDS = 10.0
 _DEFAULT_RETRY_AFTER_SECONDS = 1
 _CONVERSATION_ID = r"[CGD][A-Z0-9]{8,}"
@@ -61,7 +61,7 @@ def _form_value(value: object) -> str:
 async def slack_call(client: httpx.AsyncClient, method: str, token: str, **params: object) -> dict[str, Any]:
     """Call one Slack Web API method with a bearer token and return its body."""
     response = await client.post(
-        f"{SLACK_API_BASE}{method}",
+        f"{_SLACK_API_BASE}{method}",
         headers={"Authorization": f"Bearer {token}"},
         data={key: _form_value(value) for key, value in params.items() if value is not None},
     )

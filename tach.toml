@@ -1582,6 +1582,7 @@ visibility = [
     "mindroom.custom_tools.google_drive",
     "mindroom.custom_tools.github",
     "mindroom.custom_tools.microsoft_graph",
+    "mindroom.custom_tools.slack",
     "mindroom.egress_broker",
     "mindroom.mcp.manager",
     "mindroom.oauth.client",
@@ -9729,3 +9730,15 @@ depends_on = ["mindroom.slack.api"]
 [[modules]]
 path = "mindroom.slack.oauth"
 depends_on = ["mindroom.slack.api", "mindroom.slack.app"]
+
+[[modules]]
+path = "mindroom.custom_tools.slack"
+depends_on = [
+    "mindroom.atomic_file",
+    "mindroom.config.main",
+    "mindroom.oauth.credential_lifecycle",
+    "mindroom.path_confinement",
+    "mindroom.slack.api",
+    "mindroom.slack.app",
+    "mindroom.slack.oauth",
+]

@@ -13,9 +13,11 @@ import httpx
 import pytest
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 
+from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.oauth.providers import OAuthProviderError
+from mindroom.oauth.registry import load_oauth_providers
 from mindroom.slack import app as slack_app
 from mindroom.slack import oauth as slack_oauth
 from mindroom.slack.app import SlackAppCredentials, slack_bot_identity
@@ -318,3 +320,10 @@ def test_full_exchange_surfaces_a_slack_error(tmp_path: Path, monkeypatch: pytes
 
     with pytest.raises(OAuthProviderError, match="OAuth token exchange failed"):
         _exchange(runtime_paths)
+
+
+def test_provider_registered(tmp_path: Path) -> None:
+    providers = load_oauth_providers(Config(), _runtime_paths(tmp_path), skip_broken_plugins=False)
+
+    assert providers["slack"].credential_service == "slack_oauth"
+    assert providers["slack"].tool_config_service == "slack"
