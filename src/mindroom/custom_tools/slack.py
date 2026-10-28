@@ -858,8 +858,7 @@ class SlackTools(Toolkit):
             if isinstance(size, int) and size > MAX_FILE_BYTES:
                 msg = f"The file is {size} bytes; downloads are limited to {MAX_FILE_BYTES} bytes"
                 raise _SlackRefusalError(msg)
-            url = file.get("url_private_download") or file.get("url_private")
-            content = await fetch_file(session.client, session.token, url if isinstance(url, str) else "")
+            content = await fetch_file(session.client, session.token, file)
             path = await asyncio.to_thread(save_download, self._workspace_root, file_id, file.get("name"), content)
             return {
                 "file": {

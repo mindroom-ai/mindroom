@@ -546,6 +546,60 @@ async def test_download_stays_in_workspace(
     assert _bearer(fake.requests[-1]) == USER_TOKEN
 
 
+@pytest.mark.parametrize(
+    ("mimetype", "size", "response"),
+    [
+        ("application/pdf", None, httpx.Response(200, html="<html>Sign in</html>")),
+        ("application/pdf", 4, httpx.Response(200, content=b"plan and more")),
+    ],
+    ids=["an HTML page for a PDF", "a size other than Slack's"],
+)
+@pytest.mark.asyncio
+async def test_download_refuses_a_page_instead_of_the_file(
+    mimetype: str,
+    size: int | None,
+    response: httpx.Response,
+    tmp_path: Path,
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _connect_alice(paths)
+    download_url = f"https://files.slack.com/files-pri/T0123ABCD-{FILE_ID}/plan.pdf"
+    file = {"id": FILE_ID, "name": "plan.pdf", "mimetype": mimetype, "url_private_download": download_url}
+    if size is not None:
+        file["size"] = size
+    FakeSlack({"files.info": {"ok": True, "file": file}, download_url: lambda _request: response}).install(monkeypatch)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    result = json.loads(await _tools(paths, tool_output_workspace_root=workspace).slack_download(FILE_ID))
+
+    assert result["message"] == "Slack returned a page instead of the file; reconnect Slack and try again"
+    assert list(workspace.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_download_keeps_an_html_file(
+    tmp_path: Path,
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _connect_alice(paths)
+    download_url = f"https://files.slack.com/files-pri/T0123ABCD-{FILE_ID}/page.html"
+    page = "<html>notes</html>"
+    file = {"id": FILE_ID, "name": "page.html", "mimetype": "text/html", "size": len(page), "url_private": download_url}
+    FakeSlack(
+        {"files.info": {"ok": True, "file": file}, download_url: lambda _request: httpx.Response(200, html=page)},
+    ).install(monkeypatch)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    result = json.loads(await _tools(paths, tool_output_workspace_root=workspace).slack_download(FILE_ID))
+
+    assert (workspace / "slack-downloads" / f"{FILE_ID}-page.html").read_text() == page
+    assert result["file"]["size"] == len(page)
+
+
 @pytest.mark.asyncio
 async def test_project_search_messages_refused(paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeSlack().install(monkeypatch)

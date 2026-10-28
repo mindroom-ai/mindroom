@@ -6,7 +6,7 @@ Each function takes one call's HTTP client and the token it acts with; a refusal
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from mindroom.atomic_file import atomic_write_file_at
@@ -14,6 +14,7 @@ from mindroom.path_confinement import open_directory_within_root, resolve_path_w
 from mindroom.slack.api import slack_call
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
     import httpx
@@ -25,14 +26,25 @@ _DOWNLOAD_DIR = "slack-downloads"
 _DOWNLOAD_HOST = "files.slack.com"
 _MAX_NAME_CHARACTERS = 150
 _UNSAFE_NAME_CHARACTERS = re.compile(r"[^A-Za-z0-9._ -]")
+_NOT_THE_FILE = "Slack returned a page instead of the file; reconnect Slack and try again"
 
 
 class SlackFileError(Exception):
     """A file transfer refused before or instead of finishing; `str()` is the message for the agent."""
 
 
-async def fetch_file(client: httpx.AsyncClient, token: str, url: str) -> bytearray:
-    """Return a file's bytes from Slack's file host, refusing it as soon as it passes 50 MB."""
+def _is_html(media_type: object) -> bool:
+    return isinstance(media_type, str) and media_type.split(";", 1)[0].strip().lower() == "text/html"
+
+
+async def fetch_file(client: httpx.AsyncClient, token: str, file: Mapping[str, Any]) -> bytearray:
+    """Return the bytes of a file `files.info` described, from Slack's file host, refusing them once they pass 50 MB.
+
+    Slack answers a token it does not accept for files with a web page instead of the file, so an HTML answer for a file
+    that is not HTML, or a byte count other than the file's size, is refused.
+    """
+    link = file.get("url_private_download") or file.get("url_private")
+    url = link if isinstance(link, str) else ""
     parts = urlsplit(url)
     if parts.scheme != "https" or parts.hostname != _DOWNLOAD_HOST:
         msg = "Slack returned no download link for this file"
@@ -42,12 +54,17 @@ async def fetch_file(client: httpx.AsyncClient, token: str, url: str) -> bytearr
         if not response.is_success:
             msg = f"Slack refused the download with HTTP {response.status_code}"
             raise SlackFileError(msg)
+        if _is_html(response.headers.get("content-type")) and not _is_html(file.get("mimetype")):
+            raise SlackFileError(_NOT_THE_FILE)
         content = bytearray()
         async for chunk in response.aiter_bytes():
             content.extend(chunk)
             if len(content) > MAX_FILE_BYTES:
                 msg = f"The file is larger than {MAX_FILE_BYTES} bytes"
                 raise SlackFileError(msg)
+    size = file.get("size")
+    if isinstance(size, int) and len(content) != size:
+        raise SlackFileError(_NOT_THE_FILE)
     return content
 
 
