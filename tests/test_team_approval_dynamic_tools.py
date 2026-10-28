@@ -48,7 +48,7 @@ async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path:
     """The coordinator cannot replace frozen member ownership while rebuilding tools."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     target = _target(thread_id="$thread")
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -89,7 +89,7 @@ async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path:
         team_member_names=("alpha", "beta"),
         team_mode="coordinate",
     )
-    assert await paused_for_approval(runner.deps.approval_store, continuation) is not None
+    assert await paused_for_approval(runner.deps.replies.store, continuation) is not None
     continued = AsyncMock(return_value=CompletedApprovalRun(response_text="done", metadata_content={}))
     progress = AsyncMock()
     with (

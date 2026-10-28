@@ -285,7 +285,7 @@ class _Recording:
             target=continuation_target(continuation),
             failure_reason=_PUBLICATION_FAILED,
         )
-        published = await self.responder.approval_continuation(continuation.approval_id)
+        published = await self.responder.approvals.approval_continuation(continuation.approval_id)
         assert published is not None
         return published
 
@@ -394,9 +394,9 @@ class _Recording:
     async def fail(self, name: str, reason: str) -> None:
         """Fence the continuation ``name`` for failure in the state it holds, as its owner does."""
         self.clock.advance()
-        current = await self.responder.approval_continuation(name)
+        current = await self.responder.approvals.approval_continuation(name)
         assert current is not None
-        failing = await self.responder.request_approval_failure(
+        failing = await self.responder.approvals.request_approval_failure(
             name,
             reason,
             expected_state=current.state,
@@ -444,7 +444,7 @@ class _Recording:
         )
         card_event_id = _card(f"script-approval:{run_id}:{call_id}")
         for _attempt in range(2_000):
-            if await self.router.pending_approval_card(room_id=ROOM, card_event_id=card_event_id) is not None:
+            if await self.router.approvals.pending_approval_card(room_id=ROOM, card_event_id=card_event_id) is not None:
                 return waiter
             await asyncio.sleep(0.005)
         msg = f"The card of {run_id}:{call_id} never reached Matrix"
@@ -535,7 +535,8 @@ async def _open_recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _R
     coordinator = ApprovalResponseCoordinator(
         config=lambda: config,
         runtime_paths=runtime_paths,
-        store=responder,
+        store=responder.approvals,
+        load_span=responder.replies.span,
         delivery_gateway=MagicMock(spec=DeliveryGateway),
         retry_sources=lambda _room_id, _sources: None,
         finish_approval=AsyncMock(return_value=True),
@@ -571,21 +572,21 @@ async def recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIte
 
 
 async def _call_decisions(run: _Recording, name: str) -> list[ApprovalDecision | None]:
-    continuation = await run.responder.approval_continuation(name)
+    continuation = await run.responder.approvals.approval_continuation(name)
     assert continuation is not None
     return [call.decision for call in continuation.calls]
 
 
 async def _card_on_matrix(run: _Recording, delivery_id: str) -> bool:
     """Return whether the card delivered as ``delivery_id`` is acknowledged and still undecided."""
-    stored = await run.router.pending_approval_card(room_id=ROOM, card_event_id=_card(delivery_id))
+    stored = await run.router.approvals.pending_approval_card(room_id=ROOM, card_event_id=_card(delivery_id))
     return stored is not None and stored.resolution is None
 
 
 async def _retired(run: _Recording, delivery_id: str) -> bool:
     """Return whether the card or receipt delivered as ``delivery_id`` is retired into its terminal tombstone."""
     initial = await run.router.load_matrix_delivery(delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
-    return initial is None and await run.router.is_terminal_approval_card(
+    return initial is None and await run.router.approvals.is_terminal_approval_card(
         room_id=ROOM,
         card_event_id=_card(delivery_id),
     )
@@ -651,7 +652,7 @@ async def _ready(run: _Recording) -> None:
     await run.pause("ready", _push(), _call("call-save", "save_file", file_name="CHANGELOG.md", contents="## 1.2.0\n"))
     await run.decide(_card("ready-0-0"), "approved")
     await run.decide(_card("ready-0-1"), "approved")
-    continuation = await run.responder.approval_continuation("ready")
+    continuation = await run.responder.approvals.approval_continuation("ready")
     assert continuation is not None
     assert continuation.state == "ready"
     assert await _retired(run, "ready-0-0")
@@ -692,7 +693,7 @@ async def _failing(run: _Recording) -> None:
         ("interrupted", "interrupted"),
         ("shutdown", INTERRUPTED_FAILURE_REASON),
     ):
-        continuation = await run.responder.approval_continuation(name)
+        continuation = await run.responder.approvals.approval_continuation(name)
         assert continuation is not None
         assert (continuation.state, continuation.failure_reason) == ("failing", reason)
 
@@ -726,7 +727,7 @@ async def _denied_edit_unacknowledged(run: _Recording) -> None:
     await run.pause("denied-unsent", _push())
     # The decision committed and the process stopped before the edit went out.
     run.clock.advance()
-    recorded = await run.router.resolve_continuation_approval_card(
+    recorded = await run.router.approvals.resolve_continuation_approval_card(
         card_event_id=_card("denied-unsent-0-0"),
         requested_status="denied",
         reason="Not on a Friday.",
@@ -813,7 +814,7 @@ async def _scheduled_calls(run: _Recording) -> None:
     run.clock.advance()
     await run.manager.record_scheduled_call_outcome("task-consumed", "completed")
     run.clock.advance()
-    await run.router.maintain_automatic_approvals()
+    await run.router.approvals.maintain_automatic_approvals()
     assert await _retired(run, "scheduled-receipt:task-consumed")
     await run.schedule("task-withdrawn")
     run.clock.advance()
@@ -833,7 +834,7 @@ async def _timed_grants(run: _Recording) -> None:
     # Later calls in the scope are approved as they pause, each with a receipt instead of a card.
     await run.pause("receipt-retired", _push())
     run.clock.advance()
-    await run.router.maintain_automatic_approvals()
+    await run.router.approvals.maintain_automatic_approvals()
     assert await _retired(run, "receipt-retired-0-0")
     receipted = await run.pause("receipt-live", _push())
     assert receipted.state == "ready"
@@ -843,7 +844,7 @@ async def _timed_grants(run: _Recording) -> None:
     # A grant in another conversation, which the requester revoked.
     await run.pause("revoked", _push(), thread_id=OTHER_THREAD)
     await run.decide(_card("revoked-0-0"), "approved", seconds=600)
-    grant = await run.router.approval_grant_for_card(room_id=ROOM, card_event_id=_card("revoked-0-0"))
+    grant = await run.router.approvals.approval_grant_for_card(room_id=ROOM, card_event_id=_card("revoked-0-0"))
     assert grant is not None
     run.clock.advance()
     revoked = await run.manager.handle_grant_revocation(
@@ -878,7 +879,10 @@ async def _expired_calls(run: _Recording) -> None:
     run.clock.advance((paused.calls[0].expires_at_ns - run.clock.now_ns) // SECOND_NS + 1)
     await run.manager.recover_cards_on_startup()
     assert await _call_decisions(run, "expired") == [ApprovalDecision.EXPIRED]
-    decision = await run.router.background_approval_decision(run_id="tool-job:job-expired", call_id="call-expired")
+    decision = await run.router.approvals.background_approval_decision(
+        run_id="tool-job:job-expired",
+        call_id="call-expired",
+    )
     assert decision is not None
     assert decision.status == "expired"
     assert await _retired(run, "expired-0-0")
@@ -915,24 +919,27 @@ async def _read_back(store: EventJournalStore, database: Path) -> None:
         tasks = connection.execute("SELECT principal_id, task_id FROM scheduled_call_approvals").fetchall()
         detached = connection.execute("SELECT principal_id, run_id, call_id FROM background_approval_calls").fetchall()
     for principal_id, continuation in await store.approval_continuations(limit=1_000):
-        assert await store.principal(principal_id).approval_continuation(continuation.approval_id) == continuation
+        assert (
+            await store.principal(principal_id).approvals.approval_continuation(continuation.approval_id)
+            == continuation
+        )
     for principal_id in principals:
         principal = store.principal(principal_id)
-        await principal.pending_approvals()
-        for room_id in await principal.pending_approval_room_ids():
-            cards = await principal.pending_approval_cards(room_id=room_id)
+        await principal.approvals.pending_approvals()
+        for room_id in await principal.approvals.pending_approval_room_ids():
+            cards = await principal.approvals.pending_approval_cards(room_id=room_id)
             assert not [card for card in cards if isinstance(card, UnreadableApprovalCard)]
     for principal_id, room_id, card_event_id, grant_id in grants:
-        grant = await store.principal(principal_id).approval_grant_for_card(
+        grant = await store.principal(principal_id).approvals.approval_grant_for_card(
             room_id=room_id,
             card_event_id=card_event_id,
         )
         assert grant is not None
         assert grant.grant_id == grant_id
     for principal_id, task_id in tasks:
-        assert await store.principal(principal_id).scheduled_call(task_id=task_id) is not None
+        assert await store.principal(principal_id).approvals.scheduled_call(task_id=task_id) is not None
     for principal_id, run_id, call_id in detached:
-        await store.principal(principal_id).background_approval_decision(run_id=run_id, call_id=call_id)
+        await store.principal(principal_id).approvals.background_approval_decision(run_id=run_id, call_id=call_id)
 
 
 async def _assert_opens_cleanly(fixture: Path, database: Path, *, recorded: str) -> None:

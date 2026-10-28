@@ -49,7 +49,7 @@ async def _runner_with_source(tmp_path: Path) -> tuple[AgentBot, ResponseRunner]
         event_id=f"$response-{next(event_ids)}",
         room_id="!room:localhost",
     )
-    await runner.deps.approval_store.admit(
+    await runner.deps.replies.store.admit(
         InboundEvent(
             event_id="$source",
             room_id="!room:localhost",
@@ -133,7 +133,7 @@ async def test_final_approval_links_the_delivered_attempt(
     """Live and recovered finals persist the attempt identified by their durable metadata."""
     bot, runner = await _runner_with_source(tmp_path)
     continuation = _ready_continuation()
-    assert await paused_for_approval(runner.deps.approval_store, continuation) == continuation
+    assert await paused_for_approval(runner.deps.replies.store, continuation) == continuation
     target = _target(thread_id="$thread", reply_to_event_id="$source")
     persist_event_id = AsyncMock()
     completed = CompletedApprovalRun(
@@ -280,7 +280,7 @@ async def test_automatic_checkpoint_keeps_foreground_until_handoff(  # noqa: PLR
     assert order == ["initial model" if checkpoint == "initial" else "first batch", "original handoff", "follow-up"]
     assert generations == ([0] if checkpoint == "initial" else [0, 1])
     assert await runner.deps.approval_store.approval_continuation_for_source("$source") is None
-    assert not await runner.deps.approval_store.is_pending("$source")
+    assert not await runner.deps.replies.store.is_pending("$source")
     assert not original.cancelled()
     assert follow_up is not None
     assert not follow_up.cancelled()
@@ -368,7 +368,7 @@ async def test_human_approval_wait_releases_foreground_for_follow_up(tmp_path: P
     assert waiting.generation == 1
     assert waiting.continuation_count == 2
     assert waiting.calls[0].decision is None
-    assert await runner.deps.approval_store.is_pending("$source")
+    assert await runner.deps.replies.store.is_pending("$source")
     assert runner.is_held_for_approval(target)
     assert not original.cancelled()
     assert follow_up is not None

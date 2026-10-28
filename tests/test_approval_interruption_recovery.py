@@ -34,7 +34,7 @@ async def approval(tmp_path: Path) -> AsyncIterator[tuple[AgentBot, ApprovalCont
     bot = _bot(tmp_path)
     initialize_approval_store_for_test(bot.runtime_paths, cards=bot.journal_principal())
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-recovery",
@@ -47,7 +47,7 @@ async def approval(tmp_path: Path) -> AsyncIterator[tuple[AgentBot, ApprovalCont
     restarted = _bot(tmp_path)
     initialize_approval_store_for_test(restarted.runtime_paths, cards=restarted.journal_principal())
     await restarted._reply_runtime.start()
-    left = await restarted.journal_principal().approval_continuation(continuation.approval_id)
+    left = await restarted.journal_principal().approvals.approval_continuation(continuation.approval_id)
     assert left is not None
     assert left.state == "claimed"
     unique_room_send_responses(restarted.client)
@@ -82,7 +82,7 @@ async def _assert_settled_with_interruption_note(bot: AgentBot, claimed: Approva
     assert str(note["body"]).rstrip().endswith(RESTART_INTERRUPTED_RESPONSE_NOTE)
     assert note[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
     store = bot.journal_principal()
-    assert await store.approval_continuation(claimed.approval_id) is None
+    assert await store.approvals.approval_continuation(claimed.approval_id) is None
     assert not await store.is_pending("$source")
 
 

@@ -141,7 +141,7 @@ class _ApprovalCase:
         reconciler = UserStopReconciler(UserStopReconcilerDeps(self.store, self.gateway))
         assert await reconciler.finalize("$answer", 4, room_id=self.room.room_id)
         # Run what the journal's worker runs for the approval source the Stop fenced and woke: its failure settlement.
-        continuation = await self.principal.approval_continuation_for_source("$edit")
+        continuation = await self.principal.approvals.approval_continuation_for_source("$edit")
         if continuation is not None and continuation.state == "failing":
             await self.runner.handoff_approval_source("$edit")
         await self.runner.wait_for_source_owned_inbox_responses()
@@ -153,14 +153,14 @@ class _ApprovalCase:
             await self.stop()
         finally:
             self.bot.client.room_send.side_effect = None
-        failing = await self.principal.approval_continuation(self.approval.approval_id)
+        failing = await self.principal.approvals.approval_continuation(self.approval.approval_id)
         assert failing is not None
         assert failing.state == "failing"
         assert await self.principal.is_pending("$edit")
         assert self.store.get_turn_record("$source").source_event_revisions == {"$source": (20, "$edit")}
 
     async def assert_stopped_edit_settled(self) -> None:
-        assert await self.principal.approval_continuation_for_source("$edit") is None
+        assert await self.principal.approvals.approval_continuation_for_source("$edit") is None
         assert not await self.principal.is_pending("$edit")
         assert self.store.get_turn_record("$source").source_event_revisions == {"$source": (20, "$edit")}
         resumed = AsyncMock(side_effect=AssertionError("Stopped approval must not execute"))
@@ -209,7 +209,7 @@ class _ApprovalCase:
             delivered_projections=(),
         )
         assert await self.runner._recover_claimed_approval_lifecycle(claimed, target=self.target) == "$answer"
-        assert await self.principal.approval_continuation(claimed.approval_id) is None
+        assert await self.principal.approvals.approval_continuation(claimed.approval_id) is None
 
     async def resume(self) -> None:
         result = AsyncMock(return_value=CompletedApprovalRun(response_text="Edited answer", metadata_content={}))
@@ -305,7 +305,7 @@ async def _paused_case(  # noqa: PLR0915
     runner.deps = replace(
         runner.deps,
         delivery_gateway=gateway,
-        approval_store=principal,
+        approval_store=principal.approvals,
         # These cases end a superseded approval by hand, as its source's worker
         # would after a crash cut its background cleanup short.
         replies=replace(
@@ -315,7 +315,8 @@ async def _paused_case(  # noqa: PLR0915
         ),
     )
     await runner.deps.replies.start()
-    runner._approval_responses.store = principal
+    runner._approval_responses.store = principal.approvals
+    runner._approval_responses.load_span = principal.replies.span
     runner._approval_responses.delivery_gateway = gateway
     runner._approval_responses.finish_approval = runner.deps.replies.finish_approval
     regenerator = unwrap_extracted_collaborator(bot._edit_regenerator)
@@ -402,8 +403,8 @@ async def _paused_case(  # noqa: PLR0915
                 replace(
                     runner.deps,
                     approval_store=MagicMock(
-                        spec=type(principal),
-                        wraps=principal,
+                        spec=type(principal.approvals),
+                        wraps=principal.approvals,
                     ),
                 ),
             ),
@@ -411,14 +412,14 @@ async def _paused_case(  # noqa: PLR0915
             await dispatcher.drain_once()
             await finish_edit_regenerations(bot)
         assert model.await_count == 1
-        continuation = await principal.approval_continuation_for_source(edit_id)
+        continuation = await principal.approvals.approval_continuation_for_source(edit_id)
         assert continuation is not None
         assert outcomes == [TurnDispatchOutcome.DEFERRED]
         assert continuation.source_event_ids == (edit_id,)
         assert continuation.state == ("waiting" if requires_human else "ready")
         assert await principal.is_pending(edit_id)
         assert not await principal.is_pending(source_id)
-        assert await principal.approval_continuation_for_source(source_id) is None
+        assert await principal.approvals.approval_continuation_for_source(source_id) is None
         # The turn took the edit when its regeneration claimed the reply.
         assert store.get_turn_record(source_id).source_event_revisions == {source_id: (20, edit_id)}
 
@@ -469,7 +470,7 @@ class TestEditApprovalOwnership:
         retried: list[tuple[str, ...]] = []
         case.runner.deps.replies.retry_sources = lambda _room_id, sources: retried.append(sources)
         await case.dispatch_newer()
-        failing = await case.principal.approval_continuation(case.approval.approval_id)
+        failing = await case.principal.approvals.approval_continuation(case.approval.approval_id)
         assert failing is not None
         assert failing.state == "failing"
         assert failing.failure_reason == "cancelled_by_user"
@@ -478,7 +479,7 @@ class TestEditApprovalOwnership:
         assert ("$newer-edit",) not in retried
         await case.runner.handoff_approval_source("$edit")
         await case.runner.wait_for_source_owned_inbox_responses()
-        assert await case.principal.approval_continuation(case.approval.approval_id) is None
+        assert await case.principal.approvals.approval_continuation(case.approval.approval_id) is None
         assert ("$newer-edit",) in retried
         # The retried edit regenerates the reply in place from the newer text.
         case.bot.client.room_send.reset_mock()
@@ -501,7 +502,7 @@ class TestEditApprovalOwnership:
         retried: list[tuple[str, ...]] = []
         case.runner.deps.replies.retry_sources = lambda _room_id, sources: retried.append(sources)
         await case.dispatch_newer()
-        assert await case.principal.approval_continuation_for_source("$newer-edit") is None
+        assert await case.principal.approvals.approval_continuation_for_source("$newer-edit") is None
         assert not await case.runner._approval_responses.settle_failure(claimed, "Paused run is no longer available")
         final = await case.principal.load_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL)
         assert final is not None
@@ -521,7 +522,7 @@ class TestEditApprovalOwnership:
         await case.approve()
         await case.restart()
         await case.resume()
-        assert await case.principal.approval_continuation_for_source("$edit") is None
+        assert await case.principal.approvals.approval_continuation_for_source("$edit") is None
         assert not await case.principal.is_pending("$edit")
         assert not await case.principal.is_pending("$source")
         final = await case.principal.load_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL)
@@ -545,7 +546,7 @@ class TestEditApprovalOwnership:
         """Deleting the message the held reply answers cancels its approval as a Stop would, and the reply goes."""
         case = approval_case
         await case.redact("$source")
-        failing = await case.principal.approval_continuation(case.approval.approval_id)
+        failing = await case.principal.approvals.approval_continuation(case.approval.approval_id)
         assert failing is not None
         assert failing.state == "failing"
         assert failing.failure_reason == "cancelled_by_user"
@@ -556,7 +557,7 @@ class TestEditApprovalOwnership:
             await case.runner.handoff_approval_source("$edit")
             await case.runner.wait_for_source_owned_inbox_responses()
         resumed.assert_not_awaited()
-        assert await case.principal.approval_continuation(case.approval.approval_id) is None
+        assert await case.principal.approvals.approval_continuation(case.approval.approval_id) is None
         assert not await case.principal.is_pending("$edit")
         reply = await case.principal.replies.for_event("$answer")
         assert reply is not None
@@ -609,7 +610,7 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
     assert runner.deps.replies is not None
     runner.deps = replace(
         runner.deps,
-        approval_store=principal,
+        approval_store=principal.approvals,
         delivery_gateway=gateway,
         replies=replace(runner.deps.replies, store=principal, complete_turn=store.publish_completed_turn),
     )

@@ -12,6 +12,7 @@ from mindroom.approval.response import ApprovalResponseCoordinator
 from mindroom.config.main import Config
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.event_journal import ApprovalContinuation, EventJournalStore, PrincipalStore
+from mindroom.event_journal.approval_store import ApprovalStore
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import test_runtime_paths
 
@@ -48,12 +49,13 @@ async def test_source_failure_cancels_children_before_finishing(tmp_path: Path) 
         order.append("source")
         return True
 
-    store = MagicMock(spec=PrincipalStore)
+    store = MagicMock(spec=ApprovalStore)
     store.approval_continuation = AsyncMock(return_value=continuation)
     coordinator = ApprovalResponseCoordinator(
         config=lambda: config,
         runtime_paths=paths,
         store=store,
+        load_span=AsyncMock(return_value=None),
         delivery_gateway=MagicMock(spec=DeliveryGateway),
         retry_sources=lambda _room, _sources: None,
         finish_approval=finish,
@@ -85,7 +87,7 @@ async def test_failure_reply_redacts_credentials_from_reason(tmp_path: Path) -> 
     api_key = "sk-" + "test" + "A1b2C3d4E5f6G7h8J9k0"
     password = "hunter" + "2secret"
     reason = f"Incorrect API key provided: {api_key} at https://user:{password}@mcp.internal/sse"
-    store = MagicMock(spec=PrincipalStore)
+    store = MagicMock(spec=ApprovalStore)
     store.approval_continuation = AsyncMock(return_value=continuation)
     finish_approval = AsyncMock(side_effect=[False, True])
     gateway = MagicMock(spec=DeliveryGateway)
@@ -94,6 +96,7 @@ async def test_failure_reply_redacts_credentials_from_reason(tmp_path: Path) -> 
         config=Config,
         runtime_paths=test_runtime_paths(tmp_path),
         store=store,
+        load_span=AsyncMock(return_value=None),
         delivery_gateway=gateway,
         retry_sources=lambda _room, _sources: None,
         finish_approval=finish_approval,
@@ -120,7 +123,7 @@ async def test_failure_reply_redacts_credentials_from_reason(tmp_path: Path) -> 
 async def test_failure_reply_is_marked_interrupted(tmp_path: Path, reason: str, note: str) -> None:
     """Clients and later turns treat a stopped or failed continuation as interrupted, not as a finished reply."""
     continuation = _continuation()
-    store = MagicMock(spec=PrincipalStore)
+    store = MagicMock(spec=ApprovalStore)
     store.approval_continuation = AsyncMock(return_value=continuation)
     finish_approval = AsyncMock(side_effect=[False, True])
     gateway = MagicMock(spec=DeliveryGateway)
@@ -129,6 +132,7 @@ async def test_failure_reply_is_marked_interrupted(tmp_path: Path, reason: str, 
         config=Config,
         runtime_paths=test_runtime_paths(tmp_path),
         store=store,
+        load_span=AsyncMock(return_value=None),
         delivery_gateway=gateway,
         retry_sources=lambda _room, _sources: None,
         finish_approval=finish_approval,
@@ -158,9 +162,9 @@ async def test_unavailable_owner_cancels_children_before_discarding() -> None:
         return True
 
     store = MagicMock(spec=PrincipalStore)
-    store.approval_continuation = AsyncMock(return_value=continuation)
+    store.approvals.approval_continuation = AsyncMock(return_value=continuation)
     store.load_matrix_delivery = AsyncMock(return_value=None)
-    store.discard_unavailable_approval_continuation = AsyncMock(side_effect=discard)
+    store.approvals.discard_unavailable_approval_continuation = AsyncMock(side_effect=discard)
     journal = MagicMock(spec=EventJournalStore)
     journal.principal.return_value = store
     notice_store = MagicMock(spec=PrincipalStore)

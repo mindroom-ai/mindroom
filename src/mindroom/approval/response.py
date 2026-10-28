@@ -47,8 +47,10 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import DeliveryGateway
-    from mindroom.event_journal import MatrixDelivery, PrincipalStore
+    from mindroom.event_journal import MatrixDelivery
+    from mindroom.event_journal.approval_store import ApprovalStore
     from mindroom.llm.runs import ToolExecution
+    from mindroom.reply_lifecycle import Span
     from mindroom.response_turn import PausedAttempt
     from mindroom.tool_approval_grants import ApprovalOperation
     from mindroom.tool_system.events import ToolTraceEntry
@@ -262,7 +264,8 @@ class ApprovalResponseCoordinator:
 
     config: Callable[[], Config]
     runtime_paths: RuntimePaths
-    store: PrincipalStore
+    store: ApprovalStore
+    load_span: Callable[[str], Awaitable[Span | None]]
     delivery_gateway: DeliveryGateway
     retry_sources: Callable[[str, tuple[str, ...]], None]
     # Finishes a paused run once its FINAL is terminal, settling its turn.
@@ -506,7 +509,7 @@ class ApprovalResponseCoordinator:
         delivery = await self.final_delivery(continuation, recover=recover)
         if delivery is None or delivery.permanently_failed:
             return None
-        span = None if delivery.span_id is None else await self.store.replies.span(delivery.span_id)
+        span = None if delivery.span_id is None else await self.load_span(delivery.span_id)
         return delivery if span is not None and span.outcome is SpanOutcome.COMPLETED else None
 
     async def final_delivery(

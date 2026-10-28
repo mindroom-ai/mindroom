@@ -23,6 +23,7 @@ from mindroom.event_journal import (
     reply_spans,
     turn_records,
 )
+from mindroom.event_journal.approval_store import ApprovalStore
 from mindroom.event_journal.replies import (
     AppliedTransition,
     ApprovalEnded,
@@ -1012,7 +1013,7 @@ async def test_a_stop_still_cancels_its_span_when_waking_its_approval_fails(jour
     )
     with (
         patch.object(
-            PrincipalStore,
+            ApprovalStore,
             "approval_continuation",
             AsyncMock(side_effect=RuntimeError("journal unavailable")),
         ),
@@ -1250,9 +1251,12 @@ async def test_discarding_an_unavailable_owners_approval_ends_the_reply_it_pause
     assert continuation.span_id is not None
     paused = await alice.replies.span(continuation.span_id)
     assert paused is not None
-    assert await alice.request_approval_failure("approval-1", "agent removed", expected_state="waiting") is not None
+    assert (
+        await alice.approvals.request_approval_failure("approval-1", "agent removed", expected_state="waiting")
+        is not None
+    )
     router = journal_store.principal("router@alice")
-    delivery_id = await router.enqueue_unavailable_approval_notice(
+    delivery_id = await router.approvals.enqueue_unavailable_approval_notice(
         approval_id="approval-1",
         room_id=ROOM,
         thread_id="$thread",
@@ -1267,7 +1271,10 @@ async def test_discarding_an_unavailable_owners_approval_ends_the_reply_it_pause
         delivered_projections=(),
     )
 
-    assert await alice.discard_unavailable_approval_continuation("approval-1", notice_principal_id="router@alice")
+    assert await alice.approvals.discard_unavailable_approval_continuation(
+        "approval-1",
+        notice_principal_id="router@alice",
+    )
 
     ended = await alice.replies.load(paused.reply_id)
     assert ended is not None
@@ -1283,7 +1290,7 @@ async def test_a_resume_behind_an_unresolved_row_of_its_reply_waits_for_it(journ
     continuation = journal_tests.TestApprovalContinuations.continuation(state="ready")
     span = await reply_shown_for_approval(alice, continuation)
     assert span is not None
-    paused = await alice.pause_for_approval(
+    paused = await alice.approvals.pause_for_approval(
         continuation,
         ReplyRowRequest(
             reply_id=span.reply_id,
@@ -1311,11 +1318,11 @@ async def test_a_resume_behind_an_unresolved_row_of_its_reply_waits_for_it(journ
         approval_ended=lambda _ended: None,
     )
     await runtime.take_ownership()
-    stored = await alice.approval_continuation("approval-1")
+    stored = await alice.approvals.approval_continuation("approval-1")
     assert stored is not None
 
     assert await runtime.claim_approval_resume(stored, placeholder="Thinking...") == (None, None)
-    waiting = await alice.approval_continuation("approval-1")
+    waiting = await alice.approvals.approval_continuation("approval-1")
     assert waiting is not None
     assert waiting.state == "ready"
     assert retried == []
@@ -1358,17 +1365,17 @@ async def test_an_approval_whose_sources_were_deleted_leaves_its_turn_unanswered
     paused = await paused_for_approval(alice, journal_tests.TestApprovalContinuations.continuation(state="waiting"))
     assert paused is not None
     await _delete(alice, "$source-1")
-    assert (await alice.approval_continuation("approval-1")).state == "waiting"
+    assert (await alice.approvals.approval_continuation("approval-1")).state == "waiting"
     await _delete(alice, "$source-2")
     held = await alice.replies.for_sources(("$source-1",))
     assert held is not None
     # The reply goes with its message; the approval stays until its settlement expires its cards.
     assert held.state is ReplyState.GONE
-    failing = await alice.approval_continuation("approval-1")
+    failing = await alice.approvals.approval_continuation("approval-1")
     assert failing is not None
     assert failing.state == "failing"
     assert failing.failure_reason == "cancelled_by_user"
-    assert await alice.finish_approval_continuation("approval-1") is not None
+    assert await alice.approvals.finish_approval_continuation("approval-1") is not None
     assert not await alice.is_pending("$source-1")
     assert not await _answered(journal_store, "$source-1")
 
@@ -1394,20 +1401,20 @@ async def test_an_approval_end_reaches_its_conversation_even_when_its_caller_is_
         approval_ended=ended.append,
     )
     committing = asyncio.Event()
-    finish = PrincipalStore.finish_approval_continuation
+    finish = ApprovalStore.finish_approval_continuation
 
-    async def slow_finish(store: PrincipalStore, approval_id: str) -> object:
+    async def slow_finish(store: ApprovalStore, approval_id: str) -> object:
         committing.set()
         await asyncio.sleep(0)
         return await finish(store, approval_id)
 
-    with patch.object(PrincipalStore, "finish_approval_continuation", slow_finish):
+    with patch.object(ApprovalStore, "finish_approval_continuation", slow_finish):
         finishing = asyncio.create_task(runtime.finish_approval("approval-1"))
         await committing.wait()
         finishing.cancel()
         with pytest.raises(asyncio.CancelledError):
             await finishing
-    assert await alice.approval_continuation("approval-1") is None
+    assert await alice.approvals.approval_continuation("approval-1") is None
     assert [end.approval_id for end in ended] == ["approval-1"]
 
 
@@ -1424,7 +1431,7 @@ async def test_retention_keeps_a_reply_a_continuation_still_names(journal_store:
     assert await journal_store.end_entity_replies(lambda _name: True, now_ns=10) == 1
 
     assert await alice.replies.forget_finished(before_ns=10**18, limit=10) == 0
-    assert await alice.approval_continuation("approval-1") is not None
+    assert await alice.approvals.approval_continuation("approval-1") is not None
 
 
 @pytest.mark.parametrize("kind", [rl.SpanKind.TURN, rl.SpanKind.APPROVAL_RESUME])
@@ -1472,7 +1479,7 @@ async def test_an_in_place_approval_claim_needs_a_span_this_instance_owns(
         ),
     )
     # The waiter pauses its reply in place: its span keeps running while the approval is decided.
-    enqueued = await alice.pause_for_approval(
+    enqueued = await alice.approvals.pause_for_approval(
         continuation,
         ReplyRowRequest(
             reply_id=shown.reply_id,
@@ -1494,14 +1501,14 @@ async def test_an_in_place_approval_claim_needs_a_span_this_instance_owns(
     if taken_over:
         await alice.replies.write_generation("gen-2")
 
-    claimed, applied = await alice.claim_approval_in_place(
+    claimed, applied = await alice.approvals.claim_approval_in_place(
         "approval-1",
         runtime_generation="gen-1",
         reply_id=paused.reply_id,
         span_id=waiting.span_id,
     )
 
-    continuation = await alice.approval_continuation("approval-1")
+    continuation = await alice.approvals.approval_continuation("approval-1")
     reply = await alice.replies.load(paused.reply_id)
     assert continuation is not None
     assert reply is not None

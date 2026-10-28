@@ -23,7 +23,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
     from mindroom.approval.response import ApprovalResponseCoordinator
-    from mindroom.event_journal import ApprovalContinuation, PrincipalStore
+    from mindroom.event_journal import ApprovalContinuation
+    from mindroom.event_journal.approval_store import ApprovalStore
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.llm.runs import RunRequirement
     from mindroom.message_target import MessageTarget
@@ -41,7 +42,7 @@ class _ApprovalProgress(Protocol):
 class CliApprovalWaits:
     """Keep waiter registration, durable claims, and terminal cleanup in one owner."""
 
-    store: PrincipalStore
+    store: ApprovalStore
     responses: ApprovalResponseCoordinator
     runtime_generation: str
     retry_sources: Callable[[str, tuple[str, ...]], None]

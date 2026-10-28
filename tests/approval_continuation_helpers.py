@@ -147,12 +147,12 @@ async def claim_continuation(
 
     Any other instance that owned the principal's replies owns them again afterwards, as after a takeover.
     """
-    continuation = await principal.approval_continuation(approval_id)
+    continuation = await principal.approvals.approval_continuation(approval_id)
     if continuation is None:
         return None
     owner = await principal.replies.active_generation()
     await principal.replies.write_generation(runtime_generation)
-    claimed, _applied = await principal.claim_approval_resume(
+    claimed, _applied = await principal.approvals.claim_approval_resume(
         approval_id,
         claim=await continuation_claim(principal, continuation, generation=runtime_generation),
     )
@@ -191,7 +191,7 @@ async def advance_continuation(
     continuation_count: int | None = None,
 ) -> ApprovalContinuation | None:
     """Replace one claimed generation with the next exact Agno pause, pausing the resume that ran it."""
-    current = await principal.approval_continuation(approval_id)
+    current = await principal.approvals.approval_continuation(approval_id)
     assert current is not None
     assert current.span_id is not None
     paused = await principal.replies.span(current.span_id)
@@ -199,7 +199,7 @@ async def advance_continuation(
     reply = await principal.replies.load(paused.reply_id)
     assert reply is not None
     assert reply.current_span_id is not None
-    enqueued = await principal.pause_for_approval(
+    enqueued = await principal.approvals.pause_for_approval(
         ApprovalAdvance(
             approval_id=approval_id,
             claimant_generation=claimant_generation,
@@ -226,7 +226,7 @@ async def advance_continuation(
     )
     if enqueued is None or not enqueued.transition.applied:
         return None
-    return await principal.approval_continuation(approval_id)
+    return await principal.approvals.approval_continuation(approval_id)
 
 
 async def freeze_resume_final(

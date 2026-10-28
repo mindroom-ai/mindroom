@@ -2590,7 +2590,7 @@ class TestRoomRetryBackoff:
             assert attempts == ["$source-1", "$middle"]
             assert store.tail_read_after == middle.receipt_order
             worker.release(("$source-1",))
-            recorded = await alice.resolve_continuation_approval_card(
+            recorded = await alice.approvals.resolve_continuation_approval_card(
                 card_event_id="$approval",
                 requested_status="approved",
                 reason=None,

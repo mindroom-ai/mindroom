@@ -45,7 +45,7 @@ def test_response_source_values_are_validated_and_immutable() -> None:
 async def test_explicit_edit_sources_ignore_unrelated_model_metadata(tmp_path: Path) -> None:
     """Approval suspension persists only the pending edit selected by the producer."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    principal = runner.deps.approval_store
+    principal = runner.deps.replies.store
     await _admit_approval_source(principal, event_id="$edit")
     await _admit_approval_source(principal, event_id="$settled")
     await principal.settle_many(("$settled",))
@@ -94,7 +94,7 @@ async def test_explicit_edit_sources_ignore_unrelated_model_metadata(tmp_path: P
                 show_tool_calls=True,
             )
 
-    continuation = await principal.approval_continuation("approval-explicit-edit")
+    continuation = await principal.approvals.approval_continuation("approval-explicit-edit")
     assert continuation is not None
     assert continuation.source_event_ids == ("$edit",)
     assert continuation.sources == request.sources
@@ -103,6 +103,6 @@ async def test_explicit_edit_sources_ignore_unrelated_model_metadata(tmp_path: P
         target=request.response_envelope.target,
     )
     assert resumed.sources == request.sources
-    assert await principal.approval_continuation_for_source("$settled") is None
+    assert await principal.approvals.approval_continuation_for_source("$settled") is None
     assert await principal.is_pending("$edit")
     assert not await principal.is_pending("$settled")

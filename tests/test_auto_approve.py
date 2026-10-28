@@ -445,7 +445,7 @@ async def test_pending_card_listing_keeps_only_the_approvers_open_cards_in_one_t
         (_stored("$past-deadline", created_at_ns=10, expires_in=timedelta(seconds=-1)),),
     ]
     cards = MagicMock()
-    cards.pending_approval_cards = AsyncMock(side_effect=pages)
+    cards.approvals.pending_approval_cards = AsyncMock(side_effect=pages)
     manager = ApprovalManager(test_runtime_paths(tmp_path), send_delivery=AsyncMock(), cards=cards)
 
     try:
@@ -454,7 +454,7 @@ async def test_pending_card_listing_keeps_only_the_approvers_open_cards_in_one_t
         await manager.shutdown()
 
     assert event_ids == ("$reply-card", "$job-card")
-    assert [call.kwargs["after"] for call in cards.pending_approval_cards.await_args_list] == [
+    assert [call.kwargs["after"] for call in cards.approvals.pending_approval_cards.await_args_list] == [
         None,
         (3, "delivery-3"),
         (6, "delivery-6"),

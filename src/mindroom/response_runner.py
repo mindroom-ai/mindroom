@@ -210,7 +210,8 @@ if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
     from mindroom.dispatch_source import ScheduledHistoryBudget
-    from mindroom.event_journal import JournalEvent, PrincipalStore
+    from mindroom.event_journal import JournalEvent
+    from mindroom.event_journal.approval_store import ApprovalStore
     from mindroom.history.types import HistoryScope
     from mindroom.judgment.state import JudgmentMessage
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -1029,7 +1030,7 @@ class ResponseRunnerDeps:
     post_response_effects: PostResponseEffectsSupport
     state_writer: ConversationStateWriter
     request_preparer: ResponsePayloadPreparer
-    approval_store: PrincipalStore
+    approval_store: ApprovalStore
     retry_approval_sources: Callable[[str, tuple[str, ...]], None]
     approval_runtime_generation: str
     redacted_history_events: Callable[[MessageTarget, tuple[str, ...]], Awaitable[Mapping[str, str | None]]]
@@ -1107,6 +1108,7 @@ class ResponseRunner:
             config=lambda: self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
             store=self.deps.approval_store,
+            load_span=self.deps.replies.store.replies.span,
             delivery_gateway=self.deps.delivery_gateway,
             retry_sources=self.deps.retry_approval_sources,
             finish_approval=self.deps.replies.finish_approval,
@@ -3465,7 +3467,7 @@ class ResponseRunner:
         if claimed.is_set() or handoff.is_set():
             # The follow-up's reply settles its source, or keeps it pending for its retry.
             return
-        await self.deps.approval_store.settle(event.event_id)
+        await self.deps.replies.store.settle(event.event_id)
 
     async def _follow_up_due(self, request: ResponseRequest) -> bool:
         """Decide under the conversation lock whether a follow-up still has jobs to report.

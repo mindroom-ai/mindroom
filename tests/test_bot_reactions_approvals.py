@@ -1591,7 +1591,7 @@ class TestAgentBot(AgentBotTestBase):
 
         assert suspended.terminal_status == "suspended"
         assert report_tool.written == []
-        persisted = await first.approval_store.approval_continuation_for_source("$source")
+        persisted = await first.approval_store.approvals.approval_continuation_for_source("$source")
         if requires_human:
             await shutdown_approval_runtime()
         assert persisted is not None
@@ -1638,7 +1638,7 @@ class TestAgentBot(AgentBotTestBase):
         else:
             await drain_restarted_runtime()
 
-        remaining = await restarted.approval_store.approval_continuation_for_source("$source")
+        remaining = await restarted.approval_store.approvals.approval_continuation_for_source("$source")
         assert report_tool.written == ["written"], remaining
         assert model.turns == []
         assert remaining is None

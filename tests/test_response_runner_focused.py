@@ -1595,7 +1595,7 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
 async def test_failing_continuation_recovers_frozen_success_before_failure_settlement(tmp_path: Path) -> None:
     """A failure fence racing a generated answer cannot retire that answer as a denial."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-failing-final",
@@ -1607,7 +1607,7 @@ async def test_failing_continuation_recovers_frozen_success_before_failure_settl
         runtime_generation=runner.deps.approval_runtime_generation,
     )
     assert claimed is not None
-    failing = await store.request_approval_failure(
+    failing = await store.approvals.request_approval_failure(
         claimed.approval_id,
         "entity removed",
         expected_state="claimed",
@@ -1639,7 +1639,7 @@ async def test_failing_continuation_recovers_frozen_success_before_failure_settl
     assert recovered
     assert event_id == "$waiting"
     lifecycle.finalize.assert_awaited_once()
-    assert await store.approval_continuation(continuation.approval_id) is None
+    assert await store.approvals.approval_continuation(continuation.approval_id) is None
 
 
 @pytest.mark.asyncio
@@ -1654,7 +1654,7 @@ async def test_restart_interrupted_approval_hands_its_turn_back_to_replay(
 ) -> None:
     """An approved run a restart cut short ends its cards and leaves its reply and source for replay to continue."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-stale-claim",
@@ -1667,7 +1667,7 @@ async def test_restart_interrupted_approval_hands_its_turn_back_to_replay(
     )
     assert owned is not None
     if failure_reason is not None:
-        owned = await store.request_approval_failure(
+        owned = await store.approvals.request_approval_failure(
             continuation.approval_id,
             failure_reason,
             expected_state="claimed",
@@ -1693,7 +1693,7 @@ async def test_restart_interrupted_approval_hands_its_turn_back_to_replay(
     assert event_id is None
     edit_text.assert_not_awaited()
     expire_cards.assert_awaited_once_with(continuation.approval_id)
-    assert await store.approval_continuation(continuation.approval_id) is None
+    assert await store.approvals.approval_continuation(continuation.approval_id) is None
     assert await store.is_pending("$source")
 
 
@@ -1701,7 +1701,7 @@ async def test_restart_interrupted_approval_hands_its_turn_back_to_replay(
 async def test_restart_hand_back_retries_cards_that_did_not_expire(tmp_path: Path) -> None:
     """A hand-back whose cards did not expire waits for the next pass instead of settling the reply."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-retry-cards",
@@ -1721,7 +1721,7 @@ async def test_restart_hand_back_retries_cards_that_did_not_expire(tmp_path: Pat
         ),
     ):
         first = await runner._recover_nonready_approval(claimed, target=target)
-        waiting = await store.approval_continuation(continuation.approval_id)
+        waiting = await store.approvals.approval_continuation(continuation.approval_id)
         assert waiting is not None
         second = await runner._recover_nonready_approval(waiting, target=target)
 
@@ -1729,7 +1729,7 @@ async def test_restart_hand_back_retries_cards_that_did_not_expire(tmp_path: Pat
     assert waiting.state == "failing"
     assert second == (True, None)
     edit_text.assert_not_awaited()
-    assert await store.approval_continuation(continuation.approval_id) is None
+    assert await store.approvals.approval_continuation(continuation.approval_id) is None
     assert await store.is_pending("$source")
 
 
@@ -1746,7 +1746,7 @@ async def test_cancelled_claimed_approval_records_whether_a_successor_takes_it(
 ) -> None:
     """A run handed to a successor runtime is fenced as restart-interrupted; any other cancellation keeps its provenance."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-restart-cancelled",
@@ -1779,7 +1779,7 @@ async def test_cancelled_claimed_approval_records_whether_a_successor_takes_it(
         with pytest.raises(asyncio.CancelledError):
             await task
 
-    failing = await store.approval_continuation(continuation.approval_id)
+    failing = await store.approvals.approval_continuation(continuation.approval_id)
     assert failing is not None
     assert failing.state == "failing"
     assert failing.failure_reason == failure_reason
@@ -1844,7 +1844,7 @@ async def test_claimed_approval_generic_interruption_keeps_generic_marker(tmp_pa
     """A generic cancellation preserves its provenance instead of claiming a restart."""
     runner_bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(runner_bot._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-interrupted",
@@ -1856,9 +1856,9 @@ async def test_claimed_approval_generic_interruption_keeps_generic_marker(tmp_pa
     # The next instance takes the replies over and settles the interrupted resume.
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await bot._reply_runtime.start()
-    claimed = await store.approval_continuation(continuation.approval_id)
+    claimed = await store.approvals.approval_continuation(continuation.approval_id)
     assert claimed is not None
     unique_room_send_responses(bot.client)
     outcome = FinalDeliveryOutcome(
@@ -1873,7 +1873,7 @@ async def test_claimed_approval_generic_interruption_keeps_generic_marker(tmp_pa
     ):
         await runner._settle_failed_approval_outcome(claimed, outcome)
 
-    assert await store.approval_continuation(continuation.approval_id) is None
+    assert await store.approvals.approval_continuation(continuation.approval_id) is None
     note = bot.client.room_send.await_args_list[-1].kwargs["content"]["m.new_content"]
     assert note["body"] == f"committed partial\n\n{INTERRUPTED_RESPONSE_NOTE}"
     assert note[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
@@ -1895,7 +1895,7 @@ async def test_a_frozen_approval_final_reports_how_its_span_ended(
 ) -> None:
     """A FINAL its resume wrote as a failure or cancellation is recovered as one, never as a completed answer."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     await store.enqueue_matrix_delivery(
         delivery_id="$source",
@@ -1930,7 +1930,7 @@ async def test_a_frozen_approval_final_reports_how_its_span_ended(
 async def test_a_recovered_approval_answer_reports_what_its_final_showed(tmp_path: Path) -> None:
     """A final transform reshaped the answer the FINAL showed; recovered after-response work sees that, not the raw answer."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     await store.enqueue_matrix_delivery(
         delivery_id="$source",
@@ -1967,7 +1967,7 @@ async def test_a_recovered_approval_answer_reports_what_its_final_showed(tmp_pat
 async def test_recovery_fails_an_approval_whose_resume_already_failed(tmp_path: Path) -> None:
     """A crash between a resume's failure and its fence leaves nothing for a replay to continue: the approval fails."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     claimed = approval_continuation(
         approval_id="approval-resume-failed",
         state="claimed",
@@ -2065,7 +2065,7 @@ async def test_final_recovery_error_fences_current_claim(tmp_path: Path, *, canc
     """A failed outbox read cannot hide a same-runtime claim until restart."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id=f"approval-recovery-error-{cancelled}",
@@ -2102,7 +2102,7 @@ async def test_final_recovery_error_fences_current_claim(tmp_path: Path, *, canc
                 is None
             )
 
-    retained = await store.approval_continuation(continuation.approval_id)
+    retained = await store.approvals.approval_continuation(continuation.approval_id)
     assert retained is not None
     assert retained.state == "failing"
 
@@ -2330,7 +2330,7 @@ async def test_replayed_source_adopts_journal_owned_approval_continuation(tmp_pa
     """A crash after suspension persistence must not execute the inbound source a second time."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     continuation = approval_continuation(
         approval_id="approval-replay",
         run_id="run-paused",
@@ -2359,7 +2359,7 @@ async def test_replayed_source_adopts_journal_owned_approval_continuation(tmp_pa
         ),
         state="waiting",
     )
-    assert await paused_for_approval(runner.deps.approval_store, continuation) == continuation
+    assert await paused_for_approval(runner.deps.replies.store, continuation) == continuation
     locked_operation = AsyncMock(return_value="$duplicate")
 
     event_id = await runner._run_owned_or_locked_response(
@@ -2379,14 +2379,14 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     target = _target(thread_id="$thread", reply_to_event_id="$follow-up")
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     continuation = approval_continuation(
         approval_id="approval-resume",
         run_id="run-paused",
         room_id=target.room_id,
         thread_id=target.resolved_thread_id,
     )
-    assert await paused_for_approval(runner.deps.approval_store, continuation) is not None
+    assert await paused_for_approval(runner.deps.replies.store, continuation) is not None
     await bot._reply_runtime.start()
     follow_up_started = asyncio.Event()
     release_follow_up = asyncio.Event()
@@ -2461,14 +2461,14 @@ async def test_ready_approval_replay_rechecks_current_authorization(
     """A ready continuation must fail safely instead of executing after revocation."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     continuation = approval_continuation(
         approval_id="approval-revoked",
         run_id="run-paused",
         room_id=request.room_id,
         thread_id=request.thread_id,
     )
-    assert await paused_for_approval(runner.deps.approval_store, continuation) == continuation
+    assert await paused_for_approval(runner.deps.replies.store, continuation) == continuation
     if revoked_layer in {"room", "pending"}:
         runner.deps.runtime.config.agents["general"].access = ResponderAccessConfig(
             current_room_members=True,
@@ -2511,7 +2511,7 @@ async def test_ready_approval_replay_rechecks_current_authorization(
                     locked_operation=AsyncMock(side_effect=AssertionError("approval source regenerated")),
                 )
             assert await runner.deps.approval_store.approval_continuation(continuation.approval_id) == continuation
-            assert await runner.deps.approval_store.is_pending("$source")
+            assert await runner.deps.replies.store.is_pending("$source")
             request_failure.assert_not_awaited()
             settle_failure.assert_not_awaited()
             execute.assert_not_awaited()
@@ -2543,7 +2543,7 @@ async def test_ready_team_approval_rechecks_every_persisted_member(tmp_path: Pat
     """A ready team continuation must not resume after one member loses access."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     continuation = approval_continuation(
         approval_id="approval-team-member-revoked",
         run_id="run-paused",
@@ -2553,7 +2553,7 @@ async def test_ready_team_approval_rechecks_every_persisted_member(tmp_path: Pat
         team_member_names=("general", "worker"),
         team_mode="coordinate",
     )
-    assert await paused_for_approval(runner.deps.approval_store, continuation) == continuation
+    assert await paused_for_approval(runner.deps.replies.store, continuation) == continuation
     runner.deps.runtime.config.agents["general"].access = ResponderAccessConfig(
         users=[continuation.requester_id],
     )
@@ -2595,7 +2595,7 @@ async def test_incomplete_resume_failure_keeps_the_source_unhandled(tmp_path: Pa
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     continuation = approval_continuation(
         approval_id="approval-incomplete-failure",
         run_id="run-paused",
@@ -2611,7 +2611,7 @@ async def test_incomplete_resume_failure_keeps_the_source_unhandled(tmp_path: Pa
             ),
         ),
     )
-    assert await paused_for_approval(runner.deps.approval_store, continuation) is not None
+    assert await paused_for_approval(runner.deps.replies.store, continuation) is not None
     await bot._reply_runtime.start()
     incomplete = FinalDeliveryOutcome(
         terminal_status="error",
@@ -2636,7 +2636,7 @@ async def test_incomplete_resume_failure_keeps_the_source_unhandled(tmp_path: Pa
     assert event_id is None
     assert retained is not None
     assert retained.state == "claimed"
-    assert await runner.deps.approval_store.is_pending("$source")
+    assert await runner.deps.replies.store.is_pending("$source")
 
 
 @pytest.mark.asyncio
@@ -2644,7 +2644,7 @@ async def test_waiting_message_without_continuation_replays_the_safe_paused_turn
     """A crash before row creation replays because the paused tool has not executed."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
 
     paused = _ordered_pause(
         PausedAttempt(
@@ -2686,7 +2686,7 @@ async def test_waiting_message_without_continuation_replays_the_safe_paused_turn
             )
 
     assert await runner.deps.approval_store.approval_continuation("approval-cancel") is None
-    pending = await runner.deps.approval_store.pending(runtime_generation=runner.deps.approval_runtime_generation)
+    pending = await runner.deps.replies.store.pending(runtime_generation=runner.deps.approval_runtime_generation)
     assert [event.event_id for event in pending] == ["$source"]
 
 
@@ -2695,7 +2695,7 @@ async def test_team_approval_persists_pinned_member_models(tmp_path: Path) -> No
     """Approval pause must retain the member aliases selected at turn start."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     paused = _ordered_pause(
         PausedAttempt(
             session_id="session-1",
@@ -2744,7 +2744,7 @@ async def test_approval_pause_keeps_the_reply_correlation_when_the_request_names
     """A reply resumed after approval keeps the identity its tools saw before the pause."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread", reply_to_event_id="$question"), source_event_id="$source")
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     paused = _ordered_pause(
         PausedAttempt(
             session_id="session-1",
@@ -3091,7 +3091,7 @@ async def test_automatic_pause_publishes_ordered_tools_and_wakes_continuation(tm
         update={"rules": [ApprovalRuleConfig(match="conditional_tool", script=str(script_path))]},
     )
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     paused = _ordered_pause(
         PausedAttempt(
@@ -3157,7 +3157,7 @@ async def test_first_pause_skips_the_card_inside_the_requesters_auto_approve_win
         update={"rules": [ApprovalRuleConfig(match="dangerous", action="require_approval")]},
     )
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     start_auto_approve(
         runner.deps.runtime_paths,
@@ -3217,7 +3217,7 @@ async def test_first_pause_skips_the_card_inside_the_requesters_auto_approve_win
 async def test_automatic_pause_without_visible_event_sends_ordered_tools(tmp_path: Path) -> None:
     """A direct automatic pause sends the presentation its continuation will extend."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     paused = _ordered_pause(
         PausedAttempt(
@@ -3277,7 +3277,7 @@ async def test_pause_persists_visibility_and_presentation_frozen_for_the_turn(
 ) -> None:
     """Approval publication cannot reinterpret a committed stream after config reload."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     trace = ToolTraceEntry(
         type="tool_call_started",
@@ -3337,7 +3337,7 @@ async def test_pause_persists_visibility_and_presentation_frozen_for_the_turn(
 async def test_pause_republishes_the_acknowledged_interactive_body(tmp_path: Path) -> None:
     """Suspension must not replace a rendered question with its canonical fenced JSON."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     raw_interactive = (
         '```interactive\n{"question":"Choose","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}\n```'
@@ -3399,7 +3399,7 @@ async def test_pause_republishes_the_acknowledged_interactive_body(tmp_path: Pat
 async def test_pause_publication_rejects_an_unanchored_agent_tool(tmp_path: Path) -> None:
     """The approval coordinator must not repair or persist an unacknowledged tool start."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
     trace = ToolTraceEntry(type="tool_call_started", tool_name="inspect", tool_call_id="call-1")
@@ -3456,7 +3456,7 @@ async def test_pause_publication_rejects_an_unanchored_team_tool(
 ) -> None:
     """A first team tool must be acknowledged in its member slot before approval publication."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
     requirement = RunRequirement(tool_execution=tool)
@@ -3712,7 +3712,7 @@ async def _resumed_streamable_approval(
 ) -> AsyncIterator[ApprovalContinuation]:
     """Claim one ready agent or team continuation, whose requester is online or away, with its resume span."""
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     client = runner._client()
     client.get_presence.return_value.presence = "online" if requester_online else "offline"
@@ -3941,7 +3941,7 @@ async def test_stopping_a_streamed_approval_continuation_settles_it_as_cancelled
 async def test_missing_approver_denial_stays_neutral_and_wakes_continuation(tmp_path: Path) -> None:
     """Fail-closed automatic denial must not claim that a nonexistent recipient can approve it."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     paused = _ordered_pause(
         PausedAttempt(
@@ -4030,7 +4030,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
             requester_id="@user:localhost",
             duration=timedelta(minutes=5),
         )
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-chain",
@@ -4100,7 +4100,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
                 reply_pause=partial(runner._advance_reply_pause, handle, target),
             )
 
-    persisted = await store.approval_continuation(continuation.approval_id)
+    persisted = await store.approvals.approval_continuation(continuation.approval_id)
     assert persisted is not None
     assert persisted.generation == 1
     assert persisted.state == expected_state
@@ -4121,7 +4121,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
         retry_sources.assert_called_once_with(current.room_id, ("$source",))
         restarted = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
         claimed = await claim_continuation(
-            restarted.deps.approval_store,
+            restarted.deps.replies.store,
             continuation.approval_id,
             runtime_generation=restarted.deps.approval_runtime_generation,
         )
@@ -4142,7 +4142,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
 async def test_chained_pause_rejects_an_unanchored_tool_before_persistence(tmp_path: Path) -> None:
     """Every chained pending call must have one exact visible trace slot before journal advance."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-chain-invalid",
@@ -4182,7 +4182,7 @@ async def test_chained_pause_rejects_an_unanchored_tool_before_persistence(tmp_p
             reply_pause=reply_pause,
         )
 
-    persisted = await store.approval_continuation(continuation.approval_id)
+    persisted = await store.approvals.approval_continuation(continuation.approval_id)
     assert persisted is not None
     assert persisted.state == "claimed"
     assert persisted.generation == 0
@@ -4316,7 +4316,7 @@ async def test_policy_confirmation_honors_script_auto_approval(tmp_path: Path) -
 async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_path: Path) -> None:
     """An attempted FINAL is recovered and completed without resuming the run twice."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-final-acked",
@@ -4366,7 +4366,7 @@ async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_pat
     assert event_id == "$waiting"
     continue_entity.assert_not_awaited()
     build_lifecycle.return_value.finalize.assert_awaited_once()
-    assert await store.approval_continuation(continuation.approval_id) is None
+    assert await store.approvals.approval_continuation(continuation.approval_id) is None
     assert not await store.is_pending("$source")
 
 
@@ -4374,7 +4374,7 @@ async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_pat
 async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_path: Path) -> None:
     """Restart recovery must replay semantic final facts, not rendered Matrix HTML."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-final-semantic",
@@ -4431,7 +4431,7 @@ async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_
 async def test_original_owner_recovery_retires_acknowledged_failure_without_success_effects(tmp_path: Path) -> None:
     """A frozen failure FINAL must not be replayed through the successful response lifecycle."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-failure-final",
@@ -4459,7 +4459,7 @@ async def test_original_owner_recovery_retires_acknowledged_failure_without_succ
         assert await runner.recover_approval_final(continuation.approval_id)
 
     build_lifecycle.assert_not_called()
-    assert await store.approval_continuation(continuation.approval_id) is None
+    assert await store.approvals.approval_continuation(continuation.approval_id) is None
     assert not await store.is_pending("$source")
 
 
@@ -4467,7 +4467,7 @@ async def test_original_owner_recovery_retires_acknowledged_failure_without_succ
 async def test_permanently_refused_approval_final_releases_its_sources(tmp_path: Path) -> None:
     """An oversized frozen FINAL is terminal failure, not immortal approval debt."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-oversized-final",
@@ -4510,7 +4510,7 @@ async def test_permanently_refused_approval_final_releases_its_sources(tmp_path:
 
     assert event_id == "$waiting"
     edit_text.assert_not_awaited()
-    assert await store.approval_continuation(continuation.approval_id) is None
+    assert await store.approvals.approval_continuation(continuation.approval_id) is None
     assert not await store.is_pending("$source")
     failed = await store.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
     assert failed is not None
@@ -4522,7 +4522,7 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
     """A visible successful FINAL must complete even if the live caller is cancelled afterward."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-final-cancelled-return",
@@ -4530,7 +4530,7 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
     assert await paused_for_approval(store, continuation) is not None
 
     async def acknowledge_then_cancel(*_args: object, **_kwargs: object) -> tuple[object, object]:
-        current = await store.approval_continuation(continuation.approval_id)
+        current = await store.approvals.approval_continuation(continuation.approval_id)
         assert current is not None
         await freeze_resume_final(store, current, text="plain final", payload={"body": "plain final"})
         assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
@@ -4556,7 +4556,7 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
 
     assert outcome.terminal_status == "completed"
     assert outcome.event_id == "$waiting"
-    assert await store.approval_continuation(continuation.approval_id) is None
+    assert await store.approvals.approval_continuation(continuation.approval_id) is None
     finalized = [call.args[0] for call in lifecycle.finalize.await_args_list]
     assert [item.terminal_status for item in finalized] == ["completed"]
 
@@ -4566,7 +4566,7 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
     """Late lifecycle cancellation must adopt the visible success before failure fencing."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     await _admit_approval_source(store)
     continuation = approval_continuation(
@@ -4601,7 +4601,7 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
         )
 
     assert event_id == "$waiting"
-    assert await store.approval_continuation(continuation.approval_id) is None
+    assert await store.approvals.approval_continuation(continuation.approval_id) is None
     assert not await store.is_pending("$source")
 
 
@@ -4609,7 +4609,7 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
 async def test_recovered_claim_keeps_unacknowledged_final_recoverable(tmp_path: Path) -> None:
     """An inconclusive FINAL retry must retain the exact paused-run ownership."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-final-unacknowledged",
@@ -4646,7 +4646,7 @@ async def test_recovered_claim_keeps_unacknowledged_final_recoverable(tmp_path: 
             target=_target(thread_id="$thread", reply_to_event_id="$source"),
         )
 
-    retained = await store.approval_continuation(continuation.approval_id)
+    retained = await store.approvals.approval_continuation(continuation.approval_id)
     assert event_id is None
     assert retained is not None
     assert retained.state == "claimed"
@@ -4663,7 +4663,7 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
     """A resumed team must rebuild members from the turn's pinned aliases."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     target = _target(thread_id="$thread")
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -4686,7 +4686,7 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
         team_member_model_names=(("general", "large"),),
         team_mode="coordinate",
     )
-    assert await paused_for_approval(runner.deps.approval_store, continuation) is not None
+    assert await paused_for_approval(runner.deps.replies.store, continuation) is not None
     continued = create_autospec(
         continue_paused_team_run,
         return_value=CompletedApprovalRun(response_text="done", metadata_content={}),
@@ -4719,7 +4719,7 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
 async def test_approval_request_restores_exact_hook_envelope_after_store_reload(tmp_path: Path) -> None:
     """Resume hooks must observe the same ingress identity and correlation as suspension."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     original_envelope = replace(
         _envelope(_target(thread_id="$thread"), source_event_id="$source"),
@@ -4739,7 +4739,7 @@ async def test_approval_request_restores_exact_hook_envelope_after_store_reload(
         correlation_id="correlation-original",
     )
     assert await paused_for_approval(store, continuation) == continuation
-    reloaded = await store.approval_continuation(continuation.approval_id)
+    reloaded = await store.approvals.approval_continuation(continuation.approval_id)
     assert reloaded is not None
 
     restored = runner._approval_response_request(
@@ -4763,7 +4763,7 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
     """Resumed tool hooks and runtime events stay correlated with the originating Matrix turn."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="general",
@@ -4788,7 +4788,7 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
         execution_identity=identity,
         correlation_id="correlation-original",
     )
-    assert await paused_for_approval(runner.deps.approval_store, continuation) is not None
+    assert await paused_for_approval(runner.deps.replies.store, continuation) is not None
     request = replace(
         _plain_request(_target(thread_id="$thread"), source_event_id="$source"),
         correlation_id="correlation-original",
@@ -4851,7 +4851,7 @@ async def test_a_chained_approval_s_receipt_records_every_call_the_run_s_approva
     """
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -4898,7 +4898,10 @@ async def test_a_chained_approval_s_receipt_records_every_call_the_run_s_approva
         calls=second_calls,
     )
     assert advanced is not None
-    second = await store.activate_approval_continuation(first.approval_id, expected_generation=advanced.generation)
+    second = await store.approvals.activate_approval_continuation(
+        first.approval_id,
+        expected_generation=advanced.generation,
+    )
     assert second is not None
     assert (second.state, second.generation, second.calls) == ("ready", 1, second_calls)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
@@ -5431,7 +5434,7 @@ async def test_agent_turn_finds_its_rooms_redactions_in_the_journal(tmp_path: Pa
     """The turn driver's redaction lookup reads the tombstones the bot's own journal recorded for the room."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    store = coordinator.deps.approval_store
+    store = coordinator.deps.replies.store
     await _admit_approval_source(store, event_id="$older")
     await store.admit(
         InboundEvent(
@@ -7887,7 +7890,7 @@ async def test_cli_approval_claims_native_owner_and_wakes_without_source_lock(
 ) -> None:
     """A live CLI waiter gets the same one-attempt claim before any effects."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     tools = tuple(
@@ -7918,7 +7921,7 @@ async def test_cli_approval_claims_native_owner_and_wakes_without_source_lock(
     runner._cli_approval_waits.waiters["$source"] = waiter
 
     async def publish(continuation, plan, **kwargs):  # noqa: ANN001, ANN003, ANN202, ARG001
-        await store.activate_approval_continuation(continuation.approval_id, expected_generation=0)
+        await store.approvals.activate_approval_continuation(continuation.approval_id, expected_generation=0)
         assert await runner.handoff_approval_source("$source") is False
         assert waiter.is_set()
 
@@ -7949,14 +7952,14 @@ async def test_cli_approval_claims_native_owner_and_wakes_without_source_lock(
                 resolved = await operation
                 assert len(resolved) == call_count
                 assert all(item.confirmation is True for item in resolved)
-                current = await store.approval_continuation_for_source("$source")
+                current = await store.approvals.approval_continuation_for_source("$source")
                 assert current.state == "claimed"
                 assert current.cli_call == paused.cli_call
                 assert await claim_continuation(store, current.approval_id, runtime_generation="rival") is None
             else:
                 with pytest.raises(PermissionError):
                     await operation
-                current = await store.approval_continuation_for_source("$source")
+                current = await store.approvals.approval_continuation_for_source("$source")
                 assert current.state != "claimed"
 
 
@@ -7964,7 +7967,7 @@ async def test_cli_approval_claims_native_owner_and_wakes_without_source_lock(
 async def test_cli_wait_reports_failed_card_publication(tmp_path: Path) -> None:
     """A CLI caller sees why its approval card failed, not a generic ownership loss."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     tool = ToolExecution(
         tool_call_id="inner",
@@ -8020,7 +8023,7 @@ async def test_cli_wait_reports_failed_card_publication(tmp_path: Path) -> None:
 async def test_cli_approval_scope_retains_only_shutdown_waits(tmp_path: Path, cancel_source: str) -> None:
     """The real response task, not its spawned tool task, owns cancellation provenance."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     target = request.response_envelope.target
@@ -8074,7 +8077,7 @@ async def test_cli_approval_scope_retains_only_shutdown_waits(tmp_path: Path, ca
         else:
             task.cancel(cancel_source)
         await asyncio.gather(task, return_exceptions=True)
-    current = await store.approval_continuation("cli-wait")
+    current = await store.approvals.approval_continuation("cli-wait")
     assert current is not None
     assert current.state == (
         "claimed" if cancel_source == "rival" else "waiting" if cancel_source == "shutdown" else "failing"
@@ -8128,7 +8131,7 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
 ) -> None:
     """Expiry leaves the same durable card unclaimed and detaches the live waiter."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     target = request.response_envelope.target
@@ -8170,7 +8173,7 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
     async def publish(continuation, plan, **kwargs):  # noqa: ANN001, ANN003, ANN202, ARG001
         published.append(continuation.approval_id)
         if live:
-            assert await store.reserve_approval_card_deliveries(
+            assert await store.approvals.reserve_approval_card_deliveries(
                 continuation_principal_id=store.principal_id,
                 continuation_id=continuation.approval_id,
                 expected_generation=0,
@@ -8204,14 +8207,14 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
                 delivered_projections=(),
             )
         elif ready:
-            await store.activate_approval_continuation(continuation.approval_id, expected_generation=0)
+            await store.approvals.activate_approval_continuation(continuation.approval_id, expected_generation=0)
 
     clock = SimpleNamespace(now=cli_approval_waits.time.time_ns())
     original_timeout = asyncio.timeout
     entered = asyncio.Event()
     stopped = asyncio.Event()
     observed = []
-    real_read = store.approval_continuation_for_source
+    real_read = store.approvals.approval_continuation_for_source
     raced = []
 
     @asynccontextmanager
@@ -8225,7 +8228,7 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
     async def read_source(_store, source):  # noqa: ANN001, ANN202
         if live and ready and published and not runner._cli_approval_waits.waiters and not raced:
             raced.append(True)
-            decision = await store.resolve_continuation_approval_card(
+            decision = await store.approvals.resolve_continuation_approval_card(
                 card_event_id="$card",
                 requested_status="approved",
                 reason=None,
@@ -8238,7 +8241,7 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
     with (
         patch.object(cli_approval_waits, "time", SimpleNamespace(time_ns=lambda: clock.now)),
         patch.object(asyncio, "timeout", observe_timeout),
-        patch.object(type(store), "approval_continuation_for_source", read_source),
+        patch.object(type(store.approvals), "approval_continuation_for_source", read_source),
         patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
         patch(
             "mindroom.approval.response.evaluate_tool_approval",
@@ -8319,7 +8322,7 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
                     assert outcome.terminal_status == "suspended"
             with pytest.raises(CliAuthenticationError):
                 registry.resolve("Bearer " + grant.raw_token, now_ns=grant.expires_at_ns - 1)
-            current = await store.approval_continuation_for_source("$source")
+            current = await store.approvals.approval_continuation_for_source("$source")
             assert current is not None
             assert current.approval_id == published[0]
             assert len(published) == 1
@@ -8344,7 +8347,7 @@ async def test_cli_pause_after_control_rebuild_persists_spent_continuation_budge
 ) -> None:
     """A live hidden approval checkpoint retains the parent's consumed continuation attempt."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     target = request.response_envelope.target
@@ -8422,7 +8425,7 @@ async def test_cli_pause_after_control_rebuild_persists_spent_continuation_budge
         async with _in_reply_span(runner, request) as (_edit_text, _send_text):
             await execute()
     assert len(attempts) == spent + 1
-    stored = await store.approval_continuation_for_source("$source")
+    stored = await store.approvals.approval_continuation_for_source("$source")
     assert stored is not None
     assert stored.continuation_count == spent
     assert raised.value.paused.continuation_count == spent
@@ -8434,7 +8437,7 @@ async def test_claimed_cli_recovery_owns_chained_approval_scope(tmp_path: Path, 
     """Recovered execution advances the native claim and preserves a new pending pause."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     target = _target(thread_id="$thread")
     request = _plain_request(target, source_event_id="$source")
@@ -8460,7 +8463,10 @@ async def test_claimed_cli_recovery_owns_chained_approval_scope(tmp_path: Path, 
 
         async def decide() -> None:
             await asyncio.sleep(0)
-            await store.activate_approval_continuation(current.approval_id, expected_generation=current.generation)
+            await store.approvals.activate_approval_continuation(
+                current.approval_id,
+                expected_generation=current.generation,
+            )
             bot.retry_approval_sources(current.room_id, current.source_event_ids)
 
         decision = asyncio.create_task(decide())
@@ -8528,7 +8534,7 @@ async def test_claimed_cli_recovery_owns_chained_approval_scope(tmp_path: Path, 
         result, current = completed[0]
     assert result.terminal_status == ("suspended" if suspend else "completed")
     assert published == ([1] if suspend else [1, 2])
-    saved = await store.approval_continuation(continuation.approval_id)
+    saved = await store.approvals.approval_continuation(continuation.approval_id)
     # A new pause stays ready; completion is left for the lifecycle owner to settle after post-response effects.
     assert (saved.state, saved.cli_call["call_id"]) == (("ready", "next-0") if suspend else ("claimed", "next-1"))
     assert current.generation == (1 if suspend else 2)

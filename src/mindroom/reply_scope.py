@@ -337,12 +337,19 @@ class ReplyRuntime:
 
     async def finish_approval(self, approval_id: str) -> bool:
         """Finish a paused run once its FINAL is terminal, settling its turn; return whether it finished."""
-        return await run_coroutine_until_complete(self._ran(self.store.finish_approval_continuation(approval_id)))
+        return await run_coroutine_until_complete(
+            self._ran(self.store.approvals.finish_approval_continuation(approval_id)),
+        )
 
     async def release_approval(self, approval_id: str, expected_generation: int) -> bool:
         """Release an interrupted run's approval as ``rl.approval_released`` decides; return whether it was released."""
         return await run_coroutine_until_complete(
-            self._ran(self.store.release_approval_continuation(approval_id, expected_generation=expected_generation)),
+            self._ran(
+                self.store.approvals.release_approval_continuation(
+                    approval_id,
+                    expected_generation=expected_generation,
+                ),
+            ),
         )
 
     async def _ran(self, ending: Awaitable[tuple[PostCommitEffect, ...] | None]) -> bool:
@@ -359,7 +366,7 @@ class ReplyRuntime:
 
     async def _wake_fenced_approval(self, approval_id: str) -> None:
         """Run a fenced approval's failure settlement."""
-        continuation = await self.store.approval_continuation(approval_id)
+        continuation = await self.store.approvals.approval_continuation(approval_id)
         if continuation is None:
             return
         # Its source worker settles it once whatever owns the source lets go of it.
@@ -457,7 +464,7 @@ class ReplyRuntime:
         for applied in await self.store.replies.owner_lost(self.generation, now_ns=time.time_ns()):
             await self.run_effects(applied.post_commit)
         # A message to a conversation an approval still holds waits for that approval, after a restart too.
-        for continuation in await self.store.pending_approvals():
+        for continuation in await self.store.approvals.pending_approvals():
             self.hold_conversation(continuation)
 
     @asynccontextmanager
@@ -597,7 +604,7 @@ class ReplyRuntime:
             empty=empty,
         )
         with self._expecting((claim.span_id,)):
-            claimed, applied = await self.store.claim_approval_resume(continuation.approval_id, claim=claim)
+            claimed, applied = await self.store.approvals.claim_approval_resume(continuation.approval_id, claim=claim)
             if applied is not None:
                 applied = await self.committed(applied)
         if applied is None:

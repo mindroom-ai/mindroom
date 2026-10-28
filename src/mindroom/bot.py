@@ -784,7 +784,7 @@ class AgentBot:
                 post_response_effects=self._post_response_effects_support,
                 state_writer=self._conversation_state_writer,
                 request_preparer=self._request_payload_preparer,
-                approval_store=self._journal_store.principal(self._journal_principal_id),
+                approval_store=self._journal_store.principal(self._journal_principal_id).approvals,
                 retry_approval_sources=self.retry_approval_sources,
                 approval_runtime_generation=self._approval_runtime_generation,
                 redacted_history_events=self._turn_store.redacted_history_events,

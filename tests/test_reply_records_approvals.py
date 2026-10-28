@@ -166,7 +166,7 @@ async def test_an_approved_resume_completes_the_reply_it_paused(tmp_path: Path) 
             (rl.SpanKind.TURN, rl.SpanOutcome.PAUSED),
             (rl.SpanKind.APPROVAL_RESUME, rl.SpanOutcome.COMPLETED),
         ]
-        assert await bot.journal_principal().approval_continuation_for_source("$event") is None
+        assert await bot.journal_principal().approvals.approval_continuation_for_source("$event") is None
         assert not await bot._reply_runtime.store.is_pending("$event")
         assert _sent_bodies(bot) == ["Thinking...", "Reading document", "Approved answer."]
 
@@ -178,7 +178,7 @@ async def test_a_finished_approval_records_its_turn_answered(tmp_path: Path) -> 
         with patch.object(TurnStore, "terminal_turn_record", return_value=None):
             await _respond(bot, resume=AsyncMock(return_value=CompletedApprovalRun("Approved answer.", {})))
 
-        assert await bot.journal_principal().approval_continuation_for_source("$event") is None
+        assert await bot.journal_principal().approvals.approval_continuation_for_source("$event") is None
         record = bot._turn_store.get_turn_record("$event")
         assert record is not None
         assert record.completed
@@ -191,7 +191,7 @@ async def test_a_pause_waiting_for_a_human_leaves_the_reply_paused(tmp_path: Pat
         await _respond(bot)
 
         reply = await _reply(bot)
-        continuation = await bot.journal_principal().approval_continuation_for_source("$event")
+        continuation = await bot.journal_principal().approvals.approval_continuation_for_source("$event")
         assert continuation is not None
         assert continuation.state == "waiting"
         assert reply.state is rl.ReplyState.PAUSED
@@ -234,7 +234,7 @@ async def test_stop_on_a_paused_reply_cancels_it_through_its_approval(tmp_path: 
         reply = await _reply(bot)
         assert reply.state is rl.ReplyState.CANCELLED
         assert not reply.unapplied_stop
-        assert await bot.journal_principal().approval_continuation_for_source("$event") is None
+        assert await bot.journal_principal().approvals.approval_continuation_for_source("$event") is None
         # The Stop keeps what the reply showed and adds its note, as on any reply.
         assert _sent_bodies(bot)[-1] == "Reading document\n\n**[Response cancelled by user]**"
 
@@ -319,7 +319,7 @@ async def test_a_message_sent_while_an_approval_waits_is_answered_once_after_it_
 
         async def answer(*_args: object, **_kwargs: object) -> str:
             # A turn that runs while the approval waits cannot see the paused run, so it repeats the gated call.
-            if await bot.journal_principal().approval_continuation_for_source("$event") is not None:
+            if await bot.journal_principal().approvals.approval_continuation_for_source("$event") is not None:
                 raise ResponsePausedForApproval(_paused("run-2"))
             return "Follow-up answer."
 
@@ -342,11 +342,11 @@ async def test_a_message_sent_while_an_approval_waits_is_answered_once_after_it_
                 assert await asyncio.wait_for(await _stop(bot, "$sent1", 5), timeout=5)
             await _run_approval_wakes(bot, wakes)
             # A follow-up turn that ran beside the paused reply would now show a second card for the same call.
-            assert await bot._journal_store.principal("router@shared").pending_approval_room_ids() == ()
+            assert await bot._journal_store.principal("router@shared").approvals.pending_approval_room_ids() == ()
             await _wait_until_sent(bot, "Follow-up answer.")
 
         model.assert_awaited_once()
-        assert await bot.journal_principal().approval_continuation_for_source("$followup") is None
+        assert await bot.journal_principal().approvals.approval_continuation_for_source("$followup") is None
         assert not await bot._reply_runtime.store.is_pending("$followup")
 
 
@@ -375,7 +375,7 @@ async def test_a_message_in_another_conversation_is_answered_while_an_approval_w
         assert not await bot._reply_runtime.store.is_pending("$other")
         # The approval still waits and still holds its own conversation.
         assert bot._response_runner.is_held_for_approval(paused)
-        assert await bot.journal_principal().approval_continuation_for_source("$event") is not None
+        assert await bot.journal_principal().approvals.approval_continuation_for_source("$event") is not None
 
 
 async def test_a_hold_whose_approval_is_gone_does_not_keep_its_conversation_waiting(tmp_path: Path) -> None:
@@ -432,8 +432,8 @@ async def test_deleting_the_message_of_a_paused_reply_cancels_its_approval_and_r
         assert wakes == [("$event",)]
         await _run_approval_wakes(bot, wakes)
 
-        assert await bot.journal_principal().approval_continuation_for_source("$event") is None
-        assert await bot._journal_store.principal("router@shared").pending_approval_room_ids() == ()
+        assert await bot.journal_principal().approvals.approval_continuation_for_source("$event") is None
+        assert await bot._journal_store.principal("router@shared").approvals.pending_approval_room_ids() == ()
         assert not bot._response_runner.is_held_for_approval(_target())
 
         async def redacted() -> rl.Reply:
@@ -505,14 +505,14 @@ async def test_stop_on_a_reply_waiting_in_place_cancels_its_wait_through_its_app
         # wait already ran its settlement, which expired the cards.
         assert wakes == [("$event",)]
         assert await runner.handoff_approval_source("$event") is None
-        assert await bot._journal_store.principal("router@shared").pending_approval_room_ids() == ()
+        assert await bot._journal_store.principal("router@shared").approvals.pending_approval_room_ids() == ()
 
         reply = await _reply(bot)
         assert reply.state is rl.ReplyState.CANCELLED
         assert not reply.unapplied_stop
         assert reply.approval_id is None
         assert await _span_kinds(bot) == [(rl.SpanKind.TURN, rl.SpanOutcome.CANCELLED)]
-        assert await bot.journal_principal().approval_continuation_for_source("$event") is None
+        assert await bot.journal_principal().approvals.approval_continuation_for_source("$event") is None
         assert not await bot._reply_runtime.store.is_pending("$event")
         assert _sent_bodies(bot)[-1] == "Reading document\n\n**[Response cancelled by user]**"
 
@@ -546,14 +546,14 @@ async def test_a_turn_approved_in_place_settles_through_its_approval(tmp_path: P
             else:
                 with pytest.raises(RuntimeError, match="model down"):
                     await runner.generate_response(_plain_request(_target()))
-        if await bot.journal_principal().approval_continuation_for_source("$event") is not None:
+        if await bot.journal_principal().approvals.approval_continuation_for_source("$event") is not None:
             # A failure settles from the source worker the fence woke.
             await _run_approval_wakes(bot, [("$event",)])
 
         reply = await _reply(bot)
         assert reply.state is (rl.ReplyState.COMPLETED if answers else rl.ReplyState.FAILED)
         assert reply.approval_id is None
-        assert await bot.journal_principal().approval_continuation_for_source("$event") is None
+        assert await bot.journal_principal().approvals.approval_continuation_for_source("$event") is None
         assert not await bot._reply_runtime.store.is_pending("$event")
         if answers:
             assert _sent_bodies(bot)[-1] == "Done reading."
@@ -589,7 +589,7 @@ async def test_stop_during_an_approval_resume_cancels_it_through_its_approval(tm
             (rl.SpanKind.TURN, rl.SpanOutcome.PAUSED),
             (rl.SpanKind.APPROVAL_RESUME, rl.SpanOutcome.CANCELLED),
         ]
-        assert await bot.journal_principal().approval_continuation_for_source("$event") is None
+        assert await bot.journal_principal().approvals.approval_continuation_for_source("$event") is None
         assert not await bot._reply_runtime.store.is_pending("$event")
         # The Stop keeps what the reply showed and adds its note, as on any reply.
         assert _sent_bodies(bot)[-1] == "Reading document\n\n**[Response cancelled by user]**"
@@ -615,7 +615,7 @@ async def test_a_shutdown_during_an_approval_resume_leaves_it_for_replay(tmp_pat
             (rl.SpanKind.TURN, rl.SpanOutcome.PAUSED),
             (rl.SpanKind.APPROVAL_RESUME, None),
         ]
-        failing = await bot.journal_principal().approval_continuation_for_source("$event")
+        failing = await bot.journal_principal().approvals.approval_continuation_for_source("$event")
         assert failing is not None
         assert failing.state == "failing"
         runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -642,7 +642,7 @@ async def test_a_failed_resume_shows_its_failure_and_ends_the_reply(tmp_path: Pa
             (rl.SpanKind.TURN, rl.SpanOutcome.PAUSED),
             (rl.SpanKind.APPROVAL_RESUME, rl.SpanOutcome.FAILED),
         ]
-        assert await bot.journal_principal().approval_continuation_for_source("$event") is None
+        assert await bot.journal_principal().approvals.approval_continuation_for_source("$event") is None
         assert "tool exploded" in _sent_bodies(bot)[-1]
 
 
@@ -781,7 +781,7 @@ async def test_an_edit_of_a_paused_reply_runs_nothing(tmp_path: Path) -> None:
     """Without the edit regenerator's Stop, the approval holds its reply, so a regeneration claims nothing."""
     async with _approval_bot(tmp_path, requires_human=True) as bot:
         await _respond(bot)
-        paused = await bot.journal_principal().approval_continuation_for_source("$event")
+        paused = await bot.journal_principal().approvals.approval_continuation_for_source("$event")
         assert paused is not None
         await _admit_edit(bot)
         runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -801,7 +801,7 @@ async def test_an_edit_of_a_paused_reply_runs_nothing(tmp_path: Path) -> None:
         reply = await _reply(bot)
         assert reply.state is rl.ReplyState.PAUSED
         assert reply.approval_id == paused.approval_id
-        assert await bot.journal_principal().approval_continuation_for_source("$event") == paused
+        assert await bot.journal_principal().approvals.approval_continuation_for_source("$event") == paused
         assert await _span_kinds(bot) == [(rl.SpanKind.TURN, rl.SpanOutcome.PAUSED)]
         assert len(_sent_bodies(bot)) == sends
 
@@ -811,7 +811,7 @@ async def test_a_failure_note_that_could_not_be_sent_is_resent_not_written_again
     async with _approval_bot(tmp_path, requires_human=True) as bot:
         await _respond(bot)
         runner = unwrap_extracted_collaborator(bot._response_runner)
-        continuation = await bot.journal_principal().approval_continuation_for_source("$event")
+        continuation = await bot.journal_principal().approvals.approval_continuation_for_source("$event")
         assert continuation is not None
         failing = await runner._approval_responses.request_failure(continuation, "Card publication failed")
         assert failing is not None
@@ -837,7 +837,7 @@ async def test_a_stop_recorded_before_the_failure_note_decides_it(tmp_path: Path
         await _respond(bot)
         runner = unwrap_extracted_collaborator(bot._response_runner)
         gateway = unwrap_extracted_collaborator(bot._delivery_gateway)
-        continuation = await bot.journal_principal().approval_continuation_for_source("$event")
+        continuation = await bot.journal_principal().approvals.approval_continuation_for_source("$event")
         assert continuation is not None
         failing = await runner._approval_responses.request_failure(continuation, "Card publication failed")
         assert failing is not None
@@ -870,7 +870,7 @@ async def test_a_pause_whose_send_failed_once_still_waits_for_its_approval(tmp_p
             await _respond(bot)
 
         assert failed == ["pause"]
-        continuation = await bot.journal_principal().approval_continuation_for_source("$event")
+        continuation = await bot.journal_principal().approvals.approval_continuation_for_source("$event")
         assert continuation is not None
         assert continuation.state == "waiting"
         reply = await _reply(bot)

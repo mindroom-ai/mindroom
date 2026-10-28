@@ -104,7 +104,7 @@ class ApprovalRecovery:
         """Expire visible cards, then atomically release the removed owner's sources."""
         assert self.journal_provider is not None
         store = self.journal_provider().principal(principal_id)
-        current = await store.approval_continuation(continuation.approval_id)
+        current = await store.approvals.approval_continuation(continuation.approval_id)
         if current is None:
             return True
         final_delivery = await store.load_matrix_delivery(
@@ -121,7 +121,7 @@ class ApprovalRecovery:
             current,
             reason,
             request_failure=partial(
-                store.request_approval_failure,
+                store.approvals.request_approval_failure,
                 current.approval_id,
                 expected_state=current.state,
                 expected_generation=current.generation,
@@ -136,7 +136,7 @@ class ApprovalRecovery:
         notice_store = await self.deliver_unavailable_notice(current, reason)
         if notice_store is None:
             return False
-        return await store.discard_unavailable_approval_continuation(
+        return await store.approvals.discard_unavailable_approval_continuation(
             current.approval_id,
             notice_principal_id=notice_store.principal_id,
         )
