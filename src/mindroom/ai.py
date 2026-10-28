@@ -1314,12 +1314,11 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 yield AttemptResolved(skipped)
             else:
                 error_text = get_user_friendly_error_message(state.error, agent_name, runtime_paths=runtime_paths)
+                # Below the text this attempt already streamed, the error starts a paragraph of its own.
+                shown = state.assistant_text
                 yield AttemptResolved(
                     HandledAttempt(
-                        # Below the text this attempt already streamed, the error starts a paragraph of its own.
-                        append_stream_text(state.assistant_text, error_text, separate=True)[
-                            len(state.assistant_text) :
-                        ],
+                        append_stream_text(shown, error_text, separate=True)[len(shown) :],
                         metadata_content=_attempt_run_metadata(
                             run_metadata_collector,
                             run_context,
