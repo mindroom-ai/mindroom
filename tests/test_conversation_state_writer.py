@@ -24,7 +24,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.hooks import EVENT_SESSION_STARTED, HookRegistry, SessionHookContext, hook
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
-from mindroom.logging_config import get_logger
+from mindroom.llm.usage import HelperUsage, RunMetrics
 from mindroom.message_target import MessageTarget
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -279,7 +279,7 @@ def _usage_write(session: ConversationSession) -> Callable[[ConversationStore], 
             usage_id="u1",
             kind="compaction_summary",
             requester_id=None,
-            run={"model_provider": "P", "model": "m", "created_at": 1, "metrics": {}, "messages": []},
+            usage=HelperUsage(run_id="u1", model="m", provider="P", metrics=RunMetrics(), created_at=1),
             initial_session=session,
         )
 
@@ -296,7 +296,7 @@ async def test_session_started_fires_once_after_the_reply_whose_write_created_it
     async def helper_call() -> None:
         await run_session_storage_operation(lambda: store, _usage_write(session))
 
-    async with session_started_on_creation(reply, correlation_id="corr-1", logger=get_logger(__name__)):
+    async with session_started_on_creation(reply, correlation_id="corr-1"):
         await asyncio.create_task(helper_call())
         # The run's own save comes later and finds the row.
         await run_session_storage_operation(
@@ -315,6 +315,8 @@ async def test_session_started_fires_once_after_the_reply_whose_write_created_it
         "$thread",
     )
     assert (started.agent_name, started.correlation_id) == ("test_agent", "corr-1")
+    runtime_context = reply.tool_dispatch.runtime_context
+    assert (started.config, started.runtime_paths) == (runtime_context.config, runtime_context.runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -323,12 +325,26 @@ async def test_session_started_names_the_team_of_a_team_session(tmp_path: Path) 
     seen: list[SessionHookContext | str] = []
     reply, store = _reply(tmp_path, seen, scope=HistoryScope(kind="team", scope_id="crew"))
 
-    async with session_started_on_creation(reply, correlation_id="corr-1", logger=get_logger(__name__)):
+    async with session_started_on_creation(reply, correlation_id="corr-1"):
         store.update_metadata(_first_session(reply), lambda _metadata: {"k": "v"})
 
     [started] = seen
     assert isinstance(started, SessionHookContext)
     assert (started.scope.key, started.agent_name) == ("team:crew", "crew")
+
+
+@pytest.mark.asyncio
+async def test_session_started_names_the_running_agent_of_an_agent_session(tmp_path: Path) -> None:
+    """An agent reply's hooks see the agent the reply runs as, not the agent scope's ID."""
+    seen: list[SessionHookContext | str] = []
+    reply, store = _reply(tmp_path, seen, scope=HistoryScope(kind="agent", scope_id="other_agent"))
+
+    async with session_started_on_creation(reply, correlation_id="corr-1"):
+        store.update_metadata(_first_session(reply), lambda _metadata: {"k": "v"})
+
+    [started] = seen
+    assert isinstance(started, SessionHookContext)
+    assert (started.scope.key, started.agent_name) == ("agent:other_agent", "test_agent")
 
 
 @pytest.mark.asyncio
@@ -338,7 +354,7 @@ async def test_session_started_skips_a_session_whose_row_existed(tmp_path: Path)
     reply, store = _reply(tmp_path, seen)
     seed_session_row(store, _first_session(reply))
 
-    async with session_started_on_creation(reply, correlation_id="corr-1", logger=get_logger(__name__)):
+    async with session_started_on_creation(reply, correlation_id="corr-1"):
         store.save_run(_first_session(reply), _run(), record_usage=False)
 
     assert seen == []
@@ -351,7 +367,7 @@ async def test_session_started_skips_rows_of_other_sessions(tmp_path: Path) -> N
     reply, store = _reply(tmp_path, seen)
     other_agent = ConversationSession(session_id=SESSION_ID, kind="agent", owner_id="helper")
 
-    async with session_started_on_creation(reply, correlation_id="corr-1", logger=get_logger(__name__)):
+    async with session_started_on_creation(reply, correlation_id="corr-1"):
         store.update_metadata(_first_session(reply, "!room:localhost:$other"), lambda _metadata: {"k": "v"})
         store.update_metadata(other_agent, lambda _metadata: {"k": "v"})
 
@@ -365,7 +381,7 @@ async def test_session_started_skips_a_reply_that_raises(tmp_path: Path) -> None
     reply, store = _reply(tmp_path, seen)
 
     async def stopped_reply() -> None:
-        async with session_started_on_creation(reply, correlation_id="corr-1", logger=get_logger(__name__)):
+        async with session_started_on_creation(reply, correlation_id="corr-1"):
             store.save_run(_first_session(reply), _run(), record_usage=False)
             raise asyncio.CancelledError
 
@@ -388,7 +404,7 @@ async def test_session_started_watches_nothing_without_a_hook_or_a_live_reply(tm
     watched: ReplySession | None = None if reply_kind == "none" else reply
 
     with patch("mindroom.conversation_state_writer.watch_session_row", side_effect=AssertionError("watched")):
-        async with session_started_on_creation(watched, correlation_id="corr-1", logger=get_logger(__name__)):
+        async with session_started_on_creation(watched, correlation_id="corr-1"):
             store.save_run(_first_session(reply), _run(), record_usage=False)
 
     assert seen == []

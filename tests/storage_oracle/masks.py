@@ -93,12 +93,33 @@ MASKS: dict[str, Mask] = {
             "decision 5 (W9): a manual compaction request is only the metadata flag, with no copy in the session state "
             "that the next reply moves into the flag",
         ),
+        Mask(
+            "summary_requests_name_their_model",
+            "#3109 item 6: a compaction summary's usage row names the model that answered its request, as its run does",
+        ),
     )
 }
 _NON_VISIBLE = frozenset(NON_VISIBLE_RUN_STATUS_VALUES)
 _MISSING = object()
 # Where the Agno-layout store's runtime also queued a manual compaction request: a list of scope keys in the state.
 _PENDING_KEY = "mindroom_pending_compaction_scope_keys"
+
+
+def untag_summary_requests(ledger: object) -> bool:
+    """Drop the model each compaction summary request in ``ledger`` names; return whether any named one.
+
+    The Agno-layout store's summary rows named the model only for the row, and a request names the row's model.
+    """
+    untagged = False
+    for _run_id, snapshot in ledger if isinstance(ledger, list) else ():
+        if snapshot.get("kind") != "compaction_summary":
+            continue
+        for request in snapshot["requests"]:
+            if "model" in request:
+                named = request.pop("model"), request.pop("model_provider")
+                assert named == (snapshot["model"], snapshot["model_provider"]), named
+                untagged = True
+    return untagged
 
 
 @dataclass(frozen=True)
@@ -736,6 +757,8 @@ class MaskedBackend(StoreBackend):
                 view[key] = [event_id for event_id in view[key] if event_id not in replies]
         if isinstance(view["folded_tool_call_ids"], dict):
             view["folded_tool_call_ids"] = self._old_folded_view(view["folded_tool_call_ids"])
+        if untag_summary_requests(view["ledger"]):
+            self.used.add("summary_requests_name_their_model")
         self._old_pending_view(view)
         return view
 
@@ -782,4 +805,4 @@ class MaskedBackend(StoreBackend):
         return dict(sorted(folded.items()))
 
 
-__all__ = ["MASKS", "Diverged", "Mask", "MaskedBackend"]
+__all__ = ["MASKS", "Diverged", "Mask", "MaskedBackend", "untag_summary_requests"]

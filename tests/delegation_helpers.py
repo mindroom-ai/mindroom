@@ -36,6 +36,7 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
 from mindroom.providers import registry as provider_registry
+from mindroom.response_runner import _paused_with_committed_presentation
 from mindroom.response_turn import PausedAnswer, ResponsePausedForApproval
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -244,7 +245,6 @@ async def respond(
     runtime_paths: RuntimePaths,
     identity: ToolExecutionIdentity,
     run_id: str | None = None,
-    stream: bool = False,
     hook_registry: HookRegistry | None = None,
     correlation_id: str | None = None,
 ) -> str | PausedAttempt:
@@ -278,10 +278,9 @@ async def respond(
                 config=config,
                 execution_identity=identity,
                 supports_native_tool_approval=True,
-                collect_streamed_response=stream,
             )
         except ResponsePausedForApproval as suspended:
-            return suspended.paused
+            return _paused_with_committed_presentation(suspended, show_tool_calls=True)
 
 
 async def _run_in_tool_context[T](

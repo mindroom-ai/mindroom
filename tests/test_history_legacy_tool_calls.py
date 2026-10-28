@@ -16,7 +16,7 @@ from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS
 from mindroom.agent_loop.run import resume_agent, run_agent
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.request_messages import build_resume_request, scope_history_messages
-from mindroom.history.summary_input import build_summary_input, messages_for_runs
+from mindroom.history.summary_input import build_summary_input
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -25,7 +25,7 @@ from mindroom.skill_learning.transcript import conversation_messages
 from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.agent_loop.helpers import collect, context, gated, spec
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
-from tests.history_helpers import replay_settings
+from tests.history_helpers import replay_settings, summary_tool_work
 from tests.session_storage.agno_layout import SESSION_ID, converted_store
 
 if TYPE_CHECKING:
@@ -171,10 +171,10 @@ def test_compaction_reads_stored_calls_as_a_request_replays_them(tmp_path: Path)
     run = _compacted_run(tmp_path)
     stored = copy.deepcopy(run.messages)
 
-    calls, results = _calls_and_results(messages_for_runs([run], settings))
+    calls, results = summary_tool_work([run], settings)
 
     assert calls == [{**_BARE_CALL, "function": {"name": "list_rooms", "arguments": "{}"}}, _CALL]
-    assert results == ["call-0", "call_1"]
+    assert results == [("call-0", "[]"), ("call_1", "sunny")]
     assert run.messages == stored
 
 

@@ -332,7 +332,7 @@ async def test_screenshot_response_becomes_model_visible_image(monkeypatch: pyte
     result = await tool.desktop("screenshot", app="com.example.Editor")
 
     assert json.loads(result.content)["status"] == "ok"
-    assert result.images is not None
+    assert result.images
     assert result.images[0].content == b"\xff\xd8\xffjpeg"
     command = request.await_args.args[1]
     assert command.requester_id == "@alice:example.org"
@@ -563,7 +563,7 @@ async def test_completed_control_without_screenshot_is_partial(monkeypatch: pyte
     payload = json.loads(result.content)
     assert payload["status"] == "partial"
     assert "do not repeat" in payload["message"]
-    assert result.images is None
+    assert result.images == ()
 
 
 @pytest.mark.asyncio
@@ -606,7 +606,7 @@ async def test_completed_control_with_undecryptable_screenshot_is_partial(monkey
     payload = json.loads(result.content)
     assert payload["status"] == "partial"
     assert "do not repeat" in payload["message"]
-    assert result.images is None
+    assert result.images == ()
 
 
 @pytest.mark.asyncio
@@ -717,7 +717,7 @@ async def test_list_apps_needs_no_screenshot(monkeypatch: pytest.MonkeyPatch) ->
     result = await tool.desktop("list_apps")
 
     assert json.loads(result.content)["status"] == "ok"
-    assert result.images is None
+    assert result.images == ()
 
 
 @pytest.mark.asyncio

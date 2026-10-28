@@ -535,6 +535,7 @@
       "type": "object"
     },
     "AgentMemorySearchConfig": {
+      "additionalProperties": false,
       "description": "Optional per-agent override for file-backed memory search.",
       "properties": {
         "mode": {
@@ -588,6 +589,7 @@
       "type": "object"
     },
     "AgentPrivateConfig": {
+      "additionalProperties": false,
       "description": "Requester-private materialized state for one shared agent definition.",
       "properties": {
         "per": {
@@ -661,6 +663,7 @@
       "type": "object"
     },
     "AgentPrivateKnowledgeConfig": {
+      "additionalProperties": false,
       "description": "PrivateAgentKnowledge indexed from the agent's private root.",
       "properties": {
         "enabled": {
@@ -810,6 +813,7 @@
       "type": "object"
     },
     "AuthorizationConfig": {
+      "additionalProperties": false,
       "description": "Authorization configuration with fine-grained permissions.",
       "properties": {
         "config_command_enabled": {
@@ -1056,6 +1060,7 @@
       "type": "object"
     },
     "CompactionConfig": {
+      "additionalProperties": false,
       "description": "Concrete text compaction configuration.",
       "properties": {
         "enabled": {
@@ -1158,6 +1163,7 @@
       "type": "object"
     },
     "CompactionOverrideConfig": {
+      "additionalProperties": false,
       "description": "Optional per-scope overrides for text compaction.\n\nAn authored null clears the value inherited from defaults, except for ``enabled``, where it turns compaction off.",
       "properties": {
         "enabled": {
@@ -1281,6 +1287,7 @@
       "type": "object"
     },
     "DebugConfig": {
+      "additionalProperties": false,
       "description": "Debug and diagnostic settings.",
       "properties": {
         "log_llm_requests": {
@@ -1953,6 +1960,7 @@
       "type": "object"
     },
     "EmbedderConfig": {
+      "additionalProperties": false,
       "description": "Configuration for memory embedder.",
       "properties": {
         "model": {
@@ -2227,6 +2235,7 @@
       "type": "object"
     },
     "HookOverrideConfig": {
+      "additionalProperties": false,
       "description": "Per-hook deployer override configuration.",
       "properties": {
         "enabled": {
@@ -2287,6 +2296,7 @@
       ]
     },
     "KnowledgeBaseConfig": {
+      "additionalProperties": false,
       "description": "Knowledge base configuration.",
       "properties": {
         "mode": {
@@ -3218,6 +3228,7 @@
       "type": "object"
     },
     "MatrixSpaceConfig": {
+      "additionalProperties": false,
       "description": "Configuration for the optional root Matrix Space.",
       "properties": {
         "enabled": {
@@ -3276,6 +3287,7 @@
       "type": "object"
     },
     "MemoryAutoFlushConfig": {
+      "additionalProperties": false,
       "description": "Background memory auto-flush configuration.",
       "properties": {
         "enabled": {
@@ -3347,6 +3359,7 @@
       "type": "object"
     },
     "MemoryConfig": {
+      "additionalProperties": false,
       "description": "Memory system configuration.",
       "properties": {
         "backend": {
@@ -3446,6 +3459,7 @@
       "type": "object"
     },
     "MemorySearchConfig": {
+      "additionalProperties": false,
       "description": "Search behavior for file-backed memory.",
       "properties": {
         "mode": {
@@ -3520,6 +3534,7 @@
       "type": "object"
     },
     "MindRoomUserConfig": {
+      "additionalProperties": false,
       "description": "Configuration for the internal MindRoom user account.",
       "properties": {
         "username": {
@@ -3539,6 +3554,7 @@
       "type": "object"
     },
     "ModelConfig": {
+      "additionalProperties": false,
       "description": "Configuration for an AI model.",
       "properties": {
         "provider": {
@@ -4088,6 +4104,7 @@
       }
     },
     "PluginEntryConfig": {
+      "additionalProperties": false,
       "description": "Normalized plugin entry from the root config.",
       "properties": {
         "path": {
@@ -4465,6 +4482,7 @@
       "type": "object"
     },
     "RouterConfig": {
+      "additionalProperties": false,
       "description": "Configuration for the router system.",
       "properties": {
         "model": {
@@ -4656,6 +4674,7 @@
       "type": "object"
     },
     "StreamingConfig": {
+      "additionalProperties": false,
       "description": "Timing parameters for streaming response edits.",
       "properties": {
         "update_interval": {
@@ -4965,6 +4984,7 @@
       "type": "object"
     },
     "VoiceConfig": {
+      "additionalProperties": false,
       "description": "Configuration for voice message handling.",
       "properties": {
         "enabled": {
@@ -5078,6 +5098,7 @@
       "type": "object"
     },
     "_MemoryAutoFlushBatchConfig": {
+      "additionalProperties": false,
       "description": "Batching controls for background memory auto-flush.",
       "properties": {
         "max_sessions_per_cycle": {
@@ -5099,6 +5120,7 @@
       "type": "object"
     },
     "_MemoryAutoFlushContextConfig": {
+      "additionalProperties": false,
       "description": "Existing-memory context limits injected into extraction runs.",
       "properties": {
         "memory_snippets": {
@@ -5120,6 +5142,7 @@
       "type": "object"
     },
     "_MemoryAutoFlushExtractorConfig": {
+      "additionalProperties": false,
       "description": "Extraction limits for one background memory flush job.",
       "properties": {
         "model": {
@@ -5175,6 +5198,7 @@
       "type": "object"
     },
     "_MemoryEmbedderConfig": {
+      "additionalProperties": false,
       "description": "Memory embedder configuration.",
       "properties": {
         "provider": {
@@ -5201,6 +5225,7 @@
       "type": "object"
     },
     "_MemoryFileConfig": {
+      "additionalProperties": false,
       "description": "File-backed memory configuration.",
       "properties": {
         "path": {
@@ -5235,6 +5260,7 @@
       "type": "object"
     },
     "_MemoryLLMConfig": {
+      "additionalProperties": false,
       "description": "Memory LLM configuration.",
       "properties": {
         "provider": {
@@ -5258,6 +5284,7 @@
       "type": "object"
     },
     "_VoiceLLMConfig": {
+      "additionalProperties": false,
       "description": "Configuration for voice transcript normalization.",
       "properties": {
         "model": {

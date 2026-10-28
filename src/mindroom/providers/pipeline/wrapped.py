@@ -161,6 +161,7 @@ def _with_carried_usage(event: StreamEvent, carried: MessageMetrics | None) -> S
     """Add the failed attempts' usage to a reissued attempt's finished turn, marking its usage as summing attempts.
 
     The mark goes on the attempt's reports and its finished turn alike, once the failed attempts reported tokens.
+    Counters sum, and a value that does not, such as Claude's ``context_usage``, stays the answering attempt's.
     """
     if carried is None:
         return event
@@ -172,5 +173,5 @@ def _with_carried_usage(event: StreamEvent, carried: MessageMetrics | None) -> S
     message = event.message
     if sums_attempts:
         message.provider_data = {**(message.provider_data or {}), AGGREGATE_USAGE_KEY: True}
-    message.metrics = message.metrics + carried
+    message.metrics = carried + message.metrics
     return event

@@ -1441,6 +1441,8 @@ Validate a file with:
 mindroom config validate --path /path/to/config.yaml
 ```
 
+Every section rejects keys MindRoom does not define, except free-form maps such as a plugin's `settings`, `memory.llm.config`, and `voice.stt.extra_kwargs`, so a misspelled key fails validation and startup with an error that names its location, for example `memory → embedder → config → base_url: Unknown key 'base_url': remove it or correct its spelling`.
+
 Edits to `config.yaml` apply by hot reload without restarting MindRoom, except [event journal](https://docs.mindroom.chat/deployment/storage/#event-journal) changes and turning [background tool jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) on or off or changing their excluded toolkits, which need a restart.
 Edits to an agent's or team's own settings, such as `instructions`, `model`, `tools`, or a team's `mode`, apply from its next reply without restarting it.
 Changing `display_name` or `accept_invites`, an agent's `private` settings, whether an agent has the `desktop` tool, or which MCP tools it has restarts that agent or team.
@@ -2239,7 +2241,7 @@ Model access and usage limits depend on the logged-in ChatGPT account, so check 
 | GPT-6 Luna | `gpt-6-luna` | Efficient, high-volume work such as summaries and routing |
 
 Older or preview slugs work when the account exposes them, the form `openai-codex/gpt-6.1-sol` is accepted, and the legacy `gpt-5.6` alias maps to `gpt-5.6-sol`.
-If Codex state lives outside `~/.codex`, set `CODEX_HOME` in the process environment or `extra_kwargs.codex_home`; `~` prefixes are expanded.
+If Codex state lives outside `~/.codex`, set `CODEX_HOME` in the `.env` beside `config.yaml` or the process environment, or `extra_kwargs.codex_home`; `~` prefixes are expanded.
 `mindroom config init --provider codex` generates this config (see [CLI](https://docs.mindroom.chat/cli/)):
 
 ```yaml
@@ -2303,7 +2305,7 @@ models:
 ```
 
 The form `kimi-code/k3` is accepted.
-If Kimi Code state lives outside `~/.kimi-code`, set `KIMI_CODE_HOME` or `extra_kwargs.kimi_home`; `~` prefixes are expanded.
+If Kimi Code state lives outside `~/.kimi-code`, set `KIMI_CODE_HOME` in the `.env` beside `config.yaml` or the process environment, or `extra_kwargs.kimi_home`; `~` prefixes are expanded.
 Kimi K3 always reasons before replying, so responses include reasoning tokens even for short answers.
 The adapter depends on the Kimi Code CLI login format and backend, so a Kimi Code update can require a MindRoom update.
 
@@ -2407,6 +2409,7 @@ Changing `seed` changes the response length, split point, and tool-call choice, 
 `extra_kwargs` sets provider-specific options for the model's requests and API client.
 Each provider accepts only the keys in the table below.
 A model with any other key, including a misspelled key or a retired Agno model setting such as `retries`, fails config validation with an `Unsupported extra_kwargs` error that names the model and the unknown keys and lists the accepted ones; remove or correct those keys.
+`max_retries` is not accepted, since MindRoom retries failed requests itself (see [Retries](#retries)); a model that sets it fails config validation with an error that says to remove it.
 
 - `base_url`, a string, sends requests to a custom endpoint, such as an OpenAI-compatible server.
 - `api_key` is the same as the model's `api_key` field.
@@ -2416,14 +2419,14 @@ A model with any other key, including a misspelled key or a retired Agno model s
 
 | Provider | Accepted keys |
 |----------|---------------|
-| `openai` with Chat Completions, `zai`, `llama_cpp` | `api_key`, `base_url`, `client_params`, `default_headers`, `default_query`, `extra_body`, `extra_headers`, `extra_query`, `frequency_penalty`, `logit_bias`, `logprobs`, `max_completion_tokens`, `max_retries`, `max_tokens`, `metadata`, `organization`, `presence_penalty`, `reasoning_effort`, `request_params`, `role_map`, `seed`, `service_tier`, `stop`, `store`, `strict_output`, `temperature`, `timeout`, `top_logprobs`, `top_p`, `user`, `verbosity` |
+| `openai` with Chat Completions, `zai`, `llama_cpp` | `api_key`, `base_url`, `client_params`, `default_headers`, `default_query`, `extra_body`, `extra_headers`, `extra_query`, `frequency_penalty`, `logit_bias`, `logprobs`, `max_completion_tokens`, `max_tokens`, `metadata`, `organization`, `presence_penalty`, `reasoning_effort`, `request_params`, `role_map`, `seed`, `service_tier`, `stop`, `store`, `strict_output`, `temperature`, `timeout`, `top_logprobs`, `top_p`, `user`, `verbosity` |
 | `azure` | The Chat Completions keys, plus `api_version`, `azure_endpoint`, `azure_deployment`, and `azure_ad_token` |
 | `openrouter` | The Chat Completions keys, plus `models`, `cache_system_prompt`, and `extended_cache_time` |
 | `deepseek` | The Chat Completions keys, plus `use_thinking` |
 | `kimi` | The Chat Completions keys, plus `kimi_home` and `prompt_cache_key` |
-| `groq` | `api_key`, `base_url`, `client_params`, `default_headers`, `default_query`, `extra_headers`, `extra_query`, `frequency_penalty`, `logit_bias`, `logprobs`, `max_retries`, `max_tokens`, `presence_penalty`, `request_params`, `seed`, `stop`, `temperature`, `timeout`, `top_logprobs`, `top_p`, `user` |
-| `cerebras` | `api_key`, `base_url`, `client_params`, `default_headers`, `default_query`, `extra_body`, `extra_headers`, `extra_query`, `max_completion_tokens`, `max_retries`, `parallel_tool_calls`, `repetition_penalty`, `request_params`, `strict_output`, `temperature`, `timeout`, `top_k`, `top_p` |
-| `openai` with Responses | `api_key`, `base_url`, `cache_system_prompt`, `client_params`, `default_headers`, `default_query`, `extra_body`, `extra_headers`, `extra_query`, `include`, `max_output_tokens`, `max_retries`, `max_tool_calls`, `metadata`, `organization`, `parallel_tool_calls`, `reasoning`, `reasoning_effort`, `reasoning_summary`, `request_params`, `service_tier`, `store`, `strict_output`, `temperature`, `timeout`, `top_p`, `truncation`, `user`, `verbosity` |
+| `groq` | `api_key`, `base_url`, `client_params`, `default_headers`, `default_query`, `extra_headers`, `extra_query`, `frequency_penalty`, `logit_bias`, `logprobs`, `max_tokens`, `presence_penalty`, `request_params`, `seed`, `stop`, `temperature`, `timeout`, `top_logprobs`, `top_p`, `user` |
+| `cerebras` | `api_key`, `base_url`, `client_params`, `default_headers`, `default_query`, `extra_body`, `extra_headers`, `extra_query`, `max_completion_tokens`, `parallel_tool_calls`, `repetition_penalty`, `request_params`, `strict_output`, `temperature`, `timeout`, `top_k`, `top_p` |
+| `openai` with Responses | `api_key`, `base_url`, `cache_system_prompt`, `client_params`, `default_headers`, `default_query`, `extra_body`, `extra_headers`, `extra_query`, `include`, `max_output_tokens`, `max_tool_calls`, `metadata`, `organization`, `parallel_tool_calls`, `reasoning`, `reasoning_effort`, `reasoning_summary`, `request_params`, `service_tier`, `store`, `strict_output`, `temperature`, `timeout`, `top_p`, `truncation`, `user`, `verbosity` |
 | `codex` | The Responses keys without `max_output_tokens` and `temperature`, which the Codex endpoint rejects, plus `codex_home`, `default_instructions`, `prompt_cache_key`, and `session_id` |
 | `anthropic` | `api_key`, `auth_token`, `betas`, `cache_system_prompt`, `client_params`, `context_management`, `default_headers`, `extended_cache_time`, `max_tokens`, `output_config`, `request_params`, `stop_sequences`, `temperature`, `thinking`, `timeout`, `top_k`, `top_p` |
 | `vertexai_claude` | The `anthropic` keys without `auth_token`, plus `base_url`, `project_id`, and `region` |
@@ -2509,6 +2512,13 @@ Earlier attachments reach the judge only as placeholders, so pick a cheap model 
 Agents in `thread_mode: room` keep their model, because a room has no thread to switch.
 Teams and the router keep their models.
 Each decision logs `Cold cache model selected` with a `reason`: `no_earlier_reply`, `warm`, `history_unavailable`, `request_incomplete`, `judgment_unavailable`, or `judged`.
+
+## Retries
+
+MindRoom retries a model request that fails with a rate limit, an overload, a server error (any 5xx status, a CDN's origin timeout included), a request timeout, a conflict (409), or a dropped connection up to four times, as long as nothing was streamed yet and no provider-hosted tool had started.
+Before each retry it waits as long as the provider's `Retry-After` or Azure's `retry-after-ms` header asks, when that is at most a minute, and otherwise a delay that doubles with each retry.
+SDK retry settings in `client_params`, such as `max_retries` or Gemini's `http_options.retry_options`, have no effect; the Gemini SDK still resends on its own after a dropped connection and during a file upload's transfer.
+A request that still fails ends the turn with "⏱️ Rate limited. Please wait a moment and try again." for a rate limit, or "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly." otherwise.
 
 ## Stalled Streams
 
@@ -3496,6 +3506,8 @@ memory:
 | `extractor.include_memory_context.memory_snippets` | `5` (min 0) | Existing memories shown to the model to avoid duplicates |
 | `extractor.include_memory_context.snippet_max_chars` | `400` (min 1) | Characters per existing memory shown |
 
+The retired `max_dirty_age_seconds` and `max_cross_session_reprioritize` settings, which older dashboards saved under `auto_flush`, pass validation but have no effect, and the next dashboard save removes them.
+
 ## Prompt Curation
 
 Agents append to `MEMORY.md` and their context files more often than they condense them, so the prompt they send on every turn keeps growing.
@@ -3667,7 +3679,7 @@ Rewriting leaves free space inside an index file, which later writes reuse; once
 Changing `chunk_size`, `chunk_overlap`, `chunk_context_model`, the embedder, or any file filter re-embeds the whole base on the next refresh.
 An explicit reindex from the dashboard or API rebuilds every vector, which is how you replace an index you no longer trust.
 An interrupted or failed semantic build continues where it stopped on the next refresh instead of starting over.
-Temporary embedding failures (timeouts, connection errors, and HTTP 408, 409, 429, 500, 502, 503, 504, and 529) are retried, while permanent failures such as authentication errors stop the refresh until you fix the cause.
+Temporary embedding failures (timeouts, connection errors, and HTTP 408, 409, 429, and any 5xx status) are retried, while permanent failures such as authentication errors stop the refresh until you fix the cause.
 
 Knowledge base configuration hot-reloads.
 After a `chunk_size`, `chunk_overlap`, or `chunk_context_model` change, agents keep searching the previous index until the rebuild succeeds.
@@ -13764,6 +13776,8 @@ Authoring errors:
 
 Each child turn writes `run.json`, `events.jsonl`, and `transcript.md` to `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/` in the child's workspace, dated by the delegation's start in UTC.
 `run.json` and `events.jsonl` update as the child runs, and `transcript.md` is written when the turn finishes.
+The `usage` in `run.json` and in each `usage` event of `events.jsonl` reports the child turn's token counts (`input_tokens`, `output_tokens`, `total_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, and the audio counts), `uncached_input_tokens` (input not read from the provider's cache), a `cost` when the provider reports one, and `time_to_first_token` and `duration` in seconds.
+Fractional values are decimal strings; a token count of zero and an unreported value are left out, while `uncached_input_tokens` and a reported cost or timing appear even when zero once the turn reported any usage.
 The caller receives a receipt at `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its own workspace.
 Sensitive fields are redacted, and large outputs are stored as referenced artifacts.
 Each follow-up turn gets its own record, linked to earlier turns by `subagent_id` and `previous_delegation_id`.
@@ -17087,7 +17101,6 @@ Custom events default to 1000 ms.
   Tool calls, tool results, automation turns, queued-message notices, compaction summaries, job and media follow-up prompts, and the reply of a stopped turn are left out.
   A few notes MindRoom adds to a thread's context still appear as user lines: the note that earlier thread messages were omitted, the note that the agent's previous reply is still being delivered, and that reply's unfinished text under the agent's own Matrix ID.
   A compaction during a reply also covers what the reply wrote so far, but not the message it answers, which stays uncompacted.
-  `ctx.messages` holds the raw `mindroom.llm.messages.Message` objects being compacted, unsanitized, including attachments, media, tool calls and arguments, provider metadata, reasoning, and metrics; it will be removed in a later release, so new hooks should read `ctx.transcript`.
 - **`schedule:fired`**: `ctx.thread_id` is the thread the message will be delivered to, which can differ from `ctx.workflow.thread_id` when the task starts a new thread or posts at room level.
   The event fires for visible and silent schedules.
   Set `ctx.suppress = True` to cancel the fire; an empty or whitespace-only `ctx.message_text` produces a visible scheduled-task failure notice instead.
@@ -17302,7 +17315,7 @@ All contexts except the three tool contexts include these fields:
 | `CancelledResponseContext` | `info` with `envelope`, `visible_response_event_id`, `response_kind`, `failure_reason` |
 | `AgentLifecycleContext` | `entity_name`, `entity_type` (`"agent"`, `"team"`, or `"router"`), `rooms` (configured), `matrix_user_id`, `joined_room_ids`, `stop_reason` (`"restart"`, `"entity_removed"`, or `"shutdown"` on `agent:stopped`) |
 | `SessionHookContext` | `agent_name`, `scope`, `session_id`, `room_id`, `thread_id` |
-| `CompactionHookContext` | `agent_name`, `scope`, `session_id`, `room_id`, `thread_id`, `transcript`, `messages`, `token_count_before`, `token_count_after`, `compaction_summary` |
+| `CompactionHookContext` | `agent_name`, `scope`, `session_id`, `room_id`, `thread_id`, `transcript`, `token_count_before`, `token_count_after`, `compaction_summary` |
 | `ScheduleFiredContext` | `task_id`, `workflow`, `room_id`, `thread_id`, `created_by`, `message_text`, `suppress` |
 | `ReactionReceivedContext` | `room_id`, `event_id`, `sender_id`, `reaction_key`, `target_event_id`, `thread_id` |
 | `RoomMemberJoinedContext`, `RoomMemberLeftContext` | `agent_name`, `room_id`, `event_id`, `user_id`, `sender_id`, `display_name`, `avatar_url`, `membership`, `prev_membership` |
@@ -19185,6 +19198,7 @@ MindRoom refuses dedicated Docker and Kubernetes worker images whose protocol do
 A Docker worker is recreated from a fresh pull of the configured image, while a Kubernetes worker gets a new pod, which pulls the tag again only under the [worker image pull policy](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings) `Always`.
 If the pull fails, as it does for a locally built tag such as `mindroom:dev`, or the image is still incompatible, rebuild the image from the checkout the primary runs from or select the published tag that matches your MindRoom version.
 A worker from a newer release is refused too, and its error reports a higher protocol than the expected one, for example a `:latest` worker that started after a release the primary does not run yet; upgrade the primary to that release, or pin one release tag for both.
+A `static_runner` sandbox runner on another protocol is refused too, and every call routed to it fails until it runs the primary's release; MindRoom checks the runner when the primary first routes a call to it, so restart the primary after replacing a running runner with another release.
 Restarting the primary picks up that release only when the primary runs the same mutable tag and pulls it on every start, as the runtime chart's default `latest` tag with pull policy `Always` does.
 A restarted `uvx mindroom run` keeps its cached release, while `uvx mindroom@latest run` fetches the newest one.
 Plain `uvx mindroom run` runs the published PyPI release, so when testing unreleased code, run MindRoom from the checkout you build the image from (`uv run mindroom run` from the repo root, or `uvx --from /path/to/mindroom mindroom run`).
@@ -21312,7 +21326,7 @@ Each retry delays the reply, and a reply whose request fails every retry logs [`
 | `error` | The failure's message, redacted and truncated |
 | `attempt` | Number of this retry for its `reason`, starting at `1` |
 | `max_retries` | Retries allowed for its `reason` |
-| `delay_seconds` | Seconds waited before this retry |
+| `delay_seconds` | Seconds waited before this retry: the provider's `Retry-After` or Azure's `retry-after-ms` when it asked for at most a minute, otherwise a backoff that doubles with each retry |
 
 Count it grouped by `model_id` and alert when one model is retried far more often than usual.
 `error_type`, `status_code`, and `error` tell throttling apart from an outage or an unresponsive endpoint.
@@ -21563,6 +21577,8 @@ Smaller changes that need operator action:
 - **Retired Agno settings and unsupported model keys**: when you upgrade, delete `learning` and `learning_mode` (see [Agno Learning](https://docs.mindroom.chat/memory/#agno-learning)), `compress_tool_results` (see [History Settings](https://docs.mindroom.chat/configuration/history/#history-settings)), and the `website` tool's `knowledge` option (see [`website`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#website)) from `config.yaml`.
   Configs created by older `mindroom config init` runs set `learning: false` on the `mind` agent.
   Also delete every `extra_kwargs` key a model's provider does not accept, such as the retired Agno setting `retries` or a misspelled key, on every model, including models no agent uses; [Extra Kwargs](https://docs.mindroom.chat/configuration/models/#extra-kwargs) lists the accepted keys.
+- **Unknown config keys**: every section of `config.yaml` except free-form maps, such as a plugin's `settings` and `memory.llm.config`, rejects keys MindRoom does not define, so a misspelled or leftover key, such as one under `memory`, `models`, `knowledge_bases`, `voice`, `router`, `plugins`, `authorization`, or an agent's `private` or `compaction`, fails config load with `Unknown key` even when nothing uses it; before upgrading, run the new release's `mindroom config validate` and delete or correct each key it names.
+- **Sandbox runner release**: a `static_runner` sandbox runner from a release with another worker protocol, such as a Compose `sandbox-runner` service that was not pulled again, is refused and the calls routed to it fail, so upgrade it together with the primary (see [Keeping worker versions matched](https://docs.mindroom.chat/deployment/sandbox-proxy/#keeping-worker-versions-matched)).
 - **Model providers**: a model whose `provider` is not one of the [supported providers](https://docs.mindroom.chat/configuration/models/#supported-providers) fails config load, even when no agent uses it, so `mindroom run` and the dashboard do not start until you fix or delete that model in `config.yaml`; this includes models saved earlier with Together, Mistral, Perplexity, Cohere, or xAI.
 - **Model names**: a model key under `models` may contain only letters, digits, `:`, `_`, and `-`, so a key such as `gpt-6.1` fails config load even when no agent uses it, and `mindroom run` and the dashboard do not start until you rename it, as [Model Config Fields](https://docs.mindroom.chat/configuration/models/#model-config-fields) describes, and update every reference to it.
 - **Restart resume setting**: `defaults.auto_resume_after_restart` is removed and fails validation, so delete it from `config.yaml`; a reply interrupted by a restart always continues in the same message.

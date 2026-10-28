@@ -18,7 +18,6 @@ from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, t
 from mindroom.approval.tool_owners import required_approval_tool_names, validate_approval_tool_owners
 from mindroom.delegation.background import (
     delegation_outcome,
-    delegation_result,
     start_delegation,
 )
 from mindroom.delegation.hooks import after_delegation, before_delegation
@@ -82,9 +81,10 @@ from mindroom.runtime_resolution import resolve_agent_runtime, resolve_agent_sto
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.tool_jobs.background_after import BACKGROUND_AFTER, application_arguments, read_background_after
-from mindroom.tool_jobs.consumption import retain_parent_call_claim
+from mindroom.tool_jobs.consumption import job_failure, retain_parent_call_claim
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_jobs.conversation import current_approval_wait_timeout
+from mindroom.tool_jobs.results import read_result_payload
 from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
     JobAccessError,
@@ -825,10 +825,13 @@ async def _await_background_child(
         await background.release_wait(child.delegation_id, claim)
         raise
     try:
-        result = await delegation_result(background, waited.job) if waited.claim is not None else None
-        returned = result or format_job_handle(waited.job)
-        # A child that ended any other way than completed fails the call, as an ordinary job's call does.
-        failed = waited.claim is not None and waited.job.status != "completed"
+        if waited.claim is None:
+            returned, failure = format_job_handle(waited.job), None
+        else:
+            payload = await read_result_payload(background, waited.job)
+            failure = job_failure(waited.job, payload.value, payload)
+            returned = failure or payload.value or format_job_handle(waited.job)
+        failed = failure is not None
         settled = await settle(returned, failed)
         await record_return(ToolOutcome(content=returned, is_error=True) if failed else returned)
         if waited.claim is not None:

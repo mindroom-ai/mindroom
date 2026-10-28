@@ -4228,7 +4228,6 @@ class ResponseRunner:
         async with session_started_on_creation(
             reply_session,
             correlation_id=lifecycle.identity.correlation_id,
-            logger=self.deps.logger,
         ):
             try:
                 # The attempt runs against the event the turn already adopted, which
@@ -4842,6 +4841,7 @@ class ResponseRunner:
                 )
                 progress.settle(delivery)
             else:
+                team_tool_trace: list[ToolTraceEntry] = []
                 try:
                     try:
                         async with _response_typing_indicator(
@@ -4873,6 +4873,7 @@ class ResponseRunner:
                                     reason_prefix=team_request.reason_prefix,
                                     pipeline_timing=request.pipeline_timing,
                                     turn_recorder=team_turn_recorder,
+                                    tool_trace_collector=team_tool_trace,
                                 )
 
                             try:
@@ -4910,7 +4911,7 @@ class ResponseRunner:
                             existing_event_id=message_id,
                             response_text=response_text,
                             identity=response_identity,
-                            tool_trace=None,
+                            tool_trace=team_tool_trace if show_tool_calls else None,
                             extra_content=_merge_response_extra_content(
                                 team_final_metadata_content(),
                                 request.attachment_ids,
@@ -5144,7 +5145,6 @@ class ResponseRunner:
                 knowledge=knowledge_resolution.knowledge,
                 media=runtime.media_inputs,
                 show_tool_calls=show_tool_calls,
-                collect_streamed_response=show_tool_calls,
                 tool_trace_collector=tool_trace,
                 run_metadata_collector=run_metadata_content,
                 execution_identity=runtime.tool_dispatch.execution_identity,

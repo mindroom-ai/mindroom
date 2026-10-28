@@ -186,7 +186,7 @@ async def settle_child_response(
     elif response.status == RunStatus.cancelled:
         child.status = "cancelled"
         child.result = content or "Delegation cancelled."
-    elif response.status in {RunStatus.error, RunStatus.regenerated}:
+    elif response.status == RunStatus.error:
         child.status = "failed"
         child.result = str(content or response.status)
     else:

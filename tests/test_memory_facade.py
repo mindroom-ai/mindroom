@@ -15,7 +15,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder, get_embedder_failure
-from mindroom.embeddings.errors import EmbedderRequestError
+from mindroom.embeddings.errors import EmbedderRequestError, openai_embedder_error
 from mindroom.memory import MemoryPromptParts
 from mindroom.memory import add_agent_memory as public_add_agent_memory
 from mindroom.memory import build_memory_prompt_parts as public_build_memory_prompt_parts
@@ -350,7 +350,9 @@ class TestMemoryFacade:
     ) -> None:
         request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
         response = httpx.Response(401, request=request, json={"error": {"message": "bad key"}})
-        mock_memory.search.side_effect = AuthenticationError("Error code: 401", response=response, body=None)
+        mock_memory.search.side_effect = openai_embedder_error(
+            AuthenticationError("Error code: 401", response=response, body=None),
+        )
 
         try:
             with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
@@ -376,10 +378,10 @@ class TestMemoryFacade:
         storage_path: Path,
         config: Config,
     ) -> None:
-        """Provider failure while constructing Mem0 degrades instead of aborting the turn."""
+        """An embedder failure while Mem0 is built, which the build raises typed, degrades instead of aborting the turn."""
         request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
         response = httpx.Response(401, request=request, json={"error": {"message": "bad key"}})
-        error = AuthenticationError("Error code: 401", response=response, body=None)
+        error = openai_embedder_error(AuthenticationError("Error code: 401", response=response, body=None))
 
         with patch("mindroom.memory._backend.create_memory_instance", side_effect=error):
             outcome = await public_search_agent_memories(
@@ -407,7 +409,7 @@ class TestMemoryFacade:
         response = httpx.Response(401, request=request, json={"error": {"message": "bad key"}})
         mock_memory.search.side_effect = [
             {"results": [{"id": "personal", "memory": "available personal memory"}]},
-            AuthenticationError("Error code: 401", response=response, body=None),
+            openai_embedder_error(AuthenticationError("Error code: 401", response=response, body=None)),
         ]
 
         with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
@@ -446,7 +448,7 @@ class TestMemoryFacade:
             if calls == 1:
                 return {"results": [{"id": "personal", "memory": "personal"}]}
             if calls == 2:
-                raise AuthenticationError(auth_error_message, response=response, body=None)
+                raise openai_embedder_error(AuthenticationError(auth_error_message, response=response, body=None))
             # A real successful Mem0 request clears health inside
             # OpenAIEmbedder; this fake must model that side effect.
             capture_embedder_health_recorder().record(None)
@@ -702,7 +704,9 @@ class TestMemoryFacade:
         """The automatic per-turn path carries the degradation notice, not silence."""
         request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
         response = httpx.Response(401, request=request, json={"error": {"message": "bad key"}})
-        mock_memory.search.side_effect = AuthenticationError("Error code: 401", response=response, body=None)
+        mock_memory.search.side_effect = openai_embedder_error(
+            AuthenticationError("Error code: 401", response=response, body=None),
+        )
 
         try:
             with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):

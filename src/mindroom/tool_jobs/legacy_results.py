@@ -1,4 +1,4 @@
-"""Tool-job result payloads in the shape the Agno-based tool executor saved them."""
+"""Tool-job result payloads in the shapes earlier releases saved them."""
 
 from __future__ import annotations
 
@@ -24,3 +24,14 @@ _LEGACY_PAYLOAD_FIELDS = frozenset({"elapsed", "replay", "control"})
 def drop_legacy_payload_fields(fields: dict[str, Any]) -> dict[str, Any]:
     """Return the encoded payload fields without those only the Agno-based executor saved."""
     return {name: value for name, value in fields.items() if name not in _LEGACY_PAYLOAD_FIELDS}
+
+
+# LEGACY_COMPAT: Tool values tagged `ToolResult` in saved tool-job result payloads.
+# Legacy format: a payload's tool value, its text and media, is tagged `ToolResult`, Agno's name for it, where the
+# current encoder writes `ToolValue`; selected by that tag.
+# Last legacy release: v2026.10.636; replacement: v2026.10.637 tags it `ToolValue`.
+# Handling: the decoder reads the `ToolResult` tag as `ToolValue`, so a job saved before the upgrade is consumed with
+# the same text and media. An earlier release rejects the new tag, so after a rollback a job that finished on the
+# newer release fails when consumed; a payload lives only until its job is consumed.
+# Coverage: tests/test_tool_job_results.py::test_a_tool_value_saved_under_its_earlier_tag_decodes_as_before.
+LEGACY_TOOL_VALUE_TAG = "ToolResult"

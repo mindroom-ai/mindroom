@@ -61,6 +61,7 @@ from mindroom.credentials.manager import (
     save_scoped_credentials,
     sync_shared_credentials_to_worker,
 )
+from mindroom.llm.media import Image
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.runtime_env_policy import SHARED_CREDENTIALS_PATH_ENV
@@ -74,6 +75,7 @@ from mindroom.tool_system.declarations import (
     ToolMetadata,
     ToolStatus,
 )
+from mindroom.tool_system.media_transport import decode_media_result
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     get_tool_by_name,
@@ -81,6 +83,7 @@ from mindroom.tool_system.metadata import (
     serialize_tool_validation_snapshot,
 )
 from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_proxy_client import WorkerProxyClientConfig, execute_worker_proxy_request
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -1953,13 +1956,8 @@ async def test_inprocess_runner_encodes_browser_media_results(
     tmp_path: Path,
 ) -> None:
     """Generic in-process browser execution must preserve bounded image bytes."""
-    from agno.media import Image  # noqa: PLC0415
-    from agno.tools.function import ToolResult  # noqa: PLC0415
-
-    from mindroom.tool_system.media_transport import decode_media_result  # noqa: PLC0415
-
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
-    expected = ToolResult(content="screen", images=[Image(content=b"png", mime_type="image/png")])
+    expected = ToolValue(content="screen", images=(Image(content=b"png", mime_type="image/png"),))
     monkeypatch.setattr(
         sandbox_runner_module,
         "_resolve_entrypoint",
@@ -1977,9 +1975,9 @@ async def test_inprocess_runner_encodes_browser_media_results(
 
     assert response.ok is True
     decoded = decode_media_result(response.result)
-    assert isinstance(decoded, ToolResult)
+    assert isinstance(decoded, ToolValue)
     assert decoded.content == "screen"
-    assert decoded.images is not None
+    assert decoded.images
     assert decoded.images[0].content == b"png"
 
 
@@ -1988,13 +1986,8 @@ def test_subprocess_worker_encodes_browser_media_results(
     tmp_path: Path,
 ) -> None:
     """The subprocess protocol must carry the same bounded browser image envelope."""
-    from agno.media import Image  # noqa: PLC0415
-    from agno.tools.function import ToolResult  # noqa: PLC0415
-
-    from mindroom.tool_system.media_transport import decode_media_result  # noqa: PLC0415
-
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
-    expected = ToolResult(content="screen", images=[Image(content=b"png", mime_type="image/png")])
+    expected = ToolValue(content="screen", images=(Image(content=b"png", mime_type="image/png"),))
     monkeypatch.setattr(
         sandbox_runner_module,
         "_resolve_entrypoint",
@@ -2020,8 +2013,8 @@ def test_subprocess_worker_encodes_browser_media_results(
     assert response_json is not None
     response = sandbox_runner_module.SandboxRunnerExecuteResponse.model_validate_json(response_json)
     decoded = decode_media_result(response.result)
-    assert isinstance(decoded, ToolResult)
-    assert decoded.images is not None
+    assert isinstance(decoded, ToolValue)
+    assert decoded.images
     assert decoded.images[0].content == b"png"
 
 

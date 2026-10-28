@@ -34,22 +34,21 @@ from mindroom.agents import create_agent
 from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.failure_text import failure_text
-from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context
+from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context, record_helper_usage
 from mindroom.history.interrupted_replay import persist_interrupted_replay
 from mindroom.history.session_context import create_scope_session_storage, load_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.utils import knowledge_runtime_identity, resolve_agent_knowledge_access_async
-from mindroom.llm.messages import Message, model_provenance, system_text
-from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics
+from mindroom.llm.messages import ModelProvenance, system_text
+from mindroom.llm.runs import RunStatus
+from mindroom.llm.usage import HelperUsage, MessageMetrics, ModelMetrics, RequestUsage, RunMetrics, VoiceDuration
 from mindroom.logging_config import get_logger
 from mindroom.matrix_rtc.voice_agent import CallAgentResponse
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agno_toolkits import AGNO_EMPTY_PARAMETERS
@@ -95,11 +94,9 @@ _CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS = frozenset({"run_workflow"})
 
 
 async def _save_call_usage(
+    usage: HelperUsage,
     *,
     kind: Literal["live_voice", "realtime_voice"],
-    usage_id: str,
-    created_at: float,
-    run: dict[str, object],
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
@@ -113,22 +110,12 @@ async def _save_call_usage(
     owner = _call_usage_owner(
         agent_name,
         session_id,
-        created_at=created_at,
+        created_at=usage.created_at,
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
     )
-    await run_session_storage_operation(
-        owner.storage_factory,
-        lambda storage: storage.save_independent_usage(
-            session_id=owner.session_id,
-            usage_id=f"{kind}:{usage_id}",
-            kind=kind,
-            requester_id=execution_identity.requester_id,
-            initial_session=owner.initial_session,
-            run=run,
-        ),
-    )
+    await record_helper_usage(usage, owner=owner, kind=kind, requester_id=execution_identity.requester_id)
 
 
 def _call_usage_owner(
@@ -194,16 +181,15 @@ async def record_call_voice_usage(
 ) -> None:
     """Upsert billed GPT-Live voice duration for the caller."""
     await _save_call_usage(
+        HelperUsage(
+            run_id=usage.provider_session_id,
+            model=usage.model,
+            provider="OpenAI",
+            metrics=RunMetrics(),
+            voice=VoiceDuration(seconds=usage.duration_seconds, finalized=usage.finalized),
+            created_at=usage.created_at,
+        ),
         kind="live_voice",
-        usage_id=usage.provider_session_id,
-        created_at=usage.created_at,
-        run={
-            "model_provider": "OpenAI",
-            "model": usage.model,
-            "created_at": usage.created_at,
-            "voice_seconds": usage.duration_seconds,
-            "voice_finalized": usage.finalized,
-        },
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
@@ -222,30 +208,22 @@ async def record_call_token_usage(
     The call's model has its entry under ``details`` even before any response, so stored usage names it from the start.
     """
     metrics = RunMetrics(details={"model": [ModelMetrics(id=usage.model, provider="OpenAI")]})
-    messages: list[Message] = []
+    model = ModelProvenance(model_id=usage.model, provider="OpenAI")
+    requests: list[RequestUsage] = []
     for response in usage.responses:
         response_metrics = MessageMetrics(tokens=response.tokens.with_totals())
         metrics.add(response_metrics, model_id=usage.model, provider="OpenAI")
-        messages.append(
-            Message(
-                role="assistant",
-                created_at=int(response.created_at),
-                metrics=response_metrics,
-                provider_data=model_provenance(usage.model, "OpenAI"),
-            ),
-        )
+        requests.append(RequestUsage(created_at=int(response.created_at), metrics=response_metrics, model=model))
     await _save_call_usage(
-        kind="realtime_voice",
-        usage_id=usage.usage_id,
-        created_at=usage.created_at,
-        run=RunRecord(
+        HelperUsage(
             run_id=usage.usage_id,
             model=usage.model,
-            model_provider="OpenAI",
-            created_at=int(usage.created_at),
+            provider="OpenAI",
             metrics=metrics,
-            messages=messages,
-        ).to_dict(),
+            requests=tuple(requests),
+            created_at=int(usage.created_at),
+        ),
+        kind="realtime_voice",
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,

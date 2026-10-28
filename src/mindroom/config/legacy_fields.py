@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
 
 # LEGACY_COMPAT: Scalar knowledge_base agent configuration.
 # Legacy format: Agent config accepted scalar knowledge_base instead of knowledge_bases.
@@ -103,6 +103,24 @@ def reject_legacy_defaults_fields(value: object) -> object:
     return value
 
 
+# LEGACY_COMPAT: Retired push-model auto-flush settings.
+# Legacy format: memory.auto_flush.max_dirty_age_seconds and memory.auto_flush.max_cross_session_reprioritize, which
+#   the dashboard wrote on every save.
+# Last legacy release: v2026.10.335; replacement: v2026.10.336 flushes quiet conversations from stored sessions and
+#   removes both fields.
+# Handling: Drop both before validation, so a config that still sets them loads unchanged while every other unknown
+#   memory.auto_flush key fails, and the next dashboard save removes them.
+# Coverage: tests/test_memory_config.py::TestMemoryConfig::test_retired_auto_flush_fields_still_load.
+_RETIRED_AUTO_FLUSH_FIELDS = frozenset({"max_dirty_age_seconds", "max_cross_session_reprioritize"})
+
+
+def drop_retired_auto_flush_fields(value: object) -> object:
+    """Return memory.auto_flush settings without the retired dirty-queue fields."""
+    if isinstance(value, dict):
+        return {key: item for key, item in value.items() if key not in _RETIRED_AUTO_FLUSH_FIELDS}
+    return value
+
+
 # LEGACY_COMPAT: Retired per-tool restrict_to_base_dir override.
 # Legacy format: file, coding, and python tool entries accepted an authored boolean restrict_to_base_dir.
 # Last legacy release: v2026.9.279; replacement: v2026.9.280 removed the field for the agents.<name>.file_access and
@@ -126,3 +144,20 @@ _REJECTED_TOOL_OVERRIDES = {
 def retired_tool_override(overrides: Mapping[str, object]) -> tuple[str, str] | None:
     """Return the first rejected retired field an entry authors, and its replacement guidance."""
     return next(((field, guidance) for field, guidance in _REJECTED_TOOL_OVERRIDES.items() if field in overrides), None)
+
+
+# LEGACY_COMPAT: Retired max_retries setting of OpenAI-family models.
+# Legacy format: models.<name>.extra_kwargs.max_retries on an OpenAI-family route set the OpenAI SDK's own HTTP retries,
+#   beneath the request pipeline's retries.
+# Last legacy release: v2026.10.642; replacement: unreleased; the request pipeline retries a failed model request and
+#   the SDK clients' configurable retries are off.
+# Handling: Reject it at config load on every provider, naming the key and saying to remove it.
+# Coverage: tests/test_extra_kwargs.py::test_a_retired_max_retries_fails_config_load_with_its_reason.
+_RETIRED_MODEL_SETTINGS = {
+    "max_retries": "MindRoom retries a failed model request itself, so remove the setting",
+}
+
+
+def retired_model_setting(keys: Iterable[str]) -> tuple[str, str] | None:
+    """Return the first retired ``extra_kwargs`` setting among ``keys``, and its guidance."""
+    return next(((key, _RETIRED_MODEL_SETTINGS[key]) for key in keys if key in _RETIRED_MODEL_SETTINGS), None)

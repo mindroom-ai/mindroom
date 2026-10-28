@@ -133,7 +133,6 @@ from mindroom.response_turn import (
     ResponsePausedForApproval,
     ResponseTurnContext,
     TurnSinks,
-    run_blocking_response_turn,
     stream_response_turn,
 )
 from mindroom.room_model_overrides import set_room_model_override
@@ -202,10 +201,11 @@ from tests.test_agent_tool_calls import _catalog
 from tests.test_response_attempt import _Span
 from tests.test_response_turn import (
     _AdapterLog,
-    _blocking_adapter,
+    _collected_turn,
     _continuation,
     _ctx,
     _model_switch_execution,
+    _resolving_adapter,
     _streaming_adapter,
 )
 from tests.tool_approval_helpers import gated_functions
@@ -8405,9 +8405,9 @@ async def test_cli_pause_after_control_rebuild_persists_spent_continuation_budge
             ):
                 pass
         else:
-            await run_blocking_response_turn(
+            await _collected_turn(
                 _ctx(),
-                _blocking_adapter(_AdapterLog(), attempt),
+                _resolving_adapter(_AdapterLog(), attempt),
                 TurnSinks(),
                 continuation=_continuation(),
             )

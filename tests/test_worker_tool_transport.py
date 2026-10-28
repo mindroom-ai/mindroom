@@ -16,7 +16,7 @@ from agno.run import RunContext
 from agno.tools import openai as agno_openai
 
 from mindroom.agents import create_agent
-from mindroom.api import sandbox_runner
+from mindroom.api import sandbox_runner, sandbox_runner_app
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
@@ -75,6 +75,8 @@ def worker_requests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[dic
 
     def execute(request: httpx.Request) -> httpx.Response:
         assert request.url.host == "sandbox.invalid"
+        if request.url.path == "/healthz":
+            return httpx.Response(200, json=asyncio.run(sandbox_runner_app.healthz()))
         assert request.url.path.endswith("/execute")
         payload = json.loads(request.content)
         requests.append(payload)
