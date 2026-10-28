@@ -1,4 +1,4 @@
-"""Agent session rows that name an owner other than their agent, adopted once as layout version 3."""
+"""Agent session rows and runs that name an owner other than their agent, adopted once as layout version 3."""
 
 from __future__ import annotations
 
@@ -14,21 +14,31 @@ if TYPE_CHECKING:
     from mindroom.session_storage.schema import TableNames
 
 
-# LEGACY_COMPAT: Agent session rows naming the id Agno derived from the agent's display name.
+# LEGACY_COMPAT: Agent session rows and runs naming the id Agno derived from the agent's display name.
 # Legacy format: In agent `<name>`'s conversation database, a `session_type = 'agent'` row whose `agent_id` is not
-# `<name>`. MindRoom built each Agno agent without an id, so Agno stored `generate_id_from_name(display_name)`
-# (`Code Agent` became `code-agent`); a row keeps the owner its last save wrote, and storage v2 copied rows as it found
-# them. A row without an owner, which no release wrote, is selected too.
+# `<name>`, and a top-level agent run of such a session whose `agent_id` is not `<name>`. MindRoom built each Agno agent
+# without an id, so Agno stored `generate_id_from_name(display_name)` (`Code Agent` became `code-agent`); a row keeps
+# the owner its last save wrote, a run the id it was saved under, and storage v2 copied both as it found them. A row or
+# run without an owner, which no release wrote, is selected too.
 # Last legacy release: v2026.2.54; replacement: v2026.2.55 passed the agent's name as its id.
-# Handling: The agent's store open and the startup sweep set such a row's `agent_id` to `<name>` once: in the
-# conversion of an Agno-layout database, or when a storage v2 database moves to layout version 3. The session's owner
-# is then its history scope, so the scope's summary replays after a compaction. Runs keep the id they were saved under.
+# Handling: The agent's store open and the startup sweep set their agent to `<name>` once: in the conversion of an
+# Agno-layout database, or when a storage v2 database moves to layout version 3. The session's owner is then its
+# history scope, so the scope's summary replays after a compaction, and the runs replay as the agent's history again.
 # Coverage: tests/session_storage/test_legacy_agent_session_owners.py.
 def adopt_agent_session_owners(connection: sqlite3.Connection, names: TableNames, agent_name: str) -> None:
-    """Make every agent session row in agent ``agent_name``'s database name that agent, in the caller's transaction."""
+    """Make every agent session and its top-level runs in agent ``agent_name``'s database name that agent.
+
+    Runs in the caller's transaction.
+    """
+    sessions = quote_identifier(names.sessions)
     connection.execute(
-        f"UPDATE {quote_identifier(names.sessions)} SET agent_id = ?1 "  # noqa: S608
-        "WHERE session_type = 'agent' AND agent_id IS NOT ?1",
+        f"UPDATE {sessions} SET agent_id = ?1 WHERE session_type = 'agent' AND agent_id IS NOT ?1",  # noqa: S608
+        (agent_name,),
+    )
+    connection.execute(
+        f"UPDATE {quote_identifier(names.log_runs)} SET scope_key = 'agent:' || ?1, "  # noqa: S608
+        "record = json_set(record, '$.agent_id', ?1) "
+        "WHERE parent_run_id IS NULL AND scope_key IS NOT 'agent:' || ?1",
         (agent_name,),
     )
 

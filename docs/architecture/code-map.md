@@ -280,7 +280,7 @@ Matrix sync callback
 | `session_storage/legacy_agno2_runs.py` | Data older Agno releases stored: Agno 2 run blobs, rows without a position, and odd timestamps, which the conversion reads, and session JSON columns encoded twice, which the conversion stores once and usage reports over unconverted files read |
 | `session_storage/legacy_tool_results.py` | Tool results an earlier release stored combined in one message, split into one message per result when a database converts |
 | `session_storage/legacy_agno3_conversion.py` | The one-way conversion of an Agno-layout conversation database to storage v2, run by a store open that finds an older layout and by the startup sweep over the session state root |
-| `session_storage/legacy_agent_session_owners.py` | Agent session rows that name an id other than their agent, set to the agent once, as layout version 3, by the agent's store open and the startup sweep |
+| `session_storage/legacy_agent_session_owners.py` | Agent session rows and runs that name an id other than their agent, set to the agent once, as layout version 3, by the agent's store open and the startup sweep |
 | `session_storage/legacy_agno3_backup.py` | The `<name>.db.pre-storage-v2` copy a database gets before its conversion, after a free-space check, through no-follow descriptors |
 | `session_storage/legacy_agno3_schema.py` | The Agno layout's table names, DDL, run-row decoder, and member-subtree delete, read only by the conversion and its Agno-era steps |
 | `history/summary_rows.py` | The conversation log's summary rows: compare-and-append of compaction chunks and mid-turn folds, the event ids each row covers, the tool calls folds took, and edit and redaction cuts |

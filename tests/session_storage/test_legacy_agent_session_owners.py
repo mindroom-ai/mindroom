@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import closing
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, resolve_runtime_paths
+from mindroom.history.run_visibility import replays_in_scope
+from mindroom.history.storage import remove_history_of_redacted_events
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
@@ -23,6 +26,7 @@ from tests.history_helpers import compact_runs, stored_run_ids
 from tests.session_storage.agno_layout import write_agno_database
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
     from pathlib import Path
 
     from mindroom.session_storage.store import ConversationStore
@@ -39,6 +43,7 @@ def _run(run_id: str, session_id: str = "session") -> RunRecord:
         session_id=session_id,
         content=f"answer {run_id}",
         messages=[Message(role="user", content=f"question {run_id}")],
+        metadata={MATRIX_EVENT_ID_METADATA_KEY: f"${run_id}"},
     )
 
 
@@ -73,7 +78,7 @@ def _rows(database: Path) -> tuple[int, list[tuple[str, str, str | None, str | N
 
 
 def test_an_agents_open_converts_rows_naming_another_owner_to_the_agent(tmp_path: Path) -> None:
-    """A converted row naming the display-name id, or no owner, names the agent; its runs keep their id."""
+    """A converted row naming the display-name id, or no owner, names the agent, and so do its runs."""
     database = _agno_database(tmp_path / "code", _session("old", _DISPLAY_NAME_ID), _session("unowned", ""))
     with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute("UPDATE code_sessions SET agent_id = NULL WHERE session_id = 'unowned'")
@@ -83,7 +88,7 @@ def test_an_agents_open_converts_rows_naming_another_owner_to_the_agent(tmp_path
     assert _rows(store.path) == (LOG_VERSION, [("old", "agent", "code", None), ("unowned", "agent", "code", None)])
     session = store.load_session("old", "agent")
     assert session is not None
-    assert [run.agent_id for run in session.runs] == [_DISPLAY_NAME_ID]
+    assert [run.agent_id for run in session.runs] == ["code"]
 
 
 def test_a_storage_v2_database_adopts_its_rows_once_at_its_agents_open(tmp_path: Path) -> None:
@@ -146,5 +151,40 @@ def test_a_compaction_after_the_adoption_replays_its_summary(tmp_path: Path) -> 
     assert reloaded is not None
     assert reloaded.summary is not None
     assert reloaded.summary.text == "summary of new"
-    assert [run.run_id for run in reloaded.runs] == ["session-run"]
+    assert "new" not in [run.run_id for run in reloaded.runs]
     assert stored_run_ids(store, "session") == ["session-run", "new"]
+
+
+def test_a_conversation_continued_after_v2026_2_55_replays_its_earlier_runs(tmp_path: Path) -> None:
+    """Runs saved under the display-name id replay as the agent's history beside the runs saved since.
+
+    A run another agent ran for one of them keeps its own agent.
+    """
+    session = _session("session", "code")
+    session.runs.append(replace(_run("new"), agent_id="code"))
+    session.runs.append(replace(_run("child"), agent_id="helper", parent_run_id="new"))
+    _v2_database(tmp_path / "code", session)
+
+    store = create_agent_state_storage("code", tmp_path / "code")
+
+    loaded = store.load_session("session", "agent")
+    assert loaded is not None
+    assert [run.run_id for run in loaded.runs if replays_in_scope(run, _SCOPE)] == ["session-run", "new"]
+    assert [run.agent_id for run in loaded.runs if run.parent_run_id is not None] == ["helper"]
+
+
+@pytest.mark.asyncio
+async def test_redacting_an_event_an_adopted_run_answered_cuts_from_that_run(tmp_path: Path) -> None:
+    """A redaction cleanup finds and cuts a run saved under the display-name id, with every run after it."""
+    session = _session("session", "code")
+    session.runs.append(replace(_run("new"), agent_id="code"))
+    _v2_database(tmp_path / "code", session)
+    store = create_agent_state_storage("code", tmp_path / "code")
+    loaded = store.load_session("session", "agent")
+    assert loaded is not None
+
+    async def redacted_history_events(event_ids: Collection[str]) -> dict[str, str | None]:
+        return dict.fromkeys(set(event_ids) & {"$session-run"})
+
+    assert await remove_history_of_redacted_events(store, loaded, redacted_history_events) == ["$session-run"]
+    assert stored_run_ids(store, "session") == []
