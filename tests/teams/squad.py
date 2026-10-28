@@ -92,7 +92,7 @@ def member(
     *toolkits: AdaptedToolkit,
     system: str | None = None,
 ) -> TeamMember:
-    """Return one squad member; ``system`` defaults to a short prompt (completed rows store none)."""
+    """Return one squad member; ``system`` defaults to a short prompt."""
     spec = AgentSpec(
         id=agent_id,
         name=name,
@@ -142,8 +142,6 @@ def squad(
     *,
     mode: TeamMode = TeamMode.COORDINATE,
     team_id: str = "squad",
-    system: str = "You lead the squad.",
-    checker_system: str | None = None,
     leader_toolkits: Sequence[AdaptedToolkit] = (),
     writer_toolkits: Sequence[AdaptedToolkit] | None = None,
     checker_toolkits: Sequence[AdaptedToolkit] | None = None,
@@ -155,10 +153,10 @@ def squad(
         team_id,
         TEAM_LABEL,
         leader,
-        system,
+        "You lead the squad.",
         (
             member("writer", "Writer", writer, *writer_tools),
-            member("checker", "Checker", checker, *checker_tools, system=checker_system),
+            member("checker", "Checker", checker, *checker_tools),
         ),
         mode=mode,
         toolkits=leader_toolkits,

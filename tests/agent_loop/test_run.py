@@ -31,14 +31,13 @@ from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from tests.agent_loop.helpers import add, boom, collect, context, echo, external, gated, spec, toolkit
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
-from tests.run_record_helpers import reply, result, run_metrics, settled
+from tests.run_record_helpers import PRODUCT, approved, denied, result, resumed, settled, waiting_call
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from agno.run import RunContext as AgnoRunContext
 
-    from mindroom.llm.usage import MessageMetrics
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolkitClose
 
 LOADED_SESSIONS = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "storage" / "loaded_sessions.json"
@@ -530,40 +529,6 @@ def _model(model_id: str, *turns: list[Any]) -> ScriptedModel:
     )
 
 
-def _resumed(
-    paused: RunRecord,
-    *,
-    decided: ToolExecution,
-    added: Sequence[Message],
-    answered: tuple[str, MessageMetrics],
-    **requirement_fields: str | bool,
-) -> RunRecord:
-    """Return ``paused`` resumed into a completed run.
-
-    Its one waiting call ends as ``decided``, its requirement records that call and ``requirement_fields``, ``added``
-    follows its messages, and ``answered`` is the final reply's text and usage.
-    """
-    [requirement] = paused.requirements or ()
-    text, metrics = answered
-    assert paused.model is not None
-    return replace(
-        paused,
-        status=RunStatus.completed,
-        content=text,
-        messages=[*paused.messages, *added, reply(text, model=paused.model, metrics=metrics)],
-        tools=[decided],
-        requirements=[replace(requirement, tool_execution=decided, **requirement_fields)],
-        metrics=run_metrics((paused.model, metrics), start=paused.metrics),
-    )
-
-
-def _waiting(paused: RunRecord) -> tuple[dict[str, Any], ToolExecution]:
-    """Return the one call ``paused`` waits on, as its last message asked for it, and its tool execution."""
-    [call] = paused.messages[-1].tool_calls or ()
-    [waiting] = paused.tools or ()
-    return call, waiting
-
-
 async def _resume(
     agent: AgentSpec,
     paused: RunRecord,
@@ -604,11 +569,15 @@ async def test_an_approved_call_resumes_into_a_completed_run_with_its_result() -
         approved=[_approval("call-multiply", "multiply", {"a": 6, "b": 7})],
     )
 
-    call, waiting = _waiting(paused)
-    product = '{"operation": "multiplication", "result": 42.0}'
-    approved = replace(waiting, is_error=False, result=product, requires_confirmation=False, confirmed=True)
+    call, waiting = waiting_call(paused)
     assert settled(record) == settled(
-        _resumed(paused, decided=approved, added=[result(call, product)], answered=answered, confirmation=True),
+        resumed(
+            paused,
+            decided=approved(waiting, PRODUCT),
+            added=[result(call, PRODUCT)],
+            answered=answered,
+            confirmation=True,
+        ),
     )
     assert record.messages[: len(paused.messages)] == paused.messages
     assert len(record.messages) == len(paused.messages) + 2
@@ -631,12 +600,11 @@ async def test_a_denied_call_resumes_into_a_completed_run_that_answers_it_with_t
 
     events, record, _ = await _resume(_agent(model, [_gated_calculator()]), paused, denied={"call-multiply": reason})
 
-    call, waiting = _waiting(paused)
-    denied = replace(waiting, is_error=True, requires_confirmation=False, confirmed=False, confirmation_note=reason)
+    call, waiting = waiting_call(paused)
     assert settled(record) == settled(
-        _resumed(
+        resumed(
             paused,
-            decided=denied,
+            decided=denied(waiting, reason),
             added=[result(call, reason, is_error=True)],
             answered=answered,
             confirmation=False,
@@ -673,11 +641,15 @@ async def test_a_team_member_s_approved_call_resumes_into_the_member_s_completed
         approved=[_approval("call-checker-multiply", "multiply", {"a": 6, "b": 7}, agent="checker")],
     )
 
-    call, waiting = _waiting(paused)
-    product = '{"operation": "multiplication", "result": 42.0}'
-    approved = replace(waiting, is_error=False, result=product, requires_confirmation=False, confirmed=True)
+    call, waiting = waiting_call(paused)
     assert settled(record) == settled(
-        _resumed(paused, decided=approved, added=[result(call, product)], answered=answered, confirmation=True),
+        resumed(
+            paused,
+            decided=approved(waiting, PRODUCT),
+            added=[result(call, PRODUCT)],
+            answered=answered,
+            confirmation=True,
+        ),
     )
     assert record.parent_run_id == "team-paused"
 
@@ -695,15 +667,14 @@ async def test_an_external_result_resumes_into_a_completed_run_that_answers_the_
         external_results={"call-delegate": helper_result},
     )
 
-    call, waiting = _waiting(paused)
+    call, waiting = waiting_call(paused)
     # An externally executed call's result answers it as is, never as a failure.
     executed = replace(waiting, result=helper_result, external_execution_required=False)
-    answer_message = replace(result(call, helper_result), tool_call_error=None)
     assert settled(record) == settled(
-        _resumed(
+        resumed(
             paused,
             decided=executed,
-            added=[answer_message],
+            added=[result(call, helper_result, is_error=None)],
             answered=answered,
             external_execution_result=helper_result,
         ),

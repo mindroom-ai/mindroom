@@ -18,13 +18,13 @@ from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import TextDelta, TurnCompleted
-from mindroom.llm.runs import RunRequirement, RunStatus, TeamRunRecord
+from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.teams.delegate_tools import MEMBER_PAUSED_RESULT, NO_MEMBER_RESPONSE
 from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMode
 from tests.agent_loop.helpers import echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
-from tests.run_record_helpers import reply, result, run_metrics, settled
+from tests.run_record_helpers import PRODUCT, approved, reply, result, resumed, run_metrics, settled, waiting_call
 from tests.teams.squad import (
     CHECKER_PAUSED_PIECE,
     PROVIDER,
@@ -110,32 +110,18 @@ async def test_an_approved_member_call_resumes_the_member_and_then_the_leader() 
     )
     # The member runs the approved call and answers; its record keeps the decision and names the member.
     [paused_member] = paused.member_responses
-    [call] = paused_member.messages[-1].tool_calls or ()
-    product = '{"operation": "multiplication", "result": 42.0}'
-    [waiting] = paused_member.tools or ()
-    approved = replace(waiting, is_error=False, result=product, requires_confirmation=False, confirmed=True)
+    call, waiting = waiting_call(paused_member)
     [member] = store.members
     assert settled(member) == settled(
-        replace(
+        resumed(
             paused_member,
-            status=RunStatus.completed,
-            content="42",
-            messages=[
-                *paused_member.messages,
-                result(call, product),
-                reply("42", model="checker-model", metrics=checker_usage),
-            ],
-            tools=[approved],
-            requirements=[
-                RunRequirement(
-                    approved,
-                    confirmation=True,
-                    member_agent_id="checker",
-                    member_display_name="Checker",
-                    member_run_id=paused_member.run_id,
-                ),
-            ],
-            metrics=run_metrics(("checker-model", checker_usage), start=paused_member.metrics),
+            decided=approved(waiting, PRODUCT),
+            added=[result(call, PRODUCT)],
+            answered=("42", checker_usage),
+            confirmation=True,
+            member_agent_id="checker",
+            member_display_name="Checker",
+            member_run_id=paused_member.run_id,
         ),
     )
     assert paused.to_dict() == before

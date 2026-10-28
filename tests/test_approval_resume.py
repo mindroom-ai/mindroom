@@ -23,51 +23,24 @@ from mindroom.response_turn import CompletedApprovalRun
 from mindroom.session_storage.agent_storage import create_session_storage
 from tests.approval_continuation_helpers import receipt_call_ids
 from tests.approval_resume_helpers import AGENT_RESUMES, CodeResume, resume_case, setup_case, setup_resume
-from tests.run_record_helpers import reply, result, run_metrics, settled
+from tests.run_record_helpers import PRODUCT, approved, as_stored, denied, result, resumed, settled, waiting_call
 from tests.teams.squad import scripted
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
-    from mindroom.llm.messages import Message
-    from tests.approval_resume_helpers import AgentResume
+    from mindroom.llm.usage import MessageMetrics
+    from tests.fakes.scripted_model import ScriptStep
 
 pytestmark = pytest.mark.asyncio
 
-_PRODUCT = '{"operation": "multiplication", "result": 42.0}'
 
-
-def _resumed(
-    paused: RunRecord,
-    case: AgentResume,
-    *,
-    decided: ToolExecution,
-    added: Sequence[Message],
-    **requirement_fields: str | bool,
-) -> RunRecord:
-    """Return ``paused`` as the store holds it after its resume answered as ``case``'s model did.
-
-    Its one waiting call ends as ``decided``, its requirement records that call and ``requirement_fields``, and
-    ``added`` and the final reply follow its messages; a finished run is stored without its system message.
-    """
-    [requirement] = paused.requirements or ()
-    [step] = [step for step in case.code if isinstance(step, TurnCompleted)]
-    text, metrics = step.message.content, step.message.metrics
-    assert isinstance(text, str)
-    return replace(
-        paused,
-        status=RunStatus.completed,
-        content=text,
-        messages=[
-            *(message for message in paused.messages if message.role != "system"),
-            *added,
-            reply(text, model="code-model", metrics=metrics),
-        ],
-        tools=[decided],
-        requirements=[replace(requirement, tool_execution=decided, **requirement_fields)],
-        metrics=run_metrics(("code-model", metrics), start=paused.metrics),
-    )
+def _answered(script: Sequence[ScriptStep]) -> tuple[str, MessageMetrics]:
+    """Return the text and usage of the reply a scripted model answers with."""
+    [step] = [step for step in script if isinstance(step, TurnCompleted)]
+    assert isinstance(step.message.content, str)
+    return step.message.content, step.message.metrics
 
 
 def _without_published_metadata(record: RunRecord, *keys: str) -> dict[str, object]:
@@ -87,32 +60,30 @@ async def test_a_paused_approval_resumes_into_a_completed_run(
     run = await setup_case(case, tmp_path, monkeypatch)
     before = run.paused.to_dict()
 
-    resumed = await resume_case(case, run)
+    outcome = await resume_case(case, run)
 
-    assert isinstance(resumed, CompletedApprovalRun)
+    assert isinstance(outcome, CompletedApprovalRun)
     assert run.executed == ([(6, 7)] if case.approve else [])
-    [call] = run.paused.messages[-1].tool_calls or ()
-    [waiting] = run.paused.tools or ()
+    call, waiting = waiting_call(run.paused)
     if case.approve:
-        decided = replace(waiting, is_error=False, result=_PRODUCT, requires_confirmation=False, confirmed=True)
-        expected = _resumed(run.paused, case, decided=decided, added=[result(call, _PRODUCT)], confirmation=True)
+        expected = resumed(
+            run.paused,
+            decided=approved(waiting, PRODUCT),
+            added=[result(call, PRODUCT)],
+            answered=_answered(case.code),
+            confirmation=True,
+        )
     else:
         reason = "Alice declined the multiplication."
-        decided = replace(
-            waiting,
-            is_error=True,
-            requires_confirmation=False,
-            confirmed=False,
-            confirmation_note=reason,
-        )
-        expected = _resumed(
+        expected = resumed(
             run.paused,
-            case,
-            decided=decided,
+            decided=denied(waiting, reason),
             added=[result(call, reason, is_error=True)],
+            answered=_answered(case.code),
             confirmation=False,
             confirmation_note=reason,
         )
+    expected = as_stored(expected)
     stored = run.stored()
     assert settled(replace(stored, metadata=None)) == settled(replace(expected, metadata=None))
     assert _without_published_metadata(stored) == _without_published_metadata(run.paused)
@@ -139,32 +110,24 @@ async def test_a_paused_delegation_resumes_its_child_and_then_the_parent(
     paused_child = child_store.get_run(child.run_id)
     assert isinstance(paused_child, RunRecord)
 
-    resumed = await resume_case(case, run)
+    outcome = await resume_case(case, run)
 
-    assert isinstance(resumed, CompletedApprovalRun)
+    assert isinstance(outcome, CompletedApprovalRun)
     assert run.executed == [(6, 7)]
     # The child runs its approved call and answers, as a resumed run does.
-    [child_call] = paused_child.messages[-1].tool_calls or ()
-    [child_waiting] = paused_child.tools or ()
+    child_call, child_waiting = waiting_call(paused_child)
     assert case.helper is not None
-    [child_answer] = [step for step in case.helper if isinstance(step, TurnCompleted)]
-    approved = replace(child_waiting, is_error=False, result=_PRODUCT, requires_confirmation=False, confirmed=True)
-    [child_requirement] = paused_child.requirements or ()
     child_record = child_store.get_run(child.run_id)
     assert isinstance(child_record, RunRecord)
     assert settled(child_record) == settled(
-        replace(
-            paused_child,
-            status=RunStatus.completed,
-            content="42",
-            messages=[
-                *(message for message in paused_child.messages if message.role != "system"),
-                result(child_call, _PRODUCT),
-                reply("42", model="helper-model", metrics=child_answer.message.metrics),
-            ],
-            tools=[approved],
-            requirements=[replace(child_requirement, tool_execution=approved, confirmation=True)],
-            metrics=run_metrics(("helper-model", child_answer.message.metrics), start=paused_child.metrics),
+        as_stored(
+            resumed(
+                paused_child,
+                decided=approved(child_waiting, PRODUCT),
+                added=[result(child_call, PRODUCT)],
+                answered=_answered(case.helper),
+                confirmation=True,
+            ),
         ),
     )
     # The parent's delegation is answered with the child's answer and its record, as an externally executed result.
@@ -172,15 +135,15 @@ async def test_a_paused_delegation_resumes_its_child_and_then_the_parent(
         f"42\n\nDelegation {child.delegation_id} record: helper:.mindroom/delegations/2027-01-15/{child.delegation_id}"
         f"\nSubagent ID: {child.subagent_id}"
     )
-    [call] = run.paused.messages[-1].tool_calls or ()
-    [waiting] = run.paused.tools or ()
-    executed = replace(waiting, result=handed_over, external_execution_required=False)
-    expected = _resumed(
-        run.paused,
-        case,
-        decided=executed,
-        added=[replace(result(call, handed_over), tool_call_error=None)],
-        external_execution_result=handed_over,
+    call, waiting = waiting_call(run.paused)
+    expected = as_stored(
+        resumed(
+            run.paused,
+            decided=replace(waiting, result=handed_over, external_execution_required=False),
+            added=[result(call, handed_over, is_error=None)],
+            answered=_answered(case.code),
+            external_execution_result=handed_over,
+        ),
     )
     stored = run.stored()
     assert settled(replace(stored, metadata=None)) == settled(replace(expected, metadata=None))
