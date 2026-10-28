@@ -937,7 +937,7 @@ describe("egress broker connected accounts", () => {
     ).toBeInTheDocument();
 
     fireEvent.click(
-      screen.getByRole("button", { name: "Use account for GitHub" }),
+      screen.getByRole("button", { name: "Let commands use GitHub" }),
     );
     const question = await screen.findByRole("dialog", {
       name: "Use your GitHub account for Agent Keys?",
@@ -946,7 +946,7 @@ describe("egress broker connected accounts", () => {
       "Commands this agent runs (shell, python) will act as team-bot with its full access, without the approval prompts GitHub tools ask for. Everyone using Agent coder gets this.",
     );
     fireEvent.click(
-      within(question).getByRole("button", { name: "Use account" }),
+      within(question).getByRole("button", { name: "Let commands use it" }),
     );
 
     await waitFor(() =>

@@ -76,7 +76,7 @@ from mindroom.runtime_resolution import (
 )
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
-from mindroom.teams.members import materialize_exact_team_members
+from mindroom.teams.members import resolve_exact_team_members
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
@@ -5491,14 +5491,15 @@ def test_team_member_matches_solo_agent_construction() -> None:
         knowledge=None,
         active_model_name=None,
     )
-    [member] = materialize_exact_team_members(
+    members = resolve_exact_team_members(
         ["calculator"],
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=None,
         refresh_scheduler=None,
         active_model_names=None,
-    ).builds
+    )
+    member = members.build("calculator", members.model_names["calculator"])
     assert member.prompt.role == solo.prompt.role
     assert (member.spec.id, member.spec.name) == (solo.spec.id, solo.spec.name)
     assert member.spec.model.identity == solo.spec.model.identity
