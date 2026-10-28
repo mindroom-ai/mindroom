@@ -340,7 +340,7 @@ export function EgressServiceEditor({
 
   // A new service starts on an account of its own where another service of
   // the agent already uses the tools' one, again each time its login can
-  // change; an edited one keeps its choice.
+  // change; an edited one keeps its choice while it has a login at all.
   const startsOnOwnAccount = (next: EgressServiceForm) => {
     const fresh = { ...next, separateAccount: false };
     const nextPreset = presetOf(presets, next.preset);
@@ -354,8 +354,11 @@ export function EgressServiceEditor({
     setConfirmingSave(false);
     setForm((previous) => {
       const next = { ...previous, ...changes };
-      if (!editing && ("preset" in changes || "oauthProvider" in changes))
-        next.separateAccount = startsOnOwnAccount(next);
+      if ("preset" in changes || "oauthProvider" in changes) {
+        if (!editing) next.separateAccount = startsOnOwnAccount(next);
+        else if (serviceLogin(next, presetOf(presets, next.preset)) === "")
+          next.separateAccount = false;
+      }
       return nameLocked || nameTyped || "name" in changes
         ? next
         : { ...next, name: suggestedName(next, openedWithNames) };

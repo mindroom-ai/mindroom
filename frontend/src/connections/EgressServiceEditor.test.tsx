@@ -3632,6 +3632,46 @@ describe("the Account choice", () => {
     expect(screen.queryByText(line)).toBeNull();
   });
 
+  it("drops the service's own account when an edit leaves it without a login", async () => {
+    const first = await renderEditor({
+      ...withGmail,
+      name: "mail",
+      service: { preset: "google_gmail", oauth_separate_account: true },
+    });
+    // Another login keeps the choice.
+    type("Preset", "google_calendar");
+    expect(
+      screen.getByLabelText("Another Google Calendar account"),
+    ).toBeChecked();
+    // A preset without a login has no account to choose.
+    type("Preset", "openai");
+    expect(accountChoice()).toBeNull();
+    save();
+    await waitFor(() =>
+      expect(first.onSave).toHaveBeenCalledWith("mail", { preset: "openai" }),
+    );
+    cleanup();
+    const rules = [
+      { host: "api.example.com", auth: { type: "bearer" as const } },
+    ];
+    const second = await renderEditor({
+      ...withGmail,
+      name: "mine",
+      service: {
+        rules,
+        oauth_provider: "google_gmail",
+        oauth_separate_account: true,
+      },
+    });
+    expect(accountChoice()).toBeVisible();
+    type("Account login (optional)", "");
+    expect(accountChoice()).toBeNull();
+    save();
+    await waitFor(() =>
+      expect(second.onSave).toHaveBeenCalledWith("mine", { rules }),
+    );
+  });
+
   it("says <name> in the header while the name is empty", async () => {
     await renderEditor(withGmail);
     type("Preset", "google_gmail");
