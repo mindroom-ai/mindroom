@@ -8,6 +8,8 @@ import json
 import re
 from copy import deepcopy
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -696,6 +698,22 @@ async def test_http_errors_map_to_typed_provider_errors(
     assert (info.value.status_code, info.value.retryable, info.value.provider) == (status, retryable, "OpenAI Chat")
     assert str(info.value) == body["error"]["message"]
     assert len(built.requests) == 1, "the SDK client never retries; the pipeline alone does"
+
+
+@pytest.mark.asyncio
+async def test_a_retry_after_date_reaches_the_pipeline_as_the_seconds_until_it(tmp_path: Path) -> None:
+    """A custom endpoint that answers a 429 with an HTTP-date ``Retry-After`` is waited out as the SDK waited it out."""
+    retry_at = datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=30)
+    reply = _json_reply({"error": {"message": "slow down"}}, status=429)
+    reply["headers"]["retry-after"] = format_datetime(retry_at, usegmt=True)
+    config = {"provider": "llama_cpp", "id": "qwen", "extra_kwargs": {"base_url": "https://llm.example/v1"}}
+    built = _Built(tmp_path, config, reply)
+
+    with pytest.raises(RateLimited) as info:
+        await _adapter_turn(built, ModelRequest(messages=[_user()]))
+
+    assert info.value.retry_after_seconds is not None
+    assert 25.0 < info.value.retry_after_seconds <= 30.0
 
 
 @pytest.mark.asyncio

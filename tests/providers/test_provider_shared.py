@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -94,16 +95,16 @@ def test_statuses_and_wording_classify_the_same_for_every_family(
         ({"retry-after-ms": "soon", "retry-after": "4"}, 4.0),
         ({"retry-after": "0"}, 0.0),
         ({"retry-after": "-1"}, None),
-        ({"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}, None),
+        ({"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}, 30.0),
+        ({"Retry-After": "Wed, 21 Oct 2026 07:27:00 GMT"}, 0.0),
+        ({"retry-after": "next Tuesday"}, None),
         ({}, None),
     ],
 )
-def test_a_retry_after_header_counts_only_as_a_number_of_seconds(
-    headers: dict[str, str],
-    seconds: float | None,
-) -> None:
-    """A negative or HTTP-date ``Retry-After`` is no hint, so the backoff decides the wait."""
-    assert retry_after_seconds(headers) == seconds
+def test_a_retry_after_header_is_read_as_the_sdks_read_it(headers: dict[str, str], seconds: float | None) -> None:
+    """Azure's ``retry-after-ms`` wins, an HTTP date counts the seconds until it, and an unreadable value is no hint."""
+    now = datetime(2026, 10, 21, 7, 27, 30, tzinfo=UTC)
+    assert retry_after_seconds(headers, now=now) == seconds
 
 
 def test_a_code_the_provider_sent_never_reads_as_a_mindroom_marker() -> None:

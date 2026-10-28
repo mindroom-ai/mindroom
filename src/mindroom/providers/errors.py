@@ -9,6 +9,8 @@ error reply see one rule with one precedence.
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING
 
 import httpx
@@ -176,10 +178,11 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
     return typed(ProviderError)
 
 
-def retry_after_seconds(headers: Mapping[str, str]) -> float | None:
-    """Return a response's ``Retry-After`` hint in seconds, preferring Azure's ``retry-after-ms`` as the SDKs did.
+def retry_after_seconds(headers: Mapping[str, str], *, now: datetime | None = None) -> float | None:
+    """Return a response's ``Retry-After`` hint in seconds, read as the SDKs read it.
 
-    A value that is not a number, such as an HTTP date, or that is negative, is no hint. Header names match in any case.
+    Azure's ``retry-after-ms`` wins, then a number of seconds in ``Retry-After``, then an HTTP date there, counted from
+    ``now``. A negative number is no hint, and a date already past is no wait. Header names match in any case.
     """
     by_name = {name.casefold(): value for name, value in headers.items()}
     for name, divisor in (("retry-after-ms", 1000.0), ("retry-after", 1.0)):
@@ -191,7 +194,20 @@ def retry_after_seconds(headers: Mapping[str, str]) -> float | None:
         except ValueError:
             continue
         return seconds if seconds >= 0 else None
-    return None
+    return _seconds_until(by_name.get("retry-after"), now=now)
+
+
+def _seconds_until(http_date: str | None, *, now: datetime | None) -> float | None:
+    """Return the seconds from ``now`` until an HTTP date, zero for one already past, or None for no date."""
+    if http_date is None:
+        return None
+    try:
+        when = parsedate_to_datetime(http_date)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return max((when - (now or datetime.now(UTC))).total_seconds(), 0.0)
 
 
 def missing_api_key_error(env_var: str, *, provider: str) -> AuthenticationFailed:
