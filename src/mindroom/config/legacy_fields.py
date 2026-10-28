@@ -103,6 +103,24 @@ def reject_legacy_defaults_fields(value: object) -> object:
     return value
 
 
+# LEGACY_COMPAT: Retired push-model auto-flush settings.
+# Legacy format: memory.auto_flush.max_dirty_age_seconds and memory.auto_flush.max_cross_session_reprioritize, which
+#   the dashboard wrote on every save.
+# Last legacy release: v2026.10.335; replacement: v2026.10.336 flushes quiet conversations from stored sessions and
+#   removes both fields.
+# Handling: Drop both before validation, so a config that still sets them loads unchanged while every other unknown
+#   memory.auto_flush key fails, and the next dashboard save removes them.
+# Coverage: tests/test_memory_config.py::TestMemoryConfig::test_retired_auto_flush_fields_still_load.
+_RETIRED_AUTO_FLUSH_FIELDS = frozenset({"max_dirty_age_seconds", "max_cross_session_reprioritize"})
+
+
+def drop_retired_auto_flush_fields(value: object) -> object:
+    """Return memory.auto_flush settings without the retired dirty-queue fields."""
+    if isinstance(value, dict):
+        return {key: item for key, item in value.items() if key not in _RETIRED_AUTO_FLUSH_FIELDS}
+    return value
+
+
 # LEGACY_COMPAT: Retired per-tool restrict_to_base_dir override.
 # Legacy format: file, coding, and python tool entries accepted an authored boolean restrict_to_base_dir.
 # Last legacy release: v2026.9.279; replacement: v2026.9.280 removed the field for the agents.<name>.file_access and

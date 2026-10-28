@@ -95,8 +95,10 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends import static_runner as static_runner_module
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
+from mindroom.workers.compatibility import _WORKER_PROTOCOL_VERSION, worker_health_payload
 from mindroom.workers.models import WorkerHandle, WorkerReadyProgress, WorkerSpec
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -429,7 +431,11 @@ class _LineResponse:
 
 
 class _StreamsFromPost:
-    """Serve a fake client's streamed execute request from its ``post``."""
+    """Serve a fake client's streamed execute request from its ``post``, and its health probe as a current runner."""
+
+    def get(self, url: str) -> object:
+        assert url.endswith("/healthz"), url
+        return _FakeResponse(asdict(worker_health_payload(mindroom_version="test")))
 
     @contextlib.contextmanager
     def stream(
@@ -538,11 +544,15 @@ def _recording_client_class(
     captured: dict[str, Any] | None = None,
     captured_calls: list[tuple[str, dict[str, Any]]] | None = None,
     responder: Callable[[str, dict[str, Any]], object] | None = None,
+    health: Callable[[str], object] | None = None,
 ) -> type:
     class _FakeClient(_StreamsFromPost):
         def __init__(self, *, timeout: float) -> None:
             if captured is not None:
                 captured["timeout"] = timeout
+
+        def get(self, url: str) -> object:
+            return super().get(url) if health is None else health(url)
 
         def __enter__(self) -> Self:
             return self
@@ -1885,7 +1895,6 @@ def test_save_attachment_to_worker_posts_with_worker_token_and_size_cap(
         sandbox_proxy_module.save_attachment_to_worker(
             runtime_paths=_runtime_paths_from_env(),
             worker_target=worker_target,
-            worker_tools_override=["file"],
             attachment_id="att_sample",
             mindroom_output_path="sample.bin",
             payload_bytes=payload_bytes,
@@ -4342,6 +4351,7 @@ def test_proxy_surfaces_runner_http_detail(monkeypatch: pytest.MonkeyPatch) -> N
         entrypoint(1, 2)
 
 
+@pytest.mark.usefixtures("current_static_runner")
 def test_static_sandbox_runner_backend_reuses_worker_handle_identity() -> None:
     """The current shared sandbox-runner provider should return stable handle identity per worker key."""
     backend = StaticSandboxRunnerBackend(
@@ -4362,6 +4372,7 @@ def test_static_sandbox_runner_backend_reuses_worker_handle_identity() -> None:
     assert second.last_used_at == 20.0
 
 
+@pytest.mark.usefixtures("current_static_runner")
 def test_static_sandbox_runner_backend_marks_idle_workers() -> None:
     """Idle cleanup on the static provider should preserve worker identity while changing lifecycle state."""
     backend = StaticSandboxRunnerBackend(
@@ -4376,6 +4387,155 @@ def test_static_sandbox_runner_backend_marks_idle_workers() -> None:
     assert len(cleaned_workers) == 1
     assert cleaned_workers[0].worker_key == "worker-a"
     assert cleaned_workers[0].status == "idle"
+
+
+def _runner_health_answers(
+    monkeypatch: pytest.MonkeyPatch,
+    *answers: dict[str, object] | int | Exception,
+) -> list[str]:
+    """Answer the static runner's health probes in order with a payload, an error status, or an exception.
+
+    Returns the probed runner roots.
+    """
+    probed: list[str] = []
+    pending = list(answers)
+
+    def answer(runner_root: str) -> httpx.Response:
+        probed.append(runner_root)
+        next_answer = pending.pop(0)
+        if isinstance(next_answer, Exception):
+            raise next_answer
+        request = httpx.Request("GET", f"{runner_root}/healthz")
+        if isinstance(next_answer, int):
+            return httpx.Response(next_answer, json={"detail": "unavailable"}, request=request)
+        return httpx.Response(200, json=next_answer, request=request)
+
+    monkeypatch.setattr(static_runner_module, "_read_runner_health", answer)
+    return probed
+
+
+_STALE_RUNNER_HEALTH = {"status": "ok", "mindroom_version": "2026.10.612", "worker_protocol": 4}
+_CURRENT_RUNNER_HEALTH = {"status": "ok", "mindroom_version": "test", "worker_protocol": _WORKER_PROTOCOL_VERSION}
+
+
+def test_static_runner_refuses_a_runner_on_another_worker_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A shared runner from another release is refused with the dedicated backends' compatibility error."""
+    probed = _runner_health_answers(monkeypatch, _STALE_RUNNER_HEALTH)
+    backend = StaticSandboxRunnerBackend(api_root="http://sandbox-runner:8765", auth_token=_TEST_AUTH_TOKEN)
+
+    with pytest.raises(WorkerBackendError) as exc_info:
+        backend.ensure_worker(WorkerSpec("worker-a"))
+
+    assert probed == ["http://sandbox-runner:8765"]
+    assert str(exc_info.value) == (
+        "Sandbox runner at 'http://sandbox-runner:8765' is incompatible with this MindRoom runtime: "
+        f"expected worker protocol {_WORKER_PROTOCOL_VERSION}, got 4 (worker MindRoom version 2026.10.612). "
+        "Use a worker image built for this MindRoom release. "
+        "Restart the runner on this release, pulling its image again when it runs a tag such as ':latest'."
+    )
+    assert backend.list_workers() == []
+
+
+def test_static_runner_asks_once_and_again_after_a_failed_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The runner is probed at first use, not on every call, and again once a call to it has failed."""
+    probed = _runner_health_answers(
+        monkeypatch,
+        httpx.ConnectError("Connection refused"),
+        503,
+        _CURRENT_RUNNER_HEALTH,
+        _STALE_RUNNER_HEALTH,
+    )
+    backend = StaticSandboxRunnerBackend(api_root="http://sandbox-runner:8765", auth_token=_TEST_AUTH_TOKEN)
+
+    with pytest.raises(WorkerBackendError, match="did not answer its health check: Connection refused"):
+        backend.ensure_worker(WorkerSpec("worker-a"))
+    with pytest.raises(WorkerBackendError, match="did not answer its health check: Server error '503"):
+        backend.ensure_worker(WorkerSpec("worker-a"))
+    backend.ensure_worker(WorkerSpec("worker-a"))
+    backend.ensure_worker(WorkerSpec("worker-b"))
+    assert len(probed) == 3
+
+    backend.record_failure("worker-a", "Connection reset by peer")
+    with pytest.raises(WorkerBackendError, match="got 4"):
+        backend.ensure_worker(WorkerSpec("worker-b"))
+    assert len(probed) == 4
+
+
+def test_static_runner_asks_again_after_a_failure_recorded_during_its_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failure recorded while a probe is in flight keeps that probe's answer from skipping the next probe."""
+    backend = StaticSandboxRunnerBackend(api_root="http://sandbox-runner:8765", auth_token=_TEST_AUTH_TOKEN)
+    probed: list[str] = []
+
+    def answer_after_a_concurrent_failure(runner_root: str) -> httpx.Response:
+        probed.append(runner_root)
+        if len(probed) == 1:
+            # Another call to the runner fails while this probe waits for its answer.
+            backend.record_failure("worker-b", "Connection reset by peer")
+        return httpx.Response(
+            200,
+            json=_CURRENT_RUNNER_HEALTH,
+            request=httpx.Request("GET", f"{runner_root}/healthz"),
+        )
+
+    monkeypatch.setattr(static_runner_module, "_read_runner_health", answer_after_a_concurrent_failure)
+
+    backend.ensure_worker(WorkerSpec("worker-a"))
+    backend.ensure_worker(WorkerSpec("worker-a"))
+    backend.ensure_worker(WorkerSpec("worker-a"))
+
+    assert len(probed) == 2
+
+
+@pytest.mark.parametrize(
+    ("proxy_url", "proxy_token", "missing_setting"),
+    [
+        (None, _TEST_AUTH_TOKEN, "MINDROOM_SANDBOX_PROXY_URL"),
+        ("http://sandbox-runner:8765", None, "MINDROOM_SANDBOX_PROXY_TOKEN"),
+    ],
+)
+def test_unscoped_call_to_an_unconfigured_runner_names_the_missing_setting(
+    monkeypatch: pytest.MonkeyPatch,
+    proxy_url: str | None,
+    proxy_token: str | None,
+    missing_setting: str,
+) -> None:
+    """Without a runner URL or token the call fails naming that setting, before any health probe is sent."""
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=proxy_url,
+        proxy_token=proxy_token,
+        execution_mode="all",
+        credential_policy={},
+    )
+
+    entrypoint = get_tool_by_name("calculator", runtime_paths, worker_target=None).functions["add"].entrypoint
+    assert entrypoint is not None
+    with pytest.raises(WorkerBackendError) as exc_info:
+        entrypoint(1, 2)
+
+    assert str(exc_info.value) == f"{missing_setting} must be set when sandbox proxying is enabled."
+
+
+def test_unscoped_call_never_reaches_a_runner_on_another_worker_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unscoped call, which goes to the shared runner without a worker handle, is refused before it is sent."""
+    captured: dict[str, Any] = {}
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        execution_mode="selective",
+        proxy_tools={"calculator"},
+        credential_policy={},
+    )
+    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _recording_client_class(captured=captured))
+    probed = _runner_health_answers(monkeypatch, _STALE_RUNNER_HEALTH)
+
+    entrypoint = get_tool_by_name("calculator", runtime_paths, worker_target=None).functions["add"].entrypoint
+    assert entrypoint is not None
+    with pytest.raises(WorkerBackendError, match="is incompatible with this MindRoom runtime"):
+        entrypoint(1, 2)
+
+    assert probed == ["http://sandbox-runner:8765"]
+    assert captured == {}
 
 
 def test_get_worker_manager_singleton_creation_is_thread_safe(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5965,7 +6125,10 @@ def _forward_proxy_to_seeded_runner(
 
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
-        _recording_client_class(responder=forward_to_runner),
+        _recording_client_class(
+            responder=forward_to_runner,
+            health=lambda url: runner.get(url.removeprefix("http://sandbox-runner:8766")),
+        ),
     )
     return primary_paths, agent_workspace_root_path(storage_root, "mind"), sent_payloads
 
@@ -7919,6 +8082,7 @@ def test_worker_client_returns_raw_browser_envelopes(tool_name: str) -> None:
     assert result == envelope
 
 
+@pytest.mark.usefixtures("current_static_runner")
 @pytest.mark.parametrize("tool_name", ["browser_mcp", "browser", "shell"])
 @pytest.mark.parametrize("valid", [True, False])
 def test_proxy_composition_decodes_typed_media_for_every_tool(
@@ -7969,6 +8133,7 @@ def test_proxy_composition_decodes_typed_media_for_every_tool(
         assert result.images[0].content == b"png"
 
 
+@pytest.mark.usefixtures("current_static_runner")
 @pytest.mark.parametrize("tool_name", ["browser_mcp", "shell"])
 def test_proxy_composition_finalizes_decoded_media_and_returns_json_as_it_is(
     monkeypatch: pytest.MonkeyPatch,

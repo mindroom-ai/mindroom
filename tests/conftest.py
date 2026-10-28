@@ -29,7 +29,7 @@ from collections.abc import (
 )
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
@@ -181,6 +181,8 @@ from mindroom.user_stop_reconciliation import UserStopReconciler
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
 from mindroom.voice.visible_voice_echo import VisibleVoiceEchoLifecycle, _reset_visible_voice_echo_barriers
 from mindroom.workers import runtime as workers_runtime_module
+from mindroom.workers.backends import static_runner as static_runner_module
+from mindroom.workers.compatibility import worker_health_payload
 from tests.fakes.scripted_model import estimate_only_model
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_helpers import make_test_ca_pem
@@ -3316,6 +3318,20 @@ def _never_download_stock_avatars(monkeypatch: pytest.MonkeyPatch) -> None:
         _refuse_connection(httpx.Request("GET", url))
 
     monkeypatch.setattr(managed_avatars_module, "_download_stock_avatar", offline)
+
+
+@pytest.fixture
+def current_static_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer the static sandbox runner's health probe as a runner of this release, for tests that fake no runner."""
+
+    def current(runner_root: str) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=asdict(worker_health_payload(mindroom_version="test")),
+            request=httpx.Request("GET", f"{runner_root}/healthz"),
+        )
+
+    monkeypatch.setattr(static_runner_module, "_read_runner_health", current)
 
 
 # Captured before any test patches them, so the offline clients below still start from the production ones.

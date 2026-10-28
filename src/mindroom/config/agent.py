@@ -103,6 +103,8 @@ def _validate_safe_relative_path(
 class AgentPrivateKnowledgeConfig(BaseModel):
     """PrivateAgentKnowledge indexed from the agent's private root."""
 
+    model_config = ConfigDict(extra="forbid")
+
     enabled: bool = Field(
         default=True,
         description="Whether to index private agent knowledge for this private agent instance",
@@ -157,6 +159,8 @@ class AgentPrivateKnowledgeConfig(BaseModel):
 
 class AgentPrivateConfig(BaseModel):
     """Requester-private materialized state for one shared agent definition."""
+
+    model_config = ConfigDict(extra="forbid")
 
     per: _PrivateWorkerScope = Field(
         description="Worker boundary that gets its own private copy of this agent's state",
