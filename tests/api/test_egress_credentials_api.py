@@ -2177,6 +2177,41 @@ def _put_own_account_service(portal: dict[str, Any], preset: str = "google_drive
     assert response.status_code == 204, response.text
 
 
+def test_google_sign_in_for_a_services_own_account_shows_the_account_picker(
+    oauth_egress_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A service's own Google account is another account than the tools' one, so Google asks which; the tools' does not."""
+    portal = oauth_egress_portal
+    drive = replace(
+        portal["providers"]["google_drive"],
+        authorization_url="https://accounts.google.com/o/oauth2/v2/auth",
+        extra_auth_params={"access_type": "offline", "prompt": "consent"},
+    )
+    monkeypatch.setattr(oauth_registry, "_builtin_oauth_providers", lambda: (drive, portal["providers"]["github"]))
+    _republish(portal)
+    _put_own_account_service(portal)
+
+    def prompt(service: str) -> list[str]:
+        connect = _account_action(portal, "alice", "personal", service, "connect")
+        assert connect.status_code == 200, connect.text
+        return parse_qs(urlparse(connect.json()["auth_url"]).query)["prompt"]
+
+    assert prompt("mine") == ["consent select_account"]
+    assert prompt("drive") == ["consent"]
+
+
+def test_connecting_a_services_own_account_elsewhere_keeps_the_providers_prompt(
+    oauth_egress_portal: dict[str, Any],
+) -> None:
+    """Only Google is asked for its account picker; another provider's authorization URL keeps what it sends."""
+    portal = oauth_egress_portal
+    _put_own_account_service(portal)
+    connect = _account_action(portal, "alice", "personal", "mine", "connect")
+    assert connect.status_code == 200, connect.text
+    assert "prompt" not in parse_qs(urlparse(connect.json()["auth_url"]).query)
+
+
 def test_connecting_a_service_with_its_own_account_stores_only_that_account(
     oauth_egress_portal: dict[str, Any],
 ) -> None:

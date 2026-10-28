@@ -176,8 +176,8 @@ Matrix sync callback
 | `routing.py` | Intelligent responder selection when no agent or team is mentioned |
 | `routing_judgment.py` | Opt-in bounded System One or OpenAI Decisions responder selection, with explicit no-fit outcomes and existing LLM routing fallback |
 | `teams/formation.py` | Forming a team from one turn: who was asked, who is eligible, which members can be materialized, and the execution-time mode choice for an ad hoc team |
-| `teams/members.py` | Materializing a team's exact members as agent builds without silent shrinkage, the leader's and members' model aliases for a turn, and `build_team_spec`: the leader's model, prompt, job controls, call budget, and history settings with each member's prompt, role, and loop hooks |
-| `teams/spec.py` | `TeamMode`, `TeamMember`, and `TeamSpec`: what a team run is built from |
+| `teams/members.py` | Resolving a team's exact members without silent shrinkage, the leader's and members' model aliases for a turn, and `build_team_spec`: the leader's model, prompt, job controls, call budget, and history settings with each member's roster entry and the build its first delegation makes |
+| `teams/spec.py` | `TeamMode`, `TeamMember` with its `MemberBuild`, and `TeamSpec`: what a team run is built from |
 | `teams/prompt.py` | The leader's system messages, rendered like an agent's: the stable one holds the team's identity, the markdown line, the roster and mode block, and tool instructions; the turn one holds the date, session context, and enrichment |
 | `teams/delegate_tools.py` | `delegate_task_to_member` and `delegate_task_to_members`, the member result texts, the pause a paused member propagates to the team run, and the answer its resumed run gives the waiting call |
 | `teams/runtime.py` | `run_team` and `continue_team` over the agent loop: members as child runs, member decisions routed by member and call, team usage |

@@ -35,6 +35,7 @@ This design reuses the one thing Agent Keys already manages per row, a service: 
   An operator's service cannot be named: the most specific operator rule keeps choosing among the operator's credentials, and an agent cannot override it.
 - **The agent learns which services exist.** `list_egress_credentials` marks services with `separate_account: true`, and its guidance names the header.
 - **The editor offers it.** When a user's own service names an OAuth provider, the service editor shows one checkbox, "Use its own account, not the one the agent's tools use", with a line saying requests choose it with `X-Agent-Keys-Service: <name>`.
+  How the form offers that choice is recorded in [Choosing the Account of an Agent Keys Service](2026-10-27-agent-keys-account-choice-design.md).
 
 ## Later, not now
 
