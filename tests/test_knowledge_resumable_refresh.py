@@ -1389,6 +1389,20 @@ def test_refresh_embedder_degrades_for_providers_without_batching() -> None:
     assert inner.single_requests == ["one", "two", "one"]
 
 
+def test_a_too_large_batch_keeps_batching_for_the_next_one() -> None:
+    """A smaller batch can pass the same limit, so one too-large batch does not retire batching for the refresh."""
+    inner = _RecordingEmbedder()
+    inner.batch_error = _tokens_per_minute_error()
+    embedder = RefreshEmbedder(inner)
+
+    assert sorted(embedder.embed_texts(["one", "two"])) == ["one", "two"]
+    inner.batch_error = None
+    embedder.embed_texts(["three", "four"])
+
+    assert inner.batch_requests == [("one", "two"), ("three", "four")]
+    assert inner.single_requests == ["one", "two"]
+
+
 class _QueryPromptedEmbedder(_RecordingEmbedder):
     """Embedder whose query vectors differ from its document vectors, like a prompted local model."""
 
