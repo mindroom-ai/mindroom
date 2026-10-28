@@ -9,10 +9,13 @@ from dataclasses import dataclass, fields, is_dataclass
 from functools import lru_cache
 from itertools import islice
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from urllib.parse import ParseResult
 
 REDACTED = "***redacted***"
 REDACTION_FAILED = "[redaction failed]"
@@ -499,24 +502,41 @@ def _redacted_capability_path(host: str, path: str) -> str | None:
     return None
 
 
-def _redact_url(value: str) -> str:
+# What a URL that ``urlparse`` rejects is replaced with.
+_UNPARSEABLE_URL = "***"
+
+
+def _parsed_url(value: str) -> ParseResult | None:
+    """Return ``value`` parsed as a URL, or None when ``urlparse`` rejects it.
+
+    Every redactor replaces a rejected URL wholesale (``_UNPARSEABLE_URL``) rather than returning it unchanged:
+    unparseable is not the same as credential-free, because what defeats the parse can be the userinfo separator
+    itself, such as a fullwidth at sign (U+FF20), which NFKC-normalises to ``@``.
+    """
     try:
-        parsed = urlparse(value)
+        return urlparse(value)
     except ValueError:
-        return value
+        return None
+
+
+def _masked_userinfo(netloc: str) -> str:
+    return f"***@{netloc.rsplit('@', 1)[1]}" if "@" in netloc else netloc
+
+
+def _redact_url(value: str) -> str:
+    parsed = _parsed_url(value)
+    if parsed is None:
+        return _UNPARSEABLE_URL
     if not parsed.scheme:
         return value
 
-    netloc = parsed.netloc
+    netloc = _masked_userinfo(parsed.netloc)
     path = parsed.path
     query = parsed.query
-    changed = False
+    changed = netloc != parsed.netloc
     capability_path = _redacted_capability_path((parsed.hostname or "").lower(), path)
     if capability_path is not None:
         path = capability_path
-        changed = True
-    if "@" in netloc:
-        netloc = f"***@{netloc.rsplit('@', 1)[1]}"
         changed = True
 
     if query:
@@ -541,19 +561,18 @@ def redact_url_credentials(value: str) -> str:
     """Return a URL as scheme, masked userinfo, host and port, and path, without path parameters, query, or fragment.
 
     Any of those can carry a credential, such as a signed URL's signature, while what is kept still names the server.
-    Never raises. A URL that cannot be parsed is replaced wholesale rather than returned unchanged: unparseable is not
-    the same as credential-free, because the thing defeating the parse can be the userinfo separator itself. A value
-    without a scheme or host is returned as it is.
+    Never raises: a URL that cannot be parsed is replaced wholesale (``_parsed_url``). A value without a scheme or host
+    is returned as it is.
     """
-    try:
-        parsed = urlparse(value)
-    except ValueError:
-        return "***"
+    parsed = _parsed_url(value)
+    if parsed is None:
+        return _UNPARSEABLE_URL
     if not parsed.scheme or not parsed.netloc:
         return value
-    netloc = f"***@{parsed.netloc.rsplit('@', 1)[1]}" if "@" in parsed.netloc else parsed.netloc
     path = parsed.path.split(";", 1)[0]
-    return urlunparse(parsed._replace(netloc=netloc, path=path, params="", query="", fragment=""))
+    return urlunparse(
+        parsed._replace(netloc=_masked_userinfo(parsed.netloc), path=path, params="", query="", fragment=""),
+    )
 
 
 def _redact_query_fragment(value: str, *, max_length: int | None) -> str:

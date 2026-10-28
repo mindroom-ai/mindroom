@@ -338,12 +338,10 @@ def test_redact_sensitive_data_redacts_secret_before_truncated_bound() -> None:
 
 
 def test_redact_sensitive_data_tolerates_malformed_ipv6_url() -> None:
-    """A URL-like token with an unbalanced IPv6 bracket must not crash redaction (ISSUE-230)."""
+    """A URL-like token with an unbalanced IPv6 bracket must not crash redaction (ISSUE-230), and goes whole."""
     redacted = redact_sensitive_data({"message": 'see <a href="http://[">x</a> for details'})
 
-    message = redacted["message"]
-    assert isinstance(message, str)
-    assert "http://[" in message
+    assert redacted == {"message": 'see <a href="***">x</a> for details'}
 
 
 def test_redact_sensitive_text_fails_closed_when_internal_redaction_raises(
@@ -1536,14 +1534,51 @@ def test_many_pem_markers_in_a_megabyte_are_scanned_in_linear_time() -> None:
 @pytest.mark.parametrize(
     ("url", "redacted"),
     [
-        ("https://user:token@git.example/org/repo.git", "https://***@git.example/org/repo.git"),
+        ("https://user:password@example.com/repo.git", "https://***@example.com/repo.git"),
+        ("https://ghp_secret:x-oauth-basic@example.com/repo.git", "https://***@example.com/repo.git"),
+        ("https://username@example.com/repo.git", "https://***@example.com/repo.git"),
+        ("ssh://git@example.com/repo.git", "ssh://***@example.com/repo.git"),
+        ("ssh://user:pass@example.com/repo.git", "ssh://***@example.com/repo.git"),
+        ("git+https://user:pass@example.com/repo.git", "git+https://***@example.com/repo.git"),
+        ("https://example.com/repo.git?token=secret#frag-secret", "https://example.com/repo.git"),
+        (
+            "https://user:password@example.com/org/repo.git;token=secret?query=secret#frag-secret",
+            "https://***@example.com/org/repo.git",
+        ),
         ("http://127.0.0.1:8188/view?filename=cat.png#preview", "http://127.0.0.1:8188/view"),
         ("http://[::1]:9000/bucket/cat.png?X-Amz-Signature=abc", "http://[::1]:9000/bucket/cat.png"),
         ("https://media.example/a;session=abc/cat.png;v=1", "https://media.example/a"),
+        ("https://user:hunter2\uff20example.com/repo.git", "***"),
         ("relative/path?token=abc", "relative/path?token=abc"),
     ],
-    ids=["userinfo", "port", "ipv6", "path-parameters", "no-scheme"],
+    ids=[
+        "password",
+        "token-username",
+        "username",
+        "ssh-username",
+        "ssh-password",
+        "compound-scheme",
+        "query-and-fragment",
+        "path-parameters-query-and-fragment",
+        "port",
+        "ipv6",
+        "path-parameters",
+        "unparseable",
+        "no-scheme",
+    ],
 )
 def test_a_redacted_url_keeps_its_scheme_host_port_and_path(url: str, redacted: str) -> None:
-    """Userinfo is masked, and path parameters, query, and fragment go; a value without a scheme or host is kept."""
+    """Userinfo is masked, path parameters, query, and fragment go, and an unparseable URL goes whole.
+
+    A value without a scheme or host is kept.
+    """
     assert redact_url_credentials(url) == redacted
+
+
+def test_the_log_redactor_hides_a_url_the_parser_rejects_whole() -> None:
+    """A fullwidth at sign (U+FF20) before the host makes the parse fail, which must not let the password through."""
+    url = "https://user:hunter2\uff20example.com/repo.git"
+
+    redacted = redact_log_event(None, "warning", {"event": "git_failed", "url": url, "error": f"cannot reach '{url}'"})
+
+    assert redacted == {"event": "git_failed", "url": "***", "error": "cannot reach '***'"}
