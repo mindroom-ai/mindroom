@@ -35,7 +35,7 @@ from mindroom.providers.openai.media import responses_file_part, responses_image
 from mindroom.providers.openai.response_replay import (
     RESPONSE_OUTPUT_KEY,
     TOOL_SEARCH_ITEMS_KEY,
-    formatted_input_with_provider_items,
+    assistant_replay_items,
 )
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.settings import CODEX_REJECTED_FIELDS
@@ -110,14 +110,13 @@ class ResponsesReplay:
     """How one request continues its history, decided once for both its parameters and its input.
 
     A request chaining to ``previous_response_id`` sends only ``history[sent_from:]``, the messages after that
-    response; any other request sends all of ``history``, with its stored reasoning when ``replay_reasoning``.
-    ``history`` is already projected to the latest checkpoint on ``native_route``.
+    response; any other request sends all of ``history``. ``history`` is already projected to the latest checkpoint
+    on ``native_route``.
     """
 
     history: list[Message]
     sent_from: int
     previous_response_id: str | None
-    replay_reasoning: bool
     native_route: str | None
 
 
@@ -194,23 +193,20 @@ def responses_replay(
 ) -> ResponsesReplay:
     """Decide whether a request with storage setting ``store`` continues the latest stored response in ``messages``.
 
-    Portable replay, an unstored request, and a history whose latest response was not stored or holds another
-    conversation send the history explicitly, each reply with the ordered output and reasoning it recorded; a reply
-    stored without portable replay recorded neither, so it is rebuilt without reasoning. A stored request without a
-    stored response sends the history without reasoning.
+    Portable replay, an unstored request, a history without a stored response, and one whose latest response was not
+    stored or holds another conversation send the history explicitly.
     """
     route = native_compaction.route if native_compaction is not None else None
     history = native_replay_messages(messages, route)
     latest = _latest_response(history)
-    replay_reasoning = (
+    explicit = (
         portable_replay or store is False or (latest is not None and not _continuable(latest[1], history[: latest[0]]))
     )
-    chained = None if replay_reasoning else latest
+    chained = None if explicit else latest
     return ResponsesReplay(
         history=history,
         sent_from=0 if chained is None else chained[0] + 1,
         previous_response_id=None if chained is None else chained[1]["response_id"],
-        replay_reasoning=replay_reasoning,
         native_route=route,
     )
 
@@ -233,20 +229,6 @@ def _prompt_item(message: Message) -> dict[str, Any]:
     return item
 
 
-def _function_call_items(message: Message) -> list[dict[str, Any]]:
-    return [
-        {
-            "type": "function_call",
-            "id": call.get("id"),
-            "call_id": call.get("call_id", call.get("id")),
-            "name": call["function"]["name"],
-            "arguments": call["function"]["arguments"],
-            "status": "completed",
-        }
-        for call in message.tool_calls or ()
-    ]
-
-
 def _call_ids(messages: Sequence[Message]) -> dict[str, str]:
     """Map each function-call item id (``fc_``) to the ``call_`` id its result must reference."""
     call_ids: dict[str, str] = {}
@@ -259,7 +241,11 @@ def _call_ids(messages: Sequence[Message]) -> dict[str, str]:
 
 
 def _input_items(replay: ResponsesReplay) -> list[Any]:
-    """Convert the messages a request sends to Responses input items."""
+    """Convert the messages a request sends to Responses input items, under the tool-call ids the request sends.
+
+    Another provider's calls carry ids outside the Responses rule, so every message converts after the ids are
+    rewritten (``reformat_tool_call_ids``), its replayed output included.
+    """
     canonical = reformat_tool_call_ids(replay.history, "responses")
     call_ids = _call_ids(canonical)
     items: list[Any] = []
@@ -271,12 +257,8 @@ def _input_items(replay: ResponsesReplay) -> list[Any]:
             if result.call_id:
                 call_id = call_ids.get(result.call_id, result.call_id)
                 items.append({"type": "function_call_output", "call_id": call_id, "output": result.content})
-        elif message.tool_calls:
-            # A continued response already holds its calls; only their results are sent.
-            if replay.previous_response_id is None:
-                items.extend(_function_call_items(message))
-        elif message.role == "assistant":
-            items.append({"role": "assistant", "content": message.content if message.content is not None else ""})
+        else:
+            items.extend(assistant_replay_items(message, replay.native_route))
     return items
 
 
@@ -296,18 +278,8 @@ def _with_system_prefix_breakpoint(formatted_input: list[Any]) -> list[Any]:
 
 
 def responses_input(replay: ResponsesReplay, *, cache_system_prompt: bool, explicit_breakpoint: bool) -> list[Any]:
-    """Return the ``input`` items for one request.
-
-    Explicit replay rebuilds stored tool loops from their ordered output items, so encrypted reasoning
-    stays attached to the calls it produced even when the next response is stored again.
-    """
-    # Ordered output is restored only for the spans the request still sends.
-    formatted = formatted_input_with_provider_items(
-        replay.history[replay.sent_from :],
-        _input_items(replay),
-        native_route=replay.native_route,
-        replay_reasoning=replay.replay_reasoning,
-    )
+    """Return the ``input`` items for one request."""
+    formatted = _input_items(replay)
     if cache_system_prompt and explicit_breakpoint:
         formatted = _with_system_prefix_breakpoint(formatted)
     return formatted
