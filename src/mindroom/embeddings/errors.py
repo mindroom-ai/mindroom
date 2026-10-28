@@ -63,14 +63,12 @@ def extract_classified_embedder_detail(text: str | None) -> str | None:
 
 
 def as_embedder_error(exc: BaseException) -> EmbedderRequestError | None:
-    """Return ``exc`` as a classified embedder error, classifying a raw OpenAI SDK error; None for anything else."""
-    if isinstance(exc, EmbedderRequestError):
-        return exc
-    # Deferred so slim entry points never pay the openai SDK import; when a
-    # provider call raised, the SDK is already loaded.
-    from openai import OpenAIError  # noqa: PLC0415
+    """Return ``exc`` when it is a classified embedder error, or None for any other failure.
 
-    return openai_embedder_error(exc) if isinstance(exc, OpenAIError) else None
+    Every embedder, Mem0's included, raises its failures as this error at its own boundary, so a raw provider error,
+    such as one from Mem0's memory model, is never mistaken for the embedder's.
+    """
+    return exc if isinstance(exc, EmbedderRequestError) else None
 
 
 def classified_embedder_error(exc: BaseException) -> str | None:

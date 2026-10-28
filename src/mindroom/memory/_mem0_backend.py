@@ -82,7 +82,10 @@ async def _run_mem0_embedder_mutation(
     operation: Callable[[], Awaitable[_T]],
     health_recorder: EmbedderHealthRecorder,
 ) -> _T:
-    """Run a Mem0 write without allowing raw provider exceptions to escape."""
+    """Run a Mem0 write, recording a classified embedder failure as embedder health and raising it alone.
+
+    A raw provider failure, such as one from Mem0's memory model, propagates as raised and records no embedder health.
+    """
     try:
         result = await operation()
     except Exception as exc:
