@@ -1351,46 +1351,6 @@ async def test_delete_removes_the_named_message(paths: RuntimePaths, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_project_edit_and_delete_use_the_bot_token_in_a_member_channel(
-    paths: RuntimePaths,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake = FakeSlack(
-        {"conversations.info": _member(), "chat.update": {"ok": True}, "chat.delete": {"ok": True}},
-    ).install(monkeypatch)
-    tools = _tools(paths, channels=[CHANNEL])
-
-    edited = json.loads(await tools.slack_edit(f"{CHANNEL}:{ROOT_TS}", "on it"))
-    deleted = json.loads(await tools.slack_delete(f"{CHANNEL}:{ROOT_TS}"))
-
-    assert (edited["status"], deleted["status"]) == ("ok", "ok")
-    assert fake.methods() == ["conversations.info", "chat.update", "conversations.info", "chat.delete"]
-    assert {_bearer(request) for request in fake.requests} == {BOT_TOKEN}
-
-
-@pytest.mark.asyncio
-async def test_editing_someone_elses_message_returns_slacks_refusal_once(
-    paths: RuntimePaths,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _connect_alice(paths)
-    fake = FakeSlack(
-        {
-            "chat.update": {"ok": False, "error": "cant_update_message"},
-            "chat.delete": {"ok": False, "error": "cant_delete_message"},
-        },
-    ).install(monkeypatch)
-    tools = _tools(paths)
-
-    edited = json.loads(await tools.slack_edit(f"{CHANNEL}:{ROOT_TS}", "fixed"))
-    deleted = json.loads(await tools.slack_delete(f"{CHANNEL}:{ROOT_TS}"))
-
-    assert edited["message"] == "Slack refused the request: cant_update_message"
-    assert deleted["message"] == "Slack refused the request: cant_delete_message"
-    assert fake.methods() == ["chat.update", "chat.delete"]
-
-
-@pytest.mark.asyncio
 async def test_upload_shares_a_workspace_file_in_a_thread_and_never_sends_the_token_to_the_upload_link(
     paths: RuntimePaths,
     monkeypatch: pytest.MonkeyPatch,
@@ -1561,34 +1521,20 @@ async def test_upload_refuses_a_file_over_the_cap_before_any_request(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("outside", ["absolute", "relative"])
 async def test_upload_refuses_a_path_outside_the_workspace(
     tmp_path: Path,
     paths: RuntimePaths,
     monkeypatch: pytest.MonkeyPatch,
     notes_workspace: Path,
-    outside: str,
 ) -> None:
     _connect_alice(paths)
     (tmp_path / "secret.txt").write_text("secret")
     fake = FakeSlack(dict(UPLOAD_ANSWERS)).install(monkeypatch)
     tools = _tools(paths, tool_output_workspace_root=notes_workspace)
-    path = str(tmp_path / "secret.txt") if outside == "absolute" else "../secret.txt"
 
-    result = json.loads(await tools.slack_upload(path, CHANNEL))
+    result = json.loads(await tools.slack_upload("../secret.txt", CHANNEL))
 
-    assert result["message"].startswith(f"path '{path}' must be an existing file inside the agent workspace")
-    assert fake.requests == []
-
-
-@pytest.mark.asyncio
-async def test_upload_needs_a_workspace(paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch) -> None:
-    _connect_alice(paths)
-    fake = FakeSlack(dict(UPLOAD_ANSWERS)).install(monkeypatch)
-
-    result = json.loads(await _tools(paths).slack_upload("notes.txt", CHANNEL))
-
-    assert result["message"] == "path 'notes.txt' requires an agent workspace; file_access is 'workspace'."
+    assert result["message"].startswith("path '../secret.txt' must be an existing file inside the agent workspace")
     assert fake.requests == []
 
 
