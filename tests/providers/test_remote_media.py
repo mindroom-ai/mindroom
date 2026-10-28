@@ -317,3 +317,49 @@ async def test_a_url_the_provider_cannot_fetch_reaches_the_model_as_the_media_no
     assert wire.body(0)["messages"][-1]["content"][1] == {"type": "image_url", "image_url": {"url": url}}
     assert spec.user_text(wire.body()) == f"Look\n\n{_NOTE}"
     assert downloaded == []
+
+
+@pytest.mark.asyncio
+async def test_downloaded_audio_without_a_format_keeps_the_type_its_server_or_url_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audio a tool returns as a bare URL, such as an MP3, is sent as the format its server or URL name says.
+
+    A declared type that names no audio leaves the URL's name to decide, and an explicit format stands whatever the
+    server declares.
+    """
+    _media_server(
+        monkeypatch,
+        {
+            "https://media.test/speech": httpx.Response(200, content=b"ID3-a", headers={"content-type": "audio/mpeg"}),
+            "https://media.test/song.mp3": httpx.Response(200, content=b"ID3-b"),
+            "https://media.test/track.mp3": httpx.Response(
+                200,
+                content=b"ID3-d",
+                headers={"content-type": "application/octet-stream"},
+            ),
+            "https://media.test/clip": httpx.Response(200, content=b"RIFF-c", headers={"content-type": "audio/mpeg"}),
+        },
+    )
+    audio = [
+        Audio(url="https://media.test/speech"),
+        Audio(url="https://media.test/song.mp3"),
+        Audio(url="https://media.test/track.mp3"),
+        Audio(url="https://media.test/clip", format="wav"),
+    ]
+    chat_wire, gemini_wire = Wire(FAMILIES["openai_chat"].reply()), Wire(FAMILIES["gemini"].reply())
+    request = ModelRequest(messages=[Message(role="user", content="Listen", audio=audio)])
+
+    await complete(_provider("openai_chat", tmp_path, chat_wire), request)
+    await complete(_provider("gemini", tmp_path, gemini_wire), request)
+
+    chat_parts = chat_wire.body()["messages"][-1]["content"][1:]
+    assert [part["input_audio"]["format"] for part in chat_parts] == ["mp3", "mp3", "mp3", "wav"]
+    gemini_parts = gemini_wire.body()["contents"][0]["parts"][1:]
+    assert [part["inlineData"]["mimeType"] for part in gemini_parts] == [
+        "audio/mpeg",
+        "audio/mpeg",
+        "audio/mpeg",
+        "audio/wav",
+    ]

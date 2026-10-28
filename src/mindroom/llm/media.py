@@ -205,6 +205,21 @@ def canonical_mime_type(mime_type: str | None) -> str | None:
     return normalized or None
 
 
+# The audio formats chat audio inputs name, by the MIME types that mean them.
+_AUDIO_FORMATS = {
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/wav": "wav",
+    "audio/wave": "wav",
+    "audio/x-wav": "wav",
+}
+
+
+def audio_format(mime_type: str | None) -> str | None:
+    """Return the audio format, such as ``mp3``, that ``mime_type`` means, or None for a type with no such format."""
+    return _AUDIO_FORMATS.get(canonical_mime_type(mime_type) or "")
+
+
 def image_mime_type(image: Image, data: bytes) -> str:
     """Return an image's MIME type: its own, else its format, path extension, or header bytes, else JPEG.
 
@@ -289,6 +304,7 @@ __all__ = [
     "File",
     "Image",
     "Video",
+    "audio_format",
     "canonical_mime_type",
     "image_format",
     "image_mime_type",

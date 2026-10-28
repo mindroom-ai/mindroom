@@ -12,21 +12,13 @@ from urllib.parse import unquote, urlsplit
 import httpx
 from httpx._utils import get_environment_proxies
 
-from mindroom.llm.media import canonical_mime_type
+from mindroom.llm.media import audio_format, canonical_mime_type
 from mindroom.server_fetch_url import ServerFetchHTTPTransport, ServerFetchUrlError, validate_server_fetch_url
 from mindroom.tool_system import media_transport
 from mindroom.tool_system.agno_toolkits import AgnoAudio, AgnoFile, AgnoImage, AgnoVideo, ToolResult
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
 
 type _Media = AgnoImage | AgnoAudio | AgnoVideo | AgnoFile
-
-_AUDIO_FORMAT_BY_MIME_TYPE = {
-    "audio/mpeg": "mp3",
-    "audio/mp3": "mp3",
-    "audio/wav": "wav",
-    "audio/wave": "wav",
-    "audio/x-wav": "wav",
-}
 
 
 class _WorkerMediaProxyTransport(httpx.HTTPTransport):
@@ -120,8 +112,8 @@ def _inline_metadata(media: _Media, declared_mime: str | None) -> dict[str, Any]
         suffix_mime = mimetypes.guess_type(name)[0] or ""
         if updates.get("format") not in {"mp3", "wav", "ogg", "webm"} and not suffix_mime.startswith("audio/"):
             mime = media.mime_type or updates.get("mime_type")
-            if audio_format := _AUDIO_FORMAT_BY_MIME_TYPE.get(mime or ""):
-                updates["format"] = audio_format
+            if named_format := audio_format(mime):
+                updates["format"] = named_format
     return updates
 
 
