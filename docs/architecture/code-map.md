@@ -423,7 +423,7 @@ Matrix sync callback
 | `agent_loop/build.py` | `AgentBuild`, what `create_agent` produces for the loop, and `prompt_for_turn`, its stable and turn system messages with one turn's context appended to the turn one |
 | `agent_loop/prompt.py` | `PromptSpec` and `render_system_messages`: an agent's system prompt from named sections, as a stable system message and a turn system message |
 | `agent_loop/structured.py` | The schema-derived JSON prompt a JSON-mode route needs for an output schema, the answer text of a forced-tool route's forced call, and parsing answers into the schema: strict where the route enforces the schema, with repairs only on JSON-mode routes |
-| `agent_loop/helper.py` | `complete_prompt`: one helper request, without the caller's tools, whose system message is its instructions as written, optionally read into a schema, with the run record its usage is saved from |
+| `agent_loop/helper.py` | `complete_prompt`: one helper request, without the caller's tools, whose system message is its instructions as written, optionally read into a schema, with the call's content-free usage (`HelperUsage`), which the caller records through `helper_usage.py` |
 | `agent_loop/output_limit.py` | `output_limit_policy`: answers the tool calls of a response the output limit cut off instead of running them, and fails the run on the third cut-off response |
 | `tools/agno_compat_*.py`, `custom_tools/agno_compat_*.py`, and `oauth/agno_compat_google_auth.py` | Repairs of Agno toolkits and of Google auth's toolkit binding; see `docs/architecture/agno-compatibility.md` for the boundary inventory and upstream tracking |
 | `constants.py` | Shared constants, paths, and environment variable defaults |

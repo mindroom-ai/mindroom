@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from mindroom.agent_loop.prompt import join_sections
 from mindroom.agent_loop.structured import output_format_prompt, parse_structured, structured_answer_text
-from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message, read_model_provenance
+from mindroom.llm.messages import Message, read_model_provenance, usage_sums_attempts
 from mindroom.llm.provider import ModelRequest, RequestOverrides, complete
 from mindroom.llm.usage import HelperUsage, RequestUsage, RunMetrics
 from mindroom.logging_config import get_logger
@@ -79,19 +79,16 @@ async def complete_prompt[T: BaseModel](
     if schema is not None and parsed is None:
         logger.warning("helper_structured_output_unparsed", schema=schema.__name__)
     reply = turn.message
-    request = RequestUsage(
-        created_at=reply.created_at,
-        metrics=turn.usage,
-        model=read_model_provenance(reply.provider_data),
-    )
-    # A retried request's usage sums its attempts, so it describes no one request.
-    sums_attempts = (reply.provider_data or {}).get(AGGREGATE_USAGE_KEY) is True
+    requests: tuple[RequestUsage, ...] = ()
+    if not usage_sums_attempts(reply.provider_data):
+        model = read_model_provenance(reply.provider_data)
+        requests = (RequestUsage(created_at=reply.created_at, metrics=turn.usage, model=model),)
     usage = HelperUsage(
         run_id=run_id or str(uuid4()),
         model=identity.id,
         provider=identity.provider,
         metrics=metrics,
-        requests=() if sums_attempts else (request,),
+        requests=requests,
     )
     return HelperResult(content=text if parsed is None else parsed, usage=usage)
 

@@ -26,7 +26,7 @@ from mindroom.agent_loop.tools import (
 )
 from mindroom.llm.errors import incomplete_stream_error
 from mindroom.llm.events import ToolCompleted, ToolStarted
-from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message, model_provenance
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message, model_provenance, usage_sums_attempts
 from mindroom.llm.provider import ModelRequest, ReasoningDelta, ReportedUsage, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunRequirement
 from mindroom.logging_config import get_logger
@@ -446,9 +446,7 @@ async def _stream_turn(
                 provider_data = model_provenance(identity.id, identity.provider_name)
                 # The retrying stage marks usage that sums attempts on the finished turn and on the reports alike.
                 sums_attempts = (
-                    (turn.message.provider_data or {}).get(AGGREGATE_USAGE_KEY) is True
-                    if turn is not None
-                    else reported.sums_attempts
+                    usage_sums_attempts(turn.message.provider_data) if turn is not None else reported.sums_attempts
                 )
                 if sums_attempts:
                     # Usage that sums retried attempts must not read as one request's.

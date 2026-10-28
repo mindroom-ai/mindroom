@@ -35,7 +35,7 @@ def _media_list[T](decode: Callable[[Mapping[str, Any]], T], items: list[Mapping
 
 
 # ``Message.provider_data`` key marking an assistant message whose usage sums a retried request's attempts, so usage
-# readers do not take the sum for one request's size (``model_usage.py``, ``usage/storage.py``).
+# readers do not take the sum for one request's size; ``usage_sums_attempts`` reads it.
 AGGREGATE_USAGE_KEY = "mindroom_aggregate_usage"
 # ``Message.provider_data`` key naming the model that answered an assistant message, ``{"id": ..., "provider": ...}``,
 # which ``model_provenance`` builds for every writer and ``read_model_provenance`` reads for usage attribution
@@ -73,6 +73,14 @@ def read_model_provenance(provider_data: Mapping[str, object] | None) -> ModelPr
     if isinstance(model_id, str) and isinstance(provider, str):
         return ModelProvenance(model_id=model_id, provider=provider)
     return None
+
+
+def usage_sums_attempts(provider_data: Mapping[str, object] | None) -> bool:
+    """Return whether ``provider_data`` marks its message's usage as the sum of a retried request's attempts.
+
+    Such usage counts toward the totals but describes no one request: not its size, its price, or its time.
+    """
+    return (provider_data or {}).get(AGGREGATE_USAGE_KEY) is True
 
 
 def is_own_model_message(message: Message) -> bool:
@@ -308,5 +316,6 @@ __all__ = [
     "system_text",
     "system_texts",
     "tool_result_view",
+    "usage_sums_attempts",
     "with_joined_system",
 ]

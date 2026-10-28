@@ -296,10 +296,12 @@ class RequestUsage:
 class HelperUsage:
     """The usage of paid model work that no stored run holds, such as one helper prompt's, without any of its content.
 
-    ``run_id`` is the id the usage is recorded under. ``model`` and ``provider`` name the model the work was sent to
-    (``ModelIdentity.id`` and ``ModelIdentity.provider``), None when unknown, and ``metrics`` sums its requests by
-    model. ``requests`` lists each request whose usage describes it alone: a retried request's usage sums its
-    attempts, so ``metrics`` counts it but ``requests`` does not list it.
+    ``run_id`` is the id the usage is recorded under. ``model`` and ``provider`` are the model and provider strings
+    its usage row stores, None when unknown: a helper prompt stores its route's ``ModelIdentity.id`` and
+    ``ModelIdentity.provider``, while other writers store a label of their own, such as the name Mem0's usage is
+    priced by (``"OpenAI Chat"``). ``metrics`` sums its requests by model, and ``requests`` lists each request whose
+    usage describes it alone: a retried request's usage sums its attempts, so ``metrics`` counts it but ``requests``
+    does not list it.
     """
 
     run_id: str
