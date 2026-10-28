@@ -507,6 +507,13 @@ async def _answer(bot: AgentBot, request: ResponseRequest, answer: AsyncMock) ->
         return await runner.generate_response(request)
 
 
+async def _owe(bot: AgentBot, reply_id: str, **debt: object) -> None:
+    await bot._reply_runtime.store.replies.update(
+        reply_id,
+        lambda reply: rl.Transition(outcome=rl.Outcome.APPLIED, reply=replace(reply, **debt)),
+    )
+
+
 async def test_a_note_the_outbox_cannot_take_is_dropped_not_retried_forever(tmp_path: Path) -> None:
     """In a room the bot left, an owed note has no row to become; the reply stops owing it."""
     bot = await _streaming_bot(tmp_path)
@@ -514,10 +521,7 @@ async def test_a_note_the_outbox_cannot_take_is_dropped_not_retried_forever(tmp_
     answered = await _reply(bot)
     await admit_room_membership(bot.journal_principal(), _target().room_id, "leave", source=DepartureSource.LOCAL)
     owed = rl.OwedWrite(answered.last_span_id, rl.NoteKind.RESTART)
-    await bot._reply_runtime.store.replies.update(
-        answered.reply_id,
-        lambda reply: rl.Transition(outcome=rl.Outcome.APPLIED, reply=replace(reply, owed_write=owed)),
-    )
+    await _owe(bot, answered.reply_id, owed_write=owed)
     sends = len(_sent_bodies(bot))
 
     await bot._delivery_gateway.settle_reply_debt(answered.reply_id)
@@ -533,13 +537,7 @@ async def test_a_redaction_of_an_event_already_gone_is_done(tmp_path: Path) -> N
     bot = await _streaming_bot(tmp_path)
     await _answer(bot, _plain_request(_target()), AsyncMock(return_value="An answer."))
     answered = await _reply(bot)
-    await bot._reply_runtime.store.replies.update(
-        answered.reply_id,
-        lambda reply: rl.Transition(
-            outcome=rl.Outcome.APPLIED,
-            reply=replace(reply, redaction_pending=("$gone", "$kept")),
-        ),
-    )
+    await _owe(bot, answered.reply_id, redaction_pending=("$gone", "$kept"))
 
     async def redact(_room_id: str, event_id: str, *_args: object, **_kwargs: object) -> nio.RoomRedactError:
         if event_id == "$gone":
@@ -563,13 +561,6 @@ class _FirstCallHold:
         if not self.holding.is_set():
             self.holding.set()
             await self.release.wait()
-
-
-async def _owe(bot: AgentBot, reply_id: str, **debt: object) -> None:
-    await bot._reply_runtime.store.replies.update(
-        reply_id,
-        lambda reply: rl.Transition(outcome=rl.Outcome.APPLIED, reply=replace(reply, **debt)),
-    )
 
 
 async def _settle_while_another_settlement_is_held(bot: AgentBot, reply_id: str, hold: _FirstCallHold) -> rl.Reply:
@@ -639,10 +630,7 @@ async def test_a_note_that_could_not_be_prepared_yet_stays_owed(tmp_path: Path) 
     await _answer(bot, _plain_request(_target()), AsyncMock(return_value="An answer."))
     answered = await _reply(bot)
     owed = rl.OwedWrite(answered.last_span_id, rl.NoteKind.RESTART)
-    await bot._reply_runtime.store.replies.update(
-        answered.reply_id,
-        lambda reply: rl.Transition(outcome=rl.Outcome.APPLIED, reply=replace(reply, owed_write=owed)),
-    )
+    await _owe(bot, answered.reply_id, owed_write=owed)
     gateway = unwrap_extracted_collaborator(bot._delivery_gateway)
     with patch.object(type(gateway), "_deliver_rendered_reply_write", new=AsyncMock(return_value=None)) as deliver:
         await bot._delivery_gateway.settle_reply_debt(answered.reply_id)
