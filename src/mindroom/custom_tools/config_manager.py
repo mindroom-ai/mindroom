@@ -1286,6 +1286,12 @@ class ConfigManagerTools(Toolkit):
         try:
             if agent_name not in config.agents:
                 return f"Error: Agent '{agent_name}' not found. Use manage_agent with operation='create' to create it."
+            if (generated := config.generated_agent(agent_name)) is not None and generated.created:
+                # Saving drops created agents from the config, so this change would be lost.
+                return (
+                    f"Error: Agent '{agent_name}' was created by another agent and lives in the personal agent roster; "
+                    "its owners change it with update_agent."
+                )
 
             agent = config.agents[agent_name]
             previous_tools = config.resolve_entity(agent_name).available_tools

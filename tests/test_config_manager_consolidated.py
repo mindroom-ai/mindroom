@@ -38,9 +38,13 @@ from tests.conftest import (
     load_config_yaml,
     make_conversation_reader_mock,
     make_relation_lookup,
+    test_runtime_paths,
     write_config_yaml,
 )
 from tests.identity_helpers import persist_entity_accounts
+from tests.test_generated_agents import BASE as GENERATED_BASE
+from tests.test_generated_agents import _created as created_entry
+from tests.test_generated_agents import _load as load_generated
 
 
 def _minimal_config_path(tmp_path: Path) -> Path:
@@ -231,6 +235,30 @@ def test_membership_platform_administrator_can_mutate_full_config(tmp_path: Path
     assert "patch updated" in patch_result
     assert "Successfully updated agent" in agent_result
     assert "Successfully created team" in team_result
+
+
+def test_manage_agent_refuses_to_change_a_created_agent(tmp_path: Path) -> None:
+    """A created agent lives in the roster, so saving the config would drop the change; its owners use update_agent."""
+    paths = test_runtime_paths(tmp_path)
+    data = GENERATED_BASE | {"administrators": ["@admin:example.org"]}
+    config = load_generated(tmp_path, data, created=[created_entry()])
+    paths.config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    original = paths.config_path.read_text(encoding="utf-8")
+    config_manager = ConfigManagerTools(paths)
+
+    with tool_runtime_context(_caller_context(config_manager, config, requester_id="@admin:example.org")):
+        update_result = config_manager.manage_agent(operation="update", agent_name="creator_research", role="Changed")
+        remove_result = config_manager.manage_config(
+            operation="patch",
+            changes=[{"op": "remove", "path": "/agents/creator_research"}],
+        )
+
+    assert update_result == (
+        "Error: Agent 'creator_research' was created by another agent and lives in the personal agent roster; "
+        "its owners change it with update_agent."
+    )
+    assert remove_result.startswith("Error:")
+    assert paths.config_path.read_text(encoding="utf-8") == original
 
 
 def test_config_mutation_without_requester_context_fails_closed(tmp_path: Path) -> None:
