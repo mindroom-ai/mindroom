@@ -525,6 +525,7 @@ depends_on = [
     "mindroom.legacy_delivery_payloads",
     "mindroom.logging_config",
     "mindroom.matrix.sidecar_content",
+    "mindroom.model_selection",
     "mindroom.reply_lifecycle",
     "mindroom.tool_system.worker_routing",
     "mindroom.turn_record",
@@ -532,6 +533,7 @@ depends_on = [
 visibility = [
     "mindroom.agent_cli.delegation",
     "mindroom.event_journal.legacy_response_attempts",
+    "mindroom.event_journal.legacy_turn_rows",
     "mindroom.approval.recovery",
     "mindroom.agent_reply_membership_sync",
     "mindroom.approval.execution",
@@ -8276,6 +8278,11 @@ depends_on = []
 [[modules]]
 path = "mindroom.event_journal.legacy_response_attempts"
 depends_on = ["mindroom.event_journal"]
+visibility = ["mindroom.event_journal"]
+
+[[modules]]
+path = "mindroom.event_journal.legacy_turn_rows"
+depends_on = ["mindroom.event_journal", "mindroom.logging_config", "mindroom.turn_record"]
 visibility = ["mindroom.event_journal"]
 
 

@@ -570,6 +570,28 @@ def _project_redaction(
     if target is None:
         return
     _record_tombstone(transaction, principal_id, event.room_id, target)
+    scrub_redacted_projection(
+        transaction,
+        principal_id,
+        room_id=event.room_id,
+        event_id=target,
+        receipt_order=receipt_order,
+    )
+
+
+def scrub_redacted_projection(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    event_id: str,
+    receipt_order: int,
+) -> None:
+    """Remove a redacted event's text from one principal's projection of ``room_id``.
+
+    ``receipt_order`` is the redaction's; it becomes the refresh token of a
+    visible message whose current revision was redacted.
+    """
     # Prompt revisions retain their text for replay and consumed-revision
     # proof, so a redaction must erase that payload explicitly. Selections
     # bound to the revision disappear through their foreign-key cascade.
@@ -578,7 +600,7 @@ def _project_redaction(
         DELETE FROM interactive_questions
         WHERE principal_id = ? AND room_id = ? AND revision_event_id = ?
         """,
-        (principal_id, event.room_id, target),
+        (principal_id, room_id, event_id),
     )
     # Keep only identity and ordering proof so a late original requests a
     # refetch instead of silently forgetting any earlier surviving edit.
@@ -587,7 +609,7 @@ def _project_redaction(
         UPDATE unresolved_edits SET content_json = '{}'
         WHERE principal_id = ? AND room_id = ? AND edit_event_id = ?
         """,
-        (principal_id, event.room_id, target),
+        (principal_id, room_id, event_id),
     )
     # Held edits for this target, and not only when the target is visible. An
     # edit is held only while its target has no visible row, and the insert
@@ -606,14 +628,14 @@ def _project_redaction(
         DELETE FROM unresolved_edits
         WHERE principal_id = ? AND room_id = ? AND target_event_id = ?
         """,
-        (principal_id, event.room_id, target),
+        (principal_id, room_id, event_id),
     )
     logical = transaction.fetchone(
         """
         SELECT logical_event_id FROM visible_messages
         WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
         """,
-        (principal_id, event.room_id, target),
+        (principal_id, room_id, event_id),
     )
     if logical is not None:
         transaction.execute(
@@ -621,7 +643,7 @@ def _project_redaction(
             DELETE FROM visible_messages
             WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
             """,
-            (principal_id, event.room_id, target),
+            (principal_id, room_id, event_id),
         )
         return
     # Redacting the revision that is currently on screen. The body must stop
@@ -634,7 +656,7 @@ def _project_redaction(
         SET content_json = NULL, refresh_token = ?
         WHERE principal_id = ? AND room_id = ? AND revision_event_id = ?
         """,
-        (receipt_order, principal_id, event.room_id, target),
+        (receipt_order, principal_id, room_id, event_id),
     )
 
 

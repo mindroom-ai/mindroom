@@ -16,6 +16,7 @@ import json
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
@@ -26,7 +27,7 @@ from mindroom.event_journal.history_recovery import (
 )
 from mindroom.logging_config import get_logger
 
-from . import approval_continuations, approvals, membership_hooks, replies, reply_messages
+from . import approval_continuations, approvals, membership_hooks, replies, reply_messages, turn_rows
 from .identity import decode_thread_id, encode_thread_id
 from .models import (
     TURN_BACKED_KINDS,
@@ -48,7 +49,7 @@ from .models import (
     RoomMembershipPosition,
     SemanticConsumer,
 )
-from .projection import ProjectedEvent, is_tombstoned, project
+from .projection import ProjectedEvent, is_tombstoned, project, scrub_redacted_projection, tombstoned_event_ids
 from .schema import PENDING_STATE, SETTLED_STATE
 
 if TYPE_CHECKING:
@@ -867,7 +868,65 @@ def _project_admitted_event(
             principal_id,
             room_id=projected.room_id,
             event_id=tombstoned_event_id,
+            redacted=partial(tombstoned_event_ids, transaction, principal_id, projected.room_id),
         )
+
+
+def redact_for_agent(
+    transaction: Transaction,
+    agent_name: str,
+    *,
+    room_id: str,
+    event_id: str,
+    receipt_order: int,
+) -> None:
+    """Record one redaction for every Matrix login of an agent and apply its effects to each, in one transaction.
+
+    The deletion is agent-scoped, as turn truth is: the agent's turn rows lose
+    the event's plaintext, and every principal of the agent that has state in
+    the room loses it from its projection, retires a pending turn row of it,
+    and ends the replies that lost every source to it, exactly as the
+    principal that observed the redaction does. An earlier login the agent
+    returns to would otherwise still read the deleted text. Another agent's
+    rows are never touched, and reads stay principal-scoped: sharing the
+    deletion fact shares no content.
+    """
+    turn_rows.record_redaction(transaction, agent_name, room_id=room_id, event_id=event_id)
+    redacted = partial(turn_rows.redacted_events, transaction, agent_name, room_id)
+    for principal_id in _principals_of_agent(transaction, agent_name, room_id=room_id):
+        scrub_redacted_projection(
+            transaction,
+            principal_id,
+            room_id=room_id,
+            event_id=event_id,
+            receipt_order=receipt_order,
+        )
+        _settle_tombstoned_turn_source(transaction, principal_id, room_id=room_id, event_id=event_id)
+        replies.end_replies_of_deleted_source(
+            transaction,
+            principal_id,
+            room_id=room_id,
+            event_id=event_id,
+            redacted=redacted,
+        )
+
+
+def _principals_of_agent(transaction: Transaction, agent_name: str, *, room_id: str) -> tuple[str, ...]:
+    """Return every Matrix login of one agent that has membership state in ``room_id``.
+
+    A principal is stored as ``agent@mxid`` and agent names hold no ``@``, so the
+    prefix names the agent exactly; it is compared here rather than with
+    ``LIKE``, which SQLite matches case-insensitively.
+    """
+    rows = transaction.fetchall(
+        "SELECT principal_id FROM room_membership WHERE room_id = ? ORDER BY principal_id/*bytes*/",
+        (room_id,),
+    )
+    return tuple(
+        principal_id
+        for row in rows
+        if turn_rows.agent_of_principal(principal_id := str(row["principal_id"])) == agent_name
+    )
 
 
 def _settle_tombstoned_turn_source(

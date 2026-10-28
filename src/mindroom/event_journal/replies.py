@@ -31,7 +31,7 @@ from .projection import is_tombstoned
 logger = get_logger(__name__)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Collection, Mapping
 
     from mindroom.turn_record import TurnRecord
 
@@ -242,13 +242,16 @@ def end_replies_of_deleted_source(
     *,
     room_id: str,
     event_id: str,
+    redacted: Callable[[tuple[str, ...]], Collection[str]],
 ) -> None:
     """End the replies whose current work lost every logical source to this deletion, settling their sources.
 
-    An answer already written is kept; a reply an approval holds ends too, and
-    its approval is fenced for its settlement. The bot cancels the spans it
-    runs, wakes those approvals, and redacts what the replies showed after the
-    deletion commits, and the turn ledger loads the turns this answered.
+    ``redacted`` answers which of a reply's logical sources are redacted in
+    ``room_id``. An answer already written is kept; a reply an approval holds
+    ends too, and its approval is fenced for its settlement. The bot cancels
+    the spans it runs, wakes those approvals, and redacts what the replies
+    showed after the deletion commits, and the turn ledger loads the turns
+    this answered.
     """
     for reply_id in reply_messages.naming_logical_source(transaction, principal_id, event_id):
         reply = reply_messages.lock(transaction, principal_id, reply_id)
@@ -257,10 +260,8 @@ def end_replies_of_deleted_source(
         span = reply_spans.load(transaction, principal_id, reply.current_span_id or reply.last_span_id)
         if span is None or event_id not in span.sources.logical_source_event_ids:
             continue
-        if not all(
-            is_tombstoned(transaction, principal_id, room_id, source)
-            for source in span.sources.logical_source_event_ids
-        ):
+        logical = span.sources.logical_source_event_ids
+        if not set(logical).issubset(redacted(logical)):
             continue
         transition = rl.sources_deleted(reply, span, now_ns=time.time_ns())
         if transition.applied:

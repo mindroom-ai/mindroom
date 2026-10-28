@@ -134,6 +134,15 @@ class SourceEventMetadata:
 SourceEventRevision = tuple[int, str]
 
 
+@dataclass(frozen=True)
+class SourceVisibleEcho:
+    """The visible echo published for one voice source, and how its replacement ended."""
+
+    event_id: str
+    # None until a replacement lands; True when a fallback replaced it, False for a transcript.
+    is_fallback: bool | None = None
+
+
 class RevisionSnapshotChangedError(RuntimeError):
     """A stale request must retain its callback and retry canonical preparation."""
 
@@ -290,6 +299,9 @@ class TurnRecord:
     history_scope: HistoryScope | None = None
     conversation_target: MessageTarget | None = None
     timestamp: float = 0.0
+    # The immutable identity of the stored turn this value was read from, if any.
+    turn_key: str | None = None
+    visible_echoes: Mapping[str, SourceVisibleEcho] | None = None
 
     @classmethod
     def create(
@@ -317,6 +329,8 @@ class TurnRecord:
         history_scope: HistoryScope | None = None,
         conversation_target: MessageTarget | None = None,
         timestamp: float = 0.0,
+        turn_key: str | None = None,
+        visible_echoes: Mapping[str, SourceVisibleEcho] | None = None,
     ) -> TurnRecord:
         """Create a canonical record from permissive runtime inputs."""
         source = _canonical_source_state(
@@ -369,6 +383,8 @@ class TurnRecord:
             history_scope=context.history_scope,
             conversation_target=context.conversation_target,
             timestamp=_canonical_timestamp(timestamp),
+            turn_key=canonical_optional_string(turn_key),
+            visible_echoes=_canonical_visible_echoes(source.source_event_ids, visible_echoes),
         )
 
     @property
@@ -445,6 +461,8 @@ class _TurnRecordChanges(typing.TypedDict, total=False):
     history_scope: HistoryScope | None
     conversation_target: MessageTarget | None
     timestamp: float
+    turn_key: str | None
+    visible_echoes: Mapping[str, SourceVisibleEcho] | None
 
 
 def canonicalize_turn_record(
@@ -476,6 +494,8 @@ def canonicalize_turn_record(
         history_scope=candidate.history_scope,
         conversation_target=candidate.conversation_target,
         timestamp=candidate.timestamp,
+        turn_key=candidate.turn_key,
+        visible_echoes=candidate.visible_echoes,
     )
 
 
@@ -563,6 +583,19 @@ def _canonical_delivery_state(
             else None
         ),
     )
+
+
+def _canonical_visible_echoes(
+    source_event_ids: tuple[str, ...],
+    visible_echoes: Mapping[str, SourceVisibleEcho] | None,
+) -> Mapping[str, SourceVisibleEcho] | None:
+    """Keep the echoes of physical sources only."""
+    echoes = {
+        event_id: echo
+        for event_id in source_event_ids
+        if isinstance((echo := (visible_echoes or {}).get(event_id)), SourceVisibleEcho)
+    }
+    return MappingProxyType(echoes) if echoes else None
 
 
 def _canonical_command_state(started: object, result_text: object) -> _CanonicalCommandState:
