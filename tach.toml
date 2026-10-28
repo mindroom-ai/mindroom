@@ -1810,11 +1810,19 @@ depends_on = [
     "mindroom.bounded_bytes",
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
+    "mindroom.delivery_replay",
     "mindroom.external_triggers.auth",
     "mindroom.external_triggers.executor",
     "mindroom.external_triggers.models",
-    "mindroom.external_triggers.replay_store",
     "mindroom.response_admission",
+]
+
+[[modules]]
+path = "mindroom.delivery_replay"
+depends_on = [
+    "mindroom.durable_write",
+    "mindroom.external_triggers.legacy_replay_store",
+    "mindroom.file_locks",
 ]
 
 [[modules]]

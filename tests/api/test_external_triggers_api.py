@@ -27,6 +27,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api import external_triggers as external_triggers_api
 from mindroom.api import main as api_main
 from mindroom.config.main import Config
+from mindroom.delivery_replay import DeliveryEventClaim, DeliveryReplayStore
 from mindroom.external_triggers import executor as trigger_executor
 from mindroom.external_triggers.auth import (
     TriggerSignatureHeaders,
@@ -34,8 +35,12 @@ from mindroom.external_triggers.auth import (
     mint_trigger_capability,
     sign_trigger_request,
 )
-from mindroom.external_triggers.replay_store import ExternalTriggerEventClaim, ExternalTriggerReplayStore
-from mindroom.external_triggers.store import ExternalTriggerStore, ExternalTriggerTarget, TriggerDeliverySnapshot
+from mindroom.external_triggers.store import (
+    ExternalTriggerStore,
+    ExternalTriggerTarget,
+    TriggerDeliverySnapshot,
+    external_trigger_replay_store,
+)
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.state import MatrixState
 from mindroom.response_admission import ResponseAdmissionGate
@@ -524,13 +529,13 @@ def test_capability_duplicate_is_not_delivered_after_a_later_trigger_write_drops
     token, snapshot = _create_capability_record(trigger_api)
     store = ExternalTriggerStore(trigger_api.runtime_paths)
     assert trigger_api.runtime_paths.control_state_root is not None
-    replay_store = ExternalTriggerReplayStore(trigger_api.runtime_paths.control_state_root)
+    replay_store = external_trigger_replay_store(trigger_api.runtime_paths.control_state_root)
     executed: list[TriggerDeliverySnapshot] = []
 
     async def other_copy_delivers_while_owner_is_checked(*_args: object, **_kwargs: object) -> bool:
         now = int(time.time())
         assert replay_store.claim_event_id(snapshot.replay_scope, snapshot.uid, now=now, ttl_seconds=300) is (
-            ExternalTriggerEventClaim.FRESH
+            DeliveryEventClaim.FRESH
         )
         replay_store.mark_event_delivered(snapshot.replay_scope, snapshot.uid, now=now, ttl_seconds=300)
         store.consume_single_use(snapshot.trigger_id, expected_uid=snapshot.uid)
@@ -616,7 +621,7 @@ def test_full_replay_scope_returns_429_and_still_refuses_replays(
         "mindroom.api.external_triggers.execute_external_trigger",
         AsyncMock(return_value="$matrix-event"),
     )
-    monkeypatch.setattr("mindroom.external_triggers.replay_store._MAX_LIVE_CLAIMS_PER_SCOPE", 1)
+    monkeypatch.setattr("mindroom.delivery_replay._MAX_LIVE_CLAIMS_PER_SCOPE", 1)
 
     delivered = _post_signed(trigger_api, nonce="nonce-1")
     refused = _post_signed(trigger_api, nonce="nonce-2")
@@ -798,16 +803,16 @@ def test_replay_store_calls_stay_off_the_default_executor(
     )
 
     def recording(name: str) -> Callable[..., object]:
-        original = getattr(ExternalTriggerReplayStore, name)
+        original = getattr(DeliveryReplayStore, name)
 
-        def record_thread(store: ExternalTriggerReplayStore, *args: object, **kwargs: object) -> object:
+        def record_thread(store: DeliveryReplayStore, *args: object, **kwargs: object) -> object:
             call_threads.setdefault(name, set()).add(threading.current_thread().name)
             return original(store, *args, **kwargs)
 
         return record_thread
 
     for name in replay_calls:
-        monkeypatch.setattr(ExternalTriggerReplayStore, name, recording(name))
+        monkeypatch.setattr(DeliveryReplayStore, name, recording(name))
     outcomes = iter([None, "$root-a"])
 
     async def execute_external_trigger(**_kwargs: object) -> str | None:
@@ -1123,10 +1128,10 @@ def test_thread_key_is_ignored_for_fixed_thread_targets(
     assert continued == [None, None]
 
 
-def _new_thread_replay_store(trigger_api: TriggerApiContext) -> ExternalTriggerReplayStore:
+def _new_thread_replay_store(trigger_api: TriggerApiContext) -> DeliveryReplayStore:
     control_state_root = trigger_api.runtime_paths.control_state_root
     assert control_state_root is not None
-    return ExternalTriggerReplayStore(control_state_root)
+    return external_trigger_replay_store(control_state_root)
 
 
 def _post_keyed(trigger_api: TriggerApiContext, trigger_id: str, event_id: str, nonce: str) -> Response:
@@ -1221,7 +1226,7 @@ def test_thread_key_being_opened_elsewhere_returns_409_for_retry(
     # The event id claim was rolled back, so the same event can be retried once the thread exists.
     assert (
         replay_store.claim_event_id(snapshot.replay_scope, "msg-2", now=int(time.time()), ttl_seconds=60)
-        is ExternalTriggerEventClaim.FRESH
+        is DeliveryEventClaim.FRESH
     )
 
 
@@ -1232,7 +1237,7 @@ def test_full_thread_key_scope_returns_429_and_releases_the_event_claim(
     """Distinct thread keys past the live-claim limit are refused, and the refused event id stays retryable."""
     execute = AsyncMock(return_value="$root")
     monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute)
-    monkeypatch.setattr("mindroom.external_triggers.replay_store._MAX_LIVE_CLAIMS_PER_SCOPE", 2)
+    monkeypatch.setattr("mindroom.delivery_replay._MAX_LIVE_CLAIMS_PER_SCOPE", 2)
     trigger_id = _create_new_thread_record(trigger_api)
     snapshot = ExternalTriggerStore(trigger_api.runtime_paths).delivery_snapshot(
         trigger_id,
@@ -1257,7 +1262,7 @@ def test_full_thread_key_scope_returns_429_and_releases_the_event_claim(
     execute.assert_not_awaited()
     assert (
         replay_store.claim_event_id(snapshot.replay_scope, "msg-1", now=int(time.time()), ttl_seconds=60)
-        is ExternalTriggerEventClaim.FRESH
+        is DeliveryEventClaim.FRESH
     )
 
 
@@ -1266,7 +1271,7 @@ def test_delivery_whose_expired_thread_key_no_longer_fits_is_still_marked_delive
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A posted message keeps its event deduplicated even when its key cannot be bound in a full scope."""
-    monkeypatch.setattr("mindroom.external_triggers.replay_store._MAX_LIVE_CLAIMS_PER_SCOPE", 2)
+    monkeypatch.setattr("mindroom.delivery_replay._MAX_LIVE_CLAIMS_PER_SCOPE", 2)
     trigger_id = _create_new_thread_record(trigger_api)
     snapshot = ExternalTriggerStore(trigger_api.runtime_paths).delivery_snapshot(
         trigger_id,

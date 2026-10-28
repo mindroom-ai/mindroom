@@ -14,15 +14,16 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom.constants import safe_replace
+from mindroom.delivery_replay import (
+    DeliveryEventClaim,
+    DeliveryReplayScopeFullError,
+    DeliveryReplayStore,
+    DeliveryReplayStoreError,
+    DeliveryThreadKeyClaim,
+)
 from mindroom.durable_write import _fsync_directory
 from mindroom.external_triggers.models import ExternalTriggerAcceptedResponse, ExternalTriggerPayload
-from mindroom.external_triggers.replay_store import (
-    ExternalTriggerEventClaim,
-    ExternalTriggerReplayScopeFullError,
-    ExternalTriggerReplayStore,
-    ExternalTriggerReplayStoreError,
-    ExternalTriggerThreadKeyClaim,
-)
+from mindroom.external_triggers.store import external_trigger_replay_store
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -50,21 +51,21 @@ def _claim_nonce_with_slow_read_worker(
 ) -> None:
     """Claim one nonce after slowing reads enough to expose missing cross-process locking."""
     original_read_store = cast(
-        "Callable[[ExternalTriggerReplayStore, Path], object]",
-        ExternalTriggerReplayStore._read_store,
+        "Callable[[DeliveryReplayStore, Path], object]",
+        DeliveryReplayStore._read_store,
     )
 
-    def slow_read_store(self: ExternalTriggerReplayStore, path: Path) -> object:
+    def slow_read_store(self: DeliveryReplayStore, path: Path) -> object:
         store = original_read_store(self, path)
         time.sleep(0.1)
         return store
 
-    ExternalTriggerReplayStore._read_store = slow_read_store
+    DeliveryReplayStore._read_store = slow_read_store
     try:
         if not start_event.wait(timeout=5):
             result_queue.put(("error", "timed out waiting for start signal"))
             return
-        claimed = ExternalTriggerReplayStore(Path(control_state_root)).claim_nonce(
+        claimed = external_trigger_replay_store(Path(control_state_root)).claim_nonce(
             "campground",
             "nonce-1",
             now=1_000,
@@ -128,23 +129,23 @@ def test_accepted_response_defaults_matrix_event_id_and_duplicate_flag() -> None
 
 def test_shared_store_instances_coordinate_nonce_and_event_claims(tmp_path: Path) -> None:
     """Store instances for one tracking root should share replay state."""
-    first_store = ExternalTriggerReplayStore(tmp_path)
-    second_store = ExternalTriggerReplayStore(tmp_path)
+    first_store = external_trigger_replay_store(tmp_path)
+    second_store = external_trigger_replay_store(tmp_path)
 
     assert first_store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
     assert not second_store.claim_nonce("campground", "nonce-1", now=1_001, ttl_seconds=300)
 
     assert first_store.claim_event_id("campground", "availability-123", now=1_000, ttl_seconds=300) is (
-        ExternalTriggerEventClaim.FRESH
+        DeliveryEventClaim.FRESH
     )
     assert second_store.claim_event_id("campground", "availability-123", now=1_001, ttl_seconds=300) is (
-        ExternalTriggerEventClaim.IN_PROGRESS
+        DeliveryEventClaim.IN_PROGRESS
     )
 
     second_store.mark_event_delivered("campground", "availability-123", now=1_002, ttl_seconds=300)
 
     assert first_store.claim_event_id("campground", "availability-123", now=1_003, ttl_seconds=300) is (
-        ExternalTriggerEventClaim.DELIVERED
+        DeliveryEventClaim.DELIVERED
     )
 
 
@@ -189,14 +190,14 @@ def test_shared_store_processes_coordinate_nonce_claims(tmp_path: Path) -> None:
 
 def test_claims_read_and_rewrite_only_their_own_scope(tmp_path: Path) -> None:
     """Another trigger's replay records never enter a claim, so they cannot slow it."""
-    store = ExternalTriggerReplayStore(tmp_path)
+    store = external_trigger_replay_store(tmp_path)
     for index in range(50):
         assert store.claim_nonce("other-trigger", f"nonce-{index}", now=1_000, ttl_seconds=300)
     # A claim that parsed the other trigger's records would now fail.
     _scope_path(tmp_path, "other-trigger").write_text("{not valid json", encoding="utf-8")
 
     assert store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
-    assert store.claim_event_id("campground", "event-1", now=1_000, ttl_seconds=300) is ExternalTriggerEventClaim.FRESH
+    assert store.claim_event_id("campground", "event-1", now=1_000, ttl_seconds=300) is DeliveryEventClaim.FRESH
     assert json.loads(_scope_path(tmp_path).read_text(encoding="utf-8")) == {
         "nonces": {"nonce-1": {"expires_at": 1_300}},
         "events": {"event-1": {"state": "in_progress", "expires_at": 1_300}},
@@ -217,7 +218,7 @@ def test_shared_replay_file_is_split_into_scope_files(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    store = ExternalTriggerReplayStore(tmp_path)
+    store = external_trigger_replay_store(tmp_path)
 
     assert not store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
 
@@ -232,76 +233,76 @@ def test_shared_replay_file_is_split_into_scope_files(tmp_path: Path) -> None:
         "events": {"event-1": {"state": "delivered", "expires_at": 2_000}},
         "threads": {},
     }
-    assert _claim(store, now=1_000) == (ExternalTriggerThreadKeyClaim.BOUND, "$root")
+    assert _claim(store, now=1_000) == (DeliveryThreadKeyClaim.BOUND, "$root")
     assert store.claim_event_id("other-trigger", "event-1", now=1_000, ttl_seconds=300) is (
-        ExternalTriggerEventClaim.DELIVERED
+        DeliveryEventClaim.DELIVERED
     )
 
 
 def test_release_after_send_failure_keeps_nonce_single_use_but_allows_event_retry(tmp_path: Path) -> None:
     """Rollback release should remove only the event-id claim."""
-    store = ExternalTriggerReplayStore(tmp_path)
+    store = external_trigger_replay_store(tmp_path)
 
     assert store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
     assert store.claim_event_id("campground", "availability-123", now=1_000, ttl_seconds=300) is (
-        ExternalTriggerEventClaim.FRESH
+        DeliveryEventClaim.FRESH
     )
 
     store.release_event_id("campground", "availability-123")
 
     assert not store.claim_nonce("campground", "nonce-1", now=1_010, ttl_seconds=300)
     assert store.claim_event_id("campground", "availability-123", now=1_010, ttl_seconds=300) is (
-        ExternalTriggerEventClaim.FRESH
+        DeliveryEventClaim.FRESH
     )
 
 
 def test_expired_nonce_and_event_id_can_be_reclaimed(tmp_path: Path) -> None:
     """Expired replay claims should be pruned on the next claim."""
-    store = ExternalTriggerReplayStore(tmp_path)
+    store = external_trigger_replay_store(tmp_path)
 
     assert store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
     assert store.claim_event_id("campground", "availability-123", now=1_000, ttl_seconds=300) is (
-        ExternalTriggerEventClaim.FRESH
+        DeliveryEventClaim.FRESH
     )
 
     assert store.claim_nonce("campground", "nonce-1", now=1_301, ttl_seconds=300)
     assert store.claim_event_id("campground", "availability-123", now=1_301, ttl_seconds=300) is (
-        ExternalTriggerEventClaim.FRESH
+        DeliveryEventClaim.FRESH
     )
 
 
 def test_in_progress_event_id_processing_ttl_outlives_nonce_ttl(tmp_path: Path) -> None:
     """Long-running deliveries should not be re-claimed when signature replay TTL expires."""
-    store = ExternalTriggerReplayStore(tmp_path)
+    store = external_trigger_replay_store(tmp_path)
 
     assert store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
     assert store.claim_event_id("campground", "availability-123", now=1_000, ttl_seconds=86_400) is (
-        ExternalTriggerEventClaim.FRESH
+        DeliveryEventClaim.FRESH
     )
 
     assert store.claim_nonce("campground", "nonce-1", now=1_301, ttl_seconds=300)
     assert store.claim_event_id("campground", "availability-123", now=1_301, ttl_seconds=86_400) is (
-        ExternalTriggerEventClaim.IN_PROGRESS
+        DeliveryEventClaim.IN_PROGRESS
     )
 
 
 def test_nonce_and_event_id_remain_claimed_at_exact_expiry_boundary(tmp_path: Path) -> None:
     """Replay claims should expire after their final valid timestamp."""
-    store = ExternalTriggerReplayStore(tmp_path)
+    store = external_trigger_replay_store(tmp_path)
 
     assert store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
     assert store.claim_event_id("campground", "availability-123", now=1_000, ttl_seconds=300) is (
-        ExternalTriggerEventClaim.FRESH
+        DeliveryEventClaim.FRESH
     )
 
     assert not store.claim_nonce("campground", "nonce-1", now=1_300, ttl_seconds=300)
     assert store.claim_event_id("campground", "availability-123", now=1_300, ttl_seconds=300) is (
-        ExternalTriggerEventClaim.IN_PROGRESS
+        DeliveryEventClaim.IN_PROGRESS
     )
 
     assert store.claim_nonce("campground", "nonce-1", now=1_301, ttl_seconds=300)
     assert store.claim_event_id("campground", "availability-123", now=1_301, ttl_seconds=300) is (
-        ExternalTriggerEventClaim.FRESH
+        DeliveryEventClaim.FRESH
     )
 
 
@@ -320,26 +321,20 @@ def test_full_replay_scope_refuses_new_claims_but_still_detects_replays(tmp_path
         ),
         encoding="utf-8",
     )
-    store = ExternalTriggerReplayStore(tmp_path)
+    store = external_trigger_replay_store(tmp_path)
 
     assert not store.claim_nonce("campground", "nonce-0", now=1_000, ttl_seconds=300)
-    assert store.claim_event_id("campground", "event-0", now=1_000, ttl_seconds=300) is (
-        ExternalTriggerEventClaim.DELIVERED
-    )
-    with pytest.raises(ExternalTriggerReplayScopeFullError):
+    assert store.claim_event_id("campground", "event-0", now=1_000, ttl_seconds=300) is (DeliveryEventClaim.DELIVERED)
+    with pytest.raises(DeliveryReplayScopeFullError):
         store.claim_nonce("campground", "nonce-new", now=1_000, ttl_seconds=300)
-    with pytest.raises(ExternalTriggerReplayScopeFullError):
+    with pytest.raises(DeliveryReplayScopeFullError):
         store.claim_event_id("campground", "event-new", now=1_000, ttl_seconds=300)
 
     assert store.claim_nonce("other-trigger", "nonce-new", now=1_000, ttl_seconds=300)
-    assert store.claim_event_id("other-trigger", "event-new", now=1_000, ttl_seconds=300) is (
-        ExternalTriggerEventClaim.FRESH
-    )
+    assert store.claim_event_id("other-trigger", "event-new", now=1_000, ttl_seconds=300) is (DeliveryEventClaim.FRESH)
     # Expired claims no longer count against the scope.
     assert store.claim_nonce("campground", "nonce-new", now=2_001, ttl_seconds=300)
-    assert store.claim_event_id("campground", "event-new", now=2_001, ttl_seconds=300) is (
-        ExternalTriggerEventClaim.FRESH
-    )
+    assert store.claim_event_id("campground", "event-new", now=2_001, ttl_seconds=300) is (DeliveryEventClaim.FRESH)
 
 
 @pytest.mark.parametrize("store_payload", [["not", "a", "dict"], {"nonces": {}}])
@@ -348,9 +343,9 @@ def test_invalid_store_shape_fails_closed(tmp_path: Path, store_payload: object)
     store_path = _store_path(tmp_path)
     store_path.write_text(json.dumps(store_payload), encoding="utf-8")
 
-    store = ExternalTriggerReplayStore(tmp_path)
+    store = external_trigger_replay_store(tmp_path)
 
-    with pytest.raises(ExternalTriggerReplayStoreError, match="invalid"):
+    with pytest.raises(DeliveryReplayStoreError, match="invalid"):
         store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
 
 
@@ -368,9 +363,9 @@ def test_invalid_nested_nonce_record_fails_closed(tmp_path: Path, store_payload:
     store_path = _store_path(tmp_path)
     store_path.write_text(json.dumps(store_payload), encoding="utf-8")
 
-    store = ExternalTriggerReplayStore(tmp_path)
+    store = external_trigger_replay_store(tmp_path)
 
-    with pytest.raises(ExternalTriggerReplayStoreError, match="invalid"):
+    with pytest.raises(DeliveryReplayStoreError, match="invalid"):
         store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
 
 
@@ -397,9 +392,9 @@ def test_invalid_nested_event_record_fails_closed(tmp_path: Path, store_payload:
     store_path = _store_path(tmp_path)
     store_path.write_text(json.dumps(store_payload), encoding="utf-8")
 
-    store = ExternalTriggerReplayStore(tmp_path)
+    store = external_trigger_replay_store(tmp_path)
 
-    with pytest.raises(ExternalTriggerReplayStoreError, match="invalid"):
+    with pytest.raises(DeliveryReplayStoreError, match="invalid"):
         store.claim_event_id("campground", "availability-123", now=1_000, ttl_seconds=300)
 
 
@@ -408,9 +403,9 @@ def test_corrupt_json_store_fails_closed(tmp_path: Path) -> None:
     store_path = _store_path(tmp_path)
     store_path.write_text("{not valid json", encoding="utf-8")
 
-    store = ExternalTriggerReplayStore(tmp_path)
+    store = external_trigger_replay_store(tmp_path)
 
-    with pytest.raises(ExternalTriggerReplayStoreError, match="invalid"):
+    with pytest.raises(DeliveryReplayStoreError, match="invalid"):
         store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
 
 
@@ -419,9 +414,9 @@ def test_null_json_store_fails_closed(tmp_path: Path, replay_file: Callable[[Pat
     """A replay file holding JSON null is malformed, not absent, so it must not reset replay protection."""
     replay_file(tmp_path).write_text("null", encoding="utf-8")
 
-    store = ExternalTriggerReplayStore(tmp_path)
+    store = external_trigger_replay_store(tmp_path)
 
-    with pytest.raises(ExternalTriggerReplayStoreError, match="invalid"):
+    with pytest.raises(DeliveryReplayStoreError, match="invalid"):
         store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
 
 
@@ -441,9 +436,9 @@ def test_replay_store_read_oserror_fails_closed(
         return original_read_text(path, *args, **kwargs)
 
     monkeypatch.setattr(type(store_path), "read_text", read_text)
-    store = ExternalTriggerReplayStore(tmp_path)
+    store = external_trigger_replay_store(tmp_path)
 
-    with pytest.raises(ExternalTriggerReplayStoreError, match="unavailable"):
+    with pytest.raises(DeliveryReplayStoreError, match="unavailable"):
         store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
 
 
@@ -458,9 +453,9 @@ def test_replay_store_write_oserror_fails_closed(
         raise OSError(msg)
 
     monkeypatch.setattr("mindroom.durable_write.os.fsync", raise_disk_full)
-    store = ExternalTriggerReplayStore(tmp_path)
+    store = external_trigger_replay_store(tmp_path)
 
-    with pytest.raises(ExternalTriggerReplayStoreError, match="unavailable"):
+    with pytest.raises(DeliveryReplayStoreError, match="unavailable"):
         store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
 
 
@@ -479,7 +474,7 @@ def test_replay_store_write_uses_bind_mount_safe_replace(
         return original_replace(path, target)
 
     monkeypatch.setattr(type(store_path), "replace", raise_busy_on_store_replace)
-    store = ExternalTriggerReplayStore(tmp_path)
+    store = external_trigger_replay_store(tmp_path)
 
     assert store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
     assert json.loads(store_path.read_text(encoding="utf-8"))["nonces"]["nonce-1"] == {
@@ -590,23 +585,23 @@ def test_payload_limits_replay_keys_by_their_stored_size(field_name: str) -> Non
 
 def test_full_replay_scope_refuses_new_thread_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A flood of distinct thread keys cannot grow one trigger's thread records past the live-claim limit."""
-    monkeypatch.setattr("mindroom.external_triggers.replay_store._MAX_LIVE_CLAIMS_PER_SCOPE", 2)
-    store = ExternalTriggerReplayStore(tmp_path)
-    assert _claim(store, "site-1", now=1_000) == (ExternalTriggerThreadKeyClaim.FRESH, None)
-    assert _claim(store, "site-2", now=1_000) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    monkeypatch.setattr("mindroom.delivery_replay._MAX_LIVE_CLAIMS_PER_SCOPE", 2)
+    store = external_trigger_replay_store(tmp_path)
+    assert _claim(store, "site-1", now=1_000) == (DeliveryThreadKeyClaim.FRESH, None)
+    assert _claim(store, "site-2", now=1_000) == (DeliveryThreadKeyClaim.FRESH, None)
 
-    with pytest.raises(ExternalTriggerReplayScopeFullError):
+    with pytest.raises(DeliveryReplayScopeFullError):
         _claim(store, "site-3", now=1_001)
 
     # Known keys still resolve, a key re-claimed for a re-pointed room replaces its record,
     # other triggers keep their own allowance, and expired records stop counting.
-    assert _claim(store, "site-1", now=1_001) == (ExternalTriggerThreadKeyClaim.PENDING, None)
+    assert _claim(store, "site-1", now=1_001) == (DeliveryThreadKeyClaim.PENDING, None)
     assert _claim(store, "site-2", room="!elsewhere:localhost", now=1_001) == (
-        ExternalTriggerThreadKeyClaim.FRESH,
+        DeliveryThreadKeyClaim.FRESH,
         None,
     )
-    assert _claim(store, "site-3", scope="other-trigger", now=1_001) == (ExternalTriggerThreadKeyClaim.FRESH, None)
-    assert _claim(store, "site-3", now=1_062) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    assert _claim(store, "site-3", scope="other-trigger", now=1_001) == (DeliveryThreadKeyClaim.FRESH, None)
+    assert _claim(store, "site-3", now=1_062) == (DeliveryThreadKeyClaim.FRESH, None)
     stored = json.loads(_scope_path(tmp_path).read_text(encoding="utf-8"))
     assert len(stored["threads"]) <= 2
 
@@ -616,12 +611,12 @@ def test_expired_reservation_finalized_in_a_full_scope_is_not_stored(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A delivery that outlived its reservation cannot bind its key past the live-claim limit."""
-    monkeypatch.setattr("mindroom.external_triggers.replay_store._MAX_LIVE_CLAIMS_PER_SCOPE", 2)
-    store = ExternalTriggerReplayStore(tmp_path)
+    monkeypatch.setattr("mindroom.delivery_replay._MAX_LIVE_CLAIMS_PER_SCOPE", 2)
+    store = external_trigger_replay_store(tmp_path)
     reservation = _reserve(store, now=1_000)
     # The reservation expires after 1_060, and other keys fill the scope meanwhile.
-    assert _claim(store, "site-1", now=1_061) == (ExternalTriggerThreadKeyClaim.FRESH, None)
-    assert _claim(store, "site-2", now=1_061) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    assert _claim(store, "site-1", now=1_061) == (DeliveryThreadKeyClaim.FRESH, None)
+    assert _claim(store, "site-2", now=1_061) == (DeliveryThreadKeyClaim.FRESH, None)
 
     assert _bind(store, "$root-1", reservation=reservation, now=1_062) is None
 
@@ -645,7 +640,7 @@ def test_store_without_threads_section_is_accepted(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    store = ExternalTriggerReplayStore(tmp_path)
+    store = external_trigger_replay_store(tmp_path)
 
     claim, root, reservation = store.claim_thread_key(
         "campground",
@@ -654,7 +649,7 @@ def test_store_without_threads_section_is_accepted(tmp_path: Path) -> None:
         now=1_000,
         pending_ttl_seconds=60,
     )
-    assert (claim, root) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    assert (claim, root) == (DeliveryThreadKeyClaim.FRESH, None)
     assert reservation
     store.bind_thread_root(
         "campground",
@@ -681,15 +676,15 @@ def test_store_without_threads_section_is_accepted(tmp_path: Path) -> None:
             },
         },
     }
-    reopened = ExternalTriggerReplayStore(tmp_path)
+    reopened = external_trigger_replay_store(tmp_path)
     assert reopened.claim_nonce("campground", "nonce-old", now=1_001, ttl_seconds=300) is False
     assert (
         reopened.claim_event_id("campground", "event-delivered", now=1_001, ttl_seconds=300)
-        is ExternalTriggerEventClaim.DELIVERED
+        is DeliveryEventClaim.DELIVERED
     )
     assert (
         reopened.claim_event_id("campground", "event-pending", now=1_001, ttl_seconds=300)
-        is ExternalTriggerEventClaim.IN_PROGRESS
+        is DeliveryEventClaim.IN_PROGRESS
     )
 
 
@@ -726,8 +721,8 @@ def test_invalid_nested_thread_record_fails_closed(tmp_path: Path, threads_paylo
         encoding="utf-8",
     )
 
-    with pytest.raises(ExternalTriggerReplayStoreError, match="invalid external trigger replay store structure"):
-        ExternalTriggerReplayStore(tmp_path).claim_thread_key(
+    with pytest.raises(DeliveryReplayStoreError, match="invalid delivery replay store structure"):
+        external_trigger_replay_store(tmp_path).claim_thread_key(
             "campground",
             "site-42",
             room_id="!r:x",
@@ -740,18 +735,18 @@ ROOM = "!room:localhost"
 
 
 def _claim(
-    store: ExternalTriggerReplayStore,
+    store: DeliveryReplayStore,
     key: str = "site-42",
     *,
     scope: str = "campground",
     room: str = ROOM,
     now: int,
-) -> tuple[ExternalTriggerThreadKeyClaim, str | None]:
+) -> tuple[DeliveryThreadKeyClaim, str | None]:
     claim, root, _reservation = store.claim_thread_key(scope, key, room_id=room, now=now, pending_ttl_seconds=60)
     return claim, root
 
 
-def _reserve(store: ExternalTriggerReplayStore, *, now: int, room: str = ROOM) -> str:
+def _reserve(store: DeliveryReplayStore, *, now: int, room: str = ROOM) -> str:
     claim, _root, reservation = store.claim_thread_key(
         "campground",
         "site-42",
@@ -759,13 +754,13 @@ def _reserve(store: ExternalTriggerReplayStore, *, now: int, room: str = ROOM) -
         now=now,
         pending_ttl_seconds=60,
     )
-    assert claim is ExternalTriggerThreadKeyClaim.FRESH
+    assert claim is DeliveryThreadKeyClaim.FRESH
     assert reservation
     return reservation
 
 
 def _bind(
-    store: ExternalTriggerReplayStore,
+    store: DeliveryReplayStore,
     root: str,
     *,
     reservation: str | None,
@@ -785,96 +780,96 @@ def _bind(
 
 def test_thread_key_claim_reserves_then_binds_then_resolves(tmp_path: Path) -> None:
     """First claim reserves the key; a bound key resolves to its root within scope and room."""
-    store = ExternalTriggerReplayStore(tmp_path)
+    store = external_trigger_replay_store(tmp_path)
 
     reservation = _reserve(store, now=1_000)
-    assert _claim(store, now=1_001) == (ExternalTriggerThreadKeyClaim.PENDING, None)
+    assert _claim(store, now=1_001) == (DeliveryThreadKeyClaim.PENDING, None)
     assert _bind(store, "$root-1", reservation=reservation, now=1_002) == "$root-1"
 
-    assert _claim(store, now=1_003) == (ExternalTriggerThreadKeyClaim.BOUND, "$root-1")
-    assert _claim(store, now=1_602) == (ExternalTriggerThreadKeyClaim.BOUND, "$root-1")
-    assert _claim(store, now=1_603) == (ExternalTriggerThreadKeyClaim.FRESH, None)
-    assert _claim(store, "site-43", now=1_000) == (ExternalTriggerThreadKeyClaim.FRESH, None)
-    assert _claim(store, scope="other-scope", now=1_000) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    assert _claim(store, now=1_003) == (DeliveryThreadKeyClaim.BOUND, "$root-1")
+    assert _claim(store, now=1_602) == (DeliveryThreadKeyClaim.BOUND, "$root-1")
+    assert _claim(store, now=1_603) == (DeliveryThreadKeyClaim.FRESH, None)
+    assert _claim(store, "site-43", now=1_000) == (DeliveryThreadKeyClaim.FRESH, None)
+    assert _claim(store, scope="other-scope", now=1_000) == (DeliveryThreadKeyClaim.FRESH, None)
 
 
 def test_thread_key_bound_to_another_room_is_reclaimed(tmp_path: Path) -> None:
     """A re-pointed trigger room must not relate deliveries to a foreign root."""
-    store = ExternalTriggerReplayStore(tmp_path)
+    store = external_trigger_replay_store(tmp_path)
     reservation = _reserve(store, now=1_000)
     assert _bind(store, "$root-1", reservation=reservation, now=1_001) == "$root-1"
 
-    assert _claim(store, room="!elsewhere:localhost", now=1_002) == (ExternalTriggerThreadKeyClaim.FRESH, None)
-    assert _claim(store, room="!elsewhere:localhost", now=1_003) == (ExternalTriggerThreadKeyClaim.PENDING, None)
+    assert _claim(store, room="!elsewhere:localhost", now=1_002) == (DeliveryThreadKeyClaim.FRESH, None)
+    assert _claim(store, room="!elsewhere:localhost", now=1_003) == (DeliveryThreadKeyClaim.PENDING, None)
     # A continuation still in flight for the old room may not clobber the new room's reservation.
     assert _bind(store, "$root-1", reservation=None, now=1_004) is None
 
 
 def test_pending_thread_key_expires_and_release_needs_its_reservation(tmp_path: Path) -> None:
     """A crashed first delivery frees the key after the pending TTL; only the current owner may release early."""
-    store = ExternalTriggerReplayStore(tmp_path)
+    store = external_trigger_replay_store(tmp_path)
 
     reservation_a = _reserve(store, now=1_000)
-    assert _claim(store, now=1_060) == (ExternalTriggerThreadKeyClaim.PENDING, None)
+    assert _claim(store, now=1_060) == (DeliveryThreadKeyClaim.PENDING, None)
     reservation_b = _reserve(store, now=1_061)
 
     store.release_thread_key("campground", "site-42", reservation="someone-else")
     store.release_thread_key("campground", "site-42", reservation=reservation_a)
-    assert _claim(store, now=1_062) == (ExternalTriggerThreadKeyClaim.PENDING, None)
+    assert _claim(store, now=1_062) == (DeliveryThreadKeyClaim.PENDING, None)
 
     store.release_thread_key("campground", "site-42", reservation=reservation_b)
-    assert _claim(store, now=1_063) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    assert _claim(store, now=1_063) == (DeliveryThreadKeyClaim.FRESH, None)
 
 
 def test_release_drops_only_the_callers_pending_reservation(tmp_path: Path) -> None:
     """Release is a no-op for other scopes, missing keys, and bound keys."""
-    store = ExternalTriggerReplayStore(tmp_path)
+    store = external_trigger_replay_store(tmp_path)
     reservation = _reserve(store, now=1_000)
 
     store.release_thread_key("other-scope", "site-42", reservation=reservation)
     store.release_thread_key("campground", "missing", reservation=reservation)
-    assert _claim(store, now=1_001) == (ExternalTriggerThreadKeyClaim.PENDING, None)
+    assert _claim(store, now=1_001) == (DeliveryThreadKeyClaim.PENDING, None)
 
     assert _bind(store, "$root-1", reservation=reservation, now=1_002) == "$root-1"
     store.release_thread_key("campground", "site-42", reservation=reservation)
-    assert _claim(store, now=1_003) == (ExternalTriggerThreadKeyClaim.BOUND, "$root-1")
+    assert _claim(store, now=1_003) == (DeliveryThreadKeyClaim.BOUND, "$root-1")
 
 
 def test_late_failure_of_an_expired_reservation_cannot_release_the_new_owner(tmp_path: Path) -> None:
     """A outlives its lease, B reserves; A's late rollback must not free B's reservation."""
-    store = ExternalTriggerReplayStore(tmp_path)
+    store = external_trigger_replay_store(tmp_path)
     reservation_a = _reserve(store, now=1_000)
     reservation_b = _reserve(store, now=1_061)
 
     store.release_thread_key("campground", "site-42", reservation=reservation_a)
 
-    assert _claim(store, now=1_062) == (ExternalTriggerThreadKeyClaim.PENDING, None)
+    assert _claim(store, now=1_062) == (DeliveryThreadKeyClaim.PENDING, None)
     assert _bind(store, "$root-b", reservation=reservation_b, now=1_063) == "$root-b"
 
 
 def test_late_success_of_an_expired_reservation_cannot_bind_over_the_new_owner(tmp_path: Path) -> None:
     """A outlives its lease, B reserves and is still posting; A's late bind is refused."""
-    store = ExternalTriggerReplayStore(tmp_path)
+    store = external_trigger_replay_store(tmp_path)
     reservation_a = _reserve(store, now=1_000)
     reservation_b = _reserve(store, now=1_061)
 
     assert _bind(store, "$root-a", reservation=reservation_a, now=1_062) is None
-    assert _claim(store, now=1_063) == (ExternalTriggerThreadKeyClaim.PENDING, None)
+    assert _claim(store, now=1_063) == (DeliveryThreadKeyClaim.PENDING, None)
     assert _bind(store, "$root-b", reservation=reservation_b, now=1_064) == "$root-b"
     # Once bound, a late binder is told the real root and does not overwrite it.
     assert _bind(store, "$root-a", reservation=reservation_a, now=1_065) == "$root-b"
-    assert _claim(store, now=1_066) == (ExternalTriggerThreadKeyClaim.BOUND, "$root-b")
+    assert _claim(store, now=1_066) == (DeliveryThreadKeyClaim.BOUND, "$root-b")
 
 
 def test_bind_thread_root_refreshes_retention_for_continuations(tmp_path: Path) -> None:
     """Every continued delivery extends how long the key keeps routing to its root."""
-    store = ExternalTriggerReplayStore(tmp_path)
+    store = external_trigger_replay_store(tmp_path)
     reservation = _reserve(store, now=1_000)
     assert _bind(store, "$root-1", reservation=reservation, now=1_000) == "$root-1"
     assert _bind(store, "$root-1", reservation=None, now=1_500) == "$root-1"
 
-    assert _claim(store, now=2_099) == (ExternalTriggerThreadKeyClaim.BOUND, "$root-1")
-    assert _claim(store, now=2_101) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    assert _claim(store, now=2_099) == (DeliveryThreadKeyClaim.BOUND, "$root-1")
+    assert _claim(store, now=2_101) == (DeliveryThreadKeyClaim.FRESH, None)
 
 
 def _claim_thread_key_with_slow_read_worker(
@@ -884,21 +879,21 @@ def _claim_thread_key_with_slow_read_worker(
 ) -> None:
     """Claim one new thread key after slowing reads enough to expose missing cross-process locking."""
     original_read_store = cast(
-        "Callable[[ExternalTriggerReplayStore, Path], object]",
-        ExternalTriggerReplayStore._read_store,
+        "Callable[[DeliveryReplayStore, Path], object]",
+        DeliveryReplayStore._read_store,
     )
 
-    def slow_read_store(self: ExternalTriggerReplayStore, path: Path) -> object:
+    def slow_read_store(self: DeliveryReplayStore, path: Path) -> object:
         store = original_read_store(self, path)
         time.sleep(0.1)
         return store
 
-    ExternalTriggerReplayStore._read_store = slow_read_store
+    DeliveryReplayStore._read_store = slow_read_store
     try:
         if not start_event.wait(timeout=5):
             result_queue.put(("error", "timed out waiting for start signal"))
             return
-        claim, _root, _reservation = ExternalTriggerReplayStore(Path(control_state_root)).claim_thread_key(
+        claim, _root, _reservation = external_trigger_replay_store(Path(control_state_root)).claim_thread_key(
             "campground",
             "site-42",
             room_id=ROOM,
