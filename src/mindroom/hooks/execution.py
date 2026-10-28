@@ -44,8 +44,6 @@ from .types import (
 )
 
 if TYPE_CHECKING:
-    from mindroom.llm.messages import Message
-
     from .registry import HookRegistry
 
 logger = get_logger(__name__)
@@ -150,24 +148,12 @@ def _snapshot_tool_observer_error(error: BaseException | None) -> BaseException 
     return copied if isinstance(copied, BaseException) else Exception(str(error))
 
 
-def _snapshot_compaction_messages(messages: list[Message]) -> list[Message] | None:
-    """Return one isolated snapshot of compaction messages, or None when they cannot be copied."""
-    try:
-        return deepcopy(messages)
-    except Exception as error:
-        logger.warning(
-            "Skipping compaction hooks after a snapshot copy failure",
-            error=repr(error),
-            message_count=len(messages),
-        )
-        return None
-
-
 def _bind_hook_context(
     registry: HookRegistry,
     hook: RegisteredHook,
     context: _HookExecutionContext,
-) -> _HookExecutionContext | None:
+) -> _HookExecutionContext:
+    """Return the copy of ``context`` one hook receives, under that hook's plugin name, settings, and logger."""
     replacement_kwargs: dict[str, object] = {
         "plugin_name": hook.plugin_name,
         "settings": dict(hook.settings),
@@ -179,12 +165,6 @@ def _bind_hook_context(
     if isinstance(context, ToolAfterCallContext):
         replacement_kwargs["result"] = _snapshot_tool_observer_value(context.result)
         replacement_kwargs["error"] = _snapshot_tool_observer_error(context.error)
-    if isinstance(context, CompactionHookContext):
-        # Hooks share the transcript: it is a tuple of frozen lines no hook can change.
-        messages_snapshot = _snapshot_compaction_messages(context.messages)
-        if messages_snapshot is None:
-            return None
-        replacement_kwargs["messages"] = messages_snapshot
     if isinstance(context, MessageEnrichContext | SystemEnrichContext):
         replacement_kwargs["_items"] = []
     return replace(context, **replacement_kwargs)
@@ -284,8 +264,6 @@ async def emit(
     try:
         for hook in _eligible_hooks(registry, event_name, context):
             hook_context = _bind_hook_context(registry, hook, context)
-            if hook_context is None:
-                return
             try:
                 await _invoke_hook(hook, hook_context)
             except asyncio.CancelledError:
@@ -324,8 +302,6 @@ async def emit_gate(
                 "ToolBeforeCallContext",
                 _bind_hook_context(registry, hook, context),
             )
-            if hook_context is None:
-                return
             invocation = await _invoke_hook(hook, hook_context)
             if not invocation.succeeded:
                 continue
@@ -470,14 +446,10 @@ async def _emit_serial_transform(
     current_draft = context.draft
     for hook in _eligible_hooks(registry, event_name, context):
         hook_draft = _copy_transform_draft(current_draft) if copy_on_write else current_draft
-        bound_context = _bind_hook_context(
-            registry,
-            hook,
-            _transform_context_with_draft(context, hook_draft),
+        hook_context = cast(
+            "_TransformContext",
+            _bind_hook_context(registry, hook, _transform_context_with_draft(context, hook_draft)),
         )
-        if bound_context is None:
-            return current_draft
-        hook_context = cast("_TransformContext", bound_context)
         try:
             invocation = await _invoke_hook(hook, hook_context)
         except asyncio.CancelledError:
