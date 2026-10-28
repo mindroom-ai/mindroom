@@ -9,7 +9,7 @@ import math
 from dataclasses import dataclass, fields
 from typing import Any, cast, get_args, get_origin, get_type_hints
 
-from mindroom.llm.media import DOCUMENT_MIME_TYPES, Audio, File, Image, Video
+from mindroom.llm.media import DOCUMENT_MIME_TYPES, MEDIA_MIME_FAMILIES, Audio, File, Image, Video
 from mindroom.tool_system.tool_function import ToolValue
 
 MAX_MEDIA_COUNT = 8
@@ -23,7 +23,6 @@ _KEY = "mindroom_tool_result"
 _MEDIA_MODELS = {"images": Image, "audios": Audio, "videos": Video, "files": File}
 _RESOURCE_FIELDS = {"content", "url", "filepath"}
 type _Media = Image | Audio | Video | File
-MEDIA_MIME_FAMILIES: dict[type[_Media], str] = {Image: "image/", Audio: "audio/", Video: "video/"}
 
 
 def _json_types(hint: object) -> tuple[object, ...]:

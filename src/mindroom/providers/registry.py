@@ -34,7 +34,13 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import Capabilities, ModelProvider
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-__all__ = ["build_model_provider", "check_extra_kwargs", "model_capabilities", "stream_idle_timeout_seconds"]
+__all__ = [
+    "build_model_provider",
+    "check_extra_kwargs",
+    "configured_model",
+    "model_capabilities",
+    "stream_idle_timeout_seconds",
+]
 
 logger = get_logger(__name__)
 
@@ -53,7 +59,7 @@ _SETTINGS_KEYS = {
 }
 
 
-def _configured_model(config: Config, runtime_paths: RuntimePaths, model_name: str) -> ModelConfig:
+def configured_model(config: Config, runtime_paths: RuntimePaths, model_name: str) -> ModelConfig:
     """Return the model configured as ``model_name``, with the key the dashboard saved for it applied."""
     if model_name not in config.models:
         available = ", ".join(sorted(config.models))
@@ -118,7 +124,7 @@ def build_model_provider(
     Raises ``ValueError`` for an unknown model name, an unsupported provider, or ``extra_kwargs`` its route
     does not accept.
     """
-    model_config = _configured_model(config, runtime_paths, model_name)
+    model_config = configured_model(config, runtime_paths, model_name)
     adapter = _build_adapter(model_config, config, runtime_paths, execution_identity=execution_identity)
     logger.info(
         "Using AI model",
@@ -184,5 +190,5 @@ def check_extra_kwargs(model_config: ModelConfig, runtime_paths: RuntimePaths) -
 
 def model_capabilities(config: Config, runtime_paths: RuntimePaths, model_name: str) -> Capabilities:
     """Return what the route of the model configured as ``model_name`` supports; building its adapter sends nothing."""
-    model_config = _configured_model(config, runtime_paths, model_name)
+    model_config = configured_model(config, runtime_paths, model_name)
     return _build_adapter(model_config, config, runtime_paths, execution_identity=None).capabilities

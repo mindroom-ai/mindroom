@@ -53,6 +53,7 @@ def _replayed_input(adapter: ResponsesAdapter, messages: list[Message]) -> list[
         responses_replay(messages, store=False, portable_replay=True, native_compaction=None),
         cache_system_prompt=adapter.settings.cache_system_prompt,
         explicit_breakpoint=adapter.wire.explicit_breakpoint,
+        provider=adapter.identity.provider_name,
     )
 
 
@@ -416,6 +417,17 @@ def test_responses_image_file_id_retains_unknown_dimension_allowance(tmp_path: P
         [Message(role="user", content=[{"type": "input_image", "file_id": "file_image", "detail": "high"}])],
     )
     assert 3000 <= tokens < 3100
+
+
+def test_responses_history_with_an_unreadable_attachment_is_sized_canonically(tmp_path: Path) -> None:
+    """An attachment file that is gone leaves the route no estimate; the request sends the media note in its place."""
+    gone = Image(filepath=str(tmp_path / "gone.png"), mime_type="image/png")
+
+    tokens = responses_adapter(tmp_path).estimate_portable_replay_tokens(
+        [Message(role="user", content="Describe.", images=[gone])],
+    )
+
+    assert tokens is None
 
 
 def _reasoned_answer(ciphertext: str, *, reasoning_tokens: int = 0, own_turn: bool = False) -> list[Message]:

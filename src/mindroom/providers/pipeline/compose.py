@@ -1,9 +1,10 @@
 """Compose the request pipeline around one provider adapter.
 
-Outermost first: portable deferred tool search, media fallback, the malformed tool-call guidance retry, stream
-retry with the idle limit, the safeguard refusal, and request logging. Each attempt is therefore logged, a refused
-one included; and retries never resend media a route rejected, since the guidance retry resends the request the media
-fallback sent.
+Outermost first: portable deferred tool search, media fallback, remote media downloads, the malformed tool-call
+guidance retry, stream retry with the idle limit, the safeguard refusal, and request logging. Each attempt is
+therefore logged, a refused one included; a URL that cannot be downloaded fails inside the media fallback, which sends
+its note instead; and retries never resend media a route rejected or download media again, since the guidance retry
+resends the request the downloads produced.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from mindroom.llm.tool_search import portable_tool_search_stream
 from mindroom.providers.pipeline.guidance_retry import guidance_retry_stream
 from mindroom.providers.pipeline.media import media_fallback_stream
 from mindroom.providers.pipeline.refusal import refusal_stream
+from mindroom.providers.pipeline.remote_media import remote_media_stream
 from mindroom.providers.pipeline.request_log import RequestLog, logged_stream
 from mindroom.providers.pipeline.retry import retrying_stream
 from mindroom.providers.pipeline.wrapped import WrappedProvider
@@ -37,5 +39,6 @@ def wrap_provider(
     provider = WrappedProvider(provider, refusal_stream)
     provider = WrappedProvider(provider, partial(retrying_stream, idle_timeout_seconds=idle_timeout_seconds))
     provider = WrappedProvider(provider, guidance_retry_stream)
+    provider = WrappedProvider(provider, remote_media_stream)
     provider = WrappedProvider(provider, partial(media_fallback_stream, fallback_prompt=media_fallback_prompt))
     return WrappedProvider(provider, portable_tool_search_stream)
