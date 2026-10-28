@@ -532,7 +532,7 @@ export function EgressServiceItem({
         </div>
       </td>
       <td className={SERVICE_CELL.actions}>
-        <div className="flex flex-wrap items-center gap-1 max-sm:justify-start sm:justify-end">
+        <div className="flex flex-wrap items-center gap-1 max-sm:justify-start sm:flex-nowrap sm:justify-end">
           {busyNote ? (
             <BusyNote>{busyNote}</BusyNote>
           ) : canConnect ? (
