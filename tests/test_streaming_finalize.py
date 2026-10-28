@@ -315,7 +315,7 @@ async def test_transport_failed_terminal_update_drops_committed_interactive_meta
 {"question":"Choose","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}
 ```"""
 
-    assert await streaming._send_or_edit_message(_client(), is_final=False)
+    assert await streaming._send_or_edit_message(_client())
 
     transport_outcome = await streaming.finalize(_client())
 

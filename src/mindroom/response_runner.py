@@ -3990,14 +3990,11 @@ class ResponseRunner:
         # message:before_response, has a completed record but did not deliver it.
         generated: list[FinalDeliveryOutcome] = []
 
-        def build_post_response_outcome(final_delivery_outcome: FinalDeliveryOutcome) -> ResponseOutcome:
+        def build_post_response_outcome(_final_delivery_outcome: FinalDeliveryOutcome) -> ResponseOutcome:
             return ResponseOutcome(
                 response_run_id=recorder.run_id or turn.run_id,
-                run_succeeded=(
-                    recorder.outcome == "completed"
-                    if generated
-                    else final_delivery_outcome.terminal_status == "completed" and not final_delivery_outcome.suppressed
-                ),
+                # A turn that never returned a delivery was cut short, even when its record completed first.
+                run_succeeded=bool(generated) and recorder.outcome == "completed",
                 response_target=turn.response_target,
                 thread_summary_message_count_hint=self._thread_summary_message_count_hint(request),
                 thread_summary_entity_name=self.deps.agent_name,

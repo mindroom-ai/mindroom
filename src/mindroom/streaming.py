@@ -848,16 +848,15 @@ class StreamingResponse:
     async def _send_or_edit_message(
         self,
         client: nio.AsyncClient,
-        is_final: bool = False,
         *,
         allow_empty_progress: bool = False,
         boundary_refresh: bool = False,
         force_nonterminal_delivery: bool = False,
         capture_completions: tuple[asyncio.Future[None], ...] = (),
     ) -> bool:
-        """Send new message or edit existing one."""
+        """Send one progress update: the stream's first message, or an edit of it; ``finalize`` sends the terminal one."""
         prepared_delivery = await self._prepare_delivery_async(
-            is_final=is_final,
+            is_final=False,
             allow_empty_progress=allow_empty_progress,
         )
         if prepared_delivery is None:
@@ -866,7 +865,7 @@ class StreamingResponse:
         return await self._send_prepared_delivery(
             client,
             prepared_delivery=prepared_delivery,
-            is_final=is_final,
+            is_final=False,
             boundary_refresh=boundary_refresh,
             force_nonterminal_delivery=force_nonterminal_delivery,
             capture_completions=capture_completions,

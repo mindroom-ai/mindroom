@@ -6743,7 +6743,7 @@ async def test_terminal_send_cancellation_leaves_the_ending_to_the_span_exit(tmp
         content_sent={"body": "partial answer"},
     )
     with patch("mindroom.streaming.edit_message_result", new=AsyncMock(return_value=delivered)):
-        assert await streaming._send_or_edit_message(coordinator._client(), is_final=False)
+        assert await streaming._send_or_edit_message(coordinator._client())
 
     with pytest.raises(asyncio.CancelledError, match="sync_restart"):
         await streaming.finalize(coordinator._client())

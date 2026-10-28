@@ -289,7 +289,7 @@ async def test_streaming_initial_message_over_limit() -> None:
     streaming.accumulated_text = large_text
     streaming.last_update = float("-inf")  # Force immediate send
 
-    await streaming._send_or_edit_message(client, is_final=True)
+    await streaming.finalize(client)
 
     # Should have sent with large message handling
     assert len(client.messages_sent) == 1
@@ -315,7 +315,7 @@ async def test_streaming_edit_grows_over_limit() -> None:
     # Start with small message
     streaming.accumulated_text = "Small start"
     streaming.last_update = float("-inf")
-    await streaming._send_or_edit_message(client, is_final=False)
+    await streaming._send_or_edit_message(client)
 
     # Should have an event ID now
     assert streaming.event_id is not None
@@ -326,7 +326,7 @@ async def test_streaming_edit_grows_over_limit() -> None:
     streaming.accumulated_text = large_text
 
     # This should trigger edit with large message handling
-    await streaming._send_or_edit_message(client, is_final=True)
+    await streaming.finalize(client)
 
     # Should have sent an edit
     assert len(client.messages_sent) == 2
@@ -376,9 +376,10 @@ async def test_streaming_multiple_edits_with_growth(monkeypatch: pytest.MonkeyPa
     for label, size in sizes:
         streaming.accumulated_text = "x" * size
         streaming.last_update = float("-inf")
-        is_final = label == "Larger"
-
-        await streaming._send_or_edit_message(client, is_final=is_final)
+        if label == "Larger":
+            await streaming.finalize(client)
+        else:
+            await streaming._send_or_edit_message(client)
         if cadence_edits:
             # Wait out the interval the latest in-progress edit reserved; every
             # oversized edit exceeds 27 KB, so it always outlasts the 5 s floor.
@@ -423,7 +424,7 @@ async def test_streaming_with_thread_context() -> None:
     streaming.accumulated_text = large_text
     streaming.last_update = float("-inf")
 
-    await streaming._send_or_edit_message(client, is_final=True)
+    await streaming.finalize(client)
 
     sent_content = client.messages_sent[0][2]
 

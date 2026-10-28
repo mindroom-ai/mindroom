@@ -1260,7 +1260,7 @@ class TestStreamingResponseRoomMode:
         sr.accumulated_text = "Hello!"
 
         client = AsyncMock()
-        await sr._send_or_edit_message(client, is_final=True)
+        await sr.finalize(client)
 
         assert captured["m.relates_to"] == {"m.in_reply_to": {"event_id": "$event123"}}
 
@@ -1285,7 +1285,7 @@ class TestStreamingResponseRoomMode:
         sr.accumulated_text = "Hello!"
 
         client = AsyncMock()
-        await sr._send_or_edit_message(client, is_final=True)
+        await sr.finalize(client)
 
         assert "m.relates_to" in captured
         assert captured["m.relates_to"]["rel_type"] == "m.thread"

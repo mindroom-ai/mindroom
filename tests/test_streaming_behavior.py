@@ -688,10 +688,7 @@ class TestStreamingBehavior:
             assert mock_edit.await_count == 2
 
             streaming.accumulated_text += " final"
-            assert await streaming._send_or_edit_message(
-                mock_client,
-                is_final=True,
-            )
+            await streaming.finalize(mock_client)
             assert mock_edit.await_count == 3
 
     @pytest.mark.asyncio
@@ -3448,11 +3445,10 @@ class TestStreamingBehavior:
             async def _send_or_edit_message(
                 self,
                 client: nio.AsyncClient,
-                is_final: bool = False,
                 **kwargs: object,
             ) -> bool:
                 recorded_force_flags.append(bool(kwargs.get("force_nonterminal_delivery")))
-                return await super()._send_or_edit_message(client, is_final, **kwargs)
+                return await super()._send_or_edit_message(client, **kwargs)
 
         async def pause_after_buffering_tool(
             _response_stream: AsyncIterator[object],
@@ -4586,10 +4582,7 @@ class TestTerminalEditDurability:
         streaming.accumulated_text = "the answer"
 
         with patch("mindroom.streaming.edit_message_result", AsyncMock(return_value=delivered)) as direct:
-            await streaming._send_or_edit_message(
-                AsyncMock(),
-                is_final=True,
-            )
+            await streaming.finalize(AsyncMock())
 
         [terminal] = records.writes
         assert (terminal.kind, terminal.event_id) == ("terminal", "$visible"), (
@@ -4684,10 +4677,7 @@ class TestStreamTransportStopsWithItsMembership:
         streaming.accumulated_text = "the answer"
 
         with patch("mindroom.streaming.edit_message_result", AsyncMock()) as direct:
-            await streaming._send_or_edit_message(
-                AsyncMock(),
-                is_final=True,
-            )
+            await streaming.finalize(AsyncMock())
 
         assert [write.kind for write in records.writes] == ["terminal"]
         direct.assert_not_awaited()
