@@ -158,12 +158,7 @@ class EditRegenerator:
             source_event_ids=record.source_event_ids,
             excluded_senders=persisted_bot_user_ids(self.deps.runtime_paths),
             # In room mode the room is one conversation, threads included.
-            whole_room=self.deps.runtime.config.get_entity_thread_mode(
-                self.deps.agent_name,
-                self.deps.runtime_paths,
-                room_id=target.room_id,
-            )
-            == "room",
+            whole_room=self.deps.resolver.room_is_one_conversation(target.room_id),
         )
 
     async def handle_message_edit(  # noqa: C901, PLR0911, PLR0912

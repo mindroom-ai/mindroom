@@ -960,14 +960,7 @@ class AgentBot:
 
     def _room_scope_is_single_conversation(self, room_id: str) -> bool:
         """Return whether this agent treats the whole room as one conversation."""
-        return (
-            self.config.get_entity_thread_mode(
-                self.agent_name,
-                self.runtime_paths,
-                room_id=room_id,
-            )
-            == "room"
-        )
+        return self._conversation_resolver.room_is_one_conversation(room_id)
 
     def _approval_ended(self, ended: ApprovalEnded) -> None:
         """Let the ended approval's conversation answer its waiting messages, and settle what its reply owes."""

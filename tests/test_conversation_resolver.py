@@ -317,6 +317,21 @@ async def test_reply_to_missing_parent_keeps_unproven_candidate(config: Config) 
     assert result.thread_context.stable_target.resolved_thread_id is None
 
 
+@pytest.mark.parametrize(("thread_mode", "one_conversation"), [("thread", False), ("room", True)])
+def test_room_is_one_conversation_only_in_room_thread_mode(
+    tmp_path: Path,
+    thread_mode: str,
+    one_conversation: bool,
+) -> None:
+    """Room thread mode makes the whole room, threads included, one conversation."""
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General", thread_mode=thread_mode)}),
+        test_runtime_paths(tmp_path),
+    )
+
+    assert _resolver(config).room_is_one_conversation(_ROOM_ID) is one_conversation
+
+
 @pytest.mark.asyncio
 async def test_room_thread_mode_skips_thread_resolution(tmp_path: Path) -> None:
     """Agents in room thread mode treat every message as room-level."""

@@ -256,6 +256,17 @@ class ConversationResolver:
 
     deps: ConversationResolverDeps
 
+    def room_is_one_conversation(self, room_id: str) -> bool:
+        """Return whether this agent treats the whole room as one conversation, threads included."""
+        return (
+            self.deps.runtime.config.get_entity_thread_mode(
+                self.deps.agent_name,
+                self.deps.runtime_paths,
+                room_id=room_id,
+            )
+            == "room"
+        )
+
     def _client(self) -> nio.AsyncClient:
         client = self.deps.runtime.client
         if client is None:
@@ -610,16 +621,8 @@ class ConversationResolver:
         target is one the homeserver will not serve, and
         ``ThreadMembershipLookupError`` when the scope is unknown for now.
         """
-        config = self.deps.runtime.config
         event_info = EventInfo.from_event(event.source)
-        if (
-            config.get_entity_thread_mode(
-                self.deps.agent_name,
-                self.deps.runtime_paths,
-                room_id=room.room_id,
-            )
-            == "room"
-        ):
+        if self.room_is_one_conversation(room.room_id):
             return self._trusted_automation_fire_root_event_id(
                 event.source,
                 event_info,
@@ -925,7 +928,6 @@ class ConversationResolver:
         """Extract minimal context for router relays and defer thread hydration until after lock."""
         resolved_event_source = await resolve_event_source_content(event.source, self._client())
         resolved_event_source = _source_with_payload_metadata(resolved_event_source, payload_metadata)
-        config = self.deps.runtime.config
 
         mentioned_agents, am_i_mentioned, has_non_agent_mentions = self._mention_facts(
             resolved_event_source,
@@ -935,14 +937,7 @@ class ConversationResolver:
         if am_i_mentioned:
             self.deps.logger.info("Mentioned", event_id=event.event_id, room_id=room.room_id)
 
-        if (
-            config.get_entity_thread_mode(
-                self.deps.agent_name,
-                self.deps.runtime_paths,
-                room_id=room.room_id,
-            )
-            == "room"
-        ):
+        if self.room_is_one_conversation(room.room_id):
             resolved_thread_id = None
         else:
             # The relay's own ``m.thread`` relation, and nothing else. This context skips the
@@ -992,7 +987,6 @@ class ConversationResolver:
         """Resolve event metadata, mentions, stable context, and optional dispatch-local state."""
         resolved_event_source = await resolve_event_source_content(event.source, self._client())
         resolved_event_source = _source_with_payload_metadata(resolved_event_source, payload_metadata)
-        config = self.deps.runtime.config
 
         mentioned_agents, am_i_mentioned, has_non_agent_mentions = self._mention_facts(
             resolved_event_source,
@@ -1004,14 +998,7 @@ class ConversationResolver:
 
         event_info = EventInfo.from_event(resolved_event_source)
         dispatch_context: DispatchThreadContext | None = None
-        if (
-            config.get_entity_thread_mode(
-                self.deps.agent_name,
-                self.deps.runtime_paths,
-                room_id=room.room_id,
-            )
-            == "room"
-        ):
+        if self.room_is_one_conversation(room.room_id):
             is_thread = False
             thread_id = None
             thread_history: list[ResolvedVisibleMessage] = []

@@ -558,7 +558,7 @@ async def test_an_edit_of_a_message_someone_answered_after_is_ignored(tmp_path: 
     """Later turns built on the old text, so editing an earlier message regenerates nothing."""
     record = _turn_record()
     harness = _harness(tmp_path, turn_record=record)
-    harness.config.agents[AGENT_NAME].thread_mode = thread_mode
+    harness.resolver.room_is_one_conversation.return_value = thread_mode == "room"
     harness.later_message_exists.return_value = True
     event, event_info = _edit_event()
 
