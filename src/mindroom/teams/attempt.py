@@ -1,8 +1,7 @@
 """One attempt of a team run, a turn's or a resumed run's: the reply document its events build and what it produced.
 
-A streamed attempt records its document's text without tool markers, however it ends; a blocking attempt renders and
-records its reply from the records the run hands over, which give every attempt's run metadata. An attempt of either
-kind that pauses shows the document its events built.
+An attempt records its document's text without tool markers, however it ends, and pauses showing that document; the
+records the run hands over give its run metadata.
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.response_turn import TurnPartialSnapshot
 from mindroom.run_storage import TerminalRecord
-from mindroom.teams.presentation import apply_team_event, format_team_response
+from mindroom.teams.presentation import apply_team_event
 from mindroom.teams.runtime import MemberEvent, team_usage
 from mindroom.timing import emit_timing_event
 from mindroom.tool_system.events import StructuredStreamChunk
@@ -63,9 +62,6 @@ class TeamAttempt:
     run_id: str
     members: ResolvedExactTeamMembers
     presentation: TeamStreamPresentation
-    # Whether the document streams as it grows; a blocking turn renders a reply that does not pause from the run's
-    # records instead.
-    stream: bool
     team_name: str
     runtime_model_name: str
     # The history preparation of a new run; a resume prepares none.
@@ -91,20 +87,15 @@ class TeamAttempt:
         )
 
     def interrupted_text(self) -> str:
-        """Return the text the turn records when this attempt is stopped or fails.
+        """Return the text the turn records when this attempt is stopped or fails: its document without tool markers.
 
-        A streamed attempt records its document's text without tool markers; a blocking one its stored runs' document,
-        stripped, or nothing before the run stored a record. A stopped leader that wrote nothing
-        contributes nothing; a failed one contributes the reason its run recorded, credentials redacted. Either text
-        ends with the no-consensus note only once the team run completed, so it matches the message a stopped
-        streamed reply shows.
+        The text ends with the no-consensus note only once the team run completed, so it matches the message a stopped
+        reply shows.
         """
         record = self.records.record
-        if self.stream:
-            return self.presentation.text_without_tool_markers(
-                finished=record is not None and record.status is RunStatus.completed,
-            )
-        return format_team_response(record, self.presentation).strip() if record is not None else ""
+        return self.presentation.text_without_tool_markers(
+            finished=record is not None and record.status is RunStatus.completed,
+        )
 
     def apply(self, event: TeamRunEvent) -> bool:
         """Fold one run event into the attempt; return whether the document changed."""

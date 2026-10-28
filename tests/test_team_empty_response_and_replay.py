@@ -43,6 +43,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
     from pathlib import Path
 
+    from mindroom.tool_system.events import ToolTraceEntry
+
 NO_TEAM_RESPONSE = "🤝 **Team Response** (GeneralAgent):\n\nNo team response generated."
 
 
@@ -297,9 +299,9 @@ async def test_a_tool_only_team_reply_shows_the_fallback_document_but_records_no
     monkeypatch: pytest.MonkeyPatch,
     show_tool_calls: bool,
 ) -> None:
-    """The fallback line is display chrome, not an answer to replay; the attempt ran tools, so it is not retried.
+    """A reply that shows nothing ends with the fallback line, display chrome rather than an answer to replay.
 
-    A blocking reply delivers no tool trace, so shown tool calls add no marker to the fallback document either.
+    The attempt ran tools, so it is not retried; a reply that shows its tool calls shows them instead of the line.
     """
     team = _team(
         tmp_path,
@@ -307,10 +309,16 @@ async def test_a_tool_only_team_reply_shows_the_fallback_document_but_records_no
         leader=[delegate("call-team", "general", "Run the tool"), answer("")],
         general=[calls(tool_call("touch", "call-touch", label="noon")), answer("")],
     )
+    tool_trace: list[ToolTraceEntry] = []
 
-    text = await team.respond(message="Run the tool.", show_tool_calls=show_tool_calls)
+    text = await team.respond(message="Run the tool.", show_tool_calls=show_tool_calls, tool_trace_collector=tool_trace)
 
-    assert text == NO_TEAM_RESPONSE
+    if show_tool_calls:
+        assert text.startswith("🤝 **Team Response** (GeneralAgent):\n\n**GeneralAgent**:\n\n🔧 `touch` [1]")
+        assert [entry.tool_name for entry in tool_trace] == ["touch", "delegate_task_to_member"]
+    else:
+        assert text == NO_TEAM_RESPONSE
+        assert tool_trace == []
     assert len(team.models["default"].requests) == 2
     assert team.recorder.outcome == "completed"
     assert team.recorder.assistant_text == ""
