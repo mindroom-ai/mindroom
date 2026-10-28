@@ -1847,13 +1847,27 @@ class TestTheTerminalRecordCommitsWithItsAcknowledgement:
         )
         assert pending is not None
         gateway = _gateway(tmp_path, alice)
-        await admit_room_event(alice, _ROOM_ID, "$cause")
+        await alice.admit(
+            InboundEvent(
+                event_id="$cause",
+                room_id=_ROOM_ID,
+                thread_id=None,
+                kind=EventKind.MESSAGE,
+                event_class=EventClass.ACTIONABLE,
+                sender="@user:localhost",
+                origin_server_ts=1_000,
+                source={"event_id": "$cause", "content": {"msgtype": "m.text", "body": "question"}},
+            ),
+        )
+        assert await alice.is_pending("$cause")
         delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "answer"})
 
         with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
             assert await self._send_final(gateway, "answer") == "$sent"
 
         assert (await _turn_row(alice, DeliveryStage.FINAL)).acknowledged_event_id == "$sent"
+        # The answer owed for its own source settles it, as an unbound answer always did.
+        assert not await alice.is_pending("$cause")
         record = await turn_store.get_turn_record("$cause")
         assert record is not None
         assert record.completed is False

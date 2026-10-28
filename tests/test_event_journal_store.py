@@ -1129,6 +1129,20 @@ class TestRedaction:
         assert [event.event_id for event in await alice.pending()] == ["$redaction"]
         assert await bodies(alice) == []
 
+    async def test_a_redaction_outlives_leaving_and_rejoining_the_room(self, alice: PrincipalStore) -> None:
+        """A rejoin that delivers the message again without its redaction still reads it deleted."""
+        await admit_room_membership(alice, ROOM, "join")
+        await admit(alice, "$original", content=text("secret"))
+        await admit(alice, "$redaction", ts=2_000, redacts="$original", kind=EventKind.REDACTION)
+        await admit_room_membership(alice, ROOM, "leave", source=DepartureSource.LOCAL)
+        await admit_room_membership(alice, ROOM, "join")
+
+        await admit(alice, "$original", ts=3_000, content=text("secret"))
+
+        assert await alice.redacted_event_ids(ROOM, ("$original",)) == {"$original"}
+        assert not await alice.is_pending("$original")
+        assert await bodies(alice) == []
+
     async def test_redaction_settlement_leaves_other_pending_work_unchanged(self, alice: PrincipalStore) -> None:
         """Only a matching turn-backed source becomes terminal."""
         await admit(alice, "$unrelated")

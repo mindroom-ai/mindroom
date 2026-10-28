@@ -9166,3 +9166,59 @@ def test_an_automation_turn_is_not_queued_for_memory(hook_source: str | None, fl
     )
 
     assert (queue is not None) is flushed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply_exists", [False, True])
+async def test_a_batch_whose_source_ended_answers_the_rest_only_while_no_reply_exists(
+    tmp_path: Path,
+    reply_exists: bool,
+) -> None:
+    """Before a reply exists only the ended source settles and the rest answer apart; once one exists, the batch ends."""
+    bot = _bot(tmp_path)
+    target = _target(thread_id="$thread", reply_to_event_id="$f")
+    envelope = _envelope(target, source_event_id="$f")
+    delivery_gateway = MagicMock(spec=DeliveryGateway)
+    delivery_gateway.send_text = AsyncMock(return_value="$placeholder")
+    # Whether an earlier attempt left a reply whose records now settle the batch.
+    delivery_gateway.settle_unclaimed_reply = AsyncMock(return_value=reply_exists)
+    request_preparer = MagicMock(spec=ResponsePayloadPreparer)
+    request_preparer.prepare = AsyncMock()
+    runner = ResponseRunner(
+        replace(
+            unwrap_extracted_collaborator(bot._response_runner).deps,
+            delivery_gateway=delivery_gateway,
+            request_preparer=request_preparer,
+        ),
+    )
+    preparation = SourcePreparation(invalid=("$s",), surviving=("$f",))
+    on_sources_invalidated = AsyncMock()
+    on_source_turn_suppressed = AsyncMock()
+    request = ResponseRequest(
+        sources=ResponseSources(pending_event_ids=("$f", "$s"), logical_source_event_ids=("$s", "$f")),
+        thread_history=[],
+        prompt="first and second",
+        user_id="@user:localhost",
+        response_envelope=envelope,
+        payload_preparation=_preparation(target, envelope),
+        prepare_source_turn=AsyncMock(return_value=preparation),
+        on_source_turn_suppressed=on_source_turn_suppressed,
+        on_sources_invalidated=on_sources_invalidated,
+    )
+
+    prepared_request = await runner._begin_locked_turn(
+        request,
+        resolved_target=target,
+        history_scope=runner.deps.state_writer.history_scope(),
+        execution_identity=runner.deps.tool_runtime.build_execution_identity(target=target, user_id=request.user_id),
+        placeholder_message="Thinking...",
+    )
+
+    assert prepared_request is None
+    delivery_gateway.send_text.assert_not_awaited()
+    request_preparer.prepare.assert_not_awaited()
+    on_source_turn_suppressed.assert_not_awaited()
+    if reply_exists:
+        on_sources_invalidated.assert_not_awaited()
+    else:
+        on_sources_invalidated.assert_awaited_once_with(preparation)

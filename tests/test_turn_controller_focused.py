@@ -6336,3 +6336,124 @@ async def test_only_a_router_relay_of_a_human_reads_relay_context(
     assert len(harness.runner.requests) == 1
     assert harness.runner.requests[0].user_id == original_sender
     assert trusted_context.await_count == (1 if relay_context else 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ended_by", ["deletion", "relay_answer"])
+async def test_a_batch_source_ended_before_its_reply_hands_the_rest_back_once_the_claim_releases(
+    config: Config,
+    tmp_path: Path,
+    ended_by: str,
+) -> None:
+    """S of a pending [S, F] deleted, or answered by a relay, before any reply: S settles, F answers on its own later."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    first = _text_event("first", event_id="$s:localhost")
+    second = _text_event("second", event_id="$f:localhost")
+    target = MessageTarget.resolve(room.room_id, None, second.event_id)
+    dispatch = PreparedDispatch(
+        requester_user_id=_SENDER,
+        context=MessageContext(
+            am_i_mentioned=True,
+            is_thread=False,
+            thread_id=None,
+            thread_history=(),
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        ),
+        target=target,
+        correlation_id=second.event_id,
+        envelope=harness.controller.deps.resolver.build_envelope(
+            event=second,
+            facts=make_ingress_facts(second.sender, requester_user_id=_SENDER),
+            target=target,
+        ),
+    )
+    pending = await harness.turn_store.record_pending_turn(
+        harness.turn_store.attach_response_context(
+            TurnRecord.create([first.event_id, second.event_id], completed=False, requester_id=_SENDER),
+            history_scope=harness.turn_store.response_history_scope(
+                ResponseAction(kind="individual"),
+                requester_user_id=_SENDER,
+            ),
+            conversation_target=target,
+        ),
+    )
+    assert pending is not None
+    # The response task holds the batch's claim until it ends.
+    claim = await harness.turn_store.claim(pending)
+    assert isinstance(claim, TurnClaim)
+    if ended_by == "deletion":
+        await _redact(harness, first.event_id, _ROOM_ID)
+    else:
+        await harness.turn_store.record_turn(
+            TurnRecord.create(
+                ["$relay:localhost"],
+                discovery_event_ids=[first.event_id],
+                response_event_id="$relay-answer:localhost",
+            ),
+            room_id=_ROOM_ID,
+        )
+
+    await harness.controller._execute_response_action(
+        room,
+        second,
+        dispatch,
+        ResponseAction(kind="individual"),
+        DispatchPayloadInputs((), (), ()),
+        processing_log="Processing",
+        dispatch_started_at=0.0,
+        handled_turn=pending,
+    )
+
+    assert harness.ignored_dispatch_sources == [(first.event_id,)]
+    assert harness.retried_dispatch_sources == [], "the survivor waited for the response's claim"
+    claim.release()
+    assert harness.retried_dispatch_sources == [(second.event_id,)]
+    assert not await harness.turn_store.is_handled(_ROOM_ID, second.event_id)
+
+
+@pytest.mark.asyncio
+async def test_router_recovery_relays_once_past_every_echo_of_a_coalesced_voice_turn(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two finalized echoes of one routing turn, then a crash before the relay: the replay relays exactly once."""
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general")
+    event = _text_event("route this", event_id="$voice-2:localhost")
+    echoes = {"$voice-1:localhost": "$echo-1:localhost", "$voice-2:localhost": "$echo-2:localhost"}
+    for source, echo in echoes.items():
+        await harness.turn_store.record_visible_echo(_ROOM_ID, source, echo)
+        await harness.turn_store.record_finalized_visible_echo(source, echo, is_fallback=False)
+    handled_turn = TurnRecord.create(list(echoes), completed=False)
+    send_text = harness.gateway.send_text
+    monkeypatch.setattr(harness.gateway, "send_text", AsyncMock(side_effect=RuntimeError("crash before the relay")))
+    with pytest.raises(RuntimeError, match="crash before the relay"):
+        await harness.controller._execute_router_relay(
+            room,
+            event,
+            (),
+            requester_user_id=_SENDER,
+            handled_turn=handled_turn,
+        )
+    monkeypatch.setattr(harness.gateway, "send_text", send_text)
+
+    with patch(
+        "mindroom.visible_response_reconciliation.find_response_event_ids_via_room_messages",
+        return_value=frozenset(echoes.values()),
+    ):
+        await harness.controller._execute_router_relay(
+            room,
+            event,
+            (),
+            requester_user_id=_SENDER,
+            handled_turn=handled_turn,
+        )
+
+    assert len(harness.gateway.sent) == 1
+    record = await harness.turn_store.get_turn_record(event.event_id)
+    assert record is not None
+    assert record.completed is True
+    assert record.response_event_id == "$sent-1:localhost"

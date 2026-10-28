@@ -2823,3 +2823,118 @@ async def test_an_older_edit_does_not_replace_a_newer_one(journal_store: EventJo
     assert record is not None
     assert record.source_event_prompts == {"$source": "newer"}
     assert record.source_event_revisions == {"$source": (30, "$newer")}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ended_by", ["deletion", "relayed_message_deletion", "relay_answer"])
+async def test_a_batch_source_ended_before_any_reply_leaves_its_sibling_owing_an_answer(
+    journal_store: EventJournalStore,
+    ended_by: str,
+) -> None:
+    """Deleting S of a pending [S, F] or the message S relays, or a relay answering S, invalidates S alone."""
+    store = await _store(journal_store)
+    target = MessageTarget.resolve(ROOM, None, "$f")
+    relayed = ended_by == "relayed_message_deletion"
+    pending = await store.record_pending_turn(
+        _in_room(
+            TurnRecord.create(
+                ["$s", "$f"],
+                completed=False,
+                requester_id="@user:example.org",
+                discovery_event_ids=["$human"] if relayed else (),
+                source_event_metadata={
+                    "$s": SourceEventMetadata("@user:example.org", discovery_event_id="$human" if relayed else None),
+                    "$f": SourceEventMetadata("@user:example.org"),
+                },
+            ),
+        ),
+    )
+    assert pending is not None
+    if ended_by == "deletion":
+        await _redact_through(store, "$s")
+    elif relayed:
+        await _redact_through(store, "$human")
+    else:
+        await store.record_turn(
+            TurnRecord.create(["$relay"], discovery_event_ids=["$s"], response_event_id="$relay-answer"),
+            room_id=ROOM,
+        )
+
+    preparation = await store.prepare_pending_response_source(
+        target=target,
+        source_event_ids=pending.indexed_event_ids,
+        terminal_source_event_ids=pending.source_event_ids,
+    )
+
+    assert preparation.invalid == ("$s",)
+    assert preparation.surviving == ("$f",)
+    reopened = await _store(journal_store)
+    assert not await reopened.is_handled(ROOM, "$f")
+
+
+@pytest.mark.asyncio
+async def test_another_login_of_the_agent_reads_its_turns_redactions_and_live_claims(
+    journal_store: EventJournalStore,
+) -> None:
+    """Turn truth is the agent's: a re-login or a replacement store reads what the earlier login recorded and holds."""
+    first = await _store(journal_store)
+    await first.record_turn(_in_room(TurnRecord.create(["$answered"])))
+    await _redact(journal_store, "$deleted")
+    relogin = TurnStore(
+        replace(
+            first.deps,
+            response_recovery_state=partial(
+                journal_store.principal("agent@bob").response_recovery_state,
+                agent_name="agent",
+            ),
+        ),
+    )
+    await relogin.warm()
+    claim = await first.claim(_in_room(TurnRecord.create(["$live"], completed=False)))
+    assert isinstance(claim, TurnClaim)
+
+    assert await relogin.is_handled(ROOM, "$answered")
+    assert await relogin.redacted_event_ids(ROOM, ("$deleted",)) == {"$deleted"}
+    assert relogin.has_live_turn_claim("$live")
+    assert isinstance(await relogin.claim(_in_room(TurnRecord.create(["$live"], completed=False))), ClaimContended)
+    claim.release()
+    assert not relogin.has_live_turn_claim("$live")
+
+
+@pytest.mark.asyncio
+async def test_every_finalized_echo_of_a_coalesced_turn_is_known_after_a_restart(
+    journal_store: EventJournalStore,
+) -> None:
+    """A routing turn of two voice messages excludes both echoes when a restart looks for its relay."""
+    store = await _store(journal_store)
+    for source, echo in (("$voice-1", "$echo-1"), ("$voice-2", "$echo-2")):
+        await store.record_visible_echo(ROOM, source, echo)
+        await store.record_finalized_visible_echo(source, echo, is_fallback=False)
+    assert await store.record_pending_turn(_in_room(TurnRecord.create(["$voice-1", "$voice-2"], completed=False)))
+
+    reopened = await _store(journal_store)
+
+    assert await reopened.finalized_visible_echoes(("$voice-1", "$voice-2")) == ("$echo-1", "$echo-2")
+    record = await reopened.get_turn_record("$voice-1")
+    assert record is not None
+    assert record.response_event_id is None, "an echo never becomes the turn's answer"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_pending_write_hands_its_sources_back_once_its_claim_releases(
+    journal_store: EventJournalStore,
+) -> None:
+    """A batch refused because another turn answered one of its sources retries each source after its claim ends."""
+    store = await _store(journal_store)
+    batch = _in_room(TurnRecord.create(["$answered", "$fresh"], completed=False))
+    claim = await store.claim(batch)
+    assert isinstance(claim, TurnClaim)
+    await store.record_turn(_in_room(TurnRecord.create(["$answered"], response_event_id="$elsewhere")))
+
+    assert await store.record_pending_turn(batch) is None
+    retry = cast("MagicMock", store.deps.retry_dispatch_sources)
+    retry.assert_not_called()
+    claim.release()
+
+    assert sorted(call.args for call in retry.call_args_list) == [(ROOM, ("$answered",)), (ROOM, ("$fresh",))]
+    assert await store.get_turn_record("$fresh") is None

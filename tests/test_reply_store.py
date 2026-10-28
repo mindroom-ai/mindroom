@@ -42,7 +42,7 @@ from mindroom.reply_presentation import Presentation, encode_presentation
 from mindroom.response_sources import ResponseSources
 from mindroom.stop import SpanRegistry
 from mindroom.tool_system.events import ToolTraceEntry
-from mindroom.turn_record import TurnRecord
+from mindroom.turn_record import SourceEventMetadata, TurnRecord
 from tests import test_event_journal_store as journal_tests
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval, reply_shown_for_approval
@@ -1742,3 +1742,61 @@ async def test_owner_lost_ends_what_an_older_instance_left_running(journal_store
 async def test_finished_replies_are_kept_as_long_as_their_turns() -> None:
     """Nothing reaches a finished reply after its turn is forgotten, so both retentions agree."""
     assert turn_store._RETENTION_MAX_AGE_SECONDS * 1_000_000_000 == reply_scope._FINISHED_REPLY_RETENTION_NS
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["streaming", "approval-held"])
+async def test_deleting_the_relayed_messages_ends_the_routed_reply(
+    journal_store: EventJournalStore,
+    held: bool,
+) -> None:
+    """A routed reply answers relays of a person's messages; deleting those messages ends it as deleting the relays would."""
+    alice = journal_store.principal(PRINCIPAL)
+    await journal_tests.TestApprovalContinuations.admit_sources(alice)
+    relays = TurnRecord.create(
+        ["$source-1", "$source-2"],
+        completed=False,
+        discovery_event_ids=["$human-1", "$human-2"],
+        source_event_metadata={
+            f"$source-{index}": SourceEventMetadata(sender="@user:localhost", discovery_event_id=f"$human-{index}")
+            for index in (1, 2)
+        },
+    )
+    assert isinstance(
+        await journal_store.turn_records("agent").write(turn_rows.record_pending_turn, relays, room_id=ROOM),
+        turn_rows.Accepted,
+    )
+    if held:
+        assert await paused_for_approval(
+            alice,
+            journal_tests.TestApprovalContinuations.continuation(state="waiting"),
+        )
+    else:
+        await alice.replies.write_generation("gen-1")
+        request = replace(
+            _request(source="$source-1"),
+            sources=ResponseSources(
+                pending_event_ids=("$source-1", "$source-2"),
+                logical_source_event_ids=("$source-1", "$source-2"),
+            ),
+        )
+        assert (await alice.replies.claim(request)).transition.claimed is not None
+
+    await _delete(alice, "$human-1")
+    running = await alice.replies.for_sources(("$source-1",))
+    assert running is not None
+    assert running.state is (ReplyState.PAUSED if held else ReplyState.ACTIVE)
+    await _delete(alice, "$human-2")
+
+    ended = await alice.replies.for_sources(("$source-1",))
+    assert ended is not None
+    assert ended.state is ReplyState.GONE
+    if held:
+        failing = await alice.approval_continuation("approval-1")
+        assert failing is not None
+        assert failing.state == "failing"
+        assert failing.failure_reason == "cancelled_by_user"
+    else:
+        assert len(await alice.replies.take_deletion_endings()) == 1
+        assert not await alice.is_pending("$source-1")
+        assert not await alice.is_pending("$source-2")
+    assert not await _answered(journal_store, "$source-1")
