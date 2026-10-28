@@ -1926,7 +1926,7 @@ These settings are global-only:
 | `max_consecutive_agent_replies` | `50` | Consecutive agent or team messages (>= 1) before agents stop waking each other; see [Agents mentioning other agents](https://docs.mindroom.chat/authorization/#agents-mentioning-other-agents) |
 | `max_preload_chars` | `50000` | Cap (>= 1) on preloaded context files; see [File-Based Context Loading](#file-based-context-loading) |
 | `tool_output_auto_save_threshold_bytes` | `51200` | Larger tool outputs are saved to the workspace; see [Workspace and tool output files](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files) |
-| `worker_grantable_credentials` | `null` | Shared credential services available inside isolated workers (`null` grants none); Google OAuth client and token services and `google_vertex_adc` cannot be granted. See [Credential leases](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases) |
+| `worker_grantable_credentials` | `null` | Shared credential services available inside isolated workers (`null` grants none); Google OAuth client and token services, `google_vertex_adc`, and `slack_app` cannot be granted. See [Credential leases](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases) |
 | `thread_summary_model`, `thread_summary_temperature`, `thread_summary_first_threshold`, `thread_summary_subsequent_interval` | `null`, `0.2`, `1`, `10` | Automatic thread summaries; see [Automatic Thread Summaries](https://docs.mindroom.chat/tools/matrix-and-attachments/#automatic-thread-summaries) |
 
 # Model Configuration
@@ -12907,7 +12907,7 @@ Agents cannot edit or delete messages or upload files.
 ## Set Up The Slack App
 
 An administrator creates one Slack app for the MindRoom installation.
-One MindRoom serves one Slack workspace; connections and events from other workspaces are ignored, and Enterprise Grid org-wide installs are not supported.
+One MindRoom serves one Slack workspace: accounts from other workspaces cannot connect, their events are ignored, and Enterprise Grid org-wide installs are not supported.
 Slack must reach MindRoom for the OAuth redirect and for events, so set `MINDROOM_PUBLIC_URL` to a public HTTPS address.
 
 1. In Slack, open [Your Apps](https://api.slack.com/apps), choose **Create New App**, then **From a manifest**, pick the workspace, and paste this manifest with `mindroom.example.com` replaced by your public MindRoom host:
@@ -13048,7 +13048,6 @@ agents:
 The first time a person asks for something in Slack, the agent replies with a link to connect Slack.
 After the person approves in Slack, the agent searches, reads, and posts with that person's own account, so it finds only what they can see and posts as them.
 A person can also connect or disconnect on the [Connections portal](https://docs.mindroom.chat/connections-portal/); when Slack revokes a token, the agent replies with a new link.
-Only accounts from the app's workspace can connect.
 
 Downloads are saved in the agent's workspace.
 On an agent that is not `private`, every requester of the agent shares that workspace and can read what another person downloaded, so use a `private` agent for personal Slack.
@@ -13100,7 +13099,7 @@ In the room, ask the agent, for example "Tell me when someone messages or mentio
 - `action="start"` creates the watch, or replaces the one the person has with this agent in this room.
 - `action="stop"` ends it, and `action="status"` shows its filters and, when it is not delivering, why.
 - `mentions` (default `true`) delivers messages that mention the person, including in group direct messages.
-- `direct_messages` (default `true`) delivers every message in the person's direct messages and group direct messages.
+- `direct_messages` (default `true`) delivers every message others send in the person's direct messages and group direct messages.
 - `channels` (optional) limits channel messages to those channel IDs; direct messages are not limited by it.
   Replies in a thread where the person was mentioned also arrive, within those channels.
 
@@ -13172,13 +13171,14 @@ The 👀 reaction and the reply MindRoom posts to a Slack mention are not tool c
 | `Slack needs the <scope> permission; add it to the MindRoom Slack app` | A project call needs a bot scope. Add it in the app and reinstall the app. |
 | `Slack rate limit, retry after 30s` | Slack asked to wait; the agent can retry then. |
 | `Slack did not answer; the message may have been sent, so check with slack_read before retrying` | A post may have gone through; check before posting again. |
+| `Slack refused the request: <code>` | Slack's own error code: for example, `channel_not_found` means the account cannot see that conversation, and `not_in_channel` means it is not a member, so join it or invite the app. |
 | `This Slack account belongs to another workspace` | The person approved with an account outside the app's workspace. |
 | `The MindRoom Slack app needs an app-level token for watches` | Add `app_token` to `slack_app`. |
 | `Cannot watch Slack here: another person is in this room` | A watch needs a room where only the owner is; the text after the colon names the cause, as in the table above. |
 | `Watch mentions, direct messages, or both` | `start` needs `mentions` or `direct_messages` set to `true`. |
-| `Slack watches work only in a Matrix conversation` | Start the watch from a Matrix room, not from MCP or a script. |
 | `MindRoom couldn't receive your message; try again` | Shown in Slack when delivery to the agent failed; mention the app again. |
 | Slack cannot verify the request URL | MindRoom answers 404 until `slack_app` has a bot token and signing secret, and 401 for a wrong signing secret; an SSO proxy in front of `/api/slack/events` also blocks it. |
+| Slack reports `503` from the request URL | MindRoom answers 503 until it has finished starting, while it stops, and when a delivery failed, so that Slack resends the event; an API server started on its own, outside `mindroom run`, always answers 503. |
 
 Config errors name the setting:
 
@@ -13190,7 +13190,7 @@ Config errors name the setting:
 | `agents.<name>.tools.slack.room must be one of the agent's rooms` | Add the room to the agent's `rooms`. |
 | `agents.<name>.tools.slack.room needs write; an answering agent posts its replies to Slack` | Remove `write: false`, or remove `room`. |
 | `agents.<name>.tools.slack.channels: Slack channel IDs look like C0123ABCD` | Use channel IDs, not names. |
-| `Slack channel C0123ABCD is answered by both first and second` | Remove the channel from one agent's `room` setup. |
+| `Slack channel C0123ABCD is answered by both first and second` | Remove the channel from one agent's `channels`, or remove that agent's `room`. |
 
 # Microsoft 365
 
@@ -16129,7 +16129,7 @@ Do not report or "fix" these; they are deliberate.
   The `/connections` page shell is served without authentication, while every API stays protected.
 - With `personal_rooms.agent` naming a `personal_agents` template, every human member of an onboarding room gets a Matrix account and a running agent; membership of that room is the only gate, so its join policy and invitations control who gets one.
 - A `personal_agents` template whose `access` admits other people exposes each owner's agent, including its memory, files, and shared credentials, to them and to their own agents acting for them; owner-only access is the default.
-- `POST /api/slack/events` is public, like the external-trigger routes: it has no dashboard login, accepts a request only when it carries a valid signature from the Slack app's signing secret made within five minutes, and answers 404 while no Slack app is configured.
+- `POST /api/slack/events` is public: it has no dashboard login, accepts a request only when it carries a valid signature from the Slack app's signing secret made within five minutes, and answers 404 while no Slack app is configured.
 - A Slack message wakes a project agent as the MindRoom account that its author's confirmed Slack email maps to through `slack.email_domain` and `slack.matrix_user_id_template`, still subject to the agent's `access`, so whoever can set that email on a full member account of the workspace can act as that MindRoom account; guests, bots, other workspaces, and emails that map to one of MindRoom's own accounts never map.
   Slack text is delivered as a fenced block that is never parsed for Matrix mentions, so it cannot wake other agents.
 - A personal Slack watch delivers only into a room where the owner is the only human, nobody is invited, and people who join later cannot read earlier messages; the turn runs as the owner, and the toolkit refuses Slack writes in it, but work that turn schedules or delegates still runs as the owner, so a `tool_approval` rule for `slack_post` and `slack_react` is the boundary for those.
@@ -18312,7 +18312,7 @@ Under **MCP gateway**, select **All tools** for an agent or choose tools individ
 
 Tools that share a service connection share its OAuth controls, and tools that need a Matrix room or an agent conversation, such as `claude_agent`, are labeled **MindRoom only** and are not exposed.
 A shared agent's configured worker and credential scopes still decide whose service connection runs a call.
-The `slack` tool works through the gateway with each person's own Slack account, but its `slack_watch` function is not offered; see [Slack](https://docs.mindroom.chat/tools/slack/#mcp).
+For the `slack` tool, see [Slack over MCP](https://docs.mindroom.chat/tools/slack/#mcp).
 When managed account provisioning is enabled, users without an active provisioned account see an access notice instead of MCP controls until an administrator provisions them; their ordinary connections remain available.
 [Connections sessions from MindRoom Chat](https://docs.mindroom.chat/connections-portal/#open-it-from-mindroom-chat) carry no email, so with managed account provisioning they reach the MCP controls, and in built-in authorization mode client consent, through the one active account whose `userName` the trusted upstream email template maps to their Matrix user.
 Without such a template, when trusted upstream auth uses a signed Matrix claim, or when several accounts map to the same user, those users see that notice and need trusted upstream sign-in for them.
@@ -20939,7 +20939,7 @@ Examples use `chat.example.com` for that host, `admin.example.com` for the dashb
 
 The first rule keeps a request from passing Access as one path and reaching a service as another, because Access, the tunnel, and the origin can resolve such paths differently.
 The client chart serves `/.well-known/matrix/client` only with MatrixRTC or bug reports enabled; otherwise send it to Tuwunel as well.
-Runtime features with public paths include the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/), the [Connections portal](https://docs.mindroom.chat/connections-portal/#trusted-upstream-sign-in), the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#route-browser-and-machine-traffic), the [worker computer](https://docs.mindroom.chat/tools/worker-computer/#reverse-proxy-and-host-routing), [external triggers](https://docs.mindroom.chat/external-triggers/), the [usage export](https://docs.mindroom.chat/usage/#usage-export-service) and [budget](https://docs.mindroom.chat/budgets/#budget-service) services, and [published](https://docs.mindroom.chat/tools/agent-orchestration/#report_publishing) and [private](https://docs.mindroom.chat/tools/agent-orchestration/#dynamic_workflow) reports.
+Runtime features with public paths include the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/), the [Connections portal](https://docs.mindroom.chat/connections-portal/#trusted-upstream-sign-in), the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#route-browser-and-machine-traffic), the [worker computer](https://docs.mindroom.chat/tools/worker-computer/#reverse-proxy-and-host-routing), [external triggers](https://docs.mindroom.chat/external-triggers/), [Slack events](https://docs.mindroom.chat/tools/slack/#set-up-the-slack-app), the [usage export](https://docs.mindroom.chat/usage/#usage-export-service) and [budget](https://docs.mindroom.chat/budgets/#budget-service) services, and [published](https://docs.mindroom.chat/tools/agent-orchestration/#report_publishing) and [private](https://docs.mindroom.chat/tools/agent-orchestration/#dynamic_workflow) reports.
 `admin.example.com` sends every path to the runtime, as described in [Dashboard On Its Own Host](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#dashboard-on-its-own-host), behind the same first rule.
 
 ```yaml
@@ -20979,6 +20979,7 @@ Access applies the most specific path application, so every other path keeps the
 | `/livekit/jwt/*`, `/livekit/sfu/*` | MindRoom voice agents, which request call tokens and join LiveKit from the server, and the MatrixRTC authorization service, which calls LiveKit through its public `auth.livekitUrl` |
 | `/.well-known/matrix/server`, `/_matrix/federation/v1/openid/userinfo` | The MatrixRTC authorization service, which checks each caller's Matrix OpenID token with the caller's homeserver |
 | The MCP paths that the [route table](https://docs.mindroom.chat/deployment/mcp-gateway/#route-browser-and-machine-traffic) marks public or pass-through | MCP clients; with Cloudflare Managed OAuth, follow [External authorization](https://docs.mindroom.chat/deployment/mcp-gateway/#external-authorization) instead |
+| `POST /api/slack/events` | Slack, whose [event requests](https://docs.mindroom.chat/tools/slack/#set-up-the-slack-app) MindRoom accepts only with a valid Slack signature |
 | `/_matrix/client/versions` (optional) | External uptime checks; it answers without a Matrix login, so a passing check shows that Cloudflare, the tunnel, and Tuwunel respond |
 
 Machine callers of runtime routes need their own Access application with a service token, as the [usage export](https://docs.mindroom.chat/usage/#usage-export-service) and [budget](https://docs.mindroom.chat/budgets/#budget-service) services expect, or a bypass that leaves authentication to the route, such as the signed requests of [external triggers](https://docs.mindroom.chat/external-triggers/) or the API keys of the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/).

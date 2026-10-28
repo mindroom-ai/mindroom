@@ -35,7 +35,7 @@ Agents cannot edit or delete messages or upload files.
 ## Set Up The Slack App
 
 An administrator creates one Slack app for the MindRoom installation.
-One MindRoom serves one Slack workspace; connections and events from other workspaces are ignored, and Enterprise Grid org-wide installs are not supported.
+One MindRoom serves one Slack workspace: accounts from other workspaces cannot connect, their events are ignored, and Enterprise Grid org-wide installs are not supported.
 Slack must reach MindRoom for the OAuth redirect and for events, so set `MINDROOM_PUBLIC_URL` to a public HTTPS address.
 
 1. In Slack, open [Your Apps](https://api.slack.com/apps), choose **Create New App**, then **From a manifest**, pick the workspace, and paste this manifest with `mindroom.example.com` replaced by your public MindRoom host:
@@ -176,7 +176,6 @@ agents:
 The first time a person asks for something in Slack, the agent replies with a link to connect Slack.
 After the person approves in Slack, the agent searches, reads, and posts with that person's own account, so it finds only what they can see and posts as them.
 A person can also connect or disconnect on the [Connections portal](../connections-portal.md); when Slack revokes a token, the agent replies with a new link.
-Only accounts from the app's workspace can connect.
 
 Downloads are saved in the agent's workspace.
 On an agent that is not `private`, every requester of the agent shares that workspace and can read what another person downloaded, so use a `private` agent for personal Slack.
@@ -228,7 +227,7 @@ In the room, ask the agent, for example "Tell me when someone messages or mentio
 - `action="start"` creates the watch, or replaces the one the person has with this agent in this room.
 - `action="stop"` ends it, and `action="status"` shows its filters and, when it is not delivering, why.
 - `mentions` (default `true`) delivers messages that mention the person, including in group direct messages.
-- `direct_messages` (default `true`) delivers every message in the person's direct messages and group direct messages.
+- `direct_messages` (default `true`) delivers every message others send in the person's direct messages and group direct messages.
 - `channels` (optional) limits channel messages to those channel IDs; direct messages are not limited by it.
   Replies in a thread where the person was mentioned also arrive, within those channels.
 
@@ -300,13 +299,14 @@ The 👀 reaction and the reply MindRoom posts to a Slack mention are not tool c
 | `Slack needs the <scope> permission; add it to the MindRoom Slack app` | A project call needs a bot scope. Add it in the app and reinstall the app. |
 | `Slack rate limit, retry after 30s` | Slack asked to wait; the agent can retry then. |
 | `Slack did not answer; the message may have been sent, so check with slack_read before retrying` | A post may have gone through; check before posting again. |
+| `Slack refused the request: <code>` | Slack's own error code: for example, `channel_not_found` means the account cannot see that conversation, and `not_in_channel` means it is not a member, so join it or invite the app. |
 | `This Slack account belongs to another workspace` | The person approved with an account outside the app's workspace. |
 | `The MindRoom Slack app needs an app-level token for watches` | Add `app_token` to `slack_app`. |
 | `Cannot watch Slack here: another person is in this room` | A watch needs a room where only the owner is; the text after the colon names the cause, as in the table above. |
 | `Watch mentions, direct messages, or both` | `start` needs `mentions` or `direct_messages` set to `true`. |
-| `Slack watches work only in a Matrix conversation` | Start the watch from a Matrix room, not from MCP or a script. |
 | `MindRoom couldn't receive your message; try again` | Shown in Slack when delivery to the agent failed; mention the app again. |
 | Slack cannot verify the request URL | MindRoom answers 404 until `slack_app` has a bot token and signing secret, and 401 for a wrong signing secret; an SSO proxy in front of `/api/slack/events` also blocks it. |
+| Slack reports `503` from the request URL | MindRoom answers 503 until it has finished starting, while it stops, and when a delivery failed, so that Slack resends the event; an API server started on its own, outside `mindroom run`, always answers 503. |
 
 Config errors name the setting:
 
@@ -318,4 +318,4 @@ Config errors name the setting:
 | `agents.<name>.tools.slack.room must be one of the agent's rooms` | Add the room to the agent's `rooms`. |
 | `agents.<name>.tools.slack.room needs write; an answering agent posts its replies to Slack` | Remove `write: false`, or remove `room`. |
 | `agents.<name>.tools.slack.channels: Slack channel IDs look like C0123ABCD` | Use channel IDs, not names. |
-| `Slack channel C0123ABCD is answered by both first and second` | Remove the channel from one agent's `room` setup. |
+| `Slack channel C0123ABCD is answered by both first and second` | Remove the channel from one agent's `channels`, or remove that agent's `room`. |
