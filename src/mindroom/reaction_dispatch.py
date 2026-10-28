@@ -12,7 +12,6 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import SemanticConsumer
-from mindroom.response_admission import admitted_response_decision
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -27,7 +26,6 @@ if TYPE_CHECKING:
     from mindroom.ingress_validation import IngressValidator
     from mindroom.journal_dispatch import JournalDispatcher
     from mindroom.runtime_protocols import SupportsClientConfigOrchestrator
-    from mindroom.turn_policy import TurnPolicy
     from mindroom.turns.facts import IngressFacts
     from mindroom.user_stop_reconciliation import UserStopReconciler
 
@@ -42,13 +40,11 @@ class ReactionDispatcherDeps:
     agent_name: str
     journal_dispatcher: JournalDispatcher
     agent_reply_memberships: AgentReplyMembershipIndex
-    turn_policy: TurnPolicy
     user_stop_reconciler: UserStopReconciler
     ingress: IngressValidator
     reserve_prompt_ingress_order: Callable[..., IngressTicket]
     enqueue_interactive_selection: Callable[..., Awaitable[None]]
     emit_reaction_received_hooks: Callable[..., Awaitable[None]]
-    wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]]
     config_confirmation: ConfigConfirmationContext
 
 
@@ -182,16 +178,13 @@ class ReactionDispatcher:
         if await self._maybe_handle_approval_reaction(room, event, consumer):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         if consumer is None:
-            async with admitted_response_decision(
-                self.deps.runtime.response_admission_gate,
-                self.deps.wait_for_admission_or_shutdown,
-            ):
-                if not self.deps.turn_policy.can_reply_to_sender_in_room(
-                    requester_user_id,
-                    room.room_id,
-                ):
+            async with self.deps.ingress.admitted_reply_decision(
+                requester_user_id,
+                room.room_id,
+                unanswered=(event.event_id,),
+            ) as allowed:
+                if not allowed:
                     self.deps.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
-                    await self.deps.journal_dispatcher.settle_running_event_intentionally_ignored()
                     return TurnDispatchOutcome.INTENTIONALLY_IGNORED
                 if await self._maybe_handle_stop_reaction(room, event, consumer, requester_user_id):
                     return TurnDispatchOutcome.INTENTIONALLY_IGNORED
@@ -264,16 +257,13 @@ class ReactionDispatcher:
         )
         try:
             if pending_change is not None:
-                async with admitted_response_decision(
-                    self.deps.runtime.response_admission_gate,
-                    self.deps.wait_for_admission_or_shutdown,
-                ):
-                    if not self.deps.turn_policy.can_reply_to_sender_in_room(
-                        requester_user_id,
-                        room.room_id,
-                    ):
+                async with self.deps.ingress.admitted_reply_decision(
+                    requester_user_id,
+                    room.room_id,
+                    unanswered=(event.event_id,),
+                ) as allowed:
+                    if not allowed:
                         self.deps.logger.debug("Ignoring reaction due to current authorization", sender=event.sender)
-                        await self.deps.journal_dispatcher.settle_running_event_intentionally_ignored()
                         return TurnDispatchOutcome.INTENTIONALLY_IGNORED
                     if semantic_consumer is None:
                         await self.deps.journal_dispatcher.claim_semantic_consumer(
@@ -312,16 +302,16 @@ class ReactionDispatcher:
         requester_user_id: str,
     ) -> None:
         """Emit generic hooks only while their current reply authority is admitted."""
-        async with admitted_response_decision(
-            self.deps.runtime.response_admission_gate,
-            self.deps.wait_for_admission_or_shutdown,
-        ):
-            if not self.deps.turn_policy.can_reply_to_sender_in_room(requester_user_id, room.room_id):
+        async with self.deps.ingress.admitted_reply_decision(
+            requester_user_id,
+            room.room_id,
+            unanswered=(event.event_id,),
+        ) as allowed:
+            if not allowed:
                 self.deps.logger.debug(
                     "Ignoring reaction hook due to current authorization",
                     sender=event.sender,
                 )
-                await self.deps.journal_dispatcher.settle_running_event_intentionally_ignored()
                 return
             await self.deps.emit_reaction_received_hooks(
                 room_id=room.room_id,

@@ -17,7 +17,6 @@ from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayloadWithAttachmentsRequest
 from mindroom.matrix.member_display_names import room_member_display_names
-from mindroom.response_admission import admitted_response_decision
 from mindroom.response_lifecycle import response_lifecycle_reservation_context
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
@@ -37,9 +36,9 @@ if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.inbound_turn_normalizer import InboundTurnNormalizer
+    from mindroom.ingress_validation import IngressValidator
     from mindroom.message_target import MessageTarget
     from mindroom.response_runner import ResponseRunner
-    from mindroom.turn_policy import TurnPolicy
     from mindroom.turn_store import TurnStore
     from mindroom.turns.facts import IngressFacts
     from mindroom.visible_response_reconciliation import VisibleResponseReconciler
@@ -71,7 +70,7 @@ class InteractiveSelectionsDeps:
     agent_name: str
     resolver: ConversationResolver
     normalizer: InboundTurnNormalizer
-    turn_policy: TurnPolicy
+    ingress: IngressValidator
     response_runner: ResponseRunner
     delivery_gateway: DeliveryGateway
     turn_store: TurnStore
@@ -274,12 +273,12 @@ class InteractiveSelections:
         response_target: MessageTarget,
     ) -> bool:
         """Authorize and execute one selection after its caller transfers claim ownership."""
-        async with admitted_response_decision(
-            self.deps.runtime.response_admission_gate,
-            self.deps.response_runner.wait_for_admission_or_shutdown,
-        ):
-            if not self.deps.turn_policy.can_reply_to_sender_in_room(facts.run_requester_id, room.room_id):
-                await self.deps.settle_dispatch_sources((source_event_id,))
+        async with self.deps.ingress.admitted_reply_decision(
+            facts.run_requester_id,
+            room.room_id,
+            unanswered=(source_event_id,),
+        ) as allowed:
+            if not allowed:
                 return False
             return await self._execute_admitted_interactive_selection(
                 room,

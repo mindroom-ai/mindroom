@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from copy import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -31,12 +32,13 @@ from mindroom.requester_identity import (
     is_human_requester_id,
     resolve_human_requester_alias,
 )
+from mindroom.response_admission import admitted_response_decision
 from mindroom.turn_origin import requester_id_from_trusted_original_sender
 from mindroom.turn_record import TurnRecord
 from mindroom.turns.facts import IngressFacts
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
     import nio
 
@@ -76,6 +78,9 @@ class IngressValidatorDeps:
     matrix_id: MatrixID
     turn_store: TurnStore
     turn_policy: _SenderReplyPolicy
+    wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]]
+    # Settles sources nothing will answer, as the room's lane does for an event it ignores.
+    settle_ignored_sources: Callable[[tuple[str, ...]], Awaitable[None]]
 
 
 class _InboundEvent(Protocol):
@@ -240,6 +245,31 @@ class IngressValidator:
             return False
 
         return True
+
+    @asynccontextmanager
+    async def admitted_reply_decision(
+        self,
+        requester_id: str,
+        room_id: str,
+        *,
+        unanswered: tuple[str, ...],
+    ) -> AsyncIterator[bool]:
+        """Hold the admission fence for one decision, and yield whether the requester may still be answered here.
+
+        Authorization is current, never frozen at precheck, so it is checked again
+        under the fence a configuration change waits at. A denied decision settles
+        ``unanswered`` before the fence opens, so what was decided under the old
+        authorization is durable before the change applies.
+        """
+        async with admitted_response_decision(
+            self.deps.runtime.response_admission_gate,
+            self.deps.wait_for_admission_or_shutdown,
+        ):
+            if self.deps.turn_policy.can_reply_to_sender_in_room(requester_id, room_id):
+                yield True
+                return
+            await self.deps.settle_ignored_sources(unanswered)
+            yield False
 
     async def _can_reply_once_router_catches_up(self, sender_id: str, room: nio.MatrixRoom) -> bool:
         """Decide reply access, deciding again on each router membership publication while it stays unresolved.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -99,6 +100,8 @@ async def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress
             matrix_id=ids["test_agent"],
             turn_store=turn_store,
             turn_policy=turn_policy,
+            wait_for_admission_or_shutdown=AsyncMock(return_value=True),
+            settle_ignored_sources=AsyncMock(),
         ),
     )
     content = {
@@ -211,9 +214,40 @@ def _validator(tmp_path: Path) -> tuple[IngressValidator, dict[str, MatrixID]]:
             matrix_id=ids["general"],
             turn_store=MagicMock(),
             turn_policy=MagicMock(),
+            wait_for_admission_or_shutdown=AsyncMock(return_value=True),
+            settle_ignored_sources=AsyncMock(),
         ),
     )
     return validator, ids
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("may_reply", [True, False])
+async def test_a_reply_decision_settles_what_it_refuses_before_the_fence_opens(tmp_path: Path, may_reply: bool) -> None:
+    """A decision whose requester lost reply access settles its sources while a configuration change still waits."""
+    validator, _ids = _validator(tmp_path)
+    gate = validator.deps.runtime.response_admission_gate
+    validator.deps.turn_policy.can_reply_to_sender_in_room.return_value = may_reply
+    held_while_settling: list[int] = []
+
+    async def settle(event_ids: tuple[str, ...]) -> None:
+        held_while_settling.append(gate.in_flight_response_count)
+        assert event_ids == ("$source",)
+
+    validator = IngressValidator(replace(validator.deps, settle_ignored_sources=settle))
+
+    async with validator.admitted_reply_decision(
+        "@user:localhost",
+        "!room:localhost",
+        unanswered=("$source",),
+    ) as allowed:
+        assert gate.in_flight_response_count == 1
+        assert gate.close_if_idle() is False
+
+    assert allowed is may_reply
+    assert held_while_settling == ([] if may_reply else [1])
+    assert gate.in_flight_response_count == 0
+    validator.deps.turn_policy.can_reply_to_sender_in_room.assert_called_once_with("@user:localhost", "!room:localhost")
 
 
 def _text(sender: str, body: str, **content: object) -> nio.RoomMessageText:

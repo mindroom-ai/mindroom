@@ -321,15 +321,12 @@ class TurnDispatcher:
             if prepared is None:
                 return
             timing_scope_token = timing_scope_context.set(event_timing_scope(prepared.event.event_id))
-            async with admitted_response_decision(
-                self.deps.runtime.response_admission_gate,
-                self.deps.response_runner.wait_for_admission_or_shutdown,
-            ):
-                if not self.deps.turn_policy.can_reply_to_sender_in_room(
-                    turn.facts.run_requester_id,
-                    turn.room.room_id,
-                ):
-                    await self.deps.visible_responses.settle_source_events_ignored(prepared.handled_turn)
+            async with self.deps.ingress.admitted_reply_decision(
+                turn.facts.run_requester_id,
+                turn.room.room_id,
+                unanswered=prepared.handled_turn.source_event_ids,
+            ) as allowed:
+                if not allowed:
                     return
                 if await self._blocked_before_plan(
                     turn.room,
@@ -787,12 +784,12 @@ class TurnDispatcher:
     ) -> bool:
         """Run the authorized ingress hook and settle when it blocks dispatch."""
         hooks_start = time.monotonic()
-        async with admitted_response_decision(
-            self.deps.runtime.response_admission_gate,
-            self.deps.response_runner.wait_for_admission_or_shutdown,
-        ):
-            if not self.deps.turn_policy.can_reply_to_sender_in_room(envelope.requester_id, room.room_id):
-                await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
+        async with self.deps.ingress.admitted_reply_decision(
+            envelope.requester_id,
+            room.room_id,
+            unanswered=handled_turn.source_event_ids,
+        ) as allowed:
+            if not allowed:
                 return True
             suppressed = await self.deps.ingress_hook_runner.emit_message_received_hooks(
                 envelope=envelope,

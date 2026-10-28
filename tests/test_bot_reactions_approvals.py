@@ -48,6 +48,7 @@ from mindroom.hooks import (
     ReactionReceivedContext,
     hook,
 )
+from mindroom.ingress_validation import IngressValidator
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, ResponseRunner
@@ -492,9 +493,22 @@ class TestAgentBot(AgentBotTestBase):
             await gate.wait_until_open()
             return True
 
+        ingress = bot._reaction_dispatcher.deps.ingress
+        settled_inside_fence: list[tuple[tuple[str, ...], int]] = []
+
+        async def settle(event_ids: tuple[str, ...]) -> None:
+            settled_inside_fence.append((event_ids, gate.in_flight_response_count))
+            await ingress.deps.settle_ignored_sources(event_ids)
+
         replace_reaction_dispatcher_deps(
             bot,
-            wait_for_admission_or_shutdown=wait_for_replacement,
+            ingress=IngressValidator(
+                replace(
+                    ingress.deps,
+                    wait_for_admission_or_shutdown=wait_for_replacement,
+                    settle_ignored_sources=settle,
+                ),
+            ),
         )
         with _mock_interactive_claim(bot, None):
             reaction_task = asyncio.create_task(_dispatch_reaction(bot, room, event))
@@ -508,6 +522,7 @@ class TestAgentBot(AgentBotTestBase):
                 await reaction_task
 
         assert seen == []
+        assert settled_inside_fence == [((event.event_id,), 1)]
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("enforce_turn_authorization")
@@ -575,9 +590,10 @@ class TestAgentBot(AgentBotTestBase):
             await gate.wait_until_open()
             return True
 
+        ingress = bot._reaction_dispatcher.deps.ingress
         replace_reaction_dispatcher_deps(
             bot,
-            wait_for_admission_or_shutdown=wait_for_replacement,
+            ingress=IngressValidator(replace(ingress.deps, wait_for_admission_or_shutdown=wait_for_replacement)),
         )
 
         with _mock_interactive_claim(bot, None):
@@ -2616,9 +2632,22 @@ class TestAgentBot(AgentBotTestBase):
             replays.append(ctx.event_id)
 
         restarted.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_replay])])
+        gate = restarted._runtime_view.response_admission_gate
+        ingress = restarted._reaction_dispatcher.deps.ingress
+        settled_inside_fence: list[tuple[tuple[str, ...], int]] = []
+
+        async def settle(event_ids: tuple[str, ...]) -> None:
+            settled_inside_fence.append((event_ids, gate.in_flight_response_count))
+            await ingress.deps.settle_ignored_sources(event_ids)
+
+        replace_reaction_dispatcher_deps(
+            restarted,
+            ingress=IngressValidator(replace(ingress.deps, settle_ignored_sources=settle)),
+        )
         await restarted._journal_dispatcher.drain_once()
 
         assert replays == []
+        assert settled_inside_fence == [((event.event_id,), 1)]
         assert await restarted._journal_dispatcher.store.pending() == ()
 
     @pytest.mark.asyncio

@@ -752,7 +752,6 @@ depends_on = [
     "mindroom.dispatch_callback_outcome",
     "mindroom.entity_resolution",
     "mindroom.event_journal",
-    "mindroom.response_admission",
     "mindroom.user_stop_reconciliation",
 ]
 visibility = ["mindroom.bot"]
@@ -5985,7 +5984,6 @@ depends_on = [
     "mindroom.delivery_gateway",
     "mindroom.hooks",
     "mindroom.inbound_turn_normalizer",
-    "mindroom.response_admission",
     "mindroom.response_lifecycle",
     "mindroom.response_runner",
     "mindroom.response_sources",

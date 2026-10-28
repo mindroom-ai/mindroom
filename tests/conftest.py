@@ -2980,11 +2980,17 @@ def replace_turn_deps(bot: RuntimeBot, **changes: object) -> None:
     if "edit_regenerator" not in rebuilt_changes:
         rebuilt_changes["edit_regenerator"] = bot._edit_regenerator
     if "ingress" not in rebuilt_changes:
+        validator_deps = bot._ingress_validator.deps
         rebuilt_changes["ingress"] = IngressValidator(
             replace(
-                bot._ingress_validator.deps,
+                validator_deps,
                 turn_store=rebuilt_changes["turn_store"],
                 turn_policy=rebuilt_changes["turn_policy"],
+                **{
+                    name: changes[name]
+                    for name in ("wait_for_admission_or_shutdown", "settle_ignored_sources")
+                    if name in changes
+                },
             ),
         )
     bot._ingress_validator = rebuilt_changes["ingress"]
@@ -3071,7 +3077,6 @@ def replace_turn_deps(bot: RuntimeBot, **changes: object) -> None:
         logger=ingress.deps.logger,
         runtime_paths=ingress.deps.runtime_paths,
         agent_name=ingress.deps.agent_name,
-        turn_policy=ingress.deps.turn_policy,
         user_stop_reconciler=bot._user_stop_reconciler,
         ingress=ingress.deps.ingress,
         reserve_prompt_ingress_order=ingress.reserve_prompt_ingress_order,

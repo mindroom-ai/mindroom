@@ -820,6 +820,8 @@ class AgentBot:
                 matrix_id=runtime_matrix_id,
                 turn_store=self._turn_store,
                 turn_policy=self._turn_policy,
+                wait_for_admission_or_shutdown=self._response_runner.wait_for_admission_or_shutdown,
+                settle_ignored_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
             ),
         )
         self._visible_voice_echo = VisibleVoiceEchoLifecycle(
@@ -874,7 +876,7 @@ class AgentBot:
                 agent_name=self.agent_name,
                 resolver=self._conversation_resolver,
                 normalizer=self._inbound_turn_normalizer,
-                turn_policy=self._turn_policy,
+                ingress=self._ingress_validator,
                 response_runner=self._response_runner,
                 delivery_gateway=self._delivery_gateway,
                 turn_store=self._turn_store,
@@ -966,13 +968,11 @@ class AgentBot:
                 agent_name=self.agent_name,
                 journal_dispatcher=self._journal_dispatcher,
                 agent_reply_memberships=self._runtime_view.agent_reply_memberships,
-                turn_policy=self._turn_policy,
                 user_stop_reconciler=self._user_stop_reconciler,
                 ingress=self._ingress_validator,
                 reserve_prompt_ingress_order=self._turn_ingress.reserve_prompt_ingress_order,
                 enqueue_interactive_selection=self._interactive_selections.enqueue_interactive_selection,
                 emit_reaction_received_hooks=self._emit_reaction_received_hooks,
-                wait_for_admission_or_shutdown=self._response_runner.wait_for_admission_or_shutdown,
                 config_confirmation=config_confirmation.ConfigConfirmationContext(
                     runtime=self._runtime_view,
                     runtime_paths=self.runtime_paths,

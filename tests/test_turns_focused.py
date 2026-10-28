@@ -104,6 +104,7 @@ from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_reads import ConversationReader  # noqa: TC001
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.thread_history_result import thread_history_result
+from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
 from mindroom.reply_scope import ReplyRuntime
 from mindroom.response_admission import ResponseAdmissionRefusedError
@@ -697,6 +698,8 @@ def _build_harness(
             matrix_id=matrix_id,
             turn_store=turn_store,
             turn_policy=policy,
+            wait_for_admission_or_shutdown=runner.wait_for_admission_or_shutdown,
+            settle_ignored_sources=_settle_ignored_dispatch_sources,
         ),
     )
     selections = InteractiveSelections(
@@ -707,7 +710,7 @@ def _build_harness(
             agent_name=agent_name,
             resolver=resolver,
             normalizer=normalizer,
-            turn_policy=cast("TurnPolicy", policy),
+            ingress=ingress_validator,
             response_runner=cast("ResponseRunner", runner),
             delivery_gateway=cast("DeliveryGateway", gateway),
             turn_store=turn_store,
@@ -1834,6 +1837,101 @@ async def test_command_that_cannot_keep_its_claim_ends_as_its_refused_claim(
     assert outcome is (TurnDispatchOutcome.DEFERRED if handled_meanwhile else TurnDispatchOutcome.INTENTIONALLY_IGNORED)
     assert harness.retried_dispatch_sources == []
     execute_if_owned.assert_not_awaited()
+    assert not harness.turn_store.has_live_turn_claim(event.event_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site", ["edit", "command_target_not_ready"])
+async def test_a_late_reply_denial_at_ingress_settles_its_event_inside_the_fence(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    site: str,
+) -> None:
+    """An edit, or a command whose conversation is unresolved, refused by a later authorization settles under the fence."""
+    harness = _build_harness(config, tmp_path, agent_name="general" if site == "edit" else ROUTER_AGENT_NAME)
+    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
+    gate = harness.ingress.deps.runtime.response_admission_gate
+    if site == "edit":
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "* edited",
+                    "msgtype": "m.text",
+                    "m.new_content": {"body": "edited", "msgtype": "m.text"},
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$original:localhost"},
+                },
+                "event_id": "$edit:localhost",
+                "sender": _SENDER,
+                "origin_server_ts": 1_000_001,
+                "room_id": _ROOM_ID,
+                "type": "m.room.message",
+            },
+        )
+    else:
+        event = _text_event("!help", event_id="$unplaced-command:localhost")
+
+        async def unresolved(*_args: object) -> str | None:
+            raise ThreadMembershipLookupError
+
+        monkeypatch.setattr(harness.ingress.deps.resolver, "coalescing_thread_id", unresolved)
+    # The first gate admits the sender; access is revoked before the decision that would act on it.
+    decisions = iter([True])
+    monkeypatch.setattr(
+        harness.policy,
+        "can_reply_to_sender_in_room",
+        lambda *_args, **_kwargs: next(decisions, False),
+    )
+    settled: list[tuple[tuple[str, ...], int]] = []
+
+    async def settle(event_ids: tuple[str, ...]) -> None:
+        settled.append((event_ids, gate.in_flight_response_count))
+
+    ingress = harness.ingress.deps.ingress
+    _replace_harness_deps(harness, ingress=IngressValidator(replace(ingress.deps, settle_ignored_sources=settle)))
+
+    outcome = await harness.ingress.handle_text_event(room, event)
+
+    assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
+    assert settled == [((event.event_id,), 1)]
+    assert harness.gateway.sent == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("denied_at", ["message_received", "plan"])
+async def test_a_turn_whose_requester_lost_access_in_the_queue_settles_its_sources_inside_the_fence(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    denied_at: str,
+) -> None:
+    """A queued turn refused at gate exit, before its hooks or before its plan, settles every source it held."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    gate = harness.ingress.deps.runtime.response_admission_gate
+    event = _text_event("answer me", event_id="$queued:localhost")
+    claim = await harness.turn_store.claim(TurnRecord.create([event.event_id], completed=False))
+    assert isinstance(claim, TurnClaim)
+    # The message:received hook decides first, then the plan.
+    decisions = iter([] if denied_at == "message_received" else [True])
+    monkeypatch.setattr(
+        harness.policy,
+        "can_reply_to_sender_in_room",
+        lambda *_args, **_kwargs: next(decisions, False),
+    )
+    settled: list[tuple[tuple[str, ...], int]] = []
+
+    async def settle(event_ids: tuple[str, ...]) -> None:
+        settled.append((event_ids, gate.in_flight_response_count))
+
+    ingress = harness.dispatcher.deps.ingress
+    _replace_harness_deps(harness, ingress=IngressValidator(replace(ingress.deps, settle_ignored_sources=settle)))
+
+    await harness.dispatcher.handle_prepared_turn(make_test_turn(room, event, _SENDER, claim=claim))
+
+    assert settled == [((event.event_id,), 1)]
+    assert harness.policy.plan_turn_calls == 0
+    assert harness.runner.requests == []
     assert not harness.turn_store.has_live_turn_claim(event.event_id)
 
 

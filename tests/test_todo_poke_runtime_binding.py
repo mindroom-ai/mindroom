@@ -389,6 +389,8 @@ async def test_poke_applies_assignee_access_policy_to_human_requester(tmp_path: 
                     agent_reply_memberships=runtime.agent_reply_memberships,
                 ),
             ),
+            wait_for_admission_or_shutdown=AsyncMock(return_value=True),
+            settle_ignored_sources=AsyncMock(),
         ),
     )
     room = nio.MatrixRoom("!room:localhost", secret_id)

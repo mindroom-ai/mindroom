@@ -495,9 +495,9 @@ async def test_unresolved_router_command_waits_for_reload_and_rechecks_authoriza
         await admission_gate.wait_until_open()
         return True
 
+    replace_turn_deps(bot, wait_for_admission_or_shutdown=wait_for_replacement)
     with (
         patch.object(bot._conversation_resolver, "coalescing_thread_id", side_effect=unresolved_thread),
-        patch.object(bot._response_runner, "wait_for_admission_or_shutdown", side_effect=wait_for_replacement),
         patch.object(bot._delivery_gateway, "send_text", new_callable=AsyncMock, return_value="$notice") as send_text,
         patch.object(TurnDispatcher, "_dispatch_text_turn", new_callable=AsyncMock) as dispatch,
     ):

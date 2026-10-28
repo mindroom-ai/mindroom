@@ -475,14 +475,12 @@ class TurnIngress:
         """
         if prechecked_event.facts.sender_is_managed:
             return None
-        async with admitted_response_decision(
-            self.deps.runtime.response_admission_gate,
-            self.deps.response_runner.wait_for_admission_or_shutdown,
-        ):
-            if not self.deps.turn_policy.can_reply_to_sender_in_room(
-                prechecked_event.facts.lane_requester_id,
-                room.room_id,
-            ):
+        async with self.deps.ingress.admitted_reply_decision(
+            prechecked_event.facts.lane_requester_id,
+            room.room_id,
+            unanswered=(prechecked_event.event.event_id,),
+        ) as allowed:
+            if not allowed:
                 return None
             if await self._edit_queued_message(room, prechecked_event.event, event_info):
                 return None
@@ -552,11 +550,12 @@ class TurnIngress:
             sender=event.sender,
         )
         if self.deps.agent_name == ROUTER_AGENT_NAME:
-            async with admitted_response_decision(
-                self.deps.runtime.response_admission_gate,
-                self.deps.response_runner.wait_for_admission_or_shutdown,
-            ):
-                if not self.deps.turn_policy.can_reply_to_sender_in_room(requester_user_id, room.room_id):
+            async with self.deps.ingress.admitted_reply_decision(
+                requester_user_id,
+                room.room_id,
+                unanswered=(event.event_id,),
+            ) as allowed:
+                if not allowed:
                     return True
                 target = self.deps.resolver.build_message_target(
                     room_id=room.room_id,

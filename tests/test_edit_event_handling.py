@@ -284,6 +284,7 @@ async def test_edit_waits_for_reload_and_rechecks_authorization(tmp_path: Path) 
         await admission_gate.wait_until_open()
         return True
 
+    replace_turn_deps(bot, wait_for_admission_or_shutdown=wait_for_replacement)
     with (
         patch.object(
             bot._turn_ingress,
@@ -293,7 +294,6 @@ async def test_edit_waits_for_reload_and_rechecks_authorization(tmp_path: Path) 
                 facts=make_ingress_facts(edit_event.sender, requester_user_id=sender_id),
             ),
         ),
-        patch.object(bot._response_runner, "wait_for_admission_or_shutdown", side_effect=wait_for_replacement),
         patch.object(bot._edit_regenerator, "handle_message_edit", new_callable=AsyncMock) as handle_edit,
     ):
         edit_task = asyncio.create_task(bot._on_message(room, edit_event))
