@@ -38,6 +38,36 @@ def test_paused_rows_main_wrote_read_without_their_notices(name: str) -> None:
         assert (member.status, member.content) == (RunStatus.paused, None)
 
 
+@pytest.mark.parametrize(
+    "notice",
+    [
+        "I have tools to execute, but I need confirmation, user input, or external execution.",
+        "I have tools to execute, but I need confirmation or user input.",
+        "I have tools to execute, but I need confirmation or external execution.",
+        "I have tools to execute, but I need user input or external execution.",
+        "I have tools to execute, but I need user input.",
+        "I have tools to execute, but it needs external execution.",
+        "Team run paused.",
+    ],
+)
+def test_every_other_wording_agno_wrote_reads_as_no_content(notice: str) -> None:
+    """The paused notices Agno's runtime wrote for other pauses read as no content too."""
+    stored = {**_ROWS["agent_paused"], "content": notice}
+
+    assert RunRecord.from_dict(stored).content is None
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["I have tools to execute, but first one question.", "Team run paused. I will pick it up again tomorrow."],
+)
+def test_a_reply_that_only_opens_like_a_notice_keeps_its_content(content: str) -> None:
+    """Only the notices themselves read as no content, not a reply that happens to start with the same words."""
+    stored = {**_ROWS["agent_resumed_without_text"], "content": content}
+
+    assert RunRecord.from_dict(stored).content == content
+
+
 def test_a_completed_row_that_carried_the_notice_hands_over_none() -> None:
     """A row whose resume wrote no text, and so kept the notice, hands its reader nothing."""
     stored = _ROWS["agent_resumed_without_text"]
