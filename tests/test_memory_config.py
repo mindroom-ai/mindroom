@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 from anthropic.types import Message as AnthropicMessage
 from anthropic.types import TextBlock
@@ -21,6 +22,7 @@ from mem0.configs.embeddings.base import BaseEmbedderConfig
 from mem0.embeddings.openai import OpenAIEmbedding
 from mem0.llms.openai import OpenAILLM
 from mem0.utils.factory import LlmFactory
+from openai import APIConnectionError
 from pydantic import ValidationError
 
 from mindroom.config.agent import AgentConfig
@@ -233,7 +235,7 @@ class TestMemoryConfig:
         with patch.object(
             AsyncMemory,
             "from_config",
-            return_value=SimpleNamespace(llm=mem0_llm),
+            return_value=SimpleNamespace(llm=mem0_llm, embedding_model=MagicMock()),
         ):
             instance = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
 
@@ -284,7 +286,8 @@ class TestMemoryConfig:
         with patch("mem0.llms.openai.OpenAI", return_value=fake_client):
             mem0_llm = OpenAILLM(_get_memory_config(tmp_path / "memory", config, runtime_paths)["llm"]["config"])
 
-        with patch.object(AsyncMemory, "from_config", return_value=SimpleNamespace(llm=mem0_llm)):
+        mem0_memory = SimpleNamespace(llm=mem0_llm, embedding_model=MagicMock())
+        with patch.object(AsyncMemory, "from_config", return_value=mem0_memory):
             instance = await create_memory_instance(tmp_path / "memory", config, runtime_paths)
         instance.llm.generate_response([{"role": "user", "content": "remember this"}])
 
@@ -1053,7 +1056,7 @@ class TestMemoryConfig:
             llm=None,
         )
         config = Config(memory=memory, router=RouterConfig(model="default"))
-        expected_memory = SimpleNamespace(llm=_fake_mem0_llm())
+        expected_memory = SimpleNamespace(llm=_fake_mem0_llm(), embedding_model=MagicMock())
         mock_from_config.return_value = expected_memory
 
         result = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
@@ -1082,7 +1085,7 @@ class TestMemoryConfig:
             llm=None,
         )
         config = Config(memory=memory, router=RouterConfig(model="default"))
-        mock_from_config.return_value = SimpleNamespace(llm=_fake_mem0_llm())
+        mock_from_config.return_value = SimpleNamespace(llm=_fake_mem0_llm(), embedding_model=MagicMock())
         install_running = threading.Event()
         finish_install = threading.Event()
 
@@ -1148,6 +1151,91 @@ class TestMemoryConfig:
         assert isinstance(result.embedding_model, _Mem0StrictOpenAIEmbedder)
         with pytest.raises(EmbedderRequestError, match="embedder returned 0 embeddings for 1 inputs"):
             result.embedding_model.embed("query", "search")
+
+    @pytest.mark.asyncio
+    async def test_an_ollama_outage_reaches_mem0_callers_as_an_unreachable_embedder(self, tmp_path: Path) -> None:
+        """Mem0's own Ollama embedder fails as the typed embedder error, so a memory search degrades instead of failing.
+
+        The embedder asks Ollama for its model while the memory is built, so an outage fails the build as well.
+        """
+        config = Config(
+            memory=MemoryConfig(
+                embedder=_MemoryEmbedderConfig(provider="ollama", config=EmbedderConfig(model="nomic-embed-text")),
+                llm=None,
+            ),
+            router=RouterConfig(model="default"),
+        )
+        refused = ConnectionError("Failed to connect to Ollama. Please check that Ollama is downloaded and running.")
+        mem0_embedder = MagicMock()
+        mem0_embedder.embed.side_effect = refused
+        mem0_embedder.embed_batch.return_value = [[0.5]]
+        memory = SimpleNamespace(llm=_fake_mem0_llm(), embedding_model=mem0_embedder)
+
+        with (
+            patch.object(AsyncMemory, "from_config", side_effect=refused),
+            pytest.raises(EmbedderRequestError) as build,
+        ):
+            await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
+        with patch.object(AsyncMemory, "from_config", return_value=memory):
+            result = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
+        with pytest.raises(EmbedderRequestError) as search:
+            result.embedding_model.embed("query", "search")
+
+        for raised in (build.value, search.value):
+            assert (str(raised), raised.retryable) == ("embedder endpoint unreachable", True)
+        mem0_embedder.embed.assert_called_once_with("query", "search")
+        assert result.embedding_model.embed_batch(["memory"], "update") == [[0.5]]
+        mem0_embedder.embed_batch.assert_called_once_with(["memory"], "update")
+        mem0_embedder.embed_batch.side_effect = refused
+        with pytest.raises(EmbedderRequestError, match="embedder endpoint unreachable"):
+            result.embedding_model.embed_batch(["memory"])
+
+    @pytest.mark.asyncio
+    async def test_an_outage_of_another_mem0_embedder_reaches_mem0_callers_as_an_unreachable_embedder(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """An embedder only Mem0 provides, such as Azure OpenAI over the OpenAI SDK, fails as the typed embedder error."""
+        config = Config(
+            memory=MemoryConfig(
+                embedder=_MemoryEmbedderConfig(
+                    provider="azure_openai",
+                    config=EmbedderConfig(model="text-embedding-3-small"),
+                ),
+                llm=None,
+            ),
+            router=RouterConfig(model="default"),
+        )
+        request = httpx.Request("POST", "https://r.openai.azure.com/openai/deployments/e/embeddings")
+        refused = APIConnectionError(request=request)
+        refused.__cause__ = httpx.ConnectError("connection refused", request=request)
+        mem0_embedder = MagicMock()
+        mem0_embedder.embed.side_effect = refused
+        memory = SimpleNamespace(llm=_fake_mem0_llm(), embedding_model=mem0_embedder)
+
+        with patch.object(AsyncMemory, "from_config", return_value=memory):
+            result = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
+        with pytest.raises(EmbedderRequestError) as search:
+            result.embedding_model.embed("query", "search")
+
+        assert (str(search.value), search.value.retryable) == ("embedder endpoint unreachable", True)
+
+    @pytest.mark.asyncio
+    async def test_a_failure_unrelated_to_ollama_while_building_mem0_keeps_its_type(self, tmp_path: Path) -> None:
+        """Only an Ollama failure reads as the embedder's; any other build failure propagates as raised."""
+        config = Config(
+            memory=MemoryConfig(
+                embedder=_MemoryEmbedderConfig(provider="ollama", config=EmbedderConfig(model="nomic-embed-text")),
+                llm=None,
+            ),
+            router=RouterConfig(model="default"),
+        )
+
+        with (
+            patch.object(AsyncMemory, "from_config", side_effect=ValueError("bad vector store")),
+            pytest.raises(ValueError, match="bad vector store"),
+        ):
+            await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
 
     def test_mem0_strict_adapter_remembers_swallowed_operation_failure(self) -> None:
         """A later successful retry cannot hide a batch failure from the caller."""

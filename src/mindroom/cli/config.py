@@ -26,6 +26,7 @@ from mindroom.cli.env_file import upsert_env_values, write_private_env_text
 from mindroom.cli.help_format import PanelOrderedGroup, examples
 from mindroom.cli.interactive import secret, section, select
 from mindroom.model_defaults import (
+    AZURE_OPENAI_API_VERSION_DEFAULT,
     CONFIG_INIT_ADDITIONAL_MODELS,
     CONFIG_INIT_HELPER_MODELS,
     CONFIG_INIT_MODEL_ALTERNATIVES,
@@ -1540,7 +1541,7 @@ def _provider_env_template(  # noqa: PLR0911
         {AZURE_OPENAI_ENV_BY_KEY["endpoint"]}={ENV_TEMPLATE_PLACEHOLDERS[AZURE_OPENAI_ENV_BY_KEY["endpoint"]]}
 
         # Optional: override the default Azure OpenAI API version.
-        # {AZURE_OPENAI_ENV_BY_KEY["api_version"]}=2024-10-21
+        # {AZURE_OPENAI_ENV_BY_KEY["api_version"]}={AZURE_OPENAI_API_VERSION_DEFAULT}
 
         # In config.yaml, set models.default.id to your Azure OpenAI deployment name.
         """).rstrip()
