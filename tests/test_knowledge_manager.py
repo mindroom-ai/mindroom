@@ -1179,10 +1179,16 @@ async def test_shared_local_watch_index_refreshes_on_access_without_blocking_rea
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     doc.write_text("shared local new", encoding="utf-8")
-    monkeypatch.setattr(
-        "mindroom.knowledge.refresh_runner._refresh_index_in_subprocess",
-        knowledge_refresh_runner._refresh_resolved_knowledge_binding,
-    )
+    refresh_started = asyncio.Event()
+    release_refresh = asyncio.Event()
+
+    async def held_refresh(*args: object, **kwargs: object) -> object:
+        # The refresh stays in flight until the read below returns, so that read cannot see its publication.
+        refresh_started.set()
+        await release_refresh.wait()
+        return await knowledge_refresh_runner._refresh_resolved_knowledge_binding(*args, **kwargs)
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner._refresh_index_in_subprocess", held_refresh)
     scheduler = KnowledgeRefreshScheduler()
 
     try:
@@ -1193,7 +1199,9 @@ async def test_shared_local_watch_index_refreshes_on_access_without_blocking_rea
             refresh_scheduler=scheduler,
         ).knowledge
         assert knowledge is not None
+        await asyncio.wait_for(refresh_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
         assert [document.content for document in await knowledge.asearch("shared", 5)] == ["shared local old"]
+        release_refresh.set()
 
         try:
             async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
