@@ -34,6 +34,8 @@ CHANNEL = "C0123ABCD"
 OTHER_CHANNEL = "C0456EFGH"
 DM = "D0123ABCD"
 NOW = 1_700_000_000
+# The channels an agent answers, where an app mention also arrives as an `app_mention` event.
+ANSWERED = frozenset({CHANNEL})
 
 
 def _sign(body: bytes, timestamp: int | str = NOW, secret: str = SECRET) -> str:
@@ -57,7 +59,7 @@ def _envelope(event_type: str = "message", **inner: Any) -> dict[str, Any]:  # n
 
 
 def _event(**changes: Any) -> SlackMessageEvent:  # noqa: ANN401
-    parsed = parse_message_event(_envelope(), bot_user_id=BOT)
+    parsed = parse_message_event(_envelope(), bot_user_id=BOT, answered_channels=ANSWERED)
     assert parsed is not None
     return replace(parsed, **changes)
 
@@ -126,7 +128,7 @@ def test_signature_covers_the_raw_body_bytes() -> None:
 
 
 def test_parse_keeps_a_channel_message() -> None:
-    parsed = parse_message_event(_envelope(thread_ts="1700000000.000050"), bot_user_id=BOT)
+    parsed = parse_message_event(_envelope(thread_ts="1700000000.000050"), bot_user_id=BOT, answered_channels=ANSWERED)
     assert parsed == SlackMessageEvent(
         event_id="Ev0123ABCD",
         team_id=TEAM,
@@ -141,18 +143,22 @@ def test_parse_keeps_a_channel_message() -> None:
 
 
 def test_parse_app_mention_has_no_channel_type_and_sets_the_flag() -> None:
-    parsed = parse_message_event(_envelope("app_mention", text=f"<@{BOT}> hi"), bot_user_id=BOT)
+    parsed = parse_message_event(
+        _envelope("app_mention", text=f"<@{BOT}> hi"),
+        bot_user_id=BOT,
+        answered_channels=ANSWERED,
+    )
     assert parsed is not None
     assert (parsed.is_app_mention, parsed.channel_type, parsed.thread_ts) == (True, "channel", None)
 
 
 @pytest.mark.parametrize("subtype", ["thread_broadcast", "file_share"])
 def test_parse_keeps_allowed_subtypes(subtype: str) -> None:
-    assert parse_message_event(_envelope(subtype=subtype), bot_user_id=BOT) is not None
+    assert parse_message_event(_envelope(subtype=subtype), bot_user_id=BOT, answered_channels=ANSWERED) is not None
 
 
 def test_shared_channel_event_keeps_the_receiving_team() -> None:
-    parsed = parse_message_event(_envelope(team="T0OTHER99"), bot_user_id=BOT)
+    parsed = parse_message_event(_envelope(team="T0OTHER99"), bot_user_id=BOT, answered_channels=ANSWERED)
     assert parsed is not None
     assert parsed.team_id == TEAM
 
@@ -183,37 +189,53 @@ def test_shared_channel_event_keeps_the_receiving_team() -> None:
     ids=lambda payload: str(payload.get("event", payload)) if isinstance(payload, dict) else str(payload),
 )
 def test_bot_and_app_messages_never_wake(payload: dict[str, Any]) -> None:
-    assert parse_message_event(payload, bot_user_id=BOT) is None
+    assert parse_message_event(payload, bot_user_id=BOT, answered_channels=ANSWERED) is None
 
 
 @pytest.mark.parametrize("text", [f"<@{BOT}> hi", f"hi <@{BOT}|mindroom>", f"a <@{OWNER}> <@{BOT}>"])
-def test_message_event_mentioning_app_dropped(text: str) -> None:
-    assert parse_message_event(_envelope(text=text), bot_user_id=BOT) is None
-    assert parse_message_event(_envelope("app_mention", text=text), bot_user_id=BOT) is not None
+def test_message_event_mentioning_app_dropped_where_an_agent_answers(text: str) -> None:
+    """The `app_mention` twin carries that message."""
+    assert parse_message_event(_envelope(text=text), bot_user_id=BOT, answered_channels=ANSWERED) is None
+    assert (
+        parse_message_event(_envelope("app_mention", text=text), bot_user_id=BOT, answered_channels=ANSWERED)
+        is not None
+    )
+
+
+def test_message_event_mentioning_app_kept_where_no_agent_answers() -> None:
+    """Slack sends no `app_mention` from a channel the app is not in, so a watch must still get the message."""
+    payload = _envelope(text=f"<@{BOT}> <@{OWNER}> hi", channel=OTHER_CHANNEL)
+
+    parsed = parse_message_event(payload, bot_user_id=BOT, answered_channels=ANSWERED)
+
+    assert parsed is not None
+    assert parsed.is_app_mention is False
 
 
 def test_message_event_mentioning_someone_else_is_kept() -> None:
-    assert parse_message_event(_envelope(text=f"<@{OWNER}> hi"), bot_user_id=BOT) is not None
+    assert (
+        parse_message_event(_envelope(text=f"<@{OWNER}> hi"), bot_user_id=BOT, answered_channels=ANSWERED) is not None
+    )
 
 
 @pytest.mark.parametrize("missing", ["event_id", "team_id"])
 def test_parse_drops_an_envelope_without_ids(missing: str) -> None:
     payload = _envelope()
     del payload[missing]
-    assert parse_message_event(payload, bot_user_id=BOT) is None
+    assert parse_message_event(payload, bot_user_id=BOT, answered_channels=ANSWERED) is None
 
 
 @pytest.mark.parametrize("missing", ["user", "channel", "ts", "text", "channel_type"])
 def test_parse_drops_an_event_without_fields(missing: str) -> None:
-    assert parse_message_event(_envelope(**{missing: None}), bot_user_id=BOT) is None
+    assert parse_message_event(_envelope(**{missing: None}), bot_user_id=BOT, answered_channels=ANSWERED) is None
 
 
 def test_parse_drops_an_empty_id() -> None:
-    assert parse_message_event(_envelope(channel=""), bot_user_id=BOT) is None
+    assert parse_message_event(_envelope(channel=""), bot_user_id=BOT, answered_channels=ANSWERED) is None
 
 
 def test_parse_keeps_an_empty_text_of_a_file_share() -> None:
-    parsed = parse_message_event(_envelope(subtype="file_share", text=""), bot_user_id=BOT)
+    parsed = parse_message_event(_envelope(subtype="file_share", text=""), bot_user_id=BOT, answered_channels=ANSWERED)
     assert parsed is not None
     assert parsed.text == ""
 
@@ -246,16 +268,13 @@ def test_thread_keys() -> None:
         assert watch_thread_key("w1", direct) == f"w1:{DM}"
 
 
-def test_project_wake_mention_and_bound_reply() -> None:
+def test_project_wake_agent_answers_the_events_channel() -> None:
     answering = (_answering("alpha", CHANNEL), _answering("beta", OTHER_CHANNEL))
-    mention = _event(is_app_mention=True)
-    reply = _event()
-    assert project_wake_agent(mention, answering, bound=False) == answering[0]
-    assert project_wake_agent(reply, answering, bound=True) == answering[0]
-    assert project_wake_agent(reply, answering, bound=False) is None
-    assert project_wake_agent(replace(mention, channel_id=OTHER_CHANNEL), answering, bound=False) == answering[1]
-    assert project_wake_agent(replace(mention, channel_id="C0UNOWNED"), answering, bound=True) is None
-    assert project_wake_agent(mention, (), bound=True) is None
+    event = _event()
+    assert project_wake_agent(event, answering) == answering[0]
+    assert project_wake_agent(replace(event, channel_id=OTHER_CHANNEL), answering) == answering[1]
+    assert project_wake_agent(replace(event, channel_id="C0UNOWNED"), answering) is None
+    assert project_wake_agent(event, ()) is None
 
 
 def test_watch_candidates_dm_mention_thread() -> None:

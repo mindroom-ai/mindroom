@@ -68,11 +68,18 @@ def _is_new_message_by_a_person(event: Mapping[str, Any], *, bot_user_id: str) -
     )
 
 
-def parse_message_event(payload: Mapping[str, Any], *, bot_user_id: str) -> SlackMessageEvent | None:
+def parse_message_event(
+    payload: Mapping[str, Any],
+    *,
+    bot_user_id: str,
+    answered_channels: frozenset[str],
+) -> SlackMessageEvent | None:
     """Return the message in an Events API envelope, or None when it must never wake anyone.
 
     That is anything but a new message or app mention by a person other than the app,
-    and a `message` event that mentions the app, because its paired `app_mention` event carries that message.
+    and a `message` event that mentions the app in one of the `answered_channels`, because its paired `app_mention`
+    event carries that message.
+    Elsewhere the app may not be in the channel, so no `app_mention` arrives and the `message` is kept for watches.
     """
     event = payload.get("event")
     if payload.get("type") != "event_callback" or not isinstance(event, dict):
@@ -81,11 +88,13 @@ def parse_message_event(payload: Mapping[str, Any], *, bot_user_id: str) -> Slac
         return None
     is_app_mention = event["type"] == "app_mention"
     text = event.get("text")
-    if not isinstance(text, str) or (not is_app_mention and bot_user_id in mentioned_user_ids(text)):
+    channel_id = _text(event.get("channel"))
+    if not isinstance(text, str) or (
+        not is_app_mention and channel_id in answered_channels and bot_user_id in mentioned_user_ids(text)
+    ):
         return None
     event_id = _text(payload.get("event_id"))
     team_id = _text(payload.get("team_id"))
-    channel_id = _text(event.get("channel"))
     # An app mention event carries no channel type.
     channel_type = "channel" if is_app_mention else _text(event.get("channel_type"))
     user_id = _text(event.get("user"))
@@ -133,12 +142,8 @@ def watch_thread_key(watch_id: str, event: SlackMessageEvent) -> str:
 def project_wake_agent(
     event: SlackMessageEvent,
     answering: tuple[SlackAnsweringAgent, ...],
-    *,
-    bound: bool,
 ) -> SlackAnsweringAgent | None:
-    """Return the agent that answers an event in its channel: an app mention, or a reply in a bound thread."""
-    if not (event.is_app_mention or bound):
-        return None
+    """Return the agent that answers the event's channel; delivery wakes it for an app mention or a bound reply."""
     return next((agent for agent in answering if event.channel_id in agent.channels), None)
 
 

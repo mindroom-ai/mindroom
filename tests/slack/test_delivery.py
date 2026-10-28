@@ -28,6 +28,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.slack import app as slack_app
 from mindroom.slack import identity as slack_identity
 from mindroom.slack import turns
+from mindroom.slack.app import SlackAppCredentials, load_slack_app
 from mindroom.slack.delivery import deliver_slack_event, retry_slack_event
 from mindroom.slack.watches import SlackWatchStore, watch_id_for
 from tests.conftest import (
@@ -98,14 +99,25 @@ class Harness:
     bots: dict[str, FakeBot]
     runtime: SlackRuntime
 
-    async def deliver(self, payload: dict[str, Any], *, now: int = NOW) -> DeliveryResult:
+    async def deliver(
+        self,
+        payload: dict[str, Any],
+        *,
+        now: int = NOW,
+        app: SlackAppCredentials | None = None,
+    ) -> DeliveryResult:
+        """Deliver as the route does, with the Slack app it loaded for this event."""
+        manager = get_runtime_credentials_manager(self.paths)
+        loaded = app or load_slack_app(manager)
+        assert loaded is not None
         async with self.slack.client() as client:
             return await deliver_slack_event(
                 payload,
                 runtime=self.runtime,
                 config=self.config,
                 runtime_paths=self.paths,
-                credentials_manager=get_runtime_credentials_manager(self.paths),
+                credentials_manager=manager,
+                app=loaded,
                 client=client,
                 now=now,
             )
@@ -349,6 +361,47 @@ async def test_unmapped_author_gets_one_ephemeral(harness: Harness, author: str)
     ]
     assert harness.bearer("chat.postEphemeral") == [BOT_TOKEN]
     assert harness.slack.calls("reactions.add") == []
+
+
+@pytest.mark.asyncio
+async def test_unresolved_membership_retries_without_a_notice(harness: Harness) -> None:
+    """Room membership is not known yet just after a start, so a mention waits for it instead of being refused."""
+    data = config_data(launch_users=())
+    data["agents"]["launch"]["access"] = {"users": [], "members_of_rooms": ["launch"]}  # type: ignore[index]
+    harness.config = bind_runtime_paths(Config.model_validate(data), harness.paths)
+
+    assert await harness.deliver(event_payload()) == "retry"
+    await harness.settle()
+
+    assert harness.matrix.sent == []
+    assert harness.slack.calls("chat.postEphemeral") == []
+    assert harness.bots["launch"].admission_gate.in_flight_response_count == 0
+
+
+@pytest.mark.asyncio
+async def test_delivery_uses_the_app_it_is_given(harness: Harness) -> None:
+    """The route loads the Slack app once per event, and delivery acts with that app."""
+    app = load_slack_app(get_runtime_credentials_manager(harness.paths))
+    assert app is not None
+    given = replace(app, bot_token="xoxb-given-token")  # noqa: S106
+
+    assert await harness.deliver(event_payload(), app=given) == "delivered"
+    await harness.settle()
+
+    assert harness.bearer("reactions.add") == ["xoxb-given-token"]
+
+
+@pytest.mark.asyncio
+async def test_retry_stops_once_the_app_is_removed(harness: Harness) -> None:
+    """A retry long after the request reads the Slack app again, so removing the app stops it."""
+    get_runtime_credentials_manager(harness.paths).delete_credentials("slack_app")
+    delays: list[float] = []
+
+    await _retry(harness, "retry", delays)
+
+    assert delays == [5]
+    assert harness.slack.requests == []
+    assert harness.matrix.sent == []
 
 
 @pytest.mark.asyncio
@@ -618,6 +671,21 @@ async def test_watch_mention_in_a_channel_and_its_replies(harness: Harness) -> N
     assert " Slack mention for you from Dana " in content["body"]
     assert " Slack thread reply for you from Dana " in follow_up["body"]
     assert follow_up["m.relates_to"]["event_id"] == "$sent1"
+
+
+@pytest.mark.asyncio
+async def test_watch_gets_an_app_mention_from_a_channel_no_agent_answers(harness: Harness) -> None:
+    """Slack sends no `app_mention` from a channel the app is not in, so the `message` naming both reaches the watch."""
+    alice_watch(harness.paths)
+    connect_alice(harness.paths)
+    text = f"<@{BOT_USER}> <@{SLACK_IDS['alice']}> can you look?"
+    payload = event_payload("message", author="dana", text=text, channel="C0456EFGH")
+
+    assert await harness.deliver(payload) == "delivered"
+
+    ((room_id, content),) = harness.matrix.sent
+    assert room_id == WATCH_ROOM
+    assert " Slack mention for you from Dana " in content["body"]
 
 
 @pytest.mark.asyncio

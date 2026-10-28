@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
+from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import create_background_task
 from mindroom.config.slack import slack_answering_agents
 from mindroom.logging_config import get_logger
@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from mindroom.config.slack import SlackAnsweringAgent
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
+    from mindroom.slack.app import SlackAppCredentials
     from mindroom.slack.turns import DeliveryResult
 
 logger = get_logger(__name__)
@@ -75,12 +76,14 @@ async def deliver_slack_event(
     config: Config,
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager,
+    app: SlackAppCredentials,
     client: httpx.AsyncClient,
     now: int,
     last_attempt: bool = False,
 ) -> DeliveryResult:
     """Deliver one Events API payload to its project agent, then its watches, and say whether to try again.
 
+    `app` is the Slack app this attempt acts with, loaded once for it.
     `retry` means some target may still receive the message; targets that already did skip it next time.
     On the `last_attempt`, a project wake that still fails tells its author to try again.
     """
@@ -91,6 +94,7 @@ async def deliver_slack_event(
             config=config,
             runtime_paths=runtime_paths,
             credentials_manager=credentials_manager,
+            app=app,
             client=client,
             now=now,
             last_attempt=last_attempt,
@@ -118,8 +122,8 @@ async def retry_slack_event(
 ) -> None:
     """Retry an event acknowledged before its first attempt finished, after 5, 30 and 120 s, until one succeeds.
 
-    Each retry reads `current_config` again, so a reload that revokes access stops later retries;
-    None means no config is committed right now, which skips that retry.
+    Each retry reads `current_config` and the Slack app again, so a reload that revokes access stops later retries;
+    None means no config is committed right now, which skips that retry, and a removed app ends them.
     """
     if await first_attempt != "retry":
         return
@@ -129,6 +133,9 @@ async def retry_slack_event(
         if config is None:
             logger.warning("Slack event retry skipped without a committed config", event_id=_event_id(payload))
             continue
+        app = await asyncio.to_thread(load_slack_app, credentials_manager)
+        if app is None:
+            return
         async with runtime.http_client() as client:
             result = await deliver_slack_event(
                 payload,
@@ -136,6 +143,7 @@ async def retry_slack_event(
                 config=config,
                 runtime_paths=runtime_paths,
                 credentials_manager=credentials_manager,
+                app=app,
                 client=client,
                 now=int(time.time()),
                 last_attempt=number == len(_RETRY_DELAYS_SECONDS),
@@ -151,19 +159,24 @@ async def _deliver(
     config: Config,
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager,
+    app: SlackAppCredentials,
     client: httpx.AsyncClient,
     now: int,
     last_attempt: bool,
 ) -> DeliveryResult:
-    app = await asyncio.to_thread(load_slack_app, credentials_manager)
     control_state_root = runtime_paths.control_state_root
-    if app is None or control_state_root is None:
+    if control_state_root is None:
         return "ignored"
     # A cold cache asks Slack here, inside the route's timed delivery.
     identity = await slack_bot_identity(client, app)
     if payload.get("team_id") != identity.team_id:
         return "ignored"
-    event = parse_message_event(payload, bot_user_id=identity.bot_user_id)
+    answering = slack_answering_agents(config)
+    event = parse_message_event(
+        payload,
+        bot_user_id=identity.bot_user_id,
+        answered_channels=frozenset(channel for agent in answering for channel in agent.channels),
+    )
     if event is None:
         return "ignored"
     attempt = SlackAttempt(
@@ -180,7 +193,7 @@ async def _deliver(
         now=now,
         last_attempt=last_attempt,
     )
-    project = await _deliver_to_project(attempt)
+    project = await _deliver_to_project(attempt, answering)
     return _combined([project, *await deliver_to_watches(attempt)])
 
 
@@ -191,14 +204,14 @@ def _combined(results: Iterable[DeliveryResult]) -> DeliveryResult:
     return "delivered" if "delivered" in outcomes else "ignored"
 
 
-async def _deliver_to_project(attempt: SlackAttempt) -> DeliveryResult:
+async def _deliver_to_project(attempt: SlackAttempt, answering: tuple[SlackAnsweringAgent, ...]) -> DeliveryResult:
     """Wake the agent answering the event's channel; on the last attempt, a wake that still fails tells its author."""
     event = attempt.event
-    answering = project_wake_agent(event, slack_answering_agents(attempt.config), bound=True)
-    if answering is None:
+    agent = project_wake_agent(event, answering)
+    if agent is None:
         return "ignored"
     thread_key = project_thread_key(event)
-    result = await retry_on_failure(event, _wake_project_agent(attempt, answering, thread_key))
+    result = await retry_on_failure(event, _wake_project_agent(attempt, agent, thread_key))
     if result == "retry" and attempt.last_attempt:
         _notify_author(attempt, thread_key, _UNRECEIVED)
     return result
@@ -219,15 +232,22 @@ async def _wake_project_agent(attempt: SlackAttempt, answering: SlackAnsweringAg
         return retry_later(event, "the answering agent is not running")
     author = await event_author(attempt)
     bot, client = running
+    requester = author.matrix_id
     async with admitted_response_decision(bot.admission_gate, refuse_while_closed):
-        if author.matrix_id is None or not is_sender_allowed_for_agent_reply_in_room(
-            author.matrix_id,
-            answering.agent,
-            attempt.config,
-            room_id,
-            attempt.runtime_paths,
-            attempt.runtime.agent_reply_memberships,
-        ):
+        try:
+            allowed = requester is not None and is_sender_allowed_for_agent_reply_in_room(
+                requester,
+                answering.agent,
+                attempt.config,
+                room_id,
+                attempt.runtime_paths,
+                attempt.runtime.agent_reply_memberships,
+                require_resolved_membership=True,
+            )
+        except ReplyMembershipPendingError:
+            # Room membership is not known yet, as just after a start or a join; the decision waits for it.
+            return retry_later(event, "membership not resolved")
+        if requester is None or not allowed:
             _notify_author(attempt, thread_key, _CANT_ANSWER)
             return skipped(event, "the author may not wake the answering agent")
         turn = SlackTurn(
@@ -237,7 +257,7 @@ async def _wake_project_agent(attempt: SlackAttempt, answering: SlackAnsweringAg
             room_id=room_id,
             header=f"Slack message from {author.display_name} in <#{event.channel_id}>: {attempt.permalink}",
             hook_source=f"slack/{event.channel_id}/{event.thread_ts or event.ts}",
-            requester=author.matrix_id,
+            requester=requester,
         )
         result = await claim_and_send(attempt, bot, client, turn)
     if result == "delivered":

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.matrix.identity import matrix_user_id_from_email
+from mindroom.requester_identity import is_access_checked_requester_id
 from mindroom.slack.api import SlackApiError, slack_call
 from mindroom.slack.render import json_object, slack_display_name
 
@@ -15,7 +16,8 @@ if TYPE_CHECKING:
 
     import httpx
 
-    from mindroom.config.slack import SlackConfig
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 _CACHE_TTL_SECONDS = 600
 _CACHE_MAX_ENTRIES = 4096
@@ -71,15 +73,16 @@ async def _fetch_profile(client: httpx.AsyncClient, bot_token: str, team_id: str
     return _profile(user, team_id)
 
 
-def _matrix_id(email: str | None, slack_config: SlackConfig) -> str | None:
-    """Return the Matrix ID an email in the configured domain maps to."""
-    template = slack_config.matrix_user_id_template
+def _matrix_id(email: str | None, config: Config, runtime_paths: RuntimePaths) -> str | None:
+    """Return the Matrix ID an email in the configured domain maps to, unless it names one of MindRoom's own accounts."""
+    template = config.slack.matrix_user_id_template
     if template is None or email is None:
         return None
     try:
-        return matrix_user_id_from_email(email, template, slack_config.email_domain)
+        matrix_id = matrix_user_id_from_email(email, template, config.slack.email_domain)
     except ValueError:
         return None
+    return matrix_id if is_access_checked_requester_id(matrix_id, config, runtime_paths) else None
 
 
 async def slack_author(
@@ -87,7 +90,8 @@ async def slack_author(
     bot_token: str,
     team_id: str,
     slack_user_id: str,
-    slack_config: SlackConfig,
+    config: Config,
+    runtime_paths: RuntimePaths,
     *,
     now: Callable[[], float] = time.monotonic,
 ) -> SlackAuthor:
@@ -95,7 +99,7 @@ async def slack_author(
 
     `team_id` must be the bot token's own team (`SlackBotIdentity.team_id`), never the event author's team,
     because a person from another team is refused by comparing their team with it.
-    `matrix_id` is None for anyone who must not drive an agent, and follows `slack_config` as it is now.
+    `matrix_id` is None for anyone who must not drive an agent, and follows `config` as it is now.
     The display name is always set; someone Slack does not know or show is named by their ID.
     Any other Slack error raises `SlackApiError` and is not cached.
     """
@@ -110,4 +114,4 @@ async def slack_author(
         while len(_PROFILES) >= _CACHE_MAX_ENTRIES:
             del _PROFILES[next(iter(_PROFILES))]
         _PROFILES[key] = (looked_up_at, profile)
-    return SlackAuthor(slack_user_id, profile.display_name, _matrix_id(profile.email, slack_config))
+    return SlackAuthor(slack_user_id, profile.display_name, _matrix_id(profile.email, config, runtime_paths))

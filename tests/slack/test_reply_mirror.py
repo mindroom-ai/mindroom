@@ -31,6 +31,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.slack import app as slack_app
 from mindroom.slack import identity as slack_identity
 from mindroom.slack import reply_mirror, turns
+from mindroom.slack.app import load_slack_app
 from mindroom.slack.delivery import deliver_slack_event
 from mindroom.slack.reply_mirror import mirror_reply_to_slack
 from tests.conftest import (
@@ -201,13 +202,17 @@ async def _start_thread(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, channel
     matrix = FakeMatrix()
     monkeypatch.setattr(turns, "send_matrix_message", matrix.send)
     runtime = runtime_for({"launch": FakeBot(AsyncMock())}, AgentReplyMembershipIndex(), slack)
+    manager = get_runtime_credentials_manager(paths)
+    app = load_slack_app(manager)
+    assert app is not None
     async with slack.client() as client:
         result = await deliver_slack_event(
             event_payload(channel=channel),
             runtime=runtime,
             config=config,
             runtime_paths=paths,
-            credentials_manager=get_runtime_credentials_manager(paths),
+            credentials_manager=manager,
+            app=app,
             client=client,
             now=int(time.time()),
         )

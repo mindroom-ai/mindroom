@@ -3553,8 +3553,13 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:  # n
         mock_bot2 = AsyncMock()
         mock_bot2.running = True
 
+        slack_bound_at_bot_shutdown: list[bool] = []
+
+        def track_begin_shutdown() -> None:
+            slack_bound_at_bot_shutdown.append(config_lifecycle.app_state(api_main.app).slack_runtime is not None)
+
         for mock_bot in (mock_bot1, mock_bot2):
-            mock_bot.begin_process_shutdown = MagicMock()
+            mock_bot.begin_process_shutdown = MagicMock(side_effect=track_begin_shutdown)
             mock_bot.pending_response_owner_count = 0
             mock_bot.pending_response_phase_counts = {}
             mock_bot.deferred_stop_phase = None
@@ -3608,7 +3613,9 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:  # n
             ],
         )
         assert mock_wait.await_count == 3
-        # Slack events are refused before their deliveries drain, and both happen before any bot stops.
+        # Slack events are refused before bots begin shutting down and before their deliveries drain,
+        # and the drain finishes before any bot stops.
+        assert slack_bound_at_bot_shutdown == [False, False]
         assert config_lifecycle.app_state(api_main.app).slack_runtime is None
         assert shutdown_order.index("slack_drain") < shutdown_order.index("entity_teardown")
         quiesce_indexes = [index for index, action in enumerate(shutdown_order) if action == "source_quiesce"]

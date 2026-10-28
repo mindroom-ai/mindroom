@@ -118,7 +118,8 @@ async def event_author(attempt: SlackAttempt) -> SlackAuthor:
         attempt.app.bot_token,
         attempt.identity.team_id,
         attempt.event.user_id,
-        attempt.config.slack,
+        attempt.config,
+        attempt.runtime_paths,
     )
 
 

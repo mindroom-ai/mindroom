@@ -2526,6 +2526,8 @@ class _MultiAgentOrchestrator:
         """Stop all agent bots."""
         self.running = False
         self._runtime_ready_event.clear()
+        # First, so Slack resends what arrives from now on to the next runtime instead of reaching stopping bots.
+        slack_runtime = self._unbind_slack_runtime()
         for bot in self.agent_bots.values():
             bot.begin_process_shutdown()
         self.agent_cli_registry.close()
@@ -2535,7 +2537,6 @@ class _MultiAgentOrchestrator:
             self._runtime_shutdown_event.set()
         self._external_trigger_runtime.unbind()
         self._computer_runtime.unbind()
-        slack_runtime = self._unbind_slack_runtime()
         try:
             await _run_shutdown_step("script_runtime", self._script_runtime.shutdown())
         except Exception:
