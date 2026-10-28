@@ -51,6 +51,9 @@ if TYPE_CHECKING:
 type _RosterEntry = PersonalAgentRosterEntry | CreatedAgentEntry
 
 _EDIT_FIELDS = tuple(GeneratedAgentEdits.model_fields)
+# Created agents this runtime is registering, changed only under the roster lock.
+# The primary runtime is the roster's only writer, so any other pending created entry was left by a crash.
+_REGISTERING: set[str] = set()
 
 
 class _GeneratedAgentError(ValueError):
@@ -102,7 +105,11 @@ def _append_personal_agent_roster_entry(runtime_paths: RuntimePaths, entry: Pers
 def _settle_roster_entry(runtime_paths: RuntimePaths, entry: _RosterEntry, replacement: _RosterEntry | None) -> None:
     """Rewrite the pending entry a provisioning reserved durably as its active copy, or remove it, under the lock."""
     with advisory_file_lock(personal_agent_roster_lock_path(runtime_paths)):
-        _replace_roster_entry(runtime_paths, entry, replacement)
+        try:
+            _replace_roster_entry(runtime_paths, entry, replacement)
+        finally:
+            # A created entry this write failed to settle stays pending, and the next creation removes it.
+            _REGISTERING.discard(entry.agent_name)
 
 
 def _refuse_bracketed_owner(user_id: str) -> None:
@@ -415,7 +422,10 @@ def _reserve_created_agent(config: Config, runtime_paths: RuntimePaths, entry: C
     with advisory_file_lock(personal_agent_roster_lock_path(runtime_paths)):
         _refuse_owners([entry.owner], runtime_paths)
         roster = read_personal_agent_roster_file(runtime_paths)
-        # Pending entries count too, so two concurrent creations cannot both pass the cap.
+        # A crash left the pending entries nobody here is registering; the others count, so two creations cannot
+        # both pass the cap.
+        created = [other for other in roster.created if not other.pending or other.agent_name in _REGISTERING]
+        roster = roster.model_copy(update={"created": created})
         count = sum((other.creator, other.owner) == (entry.creator, entry.owner) for other in roster.created)
         if count >= cap:
             msg = f"{entry.owner} already has {count} agents from {entry.creator}, which may create {cap} per owner"
@@ -427,6 +437,7 @@ def _reserve_created_agent(config: Config, runtime_paths: RuntimePaths, entry: C
         active = entry.model_copy(update={"pending": False})
         _refuse_unloadable(config, runtime_paths, roster.model_copy(update={"created": [*roster.created, active]}))
         _write_personal_agent_roster(runtime_paths, roster.model_copy(update={"created": [*roster.created, entry]}))
+        _REGISTERING.add(name)
 
 
 async def provision_created_agent(

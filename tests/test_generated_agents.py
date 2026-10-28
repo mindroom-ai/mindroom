@@ -14,6 +14,7 @@ import pytest
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
+from mindroom import personal_agents
 from mindroom.config import generated_agents
 from mindroom.config.agent import AgentConfig
 from mindroom.config.generated_agents import GeneratedAgentInfo, _generated_agent_data, tool_ceiling
@@ -714,16 +715,30 @@ async def test_create_names_the_agent_after_its_creator_and_registers_it(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_create_refuses_at_the_cap(tmp_path: Path) -> None:
-    """Active and pending agents from this creator count against each owner's cap; other owners keep theirs."""
+async def test_create_refuses_at_the_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Active agents and those still registering count against each owner's cap; other owners keep theirs."""
     config = _load(tmp_path, created=[_created(co_owners=[]), _created(agent_name="creator_draft", pending=True)])
     paths = test_runtime_paths(tmp_path)
+    monkeypatch.setattr(personal_agents, "_REGISTERING", {"creator_draft"})
     register = _register()
     with pytest.raises(_GeneratedAgentError, match=re.escape(f"{OWNER} already has 2")):
         await _create(config, paths, register, name="writer")
     register.assert_not_awaited()
     await _create(config, paths, register, name="writer", requester=CO_OWNER)
     assert [entry.owner for entry in read_personal_agent_roster_file(paths).created] == [OWNER, OWNER, CO_OWNER]
+
+
+@pytest.mark.asyncio
+async def test_a_pending_entry_left_by_a_crash_frees_its_name_and_place(tmp_path: Path) -> None:
+    """A pending entry that this runtime, the roster's only writer, is not registering is removed by the next creation."""
+    data = deepcopy(BASE)
+    data["agents"]["creator"]["created_agents_per_owner"] = 1
+    config = _load(tmp_path, data, created=[_created(pending=True)])
+    paths = test_runtime_paths(tmp_path)
+    await _create(config, paths, _register(), name="research")
+    [entry] = read_personal_agent_roster_file(paths).created
+    assert (entry.agent_name, entry.co_owners, entry.pending) == ("creator_research", [], False)
+    assert set() == personal_agents._REGISTERING
 
 
 @pytest.mark.asyncio

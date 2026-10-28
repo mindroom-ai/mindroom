@@ -237,7 +237,7 @@ Failed onboarding retries after 30 seconds, then at doubling intervals up to one
 | `Personal-room onboarding trigger failed` | Onboarding one user failed. For a personal agent, `error` is usually the homeserver refusing the registration, `No free personal agent name for <user>` when the plain and the hashed names are both taken, `<user> cannot own an agent: brackets in a Matrix ID are not supported` for an ID with `[` or `]`, `<user> cannot own a personal agent: <reason>` for another unsupported Matrix ID such as one with a space, `*`, or `?`, or `<user> is a MindRoom account and cannot own a personal agent`. |
 | `Personal-room reconciliation failed` | A retry failed, with the attempt number and the delay before the next try. |
 | `Personal agent roster unavailable` | The roster file cannot be read, and the pass is retried. |
-| `created_agent_skipped` | A created agent did not load; `reason` is `pending` while it is still being created, `creator_missing`, `over_cap`, or `name_taken`. |
+| `created_agent_skipped` | A created agent did not load; `reason` is `pending` while it is still being created, or until the next `create_agent` removes one a crash interrupted, `creator_missing`, `over_cap`, or `name_taken`. |
 | `generated_agent_tool_dropped` | A tool an owner chose is no longer among the tools of the template or creator, so the agent loads without it. |
 | `generated_agents_invalid` | The config with the owners' edits and the created agents is invalid for the reason in `error`, so MindRoom ignores them all until it is fixed, and each personal agent runs from its template. |
 
