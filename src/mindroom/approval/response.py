@@ -18,9 +18,9 @@ from mindroom.delegation.state import member_slot_id, pending_call_slot
 from mindroom.event_journal import (
     ApprovalCall,
     ApprovalContinuation,
+    ApprovalDecision,
     approval_arguments_digest,
 )
-from mindroom.event_journal import ApprovalDecision as ContinuationDecision
 from mindroom.message_target import MessageTarget
 from mindroom.tool_approval_grants import grant_operation
 from mindroom.tool_system.events import tool_markers_match_trace
@@ -154,7 +154,7 @@ async def plan_approval_calls(
 ) -> ApprovalPausePlan:
     """Evaluate policy once and normalize exact calls with integer deadlines; ``human_gate`` decides what policy gates."""
     approver_id = resolve_tool_approval_approver(config, runtime_paths, requester_id)
-    decisions: dict[str, tuple[ContinuationDecision | None, float, bool, str | None]] = {}
+    decisions: dict[str, tuple[ApprovalDecision | None, float, bool, str | None]] = {}
     for tool, invoking_agent in identified:
         requires_approval, timeout_seconds = await evaluate_tool_approval(
             config,
@@ -167,14 +167,14 @@ async def plan_approval_calls(
             tool.requires_confirmation is True and tool.approval_type != POLICY_CONFIRMATION_APPROVAL_TYPE
         )
         requires_approval = requires_approval or tool_authored_confirmation
-        decision, reason = ContinuationDecision.APPROVED, None
+        decision, reason = ApprovalDecision.APPROVED, None
         if requires_approval:
             # Read after the awaited policy, so a window that ended meanwhile approves nothing.
             gate = human_gate(runtime_paths, approver_id=approver_id, room_id=room_id, thread_id=thread_id)
             decision, reason = (
                 (None, None)
                 if gate is None
-                else (ContinuationDecision.APPROVED if gate.approved else ContinuationDecision.DENIED, gate.reason)
+                else (ApprovalDecision.APPROVED if gate.approved else ApprovalDecision.DENIED, gate.reason)
             )
         decisions[tool.tool_call_id] = (decision, timeout_seconds, requires_approval, reason)
     now = datetime.now(UTC)

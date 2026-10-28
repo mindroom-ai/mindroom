@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -26,9 +26,6 @@ from mindroom.event_journal import (
     ApprovalDecision,
     ApprovalFailure,
     DeliveryStage,
-    EventClass,
-    EventKind,
-    InboundEvent,
     replies,
 )
 from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowRequest
@@ -37,8 +34,10 @@ from mindroom.reply_lifecycle import ApprovalFailureKind, NoteKind, ReplyState
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
 from mindroom.response_runner import DeliveryProgress
 from tests.approval_continuation_helpers import (
+    admit_approval_source,
     advance_continuation,
     approval_continuation,
+    dispatch_approval,
     freeze_resume_final,
     resumed_approval,
 )
@@ -161,9 +160,9 @@ def _recovery_target() -> MessageTarget:
     return _target(thread_id="$thread", reply_to_event_id="$source")
 
 
-async def _outcome(bot: AgentBot, observer: _Observer, approval_id: str = "approval") -> Outcome:
+async def _outcome(bot: AgentBot, observer: _Observer) -> Outcome:
     store = _store(bot)
-    current = await store.approvals.approval_continuation(approval_id)
+    current = await store.approvals.approval_continuation("approval")
     reply = await store.replies.for_event("$waiting")
     assert reply is not None
     return Outcome(
@@ -181,25 +180,10 @@ async def _outcome(bot: AgentBot, observer: _Observer, approval_id: str = "appro
 # Building paused replies
 
 
-async def _admit_source(store: PrincipalStore) -> None:
-    await store.admit(
-        InboundEvent(
-            event_id="$source",
-            room_id="!room:localhost",
-            thread_id="$thread",
-            kind=EventKind.MESSAGE,
-            event_class=EventClass.ACTIONABLE,
-            sender="@user:localhost",
-            origin_server_ts=1,
-            source={"event_id": "$source", "content": {"body": "run it"}},
-        ),
-    )
-
-
 async def _paused(bot: AgentBot, **changes: object) -> ApprovalContinuation:
     """Pause a reply for one continuation in ``changes``' state, as a response or a claim leaves it."""
     store = _store(bot)
-    await _admit_source(store)
+    await admit_approval_source(store)
     continuation = await paused_for_approval(store, approval_continuation(**changes))
     assert continuation is not None
     return continuation
@@ -290,18 +274,15 @@ def _final_delivery_stalled() -> Iterator[None]:
 
 async def _dispatch(bot: AgentBot, owned: ApprovalContinuation) -> str | None:
     """Run the owning bot's source worker on the paused reply's source."""
-    runner = _runner(bot)
-    target = _recovery_target()
-    request = runner._approvals._approval_response_request(owned, target=target)
-    return await runner._approvals.run_owned_approvals(owned, request=request, target=target)
+    return await dispatch_approval(_runner(bot)._approvals, owned, target=_recovery_target())
 
 
-async def _completed_resume(bot: AgentBot, approval_id: str = "approval") -> Callable[..., Awaitable[object]]:
+async def _completed_resume(bot: AgentBot) -> Callable[..., Awaitable[object]]:
     """Return a resume run that answers, as ``_execute_claimed_approval`` reports a delivered answer."""
     store = _store(bot)
 
     async def answer(*_args: object, **_kwargs: object) -> tuple[FinalDeliveryOutcome, ApprovalContinuation]:
-        current = await store.approvals.approval_continuation(approval_id)
+        current = await store.approvals.approval_continuation("approval")
         assert current is not None
         await _final(bot, current, "answered")
         return FinalDeliveryOutcome(terminal_status="completed", event_id="$waiting", is_visible_response=True), current
@@ -325,8 +306,8 @@ async def _waiting(bot: AgentBot, lease: str | None) -> ApprovalContinuation:
     return await _paused(bot, state="waiting", runtime_generation=lease)
 
 
-async def _claimed_with_final(bot: AgentBot, final: str, *, by: str = _PREVIOUS) -> ApprovalContinuation:
-    claimed = await _claimed(bot, by=by)
+async def _claimed_with_final(bot: AgentBot, final: str) -> ApprovalContinuation:
+    claimed = await _claimed(bot, by=_PREVIOUS)
     await _final(bot, claimed, final)
     return claimed
 
@@ -341,14 +322,11 @@ async def _failing(
     bot: AgentBot,
     failure: ApprovalFailure,
     *,
-    final: str | None = None,
     span_ended: bool = False,
 ) -> ApprovalContinuation:
     claimed = await _claimed(bot, by=_PREVIOUS)
     if span_ended:
         await _end_claim_span(bot, claimed)
-    if final is not None:
-        await _final(bot, claimed, final)
     return await _fence(bot, claimed, failure)
 
 
@@ -575,19 +553,15 @@ async def _resume(bot: AgentBot, run: Callable[..., Awaitable[object]], **patche
     runner = _runner(bot)
     owned = await _paused(bot)
     async with resumed_approval(bot, owned) as claimed:
-        with patch.object(runner._approvals, "_execute_claimed_approval", side_effect=run):
-            if not patches:
-                event_id, _suspended = await runner._approvals._run_owned_approval_continuation(
-                    claimed,
-                    target=_recovery_target(),
-                )
-                return event_id
-            with patch.multiple(runner, **patches):
-                event_id, _suspended = await runner._approvals._run_owned_approval_continuation(
-                    claimed,
-                    target=_recovery_target(),
-                )
-                return event_id
+        with (
+            patch.object(runner._approvals, "_execute_claimed_approval", side_effect=run),
+            patch.multiple(runner, **patches) if patches else nullcontext(),
+        ):
+            event_id, _suspended = await runner._approvals._run_owned_approval_continuation(
+                claimed,
+                target=_recovery_target(),
+            )
+            return event_id
 
 
 _FAILED_RESUMES = (
@@ -1322,7 +1296,7 @@ async def test_settle_expires_cards_with_the_failure_the_paused_reply_holds(tmp_
 async def test_cli_exit_of_a_paused_reply_already_ended_does_nothing(tmp_path: Path) -> None:
     """A minimal-mode scope that ends after its paused reply ended has nothing left to decide."""
     bot = _new_bot(tmp_path)
-    await _admit_source(_store(bot))
+    await admit_approval_source(_store(bot))
     with _observed(bot) as observer:
         await _cli_exit(bot, _CliCase("gone", _cli, Outcome(continuation=None)))
     assert observer.notes == []

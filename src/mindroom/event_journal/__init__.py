@@ -20,6 +20,7 @@ from .approval_calls import (
     ApprovalDecision,
     BackgroundApprovalDecision,
     CallKey,
+    DecisionStatus,
     approval_arguments_digest,
     tool_job_run_id,
 )
@@ -122,6 +123,7 @@ __all__ = [
     "ConversationCursor",
     "ConversationPage",
     "ConversationReadView",
+    "DecisionStatus",
     "DeliveryAcknowledgement",
     "DeliveryProjectionPendingError",
     "DeliveryStage",

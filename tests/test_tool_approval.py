@@ -1673,31 +1673,20 @@ def test_tool_approval_config_rejects_boolean_timeout_days_with_nested_location(
     assert expected_location in {tuple(error["loc"]) for error in exc_info.value.errors(include_context=False)}
 
 
-def _approval_card(
-    *,
-    approval_id: str = "approval-1",
-    event_id: str = "$approval",
-    room_id: str = "!room:localhost",
-    sender: str = "@mindroom_router:localhost",
-    requester: str = "@requester:localhost",
-    approver: str = "@user:localhost",
-    status: str = "pending",
-    origin_server_ts: int | None = None,
-    arguments_truncated: bool = False,
-) -> dict[str, Any]:
+def _approval_card_content(*, arguments_truncated: bool = False) -> dict[str, Any]:
     now = datetime.now(UTC)
     content: dict[str, Any] = {
         "msgtype": "io.mindroom.tool_approval",
         "body": "Approval required: read_file",
         "tool_name": "read_file",
-        "tool_call_id": approval_id,
-        "continuation_id": f"continuation-{approval_id}",
+        "tool_call_id": "approval-1",
+        "continuation_id": "continuation-approval-1",
         "continuation_generation": 0,
-        "approval_id": approval_id,
+        "approval_id": "approval-1",
         "arguments": {"path": "notes.txt"},
-        "status": status,
-        "requester_id": requester,
-        "approver_user_id": approver,
+        "status": "pending",
+        "requester_id": "@requester:localhost",
+        "approver_user_id": "@user:localhost",
         "agent_name": "code",
         "thread_id": "$thread",
         "requested_at": now.isoformat(),
@@ -1705,14 +1694,7 @@ def _approval_card(
     }
     if arguments_truncated:
         content["arguments_truncated"] = True
-    return {
-        "event_id": event_id,
-        "room_id": room_id,
-        "sender": sender,
-        "type": "io.mindroom.tool_approval",
-        "origin_server_ts": origin_server_ts or int(now.timestamp() * 1000),
-        "content": content,
-    }
+    return content
 
 
 def test_approval_arguments_preview_marks_sanitizer_truncation() -> None:
@@ -1906,29 +1888,29 @@ def test_full_event_arguments_accepts_structurally_complex_payload_below_byte_ca
 
 
 def test_card_approvable_reads_full_arguments_availability() -> None:
-    card = _approval_card(arguments_truncated=True)
-    assert card_approvable(card["content"]) is False
+    card = _approval_card_content(arguments_truncated=True)
+    assert card_approvable(card) is False
 
-    card["content"]["full_arguments"] = {}
-    assert card_approvable(card["content"]) is False
+    card["full_arguments"] = {}
+    assert card_approvable(card) is False
 
-    card["content"]["full_arguments"] = {"content": "x" * 10_000}
-    assert card_approvable(card["content"]) is True
+    card["full_arguments"] = {"content": "x" * 10_000}
+    assert card_approvable(card) is True
 
 
 def test_card_approvable_reads_sidecar_full_arguments_availability() -> None:
-    url_card = _approval_card(arguments_truncated=True)
-    url_card["content"]["full_arguments_url"] = "mxc://localhost/full-args"
-    assert card_approvable(url_card["content"]) is False
+    url_card = _approval_card_content(arguments_truncated=True)
+    url_card["full_arguments_url"] = "mxc://localhost/full-args"
+    assert card_approvable(url_card) is False
 
-    url_card["content"]["full_arguments_info"] = {"size": 10_000, "mimetype": "application/json"}
-    assert card_approvable(url_card["content"]) is True
+    url_card["full_arguments_info"] = {"size": 10_000, "mimetype": "application/json"}
+    assert card_approvable(url_card) is True
 
-    file_card = _approval_card(arguments_truncated=True)
-    file_card["content"]["full_arguments_file"] = {}
-    assert card_approvable(file_card["content"]) is False
+    file_card = _approval_card_content(arguments_truncated=True)
+    file_card["full_arguments_file"] = {}
+    assert card_approvable(file_card) is False
 
-    file_card["content"]["full_arguments_file"] = {
+    file_card["full_arguments_file"] = {
         "url": "mxc://localhost/full-args",
         "key": {"alg": "A256CTR", "k": "secret", "key_ops": ["encrypt", "decrypt"], "kty": "oct"},
         "iv": "iv-value",
@@ -1937,21 +1919,21 @@ def test_card_approvable_reads_sidecar_full_arguments_availability() -> None:
         "size": 10_000,
         "mimetype": "application/json",
     }
-    assert card_approvable(file_card["content"]) is True
+    assert card_approvable(file_card) is True
 
 
 def test_card_approvable_defaults_missing_approvable_flag_to_true() -> None:
-    card = _approval_card()
+    card = _approval_card_content()
 
-    assert card_approvable(card["content"]) is True
+    assert card_approvable(card) is True
 
 
 @pytest.mark.parametrize(("value", "expected"), [(False, False), (True, True), (None, False), ("false", False)])
 def test_card_approvable_reads_explicit_approvable_flag(value: object, expected: bool) -> None:
-    card = _approval_card()
-    card["content"]["approvable"] = value
+    card = _approval_card_content()
+    card["approvable"] = value
 
-    assert card_approvable(card["content"]) is expected
+    assert card_approvable(card) is expected
 
 
 def test_resolve_tool_approval_approver_rejects_internal_users(tmp_path: Path) -> None:

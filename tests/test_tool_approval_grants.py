@@ -41,7 +41,13 @@ from mindroom.message_target import MessageTarget
 from mindroom.reply_lifecycle import ApprovalFailureKind
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_approval_grants import AUTO_APPROVE_OPTIONS, ApprovalOperation, grant_operation
-from tests.approval_card_helpers import card_content, card_is_terminal, pending_card, resolve_card_event
+from tests.approval_card_helpers import (
+    card_content,
+    card_is_terminal,
+    pending_card,
+    resolve_card_event,
+    wait_for_pending_card,
+)
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import approval_manager_for_test, handle_card_response_for_test, test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
@@ -1681,18 +1687,11 @@ def _job_call(
 
 
 async def _posted_job_card(journal: EventJournalStore, name: str) -> ApprovalCardView:
-    cards = journal.principal("router@shared")
-    for _attempt in range(1000):
-        stored = await pending_card(
-            cards.approvals,
-            room_id="!room:test",
-            card_event_id=_job_card_event_id(name),
-        )
-        if stored is not None:
-            return stored
-        await asyncio.sleep(0.001)
-    message = f"Job card {name!r} was not posted."
-    raise AssertionError(message)
+    return await wait_for_pending_card(
+        journal.principal("router@shared").approvals,
+        room_id="!room:test",
+        card_event_id=_job_card_event_id(name),
+    )
 
 
 async def _stop(tasks: list[asyncio.Task[BackgroundApprovalDecision]]) -> None:

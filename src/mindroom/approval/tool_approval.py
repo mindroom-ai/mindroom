@@ -85,7 +85,7 @@ class BackgroundScriptToolOrigin:
 
 @dataclass(frozen=True, slots=True)
 class ToolApprovalDecision:
-    """One terminal automation approval decision."""
+    """A gated call's final approval decision."""
 
     approved: bool
     reason: str | None = None

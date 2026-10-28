@@ -20,15 +20,12 @@ from mindroom.event_journal import (
     ApprovalDecisionMetadata,
     ApprovalFailure,
     CallKey,
-    EventClass,
     EventJournalStore,
-    EventKind,
-    InboundEvent,
     PrincipalStore,
 )
 from mindroom.event_journal.approval_store import ApprovalStore
 from mindroom.reply_lifecycle import ApprovalFailureKind
-from tests.approval_continuation_helpers import approval_continuation
+from tests.approval_continuation_helpers import admit_approval_source, approval_continuation
 from tests.conftest import unwrap_extracted_collaborator
 from tests.reply_span_helpers import paused_for_approval
 from tests.response_runner_helpers import _bot
@@ -110,18 +107,7 @@ async def _denial_of_a_failing_replys_card(tmp_path: Path, failure: ApprovalFail
     journal = EventJournalStore.open_sqlite(tmp_path / "cards.db")
     try:
         store = journal.principal("leader@test")
-        await store.admit(
-            InboundEvent(
-                event_id="$source",
-                room_id="!room:localhost",
-                thread_id="$thread",
-                kind=EventKind.MESSAGE,
-                event_class=EventClass.ACTIONABLE,
-                sender="@user:localhost",
-                origin_server_ts=1,
-                source={"event_id": "$source", "content": {"body": "run it"}},
-            ),
-        )
+        await admit_approval_source(store)
         call = ApprovalCall(
             tool_call_id="call-1",
             tool_name="shell",

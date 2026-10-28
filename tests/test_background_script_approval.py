@@ -26,7 +26,7 @@ from mindroom.event_journal import (
 from mindroom.event_journal.approval_store import ApprovalStore
 from mindroom.script_runs.broker import ScriptToolBroker, ScriptToolCallRequest
 from mindroom.script_runs.models import ScriptCallState, ScriptToolGrant
-from tests.approval_card_helpers import card_is_terminal, pending_card
+from tests.approval_card_helpers import card_is_terminal, wait_for_pending_card
 from tests.conftest import approval_manager_for_test, handle_card_response_for_test, test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_script_run_manager import _context as _manager_context
@@ -153,18 +153,11 @@ async def _approval_manager(
 
 
 async def _wait_for_pending_card(journal: EventJournalStore) -> ApprovalCardView:
-    cards = journal.principal("router@shared")
-    for _attempt in range(1000):
-        stored = await pending_card(
-            cards.approvals,
-            room_id="!room:localhost",
-            card_event_id="$approval",
-        )
-        if stored is not None:
-            return stored
-        await asyncio.sleep(0.001)
-    message = "Approval delivery was not durably acknowledged."
-    raise AssertionError(message)
+    return await wait_for_pending_card(
+        journal.principal("router@shared").approvals,
+        room_id="!room:localhost",
+        card_event_id="$approval",
+    )
 
 
 @pytest.mark.asyncio

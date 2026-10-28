@@ -724,11 +724,10 @@ def approval_manager_for_test(
     runtime_paths: RuntimePaths,
     *,
     cards: "ApprovalDeliveryView | None" = None,
-    recovery: "ApprovalRecovery | None" = None,
     **transport: Any,  # noqa: ANN401
 ) -> ApprovalManager:
     """Build an approval manager over the transport methods a test names, as ``FakeApprovalTransport`` fields."""
-    return ApprovalManager(runtime_paths, transport=FakeApprovalTransport(**transport), cards=cards, recovery=recovery)
+    return ApprovalManager(runtime_paths, transport=FakeApprovalTransport(**transport), cards=cards)
 
 
 def initialize_approval_store_for_test(

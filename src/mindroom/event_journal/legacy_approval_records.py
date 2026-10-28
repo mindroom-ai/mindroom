@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
@@ -151,21 +151,15 @@ class _Legacy:
             key = (str(row["principal_id"]), str(row["delivery_id"]))
             delivery = deliveries.get(key, _Delivery())
             if row["stage"] == "initial":
-                delivery = _Delivery(
+                delivery = replace(
+                    delivery,
                     room_id=str(row["room_id"]),
                     thread_id=str(row["thread_id"]),
                     initial=_payload(row["payload_json"]),
                     initial_event_id=cast("str | None", row["acknowledged_event_id"]),
-                    final=delivery.final,
                 )
             else:
-                delivery = _Delivery(
-                    room_id=delivery.room_id,
-                    thread_id=delivery.thread_id,
-                    initial=delivery.initial,
-                    initial_event_id=delivery.initial_event_id,
-                    final=_payload(row["payload_json"]),
-                )
+                delivery = replace(delivery, final=_payload(row["payload_json"]))
             deliveries[key] = delivery
         return cls(
             reply_calls=rows("approval_continuation_calls"),

@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
 from mindroom.approval.receipt import build_approval_receipt
+from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.event_journal.approval_calls import ApprovalCall, ApprovalDecision
 from mindroom.event_journal.approval_continuations import ApprovalAdvance, ApprovalContinuation
 from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowRequest
@@ -258,6 +259,22 @@ async def freeze_resume_final(
         ),
     )
     assert enqueued is not None
+
+
+async def admit_approval_source(store: PrincipalStore) -> None:
+    """Admit the message ``$source`` in ``$thread`` that the tests' paused replies answer."""
+    await store.admit(
+        InboundEvent(
+            event_id="$source",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=1,
+            source={"event_id": "$source", "content": {"body": "run it"}},
+        ),
+    )
 
 
 async def dispatch_approval(

@@ -465,8 +465,8 @@ def maintain(transaction: Transaction, principal_id: str, *, grant_id: str | Non
     Revoked grants retain acknowledgement debt past expiry until delivery is
     acknowledged, or membership ends. The original terminal edit must settle
     first so a delayed acceptance cannot overwrite the later revoked state.
+    The caller holds the principal's grant lock.
     """
-    lock(transaction, principal_id)
     rows = transaction.fetchall(
         _grant_select(
             """,

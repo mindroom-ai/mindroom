@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
     from mindroom.tool_approval_grants import ApprovalGrant, ApprovalGrantRevocation, ApprovalGrantScope
 
-    from .approval_calls import BackgroundApprovalDecision, CallKey
+    from .approval_calls import BackgroundApprovalDecision, CallKey, DecisionStatus
     from .approval_cards import (
         ApprovalCardReservation,
         ApprovalCardView,
@@ -118,7 +118,7 @@ class ApprovalStore:
         self,
         call: CallKey,
         *,
-        requested_status: Literal["approved", "denied", "expired"],
+        requested_status: DecisionStatus,
         reason: str | None,
         metadata: ApprovalDecisionMetadata | None = None,
     ) -> RecordedApprovalDecision:
@@ -270,8 +270,8 @@ class ApprovalStore:
         """Retire settled receipts, enqueue grant revocations after their approval edits, and prune old scheduled calls."""
 
         def maintain(transaction: Transaction) -> tuple[str, ...]:
+            approval_grants.lock(transaction, self._principal_id)
             if grant_id is None:
-                approval_grants.lock(transaction, self._principal_id)
                 approval_cards.retire_receipts(transaction, self._principal_id)
             deliveries = approval_grants.maintain(transaction, self._principal_id, grant_id=grant_id)
             if grant_id is None:

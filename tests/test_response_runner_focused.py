@@ -108,7 +108,6 @@ from mindroom.message_target import MessageTarget, ResponseLifecycleKey
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
-from mindroom.reply_scope import SpanHandle, current_span
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, response_lifecycle_reservation_context
@@ -224,6 +223,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.hooks import MessageEnvelope
     from mindroom.judgment.state import JudgmentRequest
+    from mindroom.reply_scope import SpanHandle
     from mindroom.response_lifecycle import _QueuedMessageState
     from mindroom.streaming import ProgressPublisher
 
@@ -4102,15 +4102,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     ):
         # The resume span of the paused reply runs the next generation.
         async with resumed_approval(bot, continuation) as current:
-            handle = current_span()
-            assert handle is not None
-            presentation = await runner._approvals._advance_pause(
-                current,
-                paused,
-                target=target,
-                pending_text="Thinking...",
-                reply_pause=partial(runner._approvals._advance_reply_pause, handle, target),
-            )
+            presentation = await runner._approvals._advance_pause(current, paused, target=target)
 
     persisted = await store.approvals.approval_continuation(continuation.approval_id)
     assert persisted is not None
@@ -4183,16 +4175,11 @@ async def test_chained_pause_rejects_an_unanchored_tool_before_persistence(tmp_p
         ),
         toolkit_owners={("general", "first"): "test_toolkit", ("general", "second"): "test_toolkit"},
     )
-    reply_pause = AsyncMock()
-
-    with pytest.raises(RuntimeError, match="ordered presentation"):
-        await runner._approvals._advance_pause(
-            current,
-            paused,
-            target=_target(thread_id="$thread"),
-            pending_text="Thinking...",
-            reply_pause=reply_pause,
-        )
+    with (
+        patch.object(runner._approvals, "_advance_reply_pause", new=AsyncMock()) as reply_pause,
+        pytest.raises(RuntimeError, match="ordered presentation"),
+    ):
+        await runner._approvals._advance_pause(current, paused, target=_target(thread_id="$thread"))
 
     persisted = await store.approvals.approval_continuation(continuation.approval_id)
     assert persisted is not None

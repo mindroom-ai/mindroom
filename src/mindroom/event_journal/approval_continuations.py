@@ -725,7 +725,7 @@ def may_finish(transaction: Transaction, principal_id: str, *, approval_id: str)
     reply it paused while the run still holds that reply, then deletes the run
     with ``delete``.
     """
-    continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
+    continuation = get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None:
         return None
     if continuation.state == "failing" and _paused_reply_gone(transaction, principal_id, continuation):
@@ -774,7 +774,7 @@ def may_release(
     (``rl.approval_released``). The failure fence has already stopped execution
     and the caller has ended the cards.
     """
-    continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
+    continuation = get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None or continuation.state != "failing" or continuation.generation != expected_generation:
         return None
     if outbox.load(transaction, principal_id, delivery_id=continuation.final_delivery_id, stage=DeliveryStage.FINAL):
@@ -800,7 +800,7 @@ def may_discard_unavailable(
     )
     if membership_epoch is None:
         return None
-    continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
+    continuation = get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None or continuation.state != "failing" or continuation.room_id != observed.room_id:
         return None
     delivery_id = _unavailable_notice_delivery_id(approval_id, membership_epoch)
@@ -828,13 +828,13 @@ def may_discard_unavailable(
     return None if delivered is None else continuation
 
 
-def _get_locked(
+def get_locked(
     transaction: Transaction,
     principal_id: str,
     *,
     approval_id: str,
 ) -> ApprovalContinuation | None:
-    """Lock one aggregate before terminal paths settle its journal sources."""
+    """Lock one paused reply against concurrent writers and read it."""
     transaction.execute(
         """
         UPDATE approval_continuations SET state = state

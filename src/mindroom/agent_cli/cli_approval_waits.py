@@ -211,8 +211,7 @@ class CliApprovalWaits:
                     cancel_source=cancel_source_from_failure_reason(progress.failure_reason)
                     if progress.cancelled
                     else None,
-                    reason=progress.failure_reason,
-                    default="CLI approval response ended before final delivery.",
+                    reason=progress.failure_reason or "CLI approval response ended before final delivery.",
                 ),
             ),
         )

@@ -206,7 +206,6 @@ class _Cards:
     grants: list[tuple[str | None, ApprovalOperation | None]] = field(default_factory=list)
     # Each posted card's run and call.
     calls: list[tuple[str, str]] = field(default_factory=list)
-    cards: object = field(default_factory=object)
     transport: FakeApprovalTransport = field(default_factory=FakeApprovalTransport)
 
     async def request_background_approval(

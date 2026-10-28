@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+import asyncio
+from typing import TYPE_CHECKING
 
 from mindroom.event_journal import ApprovalCardView, CallKey, DeliveryStage, RecordedApprovalDecision
 from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 
 if TYPE_CHECKING:
-    from mindroom.event_journal import ApprovalDecisionMetadata, PrincipalStore
+    from mindroom.event_journal import ApprovalDecisionMetadata, DecisionStatus, PrincipalStore
     from mindroom.event_journal.approval_store import ApprovalStore
 
 
@@ -18,6 +19,17 @@ async def pending_card(approvals: ApprovalStore, *, room_id: str, card_event_id:
     if card is not None and not card.terminal and card.current:
         return card
     return None
+
+
+async def wait_for_pending_card(approvals: ApprovalStore, *, room_id: str, card_event_id: str) -> ApprovalCardView:
+    """Return the live request card an event shows once its posting is acknowledged."""
+    for _attempt in range(1000):
+        card = await pending_card(approvals, room_id=room_id, card_event_id=card_event_id)
+        if card is not None:
+            return card
+        await asyncio.sleep(0.001)
+    message = f"Approval card {card_event_id!r} was not posted."
+    raise AssertionError(message)
 
 
 async def card_is_terminal(approvals: ApprovalStore, *, room_id: str, card_event_id: str) -> bool:
@@ -31,7 +43,7 @@ async def resolve_card_event(
     *,
     room_id: str,
     card_event_id: str,
-    requested_status: Literal["approved", "denied", "expired"],
+    requested_status: DecisionStatus,
     reason: str | None,
     metadata: ApprovalDecisionMetadata | None = None,
 ) -> RecordedApprovalDecision:
@@ -47,11 +59,15 @@ async def resolve_card_event(
     )
 
 
+async def _payload(store: PrincipalStore, delivery_id: str, stage: DeliveryStage) -> dict[str, object]:
+    delivery = await store.load_matrix_delivery(delivery_id=delivery_id, stage=stage)
+    assert delivery is not None, f"{delivery_id!r} has no {stage.value} payload"
+    return {key: value for key, value in delivery.payload.items() if key != DURABLE_DELIVERY_ID_KEY}
+
+
 async def terminal_edit(store: PrincipalStore, delivery_id: str) -> dict[str, object]:
     """Return the terminal edit a card's delivery carries, without its private delivery marker."""
-    final = await store.load_matrix_delivery(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
-    assert final is not None, f"{delivery_id!r} has no terminal edit"
-    return {key: value for key, value in final.payload.items() if key != DURABLE_DELIVERY_ID_KEY}
+    return await _payload(store, delivery_id, DeliveryStage.FINAL)
 
 
 def card_view(**changes: object) -> ApprovalCardView:
@@ -81,6 +97,4 @@ def card_view(**changes: object) -> ApprovalCardView:
 
 async def card_content(store: PrincipalStore, card: ApprovalCardView) -> dict[str, object]:
     """Return the frozen payload a card was posted with, without its private delivery marker."""
-    initial = await store.load_matrix_delivery(delivery_id=card.delivery_id, stage=DeliveryStage.INITIAL)
-    assert initial is not None, f"{card.delivery_id!r} has no posted payload"
-    return {key: value for key, value in initial.payload.items() if key != DURABLE_DELIVERY_ID_KEY}
+    return await _payload(store, card.delivery_id, DeliveryStage.INITIAL)

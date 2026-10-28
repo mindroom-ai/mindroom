@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
     from mindroom.tool_approval_grants import ApprovalOperation
 
-    from .approval_calls import CallKey, OwnerKind
+    from .approval_calls import CallKey, DecisionStatus, OwnerKind
     from .backend import Row, Transaction
 
 type _CardKind = Literal["request", "grant_receipt", "scheduled_receipt"]
@@ -137,7 +137,7 @@ def decode_object_payload(value: object, *, description: str) -> dict[str, Any]:
 def terminal_content(
     content: Mapping[str, Any],
     *,
-    status: Literal["approved", "denied", "expired"],
+    status: DecisionStatus,
     reason: str | None,
     metadata: ApprovalDecisionMetadata | None = None,
     publication: Literal["edit", "receipt"] = "edit",
@@ -308,11 +308,11 @@ def reserve_reply_cards(
     # Reservation and a failure fence can arrive through different stores.
     # Lock the paused reply before reading its publication lease so either
     # every card and activation wins, or the failure wins without orphan deliveries.
-    transaction.execute(
-        "UPDATE approval_continuations SET state = state WHERE principal_id = ? AND approval_id = ?",
-        (continuation_principal_id, continuation_id),
+    continuation = approval_continuations.get_locked(
+        transaction,
+        continuation_principal_id,
+        approval_id=continuation_id,
     )
-    continuation = approval_continuations.get(transaction, continuation_principal_id, approval_id=continuation_id)
     if (
         continuation is None
         or continuation.state != "waiting"
@@ -496,7 +496,7 @@ def queue_terminal_edit(
     transaction: Transaction,
     card: _RequestCard,
     *,
-    status: Literal["approved", "denied", "expired"],
+    status: DecisionStatus,
     reason: str | None,
     metadata: ApprovalDecisionMetadata | None,
 ) -> dict[str, Any]:

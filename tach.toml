@@ -1445,14 +1445,11 @@ visibility = [
 [[modules]]
 path = "mindroom.approval.response"
 depends_on = [
-    "mindroom.response_sources",
     "mindroom.approval.manager",
     "mindroom.delegation.state",
     "mindroom.event_journal",
     "mindroom.message_target",
     "mindroom.approval.tool_approval",
-    "mindroom.tool_jobs.runtime",
-    "mindroom.tool_jobs.settings",
     "mindroom.tool_system.events",
 ]
 visibility = ["mindroom.approval.continuation_runner", "mindroom.tool_jobs.approvals", "mindroom.delegation.job_approvals"]
@@ -3347,7 +3344,6 @@ path = "mindroom.response_sources"
 depends_on = []
 visibility = [
     "mindroom.event_journal",
-    "mindroom.approval.response",
     "mindroom.delivery_gateway",
     "mindroom.edit_regenerator",
     "mindroom.reply_scope",
@@ -8701,7 +8697,6 @@ visibility = [
     "mindroom.tool_jobs.publication",
     "mindroom.commands.handler",
     "mindroom.tool_jobs.client_cancel",
-    "mindroom.approval.response",
     # The bot lets the job runtime apply a Stop its replies recorded at once.
     "mindroom.bot",
     "mindroom.custom_tools.delegate",
@@ -9558,7 +9553,6 @@ visibility = [
     "mindroom.ai",
     "mindroom.api.config_lifecycle",
     "mindroom.approval.execution",
-    "mindroom.approval.response",
     "mindroom.approval.tool_owners",
     "mindroom.agent_cli.cli_shell_agent",
     "mindroom.commands.config_commands",

@@ -50,10 +50,14 @@ if TYPE_CHECKING:
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
     from mindroom.approval.transport import ApprovalMatrixTransport
     from mindroom.constants import RuntimePaths
-    from mindroom.event_journal import ApprovalDeliveryView, RecordedApprovalDecision, ScheduledApprovalArmState
+    from mindroom.event_journal import (
+        ApprovalDeliveryView,
+        DecisionStatus,
+        RecordedApprovalDecision,
+        ScheduledApprovalArmState,
+    )
     from mindroom.event_journal.approval_signals import DecidedCard
 
-_ApprovalStatus = Literal["approved", "denied", "expired"]
 _ResolutionStatus = Literal["approved", "denied"]
 
 _STARTUP_RECOVERY_SCAN_PAGE = 256
@@ -106,10 +110,6 @@ def _scheduled_call_target(task_id: str, execute_at_ns: int) -> dict[str, object
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
-
-
-def _now_ns() -> int:
-    return int(_utcnow().timestamp() * 1_000_000_000)
 
 
 def _compact_preview_text(value: object) -> str:
@@ -732,7 +732,6 @@ class ApprovalManager:
                     status != "approved"
                     or not valid_auto_approve_seconds(auto_approve_seconds)
                     or not card.offers_timed_approval
-                    or auto_approve_seconds not in AUTO_APPROVE_OPTIONS
                     or not card.approvable
                 )
             )
@@ -757,7 +756,6 @@ class ApprovalManager:
         if auto_approve_seconds is not None and resolved_status == "approved":
             return await self._approve_with_grant(
                 card,
-                room_id=room_id,
                 card_event_id=card_event_id,
                 sender_id=sender_id,
                 seconds=auto_approve_seconds,
@@ -785,7 +783,6 @@ class ApprovalManager:
         self,
         card: ApprovalCardView,
         *,
-        room_id: str,
         card_event_id: str,
         sender_id: str,
         seconds: int,
@@ -796,7 +793,7 @@ class ApprovalManager:
         if self.cards is None:
             return ApprovalActionResult(consumed=True, card_event_id=card_event_id)
         decisions = await self.cards.approvals.create_approval_grant(
-            room_id=room_id,
+            room_id=card.room_id,
             card_event_id=card_event_id,
             sender_id=sender_id,
             seconds=seconds,
@@ -809,7 +806,7 @@ class ApprovalManager:
                 await self._wake_continuation(decision)
         for decision in decisions:
             if decision.delivery_id is not None:
-                await self._flush_card_delivery(decision.delivery_id, decision.card_event_id, room_id=room_id)
+                await self._flush_card_delivery(decision.delivery_id, decision.card_event_id, room_id=card.room_id)
         self._ensure_deadline_sweep()
         return ApprovalActionResult(
             consumed=True,
@@ -898,7 +895,7 @@ class ApprovalManager:
         self,
         card: ApprovalCardView,
         *,
-        status: _ApprovalStatus,
+        status: DecisionStatus,
         reason: str | None,
         resolved_by: str | None,
         scheduled_scope: str | None = None,
@@ -991,7 +988,7 @@ class ApprovalManager:
         """Return the unexpired, unanswered, approvable cards one approver has in one conversation, scheduled calls aside."""
         if self.cards is None:
             return ()
-        now_ns = _now_ns()
+        now_ns = time.time_ns()
         # A card past its deadline expires when answered, until the deadline sweep retires it.
         return tuple(
             [
@@ -1045,7 +1042,7 @@ class ApprovalManager:
 
     async def _settle_startup_card(self, card: ApprovalCardView) -> bool | None:
         """Settle due recovery work, or return None when none is currently due."""
-        if card.decided or card.expires_at_ns is None or card.expires_at_ns <= _now_ns():
+        if card.decided or card.expires_at_ns is None or card.expires_at_ns <= time.time_ns():
             return await self._expire_stored(card)
         return None
 
@@ -1214,9 +1211,9 @@ class ApprovalManager:
         *,
         status: _ResolutionStatus,
         reason: str | None,
-    ) -> tuple[_ApprovalStatus, str | None, bool]:
+    ) -> tuple[DecisionStatus, str | None, bool]:
         """Expire a card past its deadline, and deny an approval no reviewer could see in full."""
-        if card.expires_at_ns is not None and card.expires_at_ns <= _now_ns():
+        if card.expires_at_ns is not None and card.expires_at_ns <= time.time_ns():
             return "expired", TIMEOUT_REASON, False
         if status == "approved" and not card.approvable:
             return "denied", _DEFAULT_TRUNCATED_APPROVAL_REASON, True

@@ -68,6 +68,7 @@ _RECORDINGS = sorted(path.name for path in _FIXTURES.glob("[0-9][0-9]_*.sql"))
 class _Journal:
     query: Callable[[str], list[tuple[object, ...]]]
     tables: Callable[[], frozenset[str]]
+    columns: Callable[[str], set[str]]
     open: Callable[[], EventJournalStore]
 
 
@@ -143,6 +144,7 @@ def recorded_journal(request: pytest.FixtureRequest, tmp_path: Path) -> Callable
             return _Journal(
                 query,
                 lambda: frozenset(str(row[0]) for row in query("SELECT name FROM sqlite_master WHERE type = 'table'")),
+                lambda table: {str(row[1]) for row in query(f"PRAGMA table_info({table})")},
                 lambda: EventJournalStore.open_sqlite(path),
             )
 
@@ -158,6 +160,13 @@ def recorded_journal(request: pytest.FixtureRequest, tmp_path: Path) -> Callable
                     "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()",
                 )
             ),
+            lambda table: {
+                str(row[0])
+                for row in postgres_query(
+                    "SELECT column_name FROM information_schema.columns "  # noqa: S608 - a fixed table name
+                    f"WHERE table_schema = current_schema() AND table_name = '{table}'",
+                )
+            },
             lambda: EventJournalStore.open_postgres(url),
         )
 

@@ -65,12 +65,10 @@ from mindroom.delivery_gateway import (
 from mindroom.event_journal import (
     ApprovalAdvance,
     ApprovalContinuation,
+    ApprovalDecision,
     ApprovalFailure,
     ApprovalMemoryTurn,
     MatrixDelivery,
-)
-from mindroom.event_journal import (
-    ApprovalDecision as ContinuationDecision,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.hooks import MessageEnvelope
@@ -141,17 +139,12 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.turn_origin import TurnOrigin
 
-_SHUTDOWN = ApprovalFailure(ApprovalFailureKind.SHUTDOWN)
 # The note a settled failure shows below its reply; an error's carries its reason.
 _FAILURE_NOTES = {
     ApprovalFailureKind.USER_STOP: NoteKind.CANCELLED,
     ApprovalFailureKind.RESTART: NoteKind.RESTART,
     ApprovalFailureKind.INTERRUPTED: NoteKind.INTERRUPTED,
 }
-
-# Records a chained pause's advance with the reply's pause row; returns the
-# advanced continuation and whether the row reached Matrix.
-type _ReplyPause = Callable[..., Awaitable[tuple[ApprovalContinuation | None, bool]]]
 
 
 def _error(detail: str) -> ApprovalFailure:
@@ -286,7 +279,7 @@ class _ResponseHost(Protocol):
         *,
         response_kind: str,
         locked_operation: Callable[[MessageTarget, object], Awaitable[str | None]],
-        signal_queued_message: bool = True,
+        signal_queued_message: bool,
     ) -> str | None: ...
 
     def track_inbox_response(
@@ -296,7 +289,7 @@ class _ResponseHost(Protocol):
         name: str,
         room_id: str,
         recovery_proof_ready: Callable[[], bool | Awaitable[bool]],
-        source_event_ids: tuple[str, ...] = (),
+        source_event_ids: tuple[str, ...],
     ) -> asyncio.Task[None]: ...
 
 
@@ -346,7 +339,7 @@ class ApprovalContinuationRunner:
         # Fence the continuation the suspension created, whose card publication did not finish.
         born = await self.deps.approval_store.approval_continuation(approval_id)
         continuation = None if born is None else await self._request_failure(born, _error(detail))
-        if continuation is None or continuation.state != "failing":
+        if continuation is None:
             return None
         response_event_id = continuation.response_event_id
         return FinalDeliveryOutcome(
@@ -563,7 +556,6 @@ class ApprovalContinuationRunner:
 
     async def _advance_reply_pause(
         self,
-        handle: SpanHandle,
         target: MessageTarget,
         advance: ApprovalAdvance,
         paused: PausedAttempt,
@@ -572,9 +564,14 @@ class ApprovalContinuationRunner:
         stream_status: str,
         tool_trace: tuple[ToolTraceEntry, ...],
         waiting_text: str | None,
-        in_place: bool = False,
+        in_place: bool,
     ) -> tuple[ApprovalContinuation | None, bool]:
-        """Advance the continuation and pause the span's reply with the pause row, in one transaction."""
+        """Advance the continuation and pause the span's reply with the pause row, in one transaction.
+
+        Returns the advanced continuation and whether its pause row reached Matrix.
+        """
+        handle = current_span()
+        assert handle is not None, "a chained pause runs in its reply's span"
         reply = await handle.runtime.store.replies.load(handle.reply_id)
         assert reply is not None
         assert reply.event_id is not None, "a resumed reply shows its paused event"
@@ -624,15 +621,7 @@ class ApprovalContinuationRunner:
         target: MessageTarget,
     ) -> None:
         """Record the next pause of a run that waits in place, with its reply's pause row."""
-        handle = current_span()
-        assert handle is not None, "a response-local wait runs in its reply's span"
-        await self._advance_pause(
-            current,
-            paused,
-            target=target,
-            pending_text=PROGRESS_PLACEHOLDER,
-            reply_pause=partial(self._advance_reply_pause, handle, target, in_place=True),
-        )
+        await self._advance_pause(current, paused, target=target, in_place=True)
 
     async def _end_expired_in_place_wait(self) -> None:
         """End the span of a response-local wait that expired; the reply waits for the decision."""
@@ -751,14 +740,9 @@ class ApprovalContinuationRunner:
         paused: PausedAttempt,
         *,
         target: MessageTarget,
-        pending_text: str,
-        reply_pause: _ReplyPause,
+        in_place: bool = False,
     ) -> _ApprovalPausePresentation:
-        """Replace one claim with the run's next exact pause generation.
-
-        ``reply_pause`` records the advance with the reply's pause row and
-        returns the advanced continuation and whether its pause row reached Matrix.
-        """
+        """Replace one claim with the run's next exact pause generation, recorded with the reply's pause row."""
         require_ordered_pause_presentation(paused, show_tool_calls=current.show_tool_calls)
         identified = identify_approval_tools(paused, default_agent_name=current.entity_name)
         plan = await plan_approval_calls(
@@ -772,7 +756,7 @@ class ApprovalContinuationRunner:
         )
         approval_pending = plan.waiting_text is not None
         visible_tool_trace = tuple(paused.tool_trace) if current.show_tool_calls else ()
-        visible_text = paused.response_text or plan.waiting_text or pending_text
+        visible_text = paused.response_text or plan.waiting_text or PROGRESS_PLACEHOLDER
         stream_status = STREAM_STATUS_APPROVAL_PENDING if approval_pending else STREAM_STATUS_PENDING
         advance = ApprovalAdvance(
             approval_id=current.approval_id,
@@ -785,13 +769,15 @@ class ApprovalContinuationRunner:
             delegation_storage_bindings=paused.delegation_storage_bindings,
             cli_call=paused.cli_call,
         )
-        publishing, shown_with_pause = await reply_pause(
+        publishing, shown_with_pause = await self._advance_reply_pause(
+            target,
             advance,
             paused,
             visible_text=visible_text,
             stream_status=stream_status,
             tool_trace=visible_tool_trace,
             waiting_text=plan.waiting_text,
+            in_place=in_place,
         )
         if publishing is None:
             msg = "Could not persist the chained approval pause"
@@ -975,15 +961,7 @@ class ApprovalContinuationRunner:
                 ),
                 current,
             )
-        handle = current_span()
-        assert handle is not None, "an approval resume runs in its reply's resume span"
-        presentation = await self._advance_pause(
-            current,
-            result,
-            target=target,
-            pending_text=PROGRESS_PLACEHOLDER,
-            reply_pause=partial(self._advance_reply_pause, handle, target),
-        )
+        presentation = await self._advance_pause(current, result, target=target)
         current = await self.deps.approval_store.approval_continuation(claimed.approval_id) or claimed
         return (
             FinalDeliveryOutcome(
@@ -1302,7 +1280,7 @@ class ApprovalContinuationRunner:
             tool_dispatch = LiveToolDispatchContext.from_runtime_context(
                 replace(context, cli_approval_handler=cli_approval_handler),
             )
-        decisions = {call.tool_call_id: call.decision is ContinuationDecision.APPROVED for call in continuation.calls}
+        decisions = {call.tool_call_id: call.decision is ApprovalDecision.APPROVED for call in continuation.calls}
         denial_reasons = {call.tool_call_id: call.reason for call in continuation.calls}
         paused_answer = _paused_answer()
         with approval_receipt_context((*continuation.earlier_calls, *continuation.calls), run_id=continuation.run_id):
@@ -1432,7 +1410,11 @@ class ApprovalContinuationRunner:
             # runtime to hand back to replay. Read here: the detached task that
             # ends the span is no shutdown task.
             process_shutdown = current_task_is_process_shutdown()
-            failure = _SHUTDOWN if process_shutdown else cancelled_failure(classify_cancel_source(error))
+            failure = (
+                ApprovalFailure(ApprovalFailureKind.SHUTDOWN)
+                if process_shutdown
+                else cancelled_failure(classify_cancel_source(error))
+            )
             if not process_shutdown:
                 await run_coroutine_until_complete(self._end_live_resume_span())
             step, event_id = await run_coroutine_until_complete(
@@ -1672,7 +1654,7 @@ class ApprovalContinuationRunner:
     async def _settle(self, observed: ApprovalContinuation, failure: ApprovalFailure) -> bool:
         """Settle a failed paused reply: fence it, expire its cards, cancel its delegations, and end its reply.
 
-        The fence names the state the decider observed, unless the paused reply
+        The fence names the state the step was decided from, unless the paused reply
         already fails. The reply ends without a note when it is gone or its
         final answer settled, and shows the failure's note otherwise.
         """

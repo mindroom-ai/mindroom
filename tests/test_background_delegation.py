@@ -297,7 +297,6 @@ class _JobApprovalCards:
     journal: EventJournalStore | None = None
     posted: asyncio.Event = field(default_factory=asyncio.Event)
     requested: list[tuple[str, str, str]] = field(default_factory=list)
-    cards: object = field(default_factory=object)
     transport: FakeApprovalTransport = field(default_factory=FakeApprovalTransport)
 
     async def request_background_approval(

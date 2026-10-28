@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from .backend import Row, Transaction
 
 type OwnerKind = Literal["reply", "job", "script", "scheduled"]
-type _DecisionStatus = Literal["approved", "denied", "expired"]
+type DecisionStatus = Literal["approved", "denied", "expired"]
 
 # What a job's pending cards say once the job ends without a decision, whether it was stopped or a restart ended it.
 JOB_ENDED_REASON = "The background job asking for this approval ended before a decision."
@@ -86,7 +86,7 @@ class ApprovalCall:
 class BackgroundApprovalDecision:
     """One durable terminal decision for an exact detached call."""
 
-    status: _DecisionStatus
+    status: DecisionStatus
     reason: str | None
 
 
@@ -269,7 +269,7 @@ def detached_decision(transaction: Transaction, principal_id: str, call: CallKey
     )
     if row is None or row["decision"] is None:
         return None
-    return BackgroundApprovalDecision(status=cast("_DecisionStatus", str(row["decision"])), reason=row["reason"])
+    return BackgroundApprovalDecision(status=cast("DecisionStatus", str(row["decision"])), reason=row["reason"])
 
 
 def deny_pending(transaction: Transaction, *, owner_id: str, reason: str) -> tuple[RecordedApprovalDecision, ...]:
@@ -319,7 +319,7 @@ def resolve_call(
     transaction: Transaction,
     call: CallKey,
     *,
-    requested: _DecisionStatus,
+    requested: DecisionStatus,
     reason: str | None,
     metadata: ApprovalDecisionMetadata | None,
     grant_id: str | None = None,
@@ -466,11 +466,11 @@ def resolve_call(
 
 def _effective_decision(
     *,
-    requested: _DecisionStatus,
+    requested: DecisionStatus,
     reason: str | None,
     expired: bool,
     failure_reason: str | None,
-) -> tuple[_DecisionStatus, str | None]:
+) -> tuple[DecisionStatus, str | None]:
     """Apply the deadline and failure fences to one requested decision."""
     if expired:
         return "expired", approval_cards.TIMEOUT_REASON
