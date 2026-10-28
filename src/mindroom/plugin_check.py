@@ -70,9 +70,12 @@ def check_plugin(plugin_path: Path) -> _PluginCheckResult:
                 [plugin] = loaded_plugins
                 tool_names = tuple(sorted(set(TOOL_METADATA) - original_tool_names))
                 for tool_name in tool_names:
+                    factory = TOOL_METADATA[tool_name].factory
+                    # The registration decorator gives every plugin tool its factory.
+                    assert factory is not None
                     # A factory may import a package the user installs after the plugin; its build checks it then.
                     with suppress(ImportError):
-                        load_toolkit_class(tool_name)
+                        load_toolkit_class(tool_name, factory)
                 hook_names = tuple(
                     sorted(
                         metadata.hook_name

@@ -680,13 +680,14 @@ def get_tool_by_name(
         )
 
         metadata = TOOL_METADATA[tool_name]
+        factory = TOOL_REGISTRY[tool_name]
         validated_tool_config_overrides = validate_authored_tool_entry_overrides(tool_name, tool_config_overrides)
         construction = ToolConstruction.from_factory(
             tool_name,
-            TOOL_REGISTRY[tool_name],
+            factory,
             tool_config_overrides=validated_tool_config_overrides,
         )
-        tool_class = load_toolkit_class(tool_name)
+        tool_class = load_toolkit_class(tool_name, factory)
         resolved_credentials_manager = _resolve_tool_credentials_manager(
             metadata,
             runtime_paths,
@@ -773,11 +774,11 @@ def get_tool_by_name(
     return _build_with_tool_dependencies(tool_name, runtime_paths, build)
 
 
-def load_toolkit_class(tool_name: str) -> type[Toolkit]:
-    """Return the toolkit class registered as ``tool_name``, refusing one MindRoom does not run."""
+def load_toolkit_class[T: type](tool_name: str, factory: Callable[[], T]) -> T:
+    """Return the toolkit class ``factory`` registers as ``tool_name``, refusing one MindRoom does not run."""
     with optional_dependency_environment():
-        tool_class = TOOL_REGISTRY[tool_name]()
-    # By class name, so the optional MCP SDK is never imported.
+        tool_class = factory()
+    # By class name, so building or checking a tool never imports Agno's MCP module and the MCP SDK.
     if any(base.__name__ == "MCPTools" for base in tool_class.__mro__):
         msg = (
             f"Tool '{tool_name}' subclasses Agno MCPTools, which MindRoom does not run; "
