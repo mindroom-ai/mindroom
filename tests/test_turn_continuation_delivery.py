@@ -2,8 +2,8 @@
 
 A two-attempt continuation turn (the first attempt ends with a next-turn
 ``switch_thread_model`` call, the second completes) is driven through the real
-response-turn drivers (``run_blocking_response_turn`` /
-``stream_response_turn``) at the ResponseRunner seam, with a spying
+response-turn driver (``stream_response_turn``, collected for a blocking
+reply) at the ResponseRunner seam, with a spying
 DeliveryGateway. The pins:
 
 1. no ``deliver_final``/``finalize_streamed_response`` call happens between
@@ -32,14 +32,12 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import ToolExecution
 from mindroom.response_turn import (
     AttemptResolved,
-    BlockingTurnAdapter,
     CompletedAttempt,
     ResponseTurnContext,
     StreamingTurnAdapter,
     TurnContinuationRunState,
     TurnRunState,
     TurnSinks,
-    run_blocking_response_turn,
     stream_response_turn,
 )
 from tests.conftest import patch_response_runner_module, process_and_respond_for_test, unwrap_extracted_collaborator
@@ -92,12 +90,16 @@ def _noop(*_args: object) -> None:
 
 def _blocking_adapter(
     run_attempt: Callable[[TurnRunState, TurnContinuationRunState], Awaitable[CompletedAttempt]],
-) -> BlockingTurnAdapter:
-    return BlockingTurnAdapter(
-        load_scope=_load_scope,
-        run_attempt=run_attempt,
-        discard_empty_run=_noop,
-    )
+) -> StreamingTurnAdapter[str]:
+    """Return an adapter whose attempts show nothing until they resolve, as a blocking reply's collector reads them."""
+
+    async def _attempt(
+        run: TurnRunState,
+        continuation: TurnContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        yield AttemptResolved(await run_attempt(run, continuation))
+
+    return _streaming_adapter(_attempt)
 
 
 def _streaming_adapter(
@@ -177,7 +179,7 @@ async def test_blocking_continuation_delivers_final_exactly_once_after_last_atte
         run_metadata_collector: dict[str, Any] | None,
         **_kwargs: object,
     ) -> str:
-        return await run_blocking_response_turn(
+        stream = stream_response_turn(
             cast("ResponseTurnContext", args[0]),
             _blocking_adapter(run_attempt),
             TurnSinks(
@@ -191,6 +193,7 @@ async def test_blocking_continuation_delivers_final_exactly_once_after_last_atte
                 current_prompt_is_structured=current_prompt_is_structured,
             ),
         )
+        return "".join([chunk async for chunk in stream])
 
     with (
         patch.object(DeliveryGateway, "deliver_final", new=spy_deliver_final),
