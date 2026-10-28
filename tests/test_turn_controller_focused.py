@@ -1137,6 +1137,43 @@ async def test_redacted_pending_turn_settles_deferred_source_before_response(
 
 
 @pytest.mark.asyncio
+async def test_a_batch_source_deleted_during_its_pending_write_leaves_the_rest_owing_an_answer(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deleting one message of a pending batch settles only it; the other answers as its own turn."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    events = [
+        _text_event("first", event_id="$first:localhost"),
+        _text_event("second", event_id="$second:localhost"),
+    ]
+    turn = build_prepared_turn(
+        CoalescingKey(_ROOM_ID, None, RequesterCoalescingOwner(_SENDER)),
+        [
+            make_pending_event(event, room, source_kind=MESSAGE_SOURCE_KIND, requester_user_id=_SENDER)
+            for event in events
+        ],
+    )
+    real_record_pending = harness.turn_store.record_pending_turn
+
+    async def record_then_redact(turn_record: TurnRecord) -> TurnRecord | None:
+        pending_turn = await real_record_pending(turn_record)
+        assert pending_turn is not None
+        await _redact(harness, events[0].event_id, room.room_id)
+        return pending_turn
+
+    monkeypatch.setattr(harness.turn_store, "record_pending_turn", record_then_redact)
+
+    await harness.controller.handle_prepared_turn(turn)
+
+    assert harness.runner.requests == []
+    assert harness.ignored_dispatch_sources == [(events[0].event_id,)]
+    assert harness.retried_dispatch_sources == [(events[1].event_id,)]
+
+
+@pytest.mark.asyncio
 async def test_locked_coalesced_redaction_settles_every_suppressed_source(
     config: Config,
     tmp_path: Path,

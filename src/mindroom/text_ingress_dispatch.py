@@ -376,8 +376,13 @@ async def _apply_turn_plan(
     pending_turn = await controller.deps.turn_store.record_pending_turn(handled_turn)
     if pending_turn is None:
         return
-    if await controller.deps.turn_store.deleted_sources(pending_turn):
-        await visible_responses.settle_source_events_ignored(pending_turn)
+    if deleted := await controller.deps.turn_store.deleted_sources(pending_turn):
+        surviving = tuple(event_id for event_id in pending_turn.source_event_ids if event_id not in deleted)
+        await controller.deps.settle_dispatch_sources(
+            tuple(sorted(deleted)) if surviving else pending_turn.source_event_ids,
+        )
+        # The rest answer as their own turn once this dispatch lets their claim go.
+        controller.deps.turn_store.retry_when_claim_releases(room.room_id, surviving)
         return
     handled_turn = pending_turn
 
