@@ -30,6 +30,7 @@ from mindroom.tool_system.agno_toolkits import adapt_toolkit, with_offered_instr
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import publish_oauth_credentials
+from tests.slack.room_state import room_state_client
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -910,24 +911,17 @@ def _watch_tools(paths: RuntimePaths) -> SlackTools:
     return _tools(paths, current_room_id=ROOM)
 
 
-def _members(*user_ids: str) -> AsyncMock:
-    client = AsyncMock()
-    client.joined_members.return_value = nio.JoinedMembersResponse(
-        [nio.RoomMember(user_id, None, None) for user_id in user_ids],
-        ROOM,
-    )
-    return client
-
-
 async def _call_watch(
     tools: SlackTools,
     paths: RuntimePaths,
     *,
-    members: tuple[str, ...] = (ALICE, AGENT),
+    room: AsyncMock | None = None,
     requester_id: str = ALICE,
+    hook_source: str | None = None,
     **arguments: Any,  # noqa: ANN401
 ) -> dict[str, Any]:
-    context = replace(_turn_context(paths, None, _members(*members)), requester_id=requester_id)
+    client = room or room_state_client((ALICE, AGENT))
+    context = replace(_turn_context(paths, hook_source, client), requester_id=requester_id)
     with tool_runtime_context(context):
         return json.loads(await tools.slack_watch(**arguments))
 
@@ -950,6 +944,7 @@ ALICE_WATCH = SlackWatch(
     created_at=1_800_000_000,
 )
 WATCHING = "Watching your Slack mentions and direct messages; they'll arrive here."
+LATER_JOINERS = "paused: people who join this room later could read earlier messages"
 
 
 def test_watch_is_registered_only_in_personal_mode_with_a_room(paths: RuntimePaths) -> None:
@@ -1103,24 +1098,28 @@ async def test_status_reports_the_filters_and_no_problem(paths: RuntimePaths) ->
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("members", "problem"),
+    ("room", "problem"),
     [
-        ((ALICE, AGENT, BOB), "paused: another person is in this room"),
-        ((AGENT,), "paused: you are not in this room"),
-        ((ALICE, AGENT), None),
+        pytest.param(room_state_client((ALICE, AGENT, BOB)), "paused: another person is in this room", id="joined"),
+        pytest.param(
+            room_state_client((ALICE, AGENT), invited=(BOB,)),
+            "paused: another person is in this room",
+            id="invited",
+        ),
+        pytest.param(room_state_client((AGENT,)), "paused: you are not in this room", id="owner-left"),
+        pytest.param(room_state_client((ALICE, AGENT), history_visibility="shared"), LATER_JOINERS, id="shared"),
+        pytest.param(room_state_client((ALICE, AGENT), history_visibility=None), LATER_JOINERS, id="no-setting"),
+        pytest.param(room_state_client((ALICE, AGENT), history_visibility="joined"), None, id="joined-history"),
+        pytest.param(room_state_client((ALICE, AGENT)), None, id="fine"),
     ],
 )
-async def test_status_reports_pause_reason(
-    paths: RuntimePaths,
-    members: tuple[str, ...],
-    problem: str | None,
-) -> None:
+async def test_status_reports_pause_reason(paths: RuntimePaths, room: AsyncMock, problem: str | None) -> None:
     _connect_alice(paths)
     _save_app_token(paths)
     tools = _watch_tools(paths)
     await _call_watch(tools, paths, action="start")
 
-    result = await _call_watch(tools, paths, members=members, action="status")
+    result = await _call_watch(tools, paths, room=room, action="status")
 
     assert result["problem"] == problem
 
@@ -1132,10 +1131,9 @@ async def test_status_reports_a_member_list_that_cannot_be_read(paths: RuntimePa
     tools = _watch_tools(paths)
     await _call_watch(tools, paths, action="start")
     client = AsyncMock()
-    client.joined_members.return_value = nio.JoinedMembersError("boom")
+    client.room_get_state.return_value = nio.RoomGetStateError("boom")
 
-    with tool_runtime_context(_turn_context(paths, None, client)):
-        result = json.loads(await tools.slack_watch(action="status"))
+    result = await _call_watch(tools, paths, room=client, action="status")
 
     assert result["problem"] == "paused: room members could not be checked"
 
@@ -1164,15 +1162,78 @@ async def test_status_reports_that_slack_was_reconnected_as_another_account(path
 
 
 @pytest.mark.asyncio
-async def test_start_refused_when_other_human_joined(paths: RuntimePaths) -> None:
+@pytest.mark.parametrize(
+    "room",
+    [
+        pytest.param(room_state_client((ALICE, AGENT, BOB)), id="joined"),
+        # An invited person reads what is delivered after the invite, once they join.
+        pytest.param(room_state_client((ALICE, AGENT), invited=(BOB,)), id="invited"),
+    ],
+)
+async def test_start_refused_when_other_human_joined(paths: RuntimePaths, room: AsyncMock) -> None:
     _connect_alice(paths)
     _save_app_token(paths)
 
-    result = await _call_watch(_watch_tools(paths), paths, members=(ALICE, AGENT, BOB), action="start")
+    result = await _call_watch(_watch_tools(paths), paths, room=room, action="start")
 
     assert result["status"] == "error"
     assert result["message"] == "Cannot watch Slack here: another person is in this room"
     assert _stored_watches(paths) == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("history_visibility", ["shared", "world_readable", None])
+async def test_start_refused_when_later_joiners_could_read_earlier_messages(
+    paths: RuntimePaths,
+    history_visibility: str | None,
+) -> None:
+    _connect_alice(paths)
+    _save_app_token(paths)
+    room = room_state_client((ALICE, AGENT), history_visibility=history_visibility)
+
+    result = await _call_watch(_watch_tools(paths), paths, room=room, action="start")
+
+    assert result["status"] == "error"
+    assert result["message"] == "Cannot watch Slack here: people who join this room later could read earlier messages"
+    assert _stored_watches(paths) == ()
+
+
+@pytest.mark.asyncio
+async def test_start_refused_when_the_room_cannot_be_read(paths: RuntimePaths) -> None:
+    _connect_alice(paths)
+    _save_app_token(paths)
+    room = AsyncMock()
+    room.room_get_state.side_effect = TimeoutError
+
+    result = await _call_watch(_watch_tools(paths), paths, room=room, action="start")
+
+    assert result["message"] == "Cannot watch Slack here: room members could not be checked"
+    assert _stored_watches(paths) == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["start", "stop"])
+async def test_a_watch_turn_cannot_start_or_stop_a_watch(paths: RuntimePaths, action: str) -> None:
+    _connect_alice(paths)
+    _save_app_token(paths)
+    assert paths.control_state_root is not None
+    SlackWatchStore(paths.control_state_root).put(ALICE_WATCH)
+    tools = _watch_tools(paths)
+
+    refused = await _call_watch(tools, paths, hook_source="slack-watch/w-1", action=action, mentions=False)
+
+    assert refused["message"] == "Ask me in a new message to post to Slack"
+    assert _stored_watches(paths) == (ALICE_WATCH,)
+
+    status = await _call_watch(tools, paths, hook_source="slack-watch/w-1", action="status")
+
+    assert status["watching"] is True
+    assert status["problem"] is None
+
+    allowed = await _call_watch(tools, paths, hook_source="plugin:message_received", action=action, mentions=False)
+
+    assert allowed["status"] == "ok"
+    assert _stored_watches(paths) != (ALICE_WATCH,)
 
 
 @pytest.mark.asyncio

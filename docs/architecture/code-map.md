@@ -470,7 +470,7 @@ Matrix sync callback
 | `slack/identity.py` | Maps a Slack author to a MindRoom account: the Slack display name and, for full workspace members whose profile email is in `slack.email_domain`, the Matrix user ID from `slack.matrix_user_id_template`; cached for ten minutes per team and user |
 | `slack/oauth.py` | The built-in `slack` OAuth provider: each requester's own Slack user token requested as `user_scope`, accepted only from the workspace the bot token belongs to |
 | `slack/render.py` | Plain dictionaries for agents from Slack answers: messages with author names and permalinks, people, conversations, and the display-name rule |
-| `slack/watches.py` | Personal Slack watches: the durable store of who receives which Slack mentions and direct messages in which room, and the check that a room has no person but the owner |
+| `slack/watches.py` | Personal Slack watches: the durable store of who receives which Slack mentions and direct messages in which room, and the check that a room holds only the owner and MindRoom's accounts and hides earlier messages from people who join later |
 | `custom_tools/slack.py` | The `slack` toolkit: personal calls with the requester's own Slack user token, project calls with the app's bot token only in listed channels the bot belongs to; search, read, and workspace downloads, rendered by `slack/render.py`; in a personal toolkit built for a Matrix room, `slack_watch` starts, stops, and reports a watch |
 
 ## Persistent State

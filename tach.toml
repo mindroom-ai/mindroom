@@ -1588,6 +1588,7 @@ visibility = [
     "mindroom.oauth.client",
     "mindroom.oauth.reset",
     "mindroom.oauth.reset_execution",
+    "mindroom.slack.watches",
 ]
 
 [[modules]]
@@ -4023,7 +4024,6 @@ visibility = [
     "mindroom.orchestration.external_trigger_runtime",
     "mindroom.orchestration.todo_poke_runtime",
     "mindroom.orchestrator",
-    "mindroom.slack.watches",
 ]
 
 [[modules]]
@@ -9742,7 +9742,7 @@ depends_on = ["mindroom.slack.api"]
 
 [[modules]]
 path = "mindroom.slack.watches"
-depends_on = ["mindroom.matrix.client_room_admin"]
+depends_on = ["mindroom.oauth.credential_lifecycle"]
 
 [[modules]]
 path = "mindroom.custom_tools.slack"

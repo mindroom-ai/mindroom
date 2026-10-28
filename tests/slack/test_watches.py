@@ -10,12 +10,14 @@ from dataclasses import asdict, replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
+import aiohttp
 import nio
 import pytest
 
 from mindroom import constants
 from mindroom.config.main import Config
-from mindroom.slack.watches import SlackWatch, SlackWatchStore, watch_id_for, watch_room_problem
+from mindroom.slack.watches import SlackWatch, SlackWatchStore, watch_id_for, watch_problem, watch_room_problem
+from tests.slack.room_state import room_state_client
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -28,6 +30,9 @@ BOB = "@bob:example.org"
 ROOM = "!room:example.org"
 AGENT = "@mindroom_assistant:example.org"
 ROUTER = "@mindroom_router:example.org"
+INTERNAL_USER = "@mindroom_user:example.org"
+BRIDGE_BOT = "@bridge:example.org"
+LATER_JOINERS = "paused: people who join this room later could read earlier messages"
 
 
 WATCH = SlackWatch(
@@ -103,6 +108,25 @@ def test_store_file_holds_only_the_watch_fields(tmp_path: Path) -> None:
     assert stored == {"watches": {watch.watch_id: {**asdict(watch), "channels": ["C0123ABCD"]}}}
 
 
+@pytest.mark.parametrize("operation", ["all", "get", "put", "remove"])
+def test_a_corrupt_store_raises_and_is_left_as_it_was(tmp_path: Path, operation: str) -> None:
+    store = SlackWatchStore(tmp_path)
+    path = tmp_path / "slack" / "watches.json"
+    path.parent.mkdir()
+    path.write_bytes(b'{"watches": {"0123456789abcdef": {"watch_id"')
+    operations = {
+        "all": store.all,
+        "get": lambda: store.get(WATCH.watch_id),
+        "put": lambda: store.put(WATCH),
+        "remove": lambda: store.remove(WATCH.watch_id),
+    }
+
+    with pytest.raises(json.JSONDecodeError):
+        operations[operation]()
+
+    assert path.read_bytes() == b'{"watches": {"0123456789abcdef": {"watch_id"'
+
+
 @pytest.fixture
 def paths(tmp_path: Path) -> RuntimePaths:
     return constants.resolve_runtime_paths(
@@ -119,52 +143,180 @@ def config() -> Config:
             "models": {"default": {"provider": "ollama", "id": "test-model"}},
             "agents": {"assistant": {"display_name": "Assistant"}},
             "authorization": {"aliases": {ALICE: [ALICE_BRIDGE]}},
+            "mindroom_user": {"username": "mindroom_user", "display_name": "MindRoomUser"},
+            "bot_accounts": [BRIDGE_BOT],
         },
     )
 
 
-def _client(*members: str) -> AsyncMock:
-    client = AsyncMock()
-    client.joined_members.return_value = nio.JoinedMembersResponse(
-        [nio.RoomMember(user_id, None, None) for user_id in members],
-        ROOM,
-    )
-    return client
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize("members", [(ALICE,), (ALICE, AGENT), (ALICE, AGENT, ROUTER), (ALICE_BRIDGE, ALICE, AGENT)])
-async def test_a_room_with_only_the_owner_and_agents_passes(
+@pytest.mark.parametrize(
+    "joined",
+    [(ALICE,), (ALICE, AGENT), (ALICE, AGENT, ROUTER), (ALICE_BRIDGE, ALICE, AGENT), (ALICE, AGENT, INTERNAL_USER)],
+)
+@pytest.mark.parametrize("history_visibility", ["invited", "joined"])
+async def test_a_room_with_only_the_owner_and_mindroom_accounts_passes(
     config: Config,
     paths: RuntimePaths,
-    members: tuple[str, ...],
+    joined: tuple[str, ...],
+    history_visibility: str,
 ) -> None:
-    assert await watch_room_problem(_client(*members), ROOM, ALICE, config, paths) is None
+    client = room_state_client(joined, history_visibility=history_visibility)
+
+    assert await watch_room_problem(client, ROOM, ALICE, config, paths) is None
+    client.room_get_state.assert_awaited_once_with(ROOM)
 
 
 @pytest.mark.asyncio
 async def test_the_owner_may_be_present_under_a_bridge_alias(config: Config, paths: RuntimePaths) -> None:
-    assert await watch_room_problem(_client(ALICE_BRIDGE, AGENT), ROOM, ALICE, config, paths) is None
+    client = room_state_client((ALICE_BRIDGE, AGENT))
+
+    assert await watch_room_problem(client, ROOM, ALICE, config, paths) is None
 
 
 @pytest.mark.asyncio
-async def test_an_owner_who_left_pauses_the_watch(config: Config, paths: RuntimePaths) -> None:
-    problem = await watch_room_problem(_client(AGENT), ROOM, ALICE, config, paths)
+async def test_people_who_left_and_agents_invited_do_not_count(config: Config, paths: RuntimePaths) -> None:
+    client = room_state_client((ALICE, AGENT), invited=(ROUTER,), departed=(BOB,))
+
+    assert await watch_room_problem(client, ROOM, ALICE, config, paths) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "room",
+    [{"joined": (AGENT,)}, {"joined": (AGENT,), "invited": (ALICE,)}, {"joined": (AGENT,), "departed": (ALICE,)}],
+)
+async def test_an_owner_who_is_not_joined_pauses_the_watch(
+    config: Config,
+    paths: RuntimePaths,
+    room: dict[str, tuple[str, ...]],
+) -> None:
+    problem = await watch_room_problem(room_state_client(**room), ROOM, ALICE, config, paths)
 
     assert problem == "paused: you are not in this room"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("other", [BOB, "@mindroom_unknown:example.org"])
-async def test_another_person_pauses_the_watch(config: Config, paths: RuntimePaths, other: str) -> None:
-    problem = await watch_room_problem(_client(ALICE, AGENT, other), ROOM, ALICE, config, paths)
+@pytest.mark.parametrize(
+    "room",
+    [
+        {"joined": (ALICE, AGENT, BOB)},
+        {"joined": (ALICE, AGENT, "@mindroom_unknown:example.org")},
+        {"joined": (ALICE, AGENT), "invited": (BOB,)},
+        {"joined": (ALICE, AGENT), "invited": (ALICE_BRIDGE, BOB)},
+        {"joined": (ALICE, AGENT, BRIDGE_BOT)},
+        {"joined": (ALICE, AGENT), "invited": (BRIDGE_BOT,)},
+    ],
+)
+async def test_another_person_or_bot_account_pauses_the_watch(
+    config: Config,
+    paths: RuntimePaths,
+    room: dict[str, tuple[str, ...]],
+) -> None:
+    problem = await watch_room_problem(room_state_client(**room), ROOM, ALICE, config, paths)
 
     assert problem == "paused: another person is in this room"
 
 
 @pytest.mark.asyncio
-async def test_a_member_list_that_cannot_be_read_pauses_the_watch(config: Config, paths: RuntimePaths) -> None:
-    client = AsyncMock()
-    client.joined_members.return_value = nio.JoinedMembersError("boom")
+@pytest.mark.parametrize("history_visibility", ["shared", "world_readable", None])
+async def test_a_room_that_shows_history_to_later_joiners_pauses_the_watch(
+    config: Config,
+    paths: RuntimePaths,
+    history_visibility: str | None,
+) -> None:
+    client = room_state_client((ALICE, AGENT), history_visibility=history_visibility)
 
-    assert await watch_room_problem(client, ROOM, ALICE, config, paths) == "paused: room members could not be checked"
+    assert await watch_room_problem(client, ROOM, ALICE, config, paths) == LATER_JOINERS
+
+
+@pytest.mark.asyncio
+async def test_a_room_that_cannot_be_read_pauses_the_watch(config: Config, paths: RuntimePaths) -> None:
+    unreadable = AsyncMock()
+    unreadable.room_get_state.return_value = nio.RoomGetStateError("boom")
+
+    assert (
+        await watch_room_problem(unreadable, ROOM, ALICE, config, paths) == "paused: room members could not be checked"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [aiohttp.ClientError("down"), TimeoutError(), nio.LocalProtocolError("stale")])
+async def test_a_room_whose_read_fails_pauses_the_watch(config: Config, paths: RuntimePaths, error: Exception) -> None:
+    failing = AsyncMock()
+    failing.room_get_state.side_effect = error
+
+    assert await watch_room_problem(failing, ROOM, ALICE, config, paths) == "paused: room members could not be checked"
+
+
+def _credentials(**claims: str) -> dict[str, object]:
+    return {
+        "token": "xoxp-alice-token",
+        "_oauth_claims": {"sub": "U0ALICE00", "team_id": "T0123ABCD", **claims},
+        "_oauth_claims_verified": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_watch_with_a_connected_account_and_a_private_room_has_no_problem(
+    config: Config,
+    paths: RuntimePaths,
+) -> None:
+    client = room_state_client((ALICE, AGENT))
+
+    assert await watch_problem(WATCH, _credentials(), client, config, paths) is None
+
+
+@pytest.mark.asyncio
+async def test_a_watch_without_credentials_is_paused_before_the_room_is_read(
+    config: Config,
+    paths: RuntimePaths,
+) -> None:
+    client = room_state_client((ALICE, AGENT, BOB))
+
+    assert await watch_problem(WATCH, None, client, config, paths) == "paused: Slack is not connected"
+    client.room_get_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("claims", [{"sub": "U0OTHER00"}, {"team_id": "T0OTHER00"}])
+async def test_a_watch_follows_only_the_slack_account_it_started_with(
+    config: Config,
+    paths: RuntimePaths,
+    claims: dict[str, str],
+) -> None:
+    client = room_state_client((ALICE, AGENT, BOB))
+
+    problem = await watch_problem(WATCH, _credentials(**claims), client, config, paths)
+
+    assert problem == "paused: Slack account changed; start the watch again"
+    client.room_get_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_watch_without_verified_claims_is_paused_as_a_changed_account(
+    config: Config,
+    paths: RuntimePaths,
+) -> None:
+    unverified = {**_credentials(), "_oauth_claims_verified": False}
+
+    problem = await watch_problem(WATCH, unverified, room_state_client((ALICE, AGENT)), config, paths)
+
+    assert problem == "paused: Slack account changed; start the watch again"
+
+
+@pytest.mark.asyncio
+async def test_a_watch_reports_the_rooms_problem_last(config: Config, paths: RuntimePaths) -> None:
+    client = room_state_client((ALICE, AGENT, BOB))
+
+    assert await watch_problem(WATCH, _credentials(), client, config, paths) == "paused: another person is in this room"
+    assert (
+        await watch_problem(
+            WATCH,
+            _credentials(),
+            room_state_client((ALICE, AGENT), history_visibility="shared"),
+            config,
+            paths,
+        )
+        == LATER_JOINERS
+    )
