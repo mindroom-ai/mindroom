@@ -2833,6 +2833,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.model_defaults",
     "mindroom.providers.claude_wire_blocks",
+    "mindroom.providers.media_files",
 ]
 visibility = ["mindroom.providers.anthropic.messages"]
 
@@ -6132,6 +6133,7 @@ depends_on = [
     "mindroom.providers.credentials",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
+    "mindroom.providers.media_files",
     "mindroom.providers.model_http_client",
     "mindroom.providers.names",
     "mindroom.providers.prompt_cache_key",
@@ -8127,6 +8129,10 @@ path = "mindroom.providers.errors"
 depends_on = ["mindroom.llm", "mindroom.failure_text"]
 
 [[modules]]
+path = "mindroom.providers.media_files"
+depends_on = ["mindroom.llm", "mindroom.logging_config"]
+
+[[modules]]
 path = "mindroom.providers.remote_media"
 depends_on = ["mindroom.bounded_bytes", "mindroom.llm", "mindroom.logging_config"]
 
@@ -8134,13 +8140,13 @@ depends_on = ["mindroom.bounded_bytes", "mindroom.llm", "mindroom.logging_config
 path = "mindroom.providers.gemini"
 depends_on = [
     "mindroom.llm",
-    "mindroom.logging_config",
     "mindroom.model_defaults",
     "mindroom.providers.assistant_turn",
     "mindroom.providers.credentials",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.google_adc",
+    "mindroom.providers.media_files",
     "mindroom.providers.remote_media",
     "mindroom.providers.tool_policy",
 ]
@@ -8154,10 +8160,10 @@ path = "mindroom.providers.ollama.adapter"
 depends_on = [
     "mindroom.credentials.sync",
     "mindroom.llm",
-    "mindroom.logging_config",
     "mindroom.model_defaults",
     "mindroom.providers.assistant_turn",
     "mindroom.providers.extra_kwargs",
+    "mindroom.providers.media_files",
     "mindroom.providers.ollama.errors",
     "mindroom.providers.ollama.settings",
     "mindroom.providers.remote_media",
