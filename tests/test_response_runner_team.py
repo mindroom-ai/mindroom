@@ -77,6 +77,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.identity_helpers import entity_ids
+from tests.reply_span_helpers import seed_finished_reply
 from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
@@ -1527,3 +1528,116 @@ class TestAgentBot(AgentBotTestBase):
         # Nothing was shown, so nothing is left to redact.
         assert reply.event_id is None
         bot._redact_message_event.assert_not_awaited()
+
+
+def _team_regeneration_request(
+    bot: AgentBot,
+    *,
+    prompt: str,
+    on_reply_claimed: Callable[[], Awaitable[None]],
+) -> ResponseRequest:
+    """Return the request an edit of ``$event`` builds to regenerate its answer ``$existing``."""
+    return ResponseRequest(
+        sources=ResponseSources(pending_event_ids=("$edit",), logical_source_event_ids=("$event",)),
+        prompt=prompt,
+        thread_history=[],
+        existing_event_id="$existing",
+        user_id="@alice:localhost",
+        # The edit drives the regeneration; its target is the conversation the edited message's turn answered.
+        response_envelope=request_envelope(
+            reply_to_event_id="$edit",
+            target=MessageTarget.resolve("!test:localhost", "$thread", "$event"),
+            prompt=prompt,
+            user_id="@alice:localhost",
+            agent_name=bot.agent_name,
+        ),
+        correlation_id="$edit",
+        on_reply_claimed=on_reply_claimed,
+        edit_regeneration=True,
+    )
+
+
+async def _team_bot_with_existing_reply(tmp_path: Path) -> AgentBot:
+    """Return a configured team's bot whose reply ``$existing`` answered ``$event``."""
+    config = _configured_team_test_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    bot = make_test_team_bot(
+        _configured_team_user(config, runtime_paths),
+        tmp_path,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    install_direct_response_admission(bot)
+    bot.client = _make_matrix_client_mock()
+    unique_room_send_responses(bot.client, prefix="$regenerated")
+    await seed_finished_reply(
+        bot.journal_principal(),
+        "$existing",
+        sources=ResponseSources(pending_event_ids=("$event",), logical_source_event_ids=("$event",)),
+        room_id="!test:localhost",
+        thread_id="$thread",
+        entity_name=bot.agent_name,
+    )
+    return bot
+
+
+def _edits_of_existing_reply(bot: AgentBot) -> list[str]:
+    """Return the bodies of every edit this bot sent to ``$existing``."""
+    return [
+        call.kwargs["content"]["m.new_content"]["body"]
+        for call in bot.client.room_send.await_args_list
+        if call.kwargs["content"].get("m.relates_to") == {"rel_type": "m.replace", "event_id": "$existing"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_rejected_team_regeneration_edits_its_existing_reply_with_the_reason(tmp_path: Path) -> None:
+    """A regeneration whose team is rejected commits the edit and shows the reason in the reply it regenerates."""
+    bot = await _team_bot_with_existing_reply(tmp_path)
+    commit_edit = AsyncMock()
+
+    with patch_response_runner_module(
+        typing_indicator=_noop_typing_indicator,
+        should_use_streaming=AsyncMock(return_value=False),
+    ):
+        await bot._response_runner.generate_team_response_helper(
+            _team_regeneration_request(bot, prompt="Team, summarize this thread", on_reply_claimed=commit_edit),
+            member_names=["general"],
+            team_mode="coordinate",
+            resolution_reason="Team 'support_team' cannot answer: general is unavailable.",
+        )
+
+    commit_edit.assert_awaited_once()
+    assert _edits_of_existing_reply(bot) == ["Team 'support_team' cannot answer: general is unavailable."]
+    reply = await bot._reply_runtime.store.replies.for_event("$existing")
+    assert reply is not None
+    assert reply.state is rl.ReplyState.COMPLETED
+    assert reply.current_span_id is None
+
+
+@pytest.mark.asyncio
+async def test_empty_team_regeneration_finalizes_its_existing_reply_empty(tmp_path: Path) -> None:
+    """An edit that empties the prompt of a team's message finalizes the reply it regenerates without answering."""
+    bot = await _team_bot_with_existing_reply(tmp_path)
+    commit_edit = AsyncMock()
+    team_response = AsyncMock(return_value="Team reply")
+
+    with patch_response_runner_module(
+        typing_indicator=_noop_typing_indicator,
+        should_use_streaming=AsyncMock(return_value=False),
+        team_response=team_response,
+    ):
+        await bot._response_runner.generate_response_for_empty_prompt(
+            _team_regeneration_request(bot, prompt="  ", on_reply_claimed=commit_edit),
+            response_kind="team",
+        )
+
+    team_response.assert_not_awaited()
+    commit_edit.assert_awaited_once()
+    # The reply keeps showing its earlier answer: nothing is sent, edited, or redacted.
+    bot.client.room_send.assert_not_awaited()
+    bot.client.room_redact.assert_not_awaited()
+    reply = await bot._reply_runtime.store.replies.for_event("$existing")
+    assert reply is not None
+    assert reply.state is rl.ReplyState.COMPLETED
+    assert reply.current_span_id is None
