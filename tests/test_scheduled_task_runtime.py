@@ -333,6 +333,32 @@ async def test_removed_agent_fails_its_tasks_and_says_so_where_they_post(tmp_pat
     await runtime.stop()
 
 
+@pytest.mark.asyncio
+async def test_removal_stops_waiting_for_a_stalled_homeserver_and_leaves_the_task_pending(tmp_path: Path) -> None:
+    """A removal that cannot settle its tasks in time lets the reload go on; the next restore fails them."""
+    config, runtime_paths, _ids = _config_and_ids(tmp_path)
+    removed_bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
+    runtime = _runtime(runtime_paths, config, _Bots(general=removed_bot))
+    workflow = _workflow(due=False)
+
+    async def wait_forever(*_args: object, **_kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    with patch.object(scheduling_runtime._TaskRunner, "run_once", wait_forever):
+        assert runtime._start_runner("general", TASK_ID, workflow)
+
+    with (
+        patch.object(scheduling_runtime, "SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.05),
+        patch("mindroom.scheduling.runtime._get_pending_task_record", new=wait_forever),
+        patch("mindroom.scheduling.executor.send_scheduled_failure_notice", new=AsyncMock()) as notice,
+    ):
+        await asyncio.wait_for(runtime.fail_removed({"general"}), timeout=5)
+
+    assert runtime._runners == {}
+    notice.assert_not_awaited()
+    await runtime.stop()
+
+
 def _room_state(writer_id: str, agent_id: str, task_content: dict[str, Any], *, agent_level: int) -> list[dict]:
     """Return a room's full state: one agent joined at a power level, no router, and a task ``writer_id`` wrote."""
 
