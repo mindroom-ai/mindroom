@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, cast
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from mindroom.matrix.identity import validate_email_to_matrix_mapping
+
+if TYPE_CHECKING:
+    from mindroom.config.agent import AgentConfig
+    from mindroom.config.main import Config
+
+_SLACK_TOOL_NAME = "slack"
+_CHANNEL_ID = re.compile(r"[CG][A-Z0-9]{8,}")
 
 
 class SlackConfig(BaseModel):
@@ -30,3 +41,76 @@ class SlackConfig(BaseModel):
         if self.matrix_user_id_template is not None:
             validate_email_to_matrix_mapping(self.matrix_user_id_template, self.email_domain)
         return self
+
+
+@dataclass(frozen=True)
+class SlackAnsweringAgent:
+    """An agent that answers mentions of the MindRoom Slack app in its channels, in one of its Matrix rooms."""
+
+    agent: str
+    room: str
+    channels: frozenset[str]
+
+
+def _slack_overrides(agent: AgentConfig) -> dict[str, object]:
+    """Return the agent's own `slack` tool overrides; `defaults.tools` cannot set `channels` or `room`."""
+    return next((entry.overrides for entry in agent.tools if entry.name == _SLACK_TOOL_NAME), {})
+
+
+def slack_answering_agents(config: Config) -> tuple[SlackAnsweringAgent, ...]:
+    """List the agents with Slack channels and a room, in config order, from a validated config."""
+    answering: list[SlackAnsweringAgent] = []
+    for name, agent in config.agents.items():
+        overrides = _slack_overrides(agent)
+        channels = overrides.get("channels")
+        room = overrides.get("room")
+        if channels and room:
+            answering.append(SlackAnsweringAgent(name, cast("str", room), frozenset(cast("list[str]", channels))))
+    return tuple(answering)
+
+
+def _check_channels(path: str, channels: object) -> None:
+    """Reject anything but a non-empty list of Slack channel IDs."""
+    if not isinstance(channels, list):
+        msg = f"{path}.channels must be a list of Slack channel IDs"
+        raise ValueError(msg)  # noqa: TRY004
+    if not channels:
+        msg = f"{path}.channels must list at least one channel; omit it for personal mode"
+        raise ValueError(msg)
+    if not all(isinstance(channel, str) and _CHANNEL_ID.fullmatch(channel) for channel in channels):
+        msg = f"{path}.channels: Slack channel IDs look like C0123ABCD"
+        raise ValueError(msg)
+
+
+def _check_agent(config: Config, name: str, agent: AgentConfig) -> None:
+    """Check one agent's `channels` and `room` overrides."""
+    overrides = _slack_overrides(agent)
+    channels = overrides.get("channels")
+    room = overrides.get("room")
+    path = f"agents.{name}.tools.slack"
+    if channels is not None:
+        _check_channels(path, channels)
+    if room is None:
+        return
+    if channels is None:
+        msg = f"{path}.room needs channels"
+        raise ValueError(msg)
+    if room not in agent.rooms:
+        msg = f"{path}.room must be one of the agent's rooms"
+        raise ValueError(msg)
+    if config.slack.matrix_user_id_template is None:
+        msg = "Answering Slack mentions needs slack.email_domain and slack.matrix_user_id_template"
+        raise ValueError(msg)
+
+
+def validate_slack_agents(config: Config) -> None:
+    """Check each agent's Slack `channels` and `room`, and that every channel has at most one answering agent."""
+    for name, agent in config.agents.items():
+        _check_agent(config, name, agent)
+    answered_by: dict[str, str] = {}
+    for answering in slack_answering_agents(config):
+        for channel in sorted(answering.channels):
+            first = answered_by.setdefault(channel, answering.agent)
+            if first != answering.agent:
+                msg = f"Slack channel {channel} is answered by both {first} and {answering.agent}"
+                raise ValueError(msg)

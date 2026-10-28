@@ -84,7 +84,7 @@ from mindroom.config.runtime_overlays import (
     strip_runtime_approved_egress_overlay_from_dump,
 )
 from mindroom.config.schema_hints import DashboardJsonSchema, dashboard_hint, redact_config_for_display
-from mindroom.config.slack import SlackConfig
+from mindroom.config.slack import SlackConfig, validate_slack_agents
 from mindroom.config.tool_entries import raw_tool_entry_name_and_lazy_flag_fields, raw_tools_entries
 from mindroom.config.validation import TimezoneName  # noqa: TC001
 from mindroom.config.voice import VoiceConfig
@@ -823,6 +823,12 @@ class Config(BaseModel):
                 invalid_room_references,
             )
             raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_slack_answering_agents(self) -> Config:
+        """Require valid Slack channels and rooms on agents, and one answering agent per channel."""
+        validate_slack_agents(self)
         return self
 
     @model_validator(mode="after")
