@@ -130,7 +130,7 @@ async def _collect_agent_continuation(
     return _CollectedAgentContinuation(
         response=response,
         tool_executions=completed,
-        terminal_content=(response.handover_content or "") if hands_over_text else "",
+        terminal_content=(response.new_handover_content or "") if hands_over_text else "",
         has_visible_content=saw_content_delta,
     )
 

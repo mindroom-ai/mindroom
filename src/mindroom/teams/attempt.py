@@ -42,15 +42,15 @@ def team_tool_executions(record: TeamRunRecord) -> list[ToolExecution]:
 
 
 def _unshown_handover(run: AnyRunRecord, *, streamed: bool) -> str | None:
-    """Return what ``run`` hands over (``handover_content``) that its events have not shown.
+    """Return what ``run`` hands over beyond its pause (``new_handover_content``) that its events have not shown.
 
     A run's deltas show its content as it is written, so a run that streamed text has shown what it hands over,
-    unless it failed: a failed run hands over why it failed, which no delta shows. A resumed run hands over only what
-    it wrote since the resume (``resumed_record``).
+    unless it failed: a failed run hands over why it failed, which no delta shows. What a resumed run wrote before its
+    pause the document the resume continues already shows.
     """
     if streamed and run.status is not RunStatus.error:
         return None
-    return run.handover_content
+    return run.new_handover_content
 
 
 @dataclass

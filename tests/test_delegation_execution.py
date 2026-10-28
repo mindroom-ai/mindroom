@@ -385,15 +385,30 @@ async def test_a_child_resumed_after_its_approval_reports_its_activity_as_progre
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("before_the_pause", [None, "I will write the report."], ids=["no-text", "own-text"])
-async def test_a_child_that_ends_without_text_after_its_approval_hands_its_parent_the_completion_note(
+@pytest.mark.parametrize(
+    ("before_the_pause", "after_the_call", "handed_over"),
+    [
+        pytest.param(None, "", "Agent completed the task but returned no content.", id="no-text"),
+        pytest.param("The findings: three risks.", "", "The findings: three risks.", id="own-text"),
+        pytest.param(
+            "The findings: three risks.",
+            "The report is written.",
+            "The findings: three risks.\n\nThe report is written.",
+            id="own-text-then-more",
+        ),
+    ],
+)
+async def test_a_child_resumed_after_its_approval_hands_its_parent_everything_it_wrote(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     before_the_pause: str | None,
+    after_the_call: str,
+    handed_over: str,
 ) -> None:
-    """A resumed child that ran its approved call and then wrote nothing hands over the completion note.
+    """A resumed child that ran its approved call hands over the text it wrote before and after the pause.
 
-    Neither a paused notice nor what the child wrote before the pause reaches the parent after the call ran.
+    The texts join a blank line apart; a child that wrote nothing hands over the completion note, never a paused
+    notice.
     """
     paths = _runtime_paths(tmp_path)
     config = _config(paths)
@@ -404,7 +419,9 @@ async def test_a_child_that_ends_without_text_after_its_approval_hands_its_paren
             answer("parent result"),
         ],
     )
-    code = ScriptedModel([calls(tool_call("write_report", "same-call"), content=before_the_pause), answer("")])
+    code = ScriptedModel(
+        [calls(tool_call("write_report", "same-call"), content=before_the_pause), answer(after_the_call)],
+    )
     ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
 
     with registered_report_tool() as report:
@@ -435,11 +452,10 @@ async def test_a_child_that_ends_without_text_after_its_approval_hands_its_paren
     assert isinstance(result, CompletedApprovalRun)
     assert report.written == ["written"]
     resumed = _parent_record(config, paths, identity, "parent-run")
-    handed_over = next(message.content for message in resumed.messages if message.tool_call_id == "delegate-0")
-    assert isinstance(handed_over, str)
-    assert "Agent completed the task but returned no content." in handed_over
-    assert "I have tools to execute" not in handed_over
-    assert "I will write the report." not in handed_over
+    result_message = next(message.content for message in resumed.messages if message.tool_call_id == "delegate-0")
+    assert isinstance(result_message, str)
+    # The child's result comes first, then the delegation's record line.
+    assert result_message.partition("\n\nDelegation ")[0] == handed_over
 
 
 @pytest.mark.asyncio

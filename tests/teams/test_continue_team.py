@@ -142,21 +142,39 @@ async def test_an_approved_member_call_resumes_the_member_and_then_the_leader() 
     assert checker_request.messages[-1].content == '{"operation": "multiplication", "result": 42.0}'
 
 
-@pytest.mark.parametrize("before_the_pause", [None, "Let me multiply that."], ids=["stored-notice", "own-text"])
-async def test_a_resumed_member_that_ends_without_text_hands_the_leader_its_call_s_result(
-    before_the_pause: str | None,
-) -> None:
-    """A member whose resumed run ran its approved call and then wrote nothing hands over the call's result.
+_MULTIPLIED = '{"operation": "multiplication", "result": 42.0}'
 
-    Neither what the member wrote before the pause nor the paused notice its stored row held, which reads as no
-    content, reaches the leader after the call ran.
+
+@pytest.mark.parametrize(
+    ("before_the_pause", "after_the_call", "handed_over"),
+    [
+        pytest.param(None, "", _MULTIPLIED, id="stored-notice"),
+        pytest.param(None, "Their product is 42.", "Their product is 42.", id="stored-notice-then-text"),
+        pytest.param("Six and seven are both small.", "", "Six and seven are both small.", id="own-text"),
+        pytest.param(
+            "Six and seven are both small.",
+            "Their product is 42.",
+            "Six and seven are both small.\n\nTheir product is 42.",
+            id="own-text-then-more",
+        ),
+    ],
+)
+async def test_a_resumed_member_hands_the_leader_everything_it_wrote_and_never_its_paused_notice(
+    before_the_pause: str | None,
+    after_the_call: str,
+    handed_over: str,
+) -> None:
+    """A member whose resumed run ran its approved call hands over the text it wrote before and after the pause.
+
+    The texts join a blank line apart, as the texts of one run's requests do. The paused notice the stored row held
+    reads as no content, so a member that wrote nothing hands over its call's result instead.
     """
     paused = _paused_team_approved()
     if before_the_pause is not None:
         [paused_member] = paused.member_responses
         paused_member.content = before_the_pause
     leader = scripted("leader-model", answer("The checker found 42.", usage(1, 1)))
-    checker = scripted("checker-model", answer("", usage(1, 1)))
+    checker = scripted("checker-model", answer(after_the_call, usage(1, 1)))
 
     await collect(
         resume_team(
@@ -171,7 +189,7 @@ async def test_a_resumed_member_that_ends_without_text_hands_the_leader_its_call
     )
 
     [request] = leader.requests
-    assert request.messages[-1].content == '{"operation": "multiplication", "result": 42.0}'
+    assert request.messages[-1].content == handed_over
 
 
 async def test_a_member_that_pauses_again_keeps_the_team_paused_without_a_leader_request() -> None:

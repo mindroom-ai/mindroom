@@ -972,8 +972,8 @@ async def test_resume_entry_hooks_run_after_the_decided_results_and_the_loop_con
     )
 
     assert seen == [["user", "assistant", "tool"]]
-    # The loop's own text replaces the paused content, as Agno's continuation did.
-    assert record.content == "Seven."
+    # The loop's own text joins the paused content, a blank line apart.
+    assert record.content == "Checking first.\n\nSeven."
     assert record.tools is not None
     assert [tool.tool_call_id for tool in record.tools] == ["c1", "c2"]
     assert [event.call.tool_call_id for event in events if isinstance(event, ToolCompleted)] == ["c1", "c2"]

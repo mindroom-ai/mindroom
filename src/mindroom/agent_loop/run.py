@@ -225,23 +225,25 @@ def check_approved_tools_offered(spec: AgentSpec, approved: Sequence[ApprovedCal
 
 
 def resumed_record[R: AnyRunRecord](paused: R) -> R:
-    """Return the record the resume continues: a running copy of ``paused`` without its messages or content.
+    """Return the record the resume continues: a running copy of ``paused`` without its messages.
 
-    The content starts afresh, so the run hands over only what its model writes after the resume: the reply the resume
-    continues already shows the text written before the pause, and a team leader or delegating parent reads what the
-    resume added. The copy is deep, so no field it carries is shared with ``paused`` and a refused resume changes
-    nothing; a team record keeps its own copy of the member runs that ended before the pause. A tool entry that one of
-    the copy's own requirements waits on is that requirement's execution of the same call, so a decision recorded on a
-    requirement shows on the run's tools too. A team run also holds its members' requirements, whose call ids come
-    from other provider requests and may equal a leader call's id; those belong to the member's run and never replace
-    the leader's entries. A member record resumed on its own owns its requirements too: the team runtime names them
-    with that record's run id (``_plan_member_resumes``), so the ``member_run_id`` half of the check keeps the
-    aliasing on the member's tools.
+    The copy records its content as what the run carried from its pause (``carried_content``), and the loop joins what
+    the model writes after the resume to it: a team leader or delegating parent reads both, while the reply the resume
+    continues, which already shows the text written before the pause, adds only the rest (``new_handover_content``).
+    The copy is deep, so no field it carries is shared with ``paused`` and a refused resume changes nothing; a team
+    record keeps its own copy of the member runs that ended before the pause. A tool entry that one of the copy's own
+    requirements waits on is that requirement's execution of the same call, so a decision recorded on a requirement
+    shows on the run's tools too. A team run also holds its members' requirements, whose call ids come from other
+    provider requests and may equal a leader call's id; those belong to the member's run and never replace the
+    leader's entries. A member record resumed on its own owns its requirements too: the team runtime names them with
+    that record's run id (``_plan_member_resumes``), so the ``member_run_id`` half of the check keeps the aliasing on
+    the member's tools.
     """
     if paused.status is not RunStatus.paused:
         msg = f"Only a paused run can be resumed; run {paused.run_id!r} is {paused.status.value}"
         raise ValueError(msg)
-    record = deepcopy(replace(paused, messages=[], content=None))
+    record = deepcopy(replace(paused, messages=[]))
+    record.carried_content = record.content
     record.status = RunStatus.running
     record.requirements = record.requirements or []
     if record.metrics is None:

@@ -2337,14 +2337,14 @@ async def test_a_blocking_team_reply_shows_a_member_paused_on_its_delegation_onc
 
 
 @pytest.mark.asyncio
-async def test_a_blocking_team_reply_without_content_shows_what_the_leader_wrote_before_its_member_paused(
+async def test_a_blocking_team_reply_whose_leader_says_nothing_more_shows_what_it_wrote_before_its_member_paused(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A leader silent after its member's delegation has no content, so the reply shows what it wrote before the pause.
+    """A leader silent after its member's delegation keeps what it wrote before the pause, which the reply shows.
 
-    The leader's continuation starts its content afresh and nobody wrote anything after the delegation, so the reply's
-    consensus is the text the leader streamed before it delegated.
+    Nobody wrote anything after the delegation, so the reply's consensus is the text the leader streamed before it
+    delegated, and the leader's content is that text.
     """
     team = squad_turn(
         tmp_path,
@@ -2366,7 +2366,7 @@ async def test_a_blocking_team_reply_without_content_shows_what_the_leader_wrote
     assert text == f"{HEADER}\n**Team Consensus**:\n\nAsking the writer."
     assert team.recorder.assistant_text == text
     record, _, _ = _delegation_state(team)
-    assert record.content is None
+    assert record.content == "Asking the writer."
 
 
 @pytest.mark.asyncio
@@ -2635,10 +2635,10 @@ async def test_a_stopped_blocking_team_turn_records_what_its_leader_wrote_before
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A leader stopped after its member's delegation has no content, yet the turn records the text it had written.
+    """A leader stopped after its member's delegation keeps the text it had written, which the turn records.
 
-    The leader's continuation starts its content afresh and its member said nothing after the delegation; the turn
-    records the document the run's events built, which holds the text the leader wrote before the delegation.
+    Its member said nothing after the delegation; the turn records the document the run's events built, which holds
+    the text the leader wrote before the delegation, as the leader's stored content does.
     """
     working = asyncio.Event()
 
@@ -2667,7 +2667,7 @@ async def test_a_stopped_blocking_team_turn_records_what_its_leader_wrote_before
         await task
 
     record, _, _ = _delegation_state(team)
-    assert (record.status, record.content) == (RunStatus.cancelled, None)
+    assert (record.status, record.content) == (RunStatus.cancelled, "Asking the writer.")
     assert team.recorder.outcome == "interrupted"
     assert team.recorder.assistant_text == "\n**Team Consensus**:\n\nAsking the writer."
 

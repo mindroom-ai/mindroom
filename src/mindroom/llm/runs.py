@@ -9,7 +9,7 @@ the storage v2 conversion still reads; keys the records do not model are ignored
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, fields
 from enum import StrEnum
 from time import time
@@ -280,8 +280,8 @@ class _RunRecordCommon:
     parent_run_id: str | None = None
     user_id: str | None = None
     status: RunStatus = RunStatus.running
-    # What the run's model wrote, its requests' texts a blank line apart; a resumed run's holds only what its model
-    # wrote since the resume (``resumed_record``). A pause is in ``requirements`` and a failure in ``error``, never here.
+    # What the run's model wrote, before a pause and after each resume, its requests' texts a blank line apart
+    # (``joined_texts``). A pause is in ``requirements`` and a failure in ``error``, never here.
     content: str | None = None
     # Why the run failed or was stopped, credentials redacted, set by whatever ended it so: the loop for an ``ERROR``
     # run, and delegation recovery for a child run it fails or cancels. A run its own cancellation stopped has none.
@@ -297,6 +297,9 @@ class _RunRecordCommon:
     metrics: RunMetrics | None = None
     metadata: dict[str, Any] | None = None
     created_at: int = field(default_factory=_now)
+    # The content a resumed run carried from its pause, set by the resume (``resumed_record``); the loop joins what the
+    # model writes since to it. Never stored, so a loaded record has none.
+    carried_content: str | None = field(default=None, compare=False, repr=False)
 
     @property
     def handover_content(self) -> str | None:
@@ -307,6 +310,21 @@ class _RunRecordCommon:
         if self.error is not None:
             return self.error
         return legacy_failure_text(self.content) if self.status is RunStatus.error else self.content
+
+    @property
+    def new_handover_content(self) -> str | None:
+        """Return what the run hands over (``handover_content``) beyond the text it carried from its pause.
+
+        The reply a resume continues already shows that text, so it adds only this: what the model wrote since the
+        resume, or why the run failed or was stopped. A run that was not resumed hands over all of it.
+        """
+        handover = self.handover_content
+        carried = (self.carried_content or "").strip()
+        if self.error is not None or not carried or handover is None:
+            return handover
+        if handover == self.carried_content:
+            return None
+        return handover.removeprefix(carried + _TEXT_SEPARATOR)
 
     def _scalars_dict(self, identity: Mapping[str, str | None]) -> dict[str, Any]:
         """Return the scalar keys in stored order: the run, its agent or team, then the rest."""
@@ -344,6 +362,21 @@ class _RunRecordCommon:
 
     def _requirements_dict(self) -> dict[str, Any]:
         return {} if self.requirements is None else {"requirements": [item.to_dict() for item in self.requirements]}
+
+
+_TEXT_SEPARATOR = "\n\n"
+
+
+def joined_texts(parts: Sequence[str]) -> str:
+    """Return a run's texts as its content: one text as it is, several stripped and a blank line apart.
+
+    A resumed run's content joins its carried text and the texts of its requests since, so the text before and after
+    a tool call or an approval reads as two paragraphs.
+    """
+    texts = [part for part in parts if part.strip()]
+    if len(texts) <= 1:
+        return texts[0] if texts else "".join(parts)
+    return _TEXT_SEPARATOR.join(text.strip() for text in texts)
 
 
 def _common_from_dict(data: Mapping[str, Any]) -> dict[str, Any]:
@@ -450,4 +483,5 @@ __all__ = [
     "TeamRunRecord",
     "ToolExecution",
     "denial_note_for",
+    "joined_texts",
 ]

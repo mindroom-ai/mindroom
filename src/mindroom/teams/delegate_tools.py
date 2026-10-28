@@ -132,9 +132,9 @@ def delegate_functions(
 def member_result_text(child: RunRecord) -> str:
     """Return what the leader reads for a finished member run: its text, else its tool results, else a notice.
 
-    The text is the content the run hands over (``handover_content``): a resumed run's is what it wrote since the
-    resume, and a failed member gives the reason its run recorded, credentials redacted. A run without text that ran
-    tools gives their results, and one that did neither gives the no-response notice.
+    The text is the content the run hands over (``handover_content``): a resumed run's is what it wrote before its
+    pause and since, and a failed member gives the reason its run recorded, credentials redacted. A run without text
+    that ran tools gives their results, and one that did neither gives the no-response notice.
     """
     content = child.handover_content
     if content is not None and content.strip():

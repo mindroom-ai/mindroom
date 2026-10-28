@@ -172,7 +172,8 @@ async def settle_child_response(
     """Derive operational state from one exact run, then publish its audit view.
 
     A finished run's result is what it hands over (``handover_content``), so a failed run's is why it failed, a run
-    recovery cancelled hands over why, and a resumed run's is what it wrote since the resume, else the completion note.
+    recovery cancelled hands over why, and a resumed run's is what it wrote before its pause and since, else the
+    completion note.
     """
     if response.run_id != child.run_id or response.session_id != child.session_id:
         msg = "Delegation child response does not match its retained run"
