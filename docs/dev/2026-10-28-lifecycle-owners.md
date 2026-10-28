@@ -41,10 +41,10 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 ## Accepted limitations
 
 - When membership, power levels, or a task edit by another agent change a scheduled task's owner, the new owner starts from its own recurring checkpoint, and an earlier owner's stale checkpoint can replay one occurrence if ownership returns to it within the catch-up grace.
-  The first start after this change hits that case once for recurring tasks the router had restored in rooms where it may not write schedule state, such as an agent's personal room: they return to the agent that wrote them.
+  The first start after this change hits that case once for recurring tasks the router had restored in rooms where it may not write schedule state, such as an agent's personal room: they return to the agent that wrote them, so each can fire its latest occurrence a second time.
+  That one extra firing was accepted over a one-time checkpoint migration, which would have needed precedence rules between owners' checkpoints.
 - A one-time trigger still sending when its owner's stop budget expires is marked failed instead of resent, because a one-time trigger carries no transaction ID that Matrix could deduplicate.
 - A task whose owner is no longer configured stays pending, and is logged, when no bot restoring its room may write the room's schedule state.
-
 - A removed entity that leaves no room, because its frozen FINAL recovery is still unresolved or it never started, is removed from its rooms by the next router start's orphan cleanup.
 - A file edit made while another reload applies, or a second file edit made while an MCP catalog restart drains responses, reaches the dashboard only after that step; a dashboard save in that window overwrites it.
   The drain lasts at most 600 seconds, but an apply that creates Matrix accounts waits for an unreachable homeserver for as long as it is down.
