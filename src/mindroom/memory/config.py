@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import threading
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, cast
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from mindroom.credentials.sync import get_api_key_for_provider, get_ollama_host
-from mindroom.embeddings.errors import embedder_request_error, openai_embedder_error
+from mindroom.embeddings.errors import EmbedderRequestError, embedder_request_error, openai_embedder_error
 from mindroom.embeddings.factory import resolve_embedder_settings
 from mindroom.embeddings.signatures import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
@@ -25,7 +27,7 @@ from mindroom.timing import timed
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     from mem0 import AsyncMemory
@@ -33,8 +35,9 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.embeddings.base import Embedder, EmbeddingPurpose
-    from mindroom.embeddings.errors import EmbedderRequestError
     from mindroom.llm.errors import ProviderError
+
+_T = TypeVar("_T")
 
 logger = get_logger(__name__)
 _MEMORY_COLLECTION_PREFIX = "mindroom_memories"
@@ -44,27 +47,11 @@ _MEMORY_COLLECTION_PREFIX = "mindroom_memories"
 _STORE_BUILD_LOCKS: dict[str, threading.Lock] = {}
 
 
-@dataclass
+@dataclass(frozen=True)
 class _Mem0StrictOpenAIEmbedder:
-    """Adapt MindRoom's strict OpenAI embedder to Mem0's embedding interface."""
+    """Adapt MindRoom's strict OpenAI embedder, which raises typed embedder errors, to Mem0's embedding interface."""
 
     embedder: Embedder
-    _operation_failure: Exception | None = field(default=None, init=False, repr=False)
-
-    def _remember_operation_failure(self, exc: Exception) -> None:
-        if self._operation_failure is None:
-            self._operation_failure = exc
-
-    def begin_operation(self) -> None:
-        """Start tracking failures that Mem0 may swallow during one operation."""
-        self._operation_failure = None
-
-    def raise_for_operation_failure(self) -> None:
-        """Raise a safe error when Mem0 swallowed an embedding failure."""
-        failure = self._operation_failure
-        self._operation_failure = None
-        if failure is not None:
-            raise failure
 
     def embed(
         self,
@@ -80,11 +67,7 @@ class _Mem0StrictOpenAIEmbedder:
     ) -> list[list[float]]:
         # Stored memories are documents; anything else, including the entities of a search query, is a query.
         purpose: EmbeddingPurpose = "document" if memory_action in {"add", "update"} else "query"
-        try:
-            return self.embedder.embed([text.replace("\n", " ") for text in texts], purpose=purpose)
-        except Exception as exc:
-            self._remember_operation_failure(exc)
-            raise
+        return self.embedder.embed([text.replace("\n", " ") for text in texts], purpose=purpose)
 
 
 def _ollama_failure(error: Exception) -> ProviderError | None:
@@ -99,32 +82,57 @@ def _ollama_embedder_error(error: Exception) -> EmbedderRequestError:
     return embedder_request_error(error, _ollama_failure(error))
 
 
-@dataclass(frozen=True)
-class _Mem0ClassifiedEmbedder:
-    """Raise the failures of an embedder Mem0 builds itself as the typed embedder errors MindRoom's embedders raise.
+# The embedder failures of the Mem0 operation in progress, including those Mem0 catches: it drops the extracted facts
+# it could not embed and reports the add as done. Mem0 embeds in worker threads, which inherit this context.
+_operation_failures: ContextVar[list[EmbedderRequestError] | None] = ContextVar("mem0_embedder_failures", default=None)
 
-    ``classify`` returns the typed error of one failure of the embedder's SDK; the wrapper sends what Mem0's embedder
-    sends, so stored memories keep matching their searches.
+
+@contextmanager
+def recorded_embedder_failures() -> Iterator[list[EmbedderRequestError]]:
+    """Collect every embedder failure of the Mem0 operation run inside, in order."""
+    failures: list[EmbedderRequestError] = []
+    token = _operation_failures.set(failures)
+    try:
+        yield failures
+    finally:
+        _operation_failures.reset(token)
+
+
+def _recorded(error: EmbedderRequestError) -> EmbedderRequestError:
+    if (failures := _operation_failures.get()) is not None:
+        failures.append(error)
+    return error
+
+
+@dataclass(frozen=True)
+class _Mem0Embedder:
+    """The embedder every Mem0 memory calls, which raises typed embedder errors and records each failure.
+
+    ``embedder`` is Mem0's own embedder, whose requests go out unchanged so stored memories keep matching their
+    searches, or MindRoom's strict OpenAI embedder; ``classify`` returns the typed error of one failure of its SDK.
     """
 
     embedder: Any
     classify: Callable[[Exception], EmbedderRequestError]
 
     def embed(self, text: str, memory_action: Literal["add", "search", "update"] | None = None) -> list[float]:
-        try:
-            return self.embedder.embed(text, memory_action)
-        except Exception as exc:
-            raise self.classify(exc) from exc
+        return self._send(self.embedder.embed, text, memory_action)
 
     def embed_batch(
         self,
         texts: list[str],
         memory_action: Literal["add", "search", "update"] | None = "add",
     ) -> list[list[float]]:
+        return self._send(self.embedder.embed_batch, texts, memory_action)
+
+    def _send(self, call: Callable[..., _T], *args: object) -> _T:
         try:
-            return self.embedder.embed_batch(texts, memory_action)
+            return call(*args)
+        except EmbedderRequestError as error:
+            _recorded(error)
+            raise
         except Exception as exc:
-            raise self.classify(exc) from exc
+            raise _recorded(self.classify(exc)) from exc
 
 
 def _memory_collection_name(config: Config) -> str:
@@ -322,18 +330,19 @@ async def create_memory_instance(
         # reasoning-model request instead, unless the config sets ``is_reasoning_model`` itself.
         llm_config.is_reasoning_model = True
     install_mem0_usage_capture(memory.llm, memory_llm.provider if memory_llm is not None else "ollama")
-    if config.memory.embedder.provider == "openai":
+    embedder_provider = config.memory.embedder.provider
+    if embedder_provider == "openai":
         # Mem0's own OpenAI embedder indexes response.data[0] without validation
         # and can expose raw provider errors. Reuse MindRoom's strict boundary.
         from mindroom.embeddings.factory import create_configured_embedder  # noqa: PLC0415
 
-        strict_embedder = create_configured_embedder(config, runtime_paths)
-        cast("Any", memory).embedding_model = _Mem0StrictOpenAIEmbedder(strict_embedder)
+        mem0_embedder = _Mem0StrictOpenAIEmbedder(create_configured_embedder(config, runtime_paths))
     else:
-        # Every other embedder is Mem0's own, so its failures are classified here, where they leave it.
-        # The embedders only Mem0 provides mostly use the OpenAI SDK.
-        classify = _ollama_embedder_error if config.memory.embedder.provider == "ollama" else openai_embedder_error
-        cast("Any", memory).embedding_model = _Mem0ClassifiedEmbedder(memory.embedding_model, classify)
+        mem0_embedder = memory.embedding_model
+    # Mem0's Ollama embedder fails through the Ollama SDK, and the embedders only Mem0 provides mostly use the OpenAI SDK;
+    # MindRoom's strict embedder raises typed errors itself.
+    classify = _ollama_embedder_error if embedder_provider == "ollama" else openai_embedder_error
+    cast("Any", memory).embedding_model = _Mem0Embedder(mem0_embedder, classify)
 
     logger.info("created_memory_instance", path=store_path)
     return memory

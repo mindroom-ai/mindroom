@@ -33,14 +33,17 @@ from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.credentials.sync import _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder
-from mindroom.embeddings.errors import EmbedderRequestError
+from mindroom.embeddings.errors import EmbedderRequestError, openai_embedder_error
 from mindroom.embeddings.factory import create_configured_embedder, resolve_embedder_settings
 from mindroom.embeddings.openai_embedder import OpenAIEmbedder
 from mindroom.memory.config import (
     _get_memory_config,
+    _Mem0Embedder,
     _Mem0StrictOpenAIEmbedder,
     _memory_collection_name,
+    _ollama_embedder_error,
     create_memory_instance,
+    recorded_embedder_failures,
 )
 from mindroom.model_defaults import (
     MEMORY_OLLAMA_LLM,
@@ -1148,7 +1151,7 @@ class TestMemoryConfig:
         ):
             result = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
 
-        assert isinstance(result.embedding_model, _Mem0StrictOpenAIEmbedder)
+        assert result.embedding_model.embedder == _Mem0StrictOpenAIEmbedder(strict_embedder)
         with pytest.raises(EmbedderRequestError, match="embedder returned 0 embeddings for 1 inputs"):
             result.embedding_model.embed("query", "search")
 
@@ -1237,8 +1240,8 @@ class TestMemoryConfig:
         ):
             await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
 
-    def test_mem0_strict_adapter_remembers_swallowed_operation_failure(self) -> None:
-        """A later successful retry cannot hide a batch failure from the caller."""
+    def test_mem0_embedder_records_every_failure_of_the_operation(self) -> None:
+        """A later successful retry cannot hide a batch failure from the caller, whichever embedder Mem0 calls."""
         failure_detail = "embedder authentication failed (HTTP 401)"
 
         class BatchFailingEmbedder:
@@ -1253,17 +1256,28 @@ class TestMemoryConfig:
             async def aembed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
                 return self.embed(texts, purpose=purpose)
 
-        adapter = _Mem0StrictOpenAIEmbedder(BatchFailingEmbedder())
-        adapter.begin_operation()
+        strict = _Mem0Embedder(_Mem0StrictOpenAIEmbedder(BatchFailingEmbedder()), openai_embedder_error)
+        mem0_own = MagicMock()
+        mem0_own.embed_batch.side_effect = ConnectionError("Failed to connect to Ollama.")
+        mem0_own.embed.return_value = [0.3]
+        ollama = _Mem0Embedder(mem0_own, _ollama_embedder_error)
 
+        with recorded_embedder_failures() as failures:
+            for embedder in (strict, ollama):
+                with pytest.raises(EmbedderRequestError) as raised:
+                    embedder.embed_batch(["first", "second"])
+                embedder.embed("first")
+                # The raised error is the one recorded, so its retry judgment reaches the caller.
+                assert failures[-1] is raised.value
+
+        assert [(str(failure), failure.retryable) for failure in failures] == [
+            (failure_detail, False),
+            ("embedder endpoint unreachable", True),
+        ]
+        # Outside an operation nothing is recorded.
         with pytest.raises(EmbedderRequestError):
-            adapter.embed_batch(["first", "second"])
-        assert adapter.embed("first") == [0.1, 0.2]
-        with pytest.raises(EmbedderRequestError, match="embedder authentication failed"):
-            adapter.raise_for_operation_failure()
-
-        # Consuming the failure resets the next operation.
-        adapter.raise_for_operation_failure()
+            ollama.embed_batch(["first", "second"])
+        assert len(failures) == 2
 
     def test_mem0_strict_adapter_embeds_searches_as_queries_and_memories_as_documents(self) -> None:
         """Mem0 names the purpose of each embedding, so stored memories get the document prefix."""
