@@ -1594,7 +1594,9 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             ):
                 yield AttemptResolved(skipped)
             else:
-                yield get_user_friendly_error_message(state.error, agent_name, runtime_paths=runtime_paths)
+                # The failure's message starts a paragraph of its own after any text the attempt showed.
+                failure = get_user_friendly_error_message(state.error, agent_name, runtime_paths=runtime_paths)
+                yield f"\n\n{failure}" if state.assistant_text.strip() else failure
                 yield AttemptResolved(
                     HandledAttempt(
                         metadata_content=_attempt_run_metadata(

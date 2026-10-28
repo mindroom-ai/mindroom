@@ -643,6 +643,34 @@ async def test_a_provider_error_stores_an_error_record_and_streams_the_friendly_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [True, False])
+@pytest.mark.usefixtures("probe")
+async def test_a_failure_after_part_of_the_answer_starts_a_paragraph_of_its_own(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    streaming: bool,
+) -> None:
+    """A reply that fails after showing part of its answer shows the error after a blank line, not glued onto it."""
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [[TextDelta("Here is the start"), _raising(RateLimited("slow down", provider="openai"))]],
+    )
+
+    if streaming:
+        chunks = await _stream(reply)
+        text = "".join(
+            chunk if isinstance(chunk, str) else chunk.text for chunk in chunks if isinstance(chunk, str | TextDelta)
+        )
+    else:
+        text = await _respond(reply)
+
+    start, separator, failure = text.partition("\n\n")
+    assert (start, separator) == ("Here is the start", "\n\n")
+    assert "Rate limited" in failure
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("probe")
 async def test_an_error_record_never_repeats_an_earlier_answer(
     tmp_path: Path,
