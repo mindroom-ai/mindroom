@@ -219,7 +219,7 @@ export function MoreOptions({
         hint={
           sharedTarget
             ? "Accounts cannot be connected on a shared agent. Use an API key."
-            : form.separateAccount
+            : accountChoice
               ? "Users can connect an account of this kind."
               : "Users can connect an account of this kind instead of an API key. Leave it empty to use an API key."
         }

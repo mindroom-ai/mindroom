@@ -661,7 +661,7 @@ describe("the editor form", () => {
     expect(screen.queryByText(/usual routing order/)).toBeNull();
   });
 
-  it("drops the API key from a custom service's login hint while it uses its own account", async () => {
+  it("drops the API key from a custom service's login hint while the form asks which account", async () => {
     await renderEditor();
     type("Name", "mine");
     type("Website", "www.googleapis.com");
@@ -669,12 +669,21 @@ describe("the editor form", () => {
     const keyHint =
       "Users can connect an account of this kind instead of an API key. Leave it empty to use an API key.";
     expect(screen.getByText(keyHint)).toBeInTheDocument();
+    // The form offers no key on either account, so the hint names none.
     type("Account login (optional)", "google_calendar");
-    fireEvent.click(screen.getByLabelText("Another Google Calendar account"));
+    expect(toolsAccount()).toBeChecked();
     expect(screen.queryByText(keyHint)).toBeNull();
     expect(
       screen.getByText("Users can connect an account of this kind."),
     ).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Another Google Calendar account"));
+    expect(screen.queryByText(keyHint)).toBeNull();
+    // GitHub accounts belong to each user, so a key is still asked for.
+    type("Account login (optional)", "github");
+    fireEvent.click(toolsAccount());
+    type("Account login (optional)", "atlassian");
+    expect(accountChoice()).toBeNull();
+    expect(screen.getByText(keyHint)).toBeInTheDocument();
   });
 
   it("keeps a replaced login across a switch to another preset and back, so the box and the save agree", async () => {
