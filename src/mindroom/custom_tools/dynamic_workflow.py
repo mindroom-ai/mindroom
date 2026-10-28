@@ -800,6 +800,7 @@ def _resolve_participant_toolkits(context: ToolRuntimeContext, tool_names: list[
     agent_tools = resolve_agent_tools(context.config, context.agent_name)
     placement = tool_placement(context.runtime_paths)
     authored_overrides = {entry.name: entry.tool_config_overrides for entry in agent_tools.candidates()}
+    workspace_in_worker = agent_tools.workspace_in_worker(tool_names, placement)
     toolkits: dict[str, Toolkit] = {}
     for tool_name in tool_names:
         toolkit = build_agent_toolkit(
@@ -810,7 +811,7 @@ def _resolve_participant_toolkits(context: ToolRuntimeContext, tool_names: list[
             runtime_paths=context.runtime_paths,
             tool_config_overrides=authored_overrides.get(tool_name),
             execution_identity=execution_identity,
-            workspace_in_worker=agent_tools.workspace_in_worker(tool_names, placement),
+            workspace_in_worker=workspace_in_worker,
         )
         if toolkit is None:
             msg = f"Dynamic Workflow participant tool '{tool_name}' is not available in this runtime."

@@ -68,7 +68,8 @@ class AgentTools:
     def runs_in_worker(self, tool_name: str, placement: ToolPlacement) -> bool:
         """Return whether this agent's calls of ``tool_name`` run in a worker under ``placement``.
 
-        Toolkits MindRoom builds in this process without a registry factory, such as memory or delegation, never do.
+        Toolkits without a metadata factory never do: MindRoom builds memory or delegation in this process, and MCP
+        toolkits need the MCP servers that only the primary's config holds, since worker configs carry none.
         """
         metadata = TOOL_METADATA.get(tool_name)
         if metadata is not None and metadata.factory is None:
@@ -85,7 +86,11 @@ class AgentTools:
         )
 
     def _expanded(self, tool_names: list[str]) -> list[str]:
-        return [name for name in self.config.expand_tool_names(tool_names) if name not in self.facts.disabled]
+        return [
+            name
+            for name in self.config.expand_tool_names(tool_names)
+            if name not in self.facts.disabled and self.config.tool_name_is_available(name)
+        ]
 
     @property
     def tool_names(self) -> tuple[str, ...]:

@@ -18,6 +18,7 @@ from mindroom.automations.registry import automation
 from mindroom.automations.steps import Ask, AutomationContext, Done
 from mindroom.automations.threads import automation_threads
 from mindroom.config.automations import ExplorationAutomation
+from mindroom.config.resolution import edits_knowledge_graph
 from mindroom.durable_write import write_json_file_durable
 from mindroom.history.session_runs import session_runs, updated_sessions
 from mindroom.knowledge_graph.episodes import classify_thread, is_evidence, tool_arguments
@@ -129,7 +130,7 @@ def check_exploration(ctx: AutomationContext) -> Ask | None:
     # A revisit catches changes in the sources people use; an agent or instance nobody talked to since needs none.
     if not leads and not (revisit_due and active):
         return None
-    fixes = ctx.config.resolve_agent(ctx.agent_name).knowledge_graph_edits
+    fixes = edits_knowledge_graph(ctx.config, ctx.agent_name)
     prompt = ctx.config.render_prompt(
         "EXPLORATION_PROMPT_TEMPLATE",
         max_tool_calls=entry.max_tool_calls,

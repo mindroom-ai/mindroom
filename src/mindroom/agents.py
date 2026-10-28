@@ -288,7 +288,8 @@ def _load_context_files(
     runtime_paths: constants.RuntimePaths,
     agent_name: str | None = None,
     storage_path: Path | None = None,
-    workspace_root: Path | None = None,
+    *,
+    workspace_root: Path,
 ) -> list[_PreloadChunk]:
     """Load configured context files; ``Path`` entries and agent-owned strings are workspace files."""
     loaded_parts: list[_PreloadChunk] = []
@@ -504,8 +505,8 @@ def _render_preloaded_files(
     personality_section_heading: str,
     truncation_marker_template: str,
     chunk_marker_template: str,
-    workspace_context_files: tuple[Path, ...] = (),
-    workspace_root: Path | None = None,
+    workspace_context_files: tuple[Path, ...],
+    workspace_root: Path,
     context_documents: list[_PreloadChunk],
     storage_path: Path,
     runtime_paths: constants.RuntimePaths,
@@ -525,7 +526,7 @@ def _render_preloaded_files(
             runtime_paths,
             agent_name,
             storage_path,
-            workspace_root,
+            workspace_root=workspace_root,
         )
 
     # Preload truncation mutates chunks; keep complete files for CLI reads.

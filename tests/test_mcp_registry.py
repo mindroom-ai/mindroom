@@ -22,6 +22,7 @@ from mindroom.mcp.registry import (
 )
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.mcp.types import MCPServerState
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.declarations import SetupType, ToolManagedInitArg, ToolStatus
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
@@ -29,6 +30,7 @@ from mindroom.tool_system.metadata import (
     get_tool_by_name,
 )
 from mindroom.tool_system.plugins import load_plugins
+from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     resolve_worker_target,
@@ -130,6 +132,36 @@ def test_sync_mcp_tool_registry_registers_dynamic_tool(tmp_path: Path) -> None:
     assert tool_name in TOOL_METADATA
     assert tool_name in TOOL_REGISTRY
     assert TOOL_METADATA[tool_name].agent_override_fields is not None
+
+
+@pytest.mark.parametrize("worker_tools", [None, ["mcp_demo"]], ids=["mode-all", "explicit-worker-tools"])
+def test_mcp_toolkits_stay_in_the_primary_when_every_tool_routes(
+    tmp_path: Path,
+    worker_tools: list[str] | None,
+) -> None:
+    """Worker configs carry no MCP servers, so an agent's MCP toolkit runs in the primary however tools route."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_SANDBOX_EXECUTION_MODE": "all", "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid"},
+    )
+    agent: dict[str, object] = {"display_name": "Code", "role": "Write code", "tools": ["mcp_demo"]}
+    if worker_tools is not None:
+        agent["worker_tools"] = worker_tools
+    config = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
+            "mcp_servers": {"demo": {"transport": "stdio", "command": "npx"}},
+            "agents": {"code": agent},
+        },
+        runtime_paths,
+    )
+    sync_mcp_tool_registry(config)
+    placement = tool_placement(runtime_paths)
+    agent_tools = resolve_agent_tools(config, "code")
+
+    assert placement.runs_in_worker("mcp_demo", agent_tools.facts.worker_tools) is True
+    assert agent_tools.runs_in_worker("mcp_demo", placement) is False
 
 
 @pytest.mark.parametrize(

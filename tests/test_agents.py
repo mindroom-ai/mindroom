@@ -3052,6 +3052,7 @@ def test_load_context_files_refuses_planted_workspace_entries(tmp_path: Path, pl
             runtime_paths,
             agent_name="general",
             storage_path=storage_path,
+            workspace_root=agent_workspace_root_path(storage_path, "general"),
         )
 
     assert [chunk.body for chunk in loaded] == ["own user notes"]
@@ -3078,6 +3079,7 @@ def test_load_context_files_reads_a_huge_workspace_file_up_to_its_cap(
         _runtime_paths(storage_path),
         agent_name="general",
         storage_path=storage_path,
+        workspace_root=agent_workspace_root_path(storage_path, "general"),
     )
 
     assert [chunk.body for chunk in loaded] == [("soul " * 4).strip()]
@@ -3097,6 +3099,7 @@ def test_context_files_in_a_workspace_reached_through_a_link_are_refused(tmp_pat
             _runtime_paths(storage_path),
             agent_name="general",
             storage_path=storage_path,
+            workspace_root=agent_workspace_root_path(storage_path, "general"),
         )
 
     assert loaded == []
@@ -3116,6 +3119,7 @@ def test_load_context_files_truncates_a_workspace_file_above_one_mebibyte(tmp_pa
             _runtime_paths(storage_path),
             agent_name="general",
             storage_path=storage_path,
+            workspace_root=agent_workspace_root_path(storage_path, "general"),
         )
 
     assert len(chunk.body) == 1 << 20
@@ -3154,6 +3158,7 @@ def test_load_context_files_keeps_internal_workspace_links(tmp_path: Path) -> No
         _runtime_paths(storage_path),
         agent_name="general",
         storage_path=storage_path,
+        workspace_root=agent_workspace_root_path(storage_path, "general"),
     )
 
     assert [(chunk.title, chunk.body) for chunk in loaded] == [
@@ -3183,6 +3188,7 @@ def test_load_context_files_prefers_projected_assets_over_workspace_shadows(
         runtime_paths,
         agent_name="general",
         storage_path=storage_path,
+        workspace_root=agent_workspace_root_path(storage_path, "general"),
     )
 
     assert len(loaded) == 1

@@ -509,7 +509,7 @@ worker_target = context.resolve_worker_target()
 ```
 
 A plugin tool always runs as an agent, inside a team as the member that called it, so `resolve_worker_target()` returns that agent's target.
-A sub-toolkit built with that target runs where the agent's own toolkit of that name would run: an explicit `worker_tools` list decides, and without one the sandbox settings and the tool's default target do.
+A sub-toolkit built with that target and `runtime_config=context.config` runs where the agent's own toolkit of that name would run: an explicit `worker_tools` list decides, and without one the sandbox settings and the tool's default target do.
 
 ## OAuth providers
 

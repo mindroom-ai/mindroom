@@ -212,11 +212,6 @@ async def test_view_file_endpoint_prefers_prepared_worker_workspace(
         "prepare_worker_request",
         lambda **_kwargs: SimpleNamespace(runtime_overrides={"base_dir": workspace}),
     )
-    monkeypatch.setattr(
-        sandbox_runner,
-        "resolve_agent_runtime",
-        lambda *_args, **_kwargs: SimpleNamespace(tool_base_dir=None),
-    )
 
     response = await sandbox_runner.view_file_in_worker(
         SimpleNamespace(app=app),

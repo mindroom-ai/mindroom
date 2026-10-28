@@ -164,6 +164,12 @@ def show_tool_calls(config: Config, name: str | None) -> bool:
     return config.defaults.show_tool_calls
 
 
+def file_access(config: Config, name: str | None) -> FileAccess:
+    """Return an agent's effective file_access; every other scope, and a name no agent has, uses the default."""
+    agent = config.agents.get(name) if name is not None else None
+    return agent.file_access if agent is not None and agent.file_access is not None else config.defaults.file_access
+
+
 def memory_search(config: Config, name: str | None) -> MemorySearchConfig:
     """Return an agent's effective file-memory search settings; every other scope uses the global ones."""
     agent = config.agents.get(name) if name is not None else None
@@ -179,7 +185,7 @@ def uses_knowledge_graph(config: Config, agent_name: str) -> bool:
     return agent.knowledge_graph if agent.knowledge_graph is not None else config.defaults.knowledge_graph
 
 
-def _edits_knowledge_graph(config: Config, agent_name: str) -> bool:
+def edits_knowledge_graph(config: Config, agent_name: str) -> bool:
     """Return whether an agent may delete facts and entities from its graph, merge entities, and rewrite summaries."""
     agent = config.get_agent(agent_name)
     edits = (
@@ -336,8 +342,11 @@ def agent_tool_facts(config: Config, agent_name: str, *, policy: ResolvedAgentPo
     authored = _authored_tool_entries(config, agent_name)
 
     def expanded(entries: list[EffectiveToolConfig]) -> tuple[str, ...]:
+        # A preset or implied toolkit can name a tool that is unavailable here, as an authored entry can.
         return tuple(
-            name for name in config.expand_tool_names([entry.name for entry in entries]) if name not in disabled
+            name
+            for name in config.expand_tool_names([entry.name for entry in entries])
+            if name not in disabled and config.tool_name_is_available(name)
         )
 
     scope = policy.effective_execution_scope
@@ -401,15 +410,12 @@ class ResolvedAgent(ResolvedEntity):
 def resolve_scope(config: Config, name: str | None) -> ResolvedScope:
     """Return what one agent, team, or the router gets in common with every scope; None is the defaults scope."""
     entity = configured_entity(config, name) if name is not None and name != ROUTER_AGENT_NAME else None
-    agent = config.agents.get(name) if name is not None else None
     own_calls = entity.max_tool_calls_per_turn if entity is not None else None
     return ResolvedScope(
         name=name,
         history_settings=_history_settings(config, entity, name),
         max_tool_calls_per_turn=own_calls if own_calls is not None else config.defaults.max_tool_calls_per_turn,
-        file_access=agent.file_access
-        if agent is not None and agent.file_access is not None
-        else config.defaults.file_access,
+        file_access=file_access(config, name),
         memory_backend=memory_backend(config, name),
         memory_search=memory_search(config, name),
         timezone=entity_timezone(config, name),
@@ -464,5 +470,5 @@ def resolve_agent(config: Config, name: str) -> ResolvedAgent:
         ),
         markdown=agent.markdown if agent.markdown is not None else config.defaults.markdown,
         knowledge_graph=uses_knowledge_graph(config, name),
-        knowledge_graph_edits=_edits_knowledge_graph(config, name),
+        knowledge_graph_edits=edits_knowledge_graph(config, name),
     )

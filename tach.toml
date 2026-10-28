@@ -6505,6 +6505,7 @@ depends_on = [
     "mindroom.knowledge.search",
     "mindroom.logging_config",
     "mindroom.runtime_protocols",
+    "mindroom.config.resolution",
 ]
 
 [[modules]]
@@ -9092,6 +9093,7 @@ depends_on = [
     "mindroom.config.knowledge_graph",
     "mindroom.agent_policy",
     "mindroom.tool_system.agent_tools",
+    "mindroom.config.resolution",
 ]
 
 visibility = [
@@ -9313,7 +9315,7 @@ depends_on = ["mindroom.atomic_file"]
 
 [[modules]]
 path = "mindroom.file_access"
-depends_on = ["mindroom.path_confinement"]
+depends_on = ["mindroom.path_confinement", "mindroom.config.resolution"]
 
 [[modules]]
 path = "mindroom.config.mid_turn"
@@ -9738,6 +9740,7 @@ depends_on = [
     "mindroom.knowledge_graph.scope",
     "mindroom.knowledge_graph.store",
     "mindroom.logging_config",
+    "mindroom.config.resolution",
 ]
 visibility = ["mindroom.agents"]
 
@@ -9759,6 +9762,7 @@ depends_on = [
     "mindroom.knowledge_graph.ingestion",
     "mindroom.session_storage.agent_storage",
     "mindroom.llm",
+    "mindroom.config.resolution",
 ]
 visibility = ["mindroom.automations.registry"]
 [[modules]]

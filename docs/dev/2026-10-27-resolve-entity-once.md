@@ -17,7 +17,8 @@ Every divergence between those copies was a bug class: a saved approval could au
   There is no cache: `model_copy` copies private attributes, and both production and tests mutate configs after validation, so a cached record would go stale without any signal.
   Building a full agent record costs about 35 microseconds; hot paths that need one fact, such as execution policy in `resolve_agent_execution`, call that fact's function (about 3 microseconds) instead of the whole record, which also keeps dedicated workers, whose configs carry no models, from evaluating facts they cannot answer.
 - **The turn's model has one owner.**
-  Precedence is explicit, then the thread override, then the saved room override, then `room_models`, then the authored model, and the budget model applies after the cold-cache check in the same function.
+  Precedence is explicit, then the thread override, then the saved room override, then `room_models`, then the authored model, and the requester's budget may then swap in its fallback.
+  A reply resolves its model without a budget for the cold-cache check, and the budget applies afterwards to the model that check picks, so the check judges the model the room chose rather than the fallback.
   For teams, an explicit model or a configured team's thread override governs every member; each distinct member model is budgeted once.
 - **Tool candidates come from the record; eligibility and placement stay per turn.**
   Which tool owner wins depends on the attached deferred entries of the turn, the delegation depth, room flags, and portable search, so one config-time owner per tool would be wrong.
