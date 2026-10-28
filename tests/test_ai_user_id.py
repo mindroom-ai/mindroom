@@ -339,8 +339,8 @@ def test_reply_usage_publishes_a_counter_its_order_omits(monkeypatch: pytest.Mon
     assert list(payload.items()) == [("output_tokens", 2), ("input_tokens", 5), ("cost", "0.5")]
 
 
-def test_reply_usage_preserves_zero_usage_fields_from_metrics() -> None:
-    """Run metrics publish only the counters the provider reported."""
+def test_reply_usage_leaves_out_zero_counters() -> None:
+    """A zero counter is left out of the published usage."""
     payload = ReplyUsage(
         tokens=TokenCounts(input_tokens=6, output_tokens=0, cache_read_tokens=46449),
         cost=None,
