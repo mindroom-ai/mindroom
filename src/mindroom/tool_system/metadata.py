@@ -643,7 +643,6 @@ def get_tool_by_name(
     tool_init_overrides: dict[str, object] | None = None,
     worker_tools_override: list[str] | None = None,
     runtime_overrides: dict[str, object] | None = None,
-    shared_storage_root_path: Path | None = None,
     allowed_shared_services: frozenset[str] | None = None,
     tool_output_workspace_root: Path | None = None,
     agent_state_root: Path | None = None,
@@ -765,7 +764,6 @@ def get_tool_by_name(
                 tool_config_overrides=validated_tool_config_overrides,
                 extra_env_passthrough=extra_env_passthrough if isinstance(extra_env_passthrough, str) else None,
                 worker_tools_override=worker_tools_override,
-                shared_storage_root_path=shared_storage_root_path,
                 worker_target=worker_target,
                 runtime_config=runtime_config,
             )

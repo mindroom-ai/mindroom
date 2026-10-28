@@ -635,12 +635,11 @@ def build_unseen_context_messages_for_test(
 def call_proxy_sync_for_test(**call: Any) -> object:  # noqa: ANN401
     """Send one tool call through ``sandbox_proxy._call_proxy_sync`` with the options a test names.
 
-    The others take a plain call's values: an entrypoint that leaves the call's agent alone, and no shared storage,
-    overrides, execution env, extra passthrough, or resolved worker target.
+    The others take a plain call's values: an entrypoint that leaves the call's agent alone, and no overrides,
+    execution env, extra passthrough, or resolved worker target.
     """
     plain: dict[str, Any] = {
         "function_entrypoint": lambda *_args, **_kwargs: None,
-        "shared_storage_root_path": None,
         "tool_config_overrides": None,
         "tool_init_overrides": None,
         "execution_env": None,

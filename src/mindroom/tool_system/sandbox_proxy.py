@@ -12,9 +12,9 @@ import json
 import math
 import secrets
 from contextlib import suppress
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import httpx
 
@@ -36,17 +36,27 @@ from mindroom.tool_system.worker_proxy_client import (
     SANDBOX_PROXY_VIEW_FILE_PATH,
     WorkerCallCancellation,
     WorkerProxyClientConfig,
-    checked_worker_response,
     execute_worker_proxy_request,
-    post_worker_proxy_json,
+    post_worker_proxy_request,
     record_proxy_response_failure_for_worker,
     to_json_compatible,
 )
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     resolve_unscoped_worker_key,
+    serialize_tool_execution_identity,
 )
 from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerReadyProgress, WorkerSpec
+from mindroom.workers.protocol import (
+    WORKER_PROTOCOL_VERSION,
+    CallEnvironment,
+    ExecuteRequest,
+    SaveAttachmentRequest,
+    SaveAttachmentResponse,
+    ViewFileRequest,
+    ViewFileResponse,
+    WorkerRoute,
+)
 from mindroom.workers.runtime import (
     lease_primary_worker_manager,
     primary_worker_backend_available,
@@ -115,22 +125,17 @@ def decode_attachment_save_bytes(*, bytes_b64: str, sha256: str, size_bytes: int
 
 
 def _validate_attachment_save_receipt(
-    data: Mapping[str, object],
+    data: SaveAttachmentResponse,
     *,
     requested_path: str,
     byte_count: int,
     sha256: str,
 ) -> WorkerAttachmentSaveReceipt | str:
     """Validate one successful worker save response against the sent bytes."""
-    worker_path = data.get("worker_path")
-    response_size = data.get("size_bytes")
-    response_sha256 = data.get("sha256")
-    if (
-        not isinstance(worker_path, str)
-        or type(response_size) is not int
-        or response_size < 0
-        or not isinstance(response_sha256, str)
-    ):
+    worker_path = data.worker_path
+    response_size = data.size_bytes
+    response_sha256 = data.sha256
+    if worker_path is None or response_size is None or response_size < 0 or response_sha256 is None:
         return "Sandbox save-attachment response is missing its receipt fields."
     if worker_path != requested_path:
         return "Sandbox save-attachment response path does not match the requested workspace path."
@@ -296,85 +301,94 @@ def _worker_proxy_client_config(
     )
 
 
-def _build_worker_routing_payload(
+def _worker_route(
     *,
     runtime_paths: RuntimePaths,
+    runtime_config: Config | None,
     tool_name: str,
     function_name: str,
     worker_target: ResolvedWorkerTarget | None,
     worker_manager: WorkerBackend,
+    base_dir: str | None,
     progress_sink: ProgressSink | None = None,
-) -> tuple[dict[str, object], WorkerHandle | None]:
+) -> tuple[WorkerRoute, WorkerHandle | None]:
+    """Return the route of one request, ensuring the dedicated worker that serves it.
+
+    ``base_dir`` is the calling agent's tool workspace in this primary's paths; a request that names a worker
+    carries it relative to the shared storage root, which the worker mounts at its own path.
+    """
     worker_scope = worker_target.worker_scope if worker_target is not None else None
     execution_identity = worker_target.execution_identity if worker_target is not None else None
     routing_agent_name = worker_target.routing_agent_name if worker_target is not None else None
+    private_agent_names: frozenset[str] | None = None
+    worker_handle: WorkerHandle | None = None
     if worker_scope is None:
-        if not primary_worker_backend_is_dedicated(runtime_paths):
-            payload: dict[str, object] = {}
-            if routing_agent_name is not None:
-                payload["routing_agent_name"] = routing_agent_name
-            if execution_identity is not None:
-                payload["execution_identity"] = to_json_compatible(asdict(execution_identity))
-            return payload, None
-
-        if worker_target is None or routing_agent_name is None:
+        worker_key: str | None = None
+        if primary_worker_backend_is_dedicated(runtime_paths):
+            if worker_target is None or routing_agent_name is None:
+                msg = (
+                    f"Unscoped worker-routed tool '{tool_name}.{function_name}' requires an agent name "
+                    "when using a dedicated worker backend."
+                )
+                raise RuntimeError(msg)
+            worker_key = resolve_unscoped_worker_key(
+                agent_name=routing_agent_name,
+                tenant_id=worker_target.tenant_id,
+                account_id=worker_target.account_id,
+            )
+            worker_handle = worker_manager.ensure_worker(WorkerSpec(worker_key), progress_sink=progress_sink)
+    else:
+        if worker_target is None or execution_identity is None:
+            msg = f"Worker-routed tool '{tool_name}.{function_name}' requires execution identity context."
+            raise RuntimeError(msg)
+        if worker_scope == "user_agent" and worker_target.private_agent_names is None:
             msg = (
-                f"Unscoped worker-routed tool '{tool_name}.{function_name}' requires an agent name "
-                "when using a dedicated worker backend."
+                f"Worker-routed tool '{tool_name}.{function_name}' with scope 'user_agent' "
+                "requires explicit private visibility."
             )
             raise RuntimeError(msg)
-
-        worker_key = resolve_unscoped_worker_key(
-            agent_name=routing_agent_name,
-            tenant_id=worker_target.tenant_id,
-            account_id=worker_target.account_id,
-        )
+        worker_key = worker_target.worker_key
+        if worker_key is None:
+            msg = (
+                f"Worker scope '{worker_scope}' for tool '{tool_name}.{function_name}' "
+                "could not be resolved from the current execution identity."
+            )
+            raise RuntimeError(msg)
+        private_agent_names = worker_target.private_agent_names if worker_scope == "user_agent" else None
         worker_handle = worker_manager.ensure_worker(
-            WorkerSpec(worker_key),
+            WorkerSpec(worker_key, private_agent_names=private_agent_names),
             progress_sink=progress_sink,
         )
-        return (
-            {
-                "routing_agent_name": routing_agent_name,
-                "worker_key": worker_key,
-            },
-            worker_handle,
-        )
-
-    if worker_target is None or execution_identity is None:
-        msg = f"Worker-routed tool '{tool_name}.{function_name}' requires execution identity context."
-        raise RuntimeError(msg)
-
-    if worker_scope == "user_agent" and worker_target.private_agent_names is None:
-        msg = (
-            f"Worker-routed tool '{tool_name}.{function_name}' with scope 'user_agent' "
-            "requires explicit private visibility."
-        )
-        raise RuntimeError(msg)
-    worker_key = worker_target.worker_key
-    if worker_key is None:
-        msg = (
-            f"Worker scope '{worker_scope}' for tool '{tool_name}.{function_name}' "
-            "could not be resolved from the current execution identity."
-        )
-        raise RuntimeError(msg)
-    resolved_private_agent_names = worker_target.private_agent_names if worker_scope == "user_agent" else None
-    worker_handle = worker_manager.ensure_worker(
-        WorkerSpec(worker_key, private_agent_names=resolved_private_agent_names),
-        progress_sink=progress_sink,
+    route = WorkerRoute(
+        protocol=WORKER_PROTOCOL_VERSION,
+        worker_key=worker_key,
+        worker_scope=worker_scope,
+        routing_agent_name=routing_agent_name,
+        execution_identity=(
+            serialize_tool_execution_identity(execution_identity) if execution_identity is not None else None
+        ),
+        private_agent_names=sorted(private_agent_names) if private_agent_names is not None else None,
+        config_snapshot=runner_config_snapshot(runtime_paths, runtime_config),
+        base_dir=_route_base_dir(
+            base_dir,
+            shared_storage_root=runtime_paths.storage_root,
+            keyed=worker_key is not None,
+        ),
     )
-    return (
-        {
-            "worker_scope": worker_scope,
-            "routing_agent_name": routing_agent_name,
-            "worker_key": worker_key,
-            "execution_identity": to_json_compatible(asdict(execution_identity)),
-            "private_agent_names": (
-                sorted(resolved_private_agent_names) if resolved_private_agent_names is not None else None
-            ),
-        },
-        worker_handle,
-    )
+    return route, worker_handle
+
+
+def _route_base_dir(base_dir: str | None, *, shared_storage_root: Path, keyed: bool) -> str | None:
+    """Spell ``base_dir`` relative to the shared storage root for a request that names a worker."""
+    if base_dir is None or not keyed:
+        return base_dir
+    path = Path(base_dir).expanduser()
+    if not path.is_absolute():
+        return base_dir
+    try:
+        return path.resolve().relative_to(shared_storage_root.resolve()).as_posix()
+    except ValueError:
+        return base_dir
 
 
 def runner_config_snapshot(runtime_paths: RuntimePaths, runtime_config: Config | None) -> dict[str, object] | None:
@@ -438,49 +452,18 @@ def attachment_save_uses_worker(
     )
 
 
-def _post_worker_file_request(
-    proxy_config: _SandboxProxyConfig,
-    runtime_paths: RuntimePaths,
-    payload: dict[str, object],
-    *,
-    worker_handle: WorkerHandle | None,
-    worker_manager: WorkerBackend,
-    proxy_path: str,
-    operation: Literal["save-attachment", "view-file"],
-    failure: str,
-) -> dict[str, object]:
-    """Post one worker file request and return the worker's successful response, recording a failed one against it."""
-    data = post_worker_proxy_json(
-        config=_worker_proxy_client_config(proxy_config, runtime_paths),
-        payload=payload,
-        worker_handle=worker_handle,
-        worker_manager=worker_manager,
-        proxy_path=proxy_path,
-        worker_operation=operation,
-        client_factory=httpx.Client,
-    )
-    return checked_worker_response(
-        data,
-        worker_handle=worker_handle,
-        worker_manager=worker_manager,
-        non_object_error=f"Sandbox {operation} returned a non-object response.",
-        failure=failure,
-    )
-
-
 def save_attachment_to_worker(
     *,
     runtime_paths: RuntimePaths,
     runtime_config: Config | None,
     worker_target: ResolvedWorkerTarget | None,
     worker_tools_override: list[str] | None = None,
+    workspace_root: Path | None,
     attachment_id: str,
     mindroom_output_path: str,
     payload_bytes: bytes,
-    mime_type: str | None,
-    filename: str | None,
 ) -> WorkerAttachmentSaveReceipt | None:
-    """Write attachment bytes to the selected worker, returning None when no worker endpoint exists."""
+    """Write attachment bytes into the calling agent's workspace in its worker, or None when no worker serves it."""
     if not attachment_save_uses_worker(
         runtime_paths=runtime_paths,
         worker_tools_override=worker_tools_override,
@@ -498,39 +481,39 @@ def save_attachment_to_worker(
 
     proxy_config = sandbox_proxy_config(runtime_paths)
     with _lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
-        worker_payload, worker_handle = _build_worker_routing_payload(
+        route, worker_handle = _worker_route(
             runtime_paths=runtime_paths,
+            runtime_config=runtime_config,
             tool_name="attachments",
             function_name="get_attachment",
             worker_target=worker_target,
             worker_manager=worker_manager,
+            base_dir=str(workspace_root) if workspace_root is not None else None,
         )
         if worker_handle is None and proxy_config.proxy_url is None:
             return None
 
         attachment_fields = _attachment_save_payload_fields(payload_bytes)
-        request_payload: dict[str, object] = {
-            **worker_payload,
-            "attachment_id": attachment_id,
-            "mindroom_output_path": mindroom_output_path,
-            **attachment_fields,
-            "mime_type": mime_type,
-            "filename": filename,
-            "config_snapshot": runner_config_snapshot(runtime_paths, runtime_config),
-        }
-
-        response_data = _post_worker_file_request(
-            proxy_config,
-            runtime_paths,
-            request_payload,
+        response = post_worker_proxy_request(
+            config=_worker_proxy_client_config(proxy_config, runtime_paths),
+            request=SaveAttachmentRequest(
+                **dict(route),
+                attachment_id=attachment_id,
+                mindroom_output_path=mindroom_output_path,
+                bytes_b64=attachment_fields["bytes_b64"],
+                sha256=attachment_fields["sha256"],
+                size_bytes=attachment_fields["size_bytes"],
+            ),
+            response_model=SaveAttachmentResponse,
             worker_handle=worker_handle,
             worker_manager=worker_manager,
             proxy_path=SANDBOX_PROXY_SAVE_ATTACHMENT_PATH,
-            operation="save-attachment",
+            worker_operation="save-attachment",
             failure="Sandbox attachment save failed.",
+            client_factory=httpx.Client,
         )
         receipt = _validate_attachment_save_receipt(
-            response_data,
+            response,
             requested_path=mindroom_output_path,
             byte_count=byte_count,
             sha256=attachment_fields["sha256"],
@@ -554,7 +537,7 @@ def view_file_from_worker(
     runtime_config: Config | None,
     worker_target: ResolvedWorkerTarget | None,
     worker_tools_override: list[str] | None = None,
-    workspace_root: Path | None = None,
+    workspace_root: Path | None,
     path: str,
 ) -> ToolResult | None:
     """View one file in the selected worker, returning None when no worker endpoint exists."""
@@ -566,49 +549,40 @@ def view_file_from_worker(
 
     proxy_config = sandbox_proxy_config(runtime_paths)
     with _lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
-        worker_payload, worker_handle = _build_worker_routing_payload(
+        route, worker_handle = _worker_route(
             runtime_paths=runtime_paths,
+            runtime_config=runtime_config,
             tool_name="attachments",
             function_name="view_file",
             worker_target=worker_target,
             worker_manager=worker_manager,
+            base_dir=str(workspace_root) if workspace_root is not None else None,
         )
         if worker_handle is None and proxy_config.proxy_url is None:
             return None
 
-        worker_key = worker_payload.get("worker_key")
-        tool_init_overrides = _portable_tool_init_overrides(
-            {"base_dir": str(workspace_root)} if workspace_root is not None else None,
-            shared_storage_root_path=runtime_paths.storage_root,
-            worker_key=worker_key if isinstance(worker_key, str) else None,
-        )
-        if tool_init_overrides:
-            worker_payload["tool_init_overrides"] = tool_init_overrides
         if workspace_root is not None:
             # Translate the mount spelling only; resolve and authorize the path inside the worker.
             with suppress(ValueError):
                 path = Path(path).relative_to(workspace_root).as_posix()
 
-        response_data = _post_worker_file_request(
-            proxy_config,
-            runtime_paths,
-            {
-                **worker_payload,
-                "path": path,
-                "config_snapshot": runner_config_snapshot(runtime_paths, runtime_config),
-            },
+        response = post_worker_proxy_request(
+            config=_worker_proxy_client_config(proxy_config, runtime_paths),
+            request=ViewFileRequest(**dict(route), path=path),
+            response_model=ViewFileResponse,
             worker_handle=worker_handle,
             worker_manager=worker_manager,
             proxy_path=SANDBOX_PROXY_VIEW_FILE_PATH,
-            operation="view-file",
+            worker_operation="view-file",
             failure="Sandbox file view failed.",
+            client_factory=httpx.Client,
         )
         # Deferred: Agno's tool layer, which both modules load, must stay out of the slim tool registry.
         from mindroom.tool_system.agno_toolkits import ToolResult  # noqa: PLC0415
         from mindroom.tool_system.media_transport import decode_media_result  # noqa: PLC0415
 
         try:
-            result = decode_media_result(response_data.get("result"))
+            result = decode_media_result(response.result)
         except ValueError as exc:
             record_proxy_response_failure_for_worker(
                 worker_handle=worker_handle,
@@ -649,28 +623,6 @@ def _make_progress_sink(
             pump.loop.call_soon_threadsafe(pump.queue.put_nowait, event)
 
     return sink
-
-
-def _portable_tool_init_overrides(
-    tool_init_overrides: dict[str, object] | None,
-    *,
-    shared_storage_root_path: Path | None,
-    worker_key: str | None,
-) -> dict[str, object] | None:
-    """Rewrite storage-root absolute base_dir values only for worker-keyed requests."""
-    if not tool_init_overrides or worker_key is None:
-        return tool_init_overrides
-    portable_overrides = dict(tool_init_overrides)
-    raw_base_dir = portable_overrides.get("base_dir")
-    if not isinstance(raw_base_dir, str):
-        return portable_overrides
-    base_dir = Path(raw_base_dir).expanduser()
-    if not base_dir.is_absolute() or shared_storage_root_path is None:
-        return portable_overrides
-    shared_root = shared_storage_root_path.resolve()
-    with suppress(ValueError):
-        portable_overrides["base_dir"] = base_dir.resolve().relative_to(shared_root).as_posix()
-    return portable_overrides
 
 
 def _sandbox_proxy_requested_for_tool(
@@ -812,7 +764,6 @@ def _call_proxy_sync(
     kwargs: dict[str, object],
     credentials_manager: CredentialsManager | None,
     function_entrypoint: Callable[..., object],
-    shared_storage_root_path: Path | None,
     tool_config_overrides: dict[str, object] | None,
     tool_init_overrides: dict[str, object] | None,
     execution_env: dict[str, str] | None,
@@ -839,23 +790,20 @@ def _call_proxy_sync(
         if pump is not None
         else None
     )
-    payload: dict[str, object] = {
-        "tool_name": tool_name,
-        "function_name": function_name,
-        "args": wire_args,
-        "kwargs": wire_kwargs,
-    }
+    # The tool's workspace travels as the request's workspace, which the worker confines before acting in it.
+    init_overrides = dict(tool_init_overrides or {})
+    base_dir = init_overrides.pop("base_dir", None)
     with _lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
-        worker_payload, worker_handle = _build_worker_routing_payload(
+        route, worker_handle = _worker_route(
             runtime_paths=runtime_paths,
+            runtime_config=runtime_config,
             tool_name=tool_name,
             function_name=function_name,
             worker_target=worker_target,
             worker_manager=worker_manager,
+            base_dir=str(base_dir) if base_dir is not None else None,
             progress_sink=progress_sink,
         )
-        payload.update(worker_payload)
-        payload["config_snapshot"] = runner_config_snapshot(runtime_paths, runtime_config)
         # A shell call's own environment, plugin hooks' changes and a response's CLI grant, travels with each command;
         # the runner passes a variable on only when told to, so the call's pass-through patterns join the configured ones.
         call_environment = current_tool_environment() if tool_name == "shell" else ToolEnvironment()
@@ -874,47 +822,41 @@ def _call_proxy_sync(
             from mindroom.egress_broker.service import execution_env_for_worker  # noqa: PLC0415
 
             execution_env = {
-                **(execution_env or {}),
+                **execution_env,
                 **execution_env_for_worker(
                     runtime_paths,
                     config=runtime_config,
                     worker_target=worker_target,
-                    routed_worker_key=worker_payload.get("worker_key"),
+                    routed_worker_key=route.worker_key,
                     call_env=execution_env,
                 ),
             }
-        if execution_env:
-            payload["execution_env"] = execution_env
-        # The call's set and removed names apply over the worker's own environment and workspace script too, except
-        # where the worker's call env changes them, as its egress settings do; a set name takes its value from above.
-        if execution_env_set := sorted(name for name, value in call_environment.values.items() if value is not None):
-            payload["execution_env_set"] = execution_env_set
-        if call_environment.removed:
-            payload["execution_env_unset"] = sorted(call_environment.removed)
-        if call_environment.path_prepend:
-            payload["execution_path_prepend"] = list(call_environment.path_prepend)
-        if extra_env_passthrough is not None:
-            payload["extra_env_passthrough"] = extra_env_passthrough
-        if tool_config_overrides:
-            payload["tool_config_overrides"] = to_json_compatible(tool_config_overrides)
-        worker_key = worker_payload.get("worker_key")
-        portable_tool_init_overrides = _portable_tool_init_overrides(
-            tool_init_overrides,
-            shared_storage_root_path=shared_storage_root_path,
-            worker_key=worker_key if isinstance(worker_key, str) else None,
+        request = ExecuteRequest(
+            **dict(route),
+            tool_name=tool_name,
+            function_name=function_name,
+            args=wire_args,
+            kwargs=wire_kwargs,
+            tool_config_overrides=cast("dict[str, Any]", to_json_compatible(tool_config_overrides or {})),
+            tool_init_overrides=cast("dict[str, Any]", to_json_compatible(init_overrides)),
+            execution_env=execution_env,
+            # The call's set and removed names apply over the worker's own environment and workspace script too,
+            # except where the worker's own composition changes them; a set name takes its value from execution_env.
+            environment=CallEnvironment(
+                set_names=sorted(name for name, value in call_environment.values.items() if value is not None),
+                unset_names=sorted(call_environment.removed),
+                path_prepend=list(call_environment.path_prepend),
+            ),
+            extra_env_passthrough=extra_env_passthrough,
         )
-        if portable_tool_init_overrides:
-            payload["tool_init_overrides"] = to_json_compatible(portable_tool_init_overrides)
         result = execute_worker_proxy_request(
             config=_worker_proxy_client_config(
                 proxy_config,
                 runtime_paths,
                 request_budget_seconds=shell_request_budget_seconds(tool_name, function_name, wire_kwargs),
             ),
-            payload=payload,
+            request=request,
             credentials_manager=credentials_manager,
-            tool_name=tool_name,
-            function_name=function_name,
             worker_target=worker_target,
             worker_handle=worker_handle,
             worker_manager=worker_manager,
@@ -961,7 +903,6 @@ def _wrap_sync_function(
     *,
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager | None,
-    shared_storage_root_path: Path | None = None,
     tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     execution_env: dict[str, str] | None = None,
@@ -989,7 +930,6 @@ def _wrap_sync_function(
             args=args,
             kwargs=dict(kwargs),
             credentials_manager=credentials_manager,
-            shared_storage_root_path=shared_storage_root_path,
             tool_config_overrides=tool_config_overrides,
             tool_init_overrides=tool_init_overrides,
             execution_env=execution_env,
@@ -1010,7 +950,6 @@ def _wrap_async_proxy(
     *,
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager | None,
-    shared_storage_root_path: Path | None = None,
     tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     execution_env: dict[str, str] | None = None,
@@ -1045,7 +984,6 @@ def _wrap_async_proxy(
             args=args,
             kwargs=dict(kwargs),
             credentials_manager=credentials_manager,
-            shared_storage_root_path=shared_storage_root_path,
             tool_config_overrides=tool_config_overrides,
             tool_init_overrides=tool_init_overrides,
             execution_env=execution_env,
@@ -1072,7 +1010,6 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     *,
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager | None,
-    shared_storage_root_path: Path | None = None,
     tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     extra_env_passthrough: str | None = None,
@@ -1109,7 +1046,6 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
                 function_name,
                 runtime_paths=runtime_paths,
                 credentials_manager=credentials_manager,
-                shared_storage_root_path=shared_storage_root_path,
                 tool_config_overrides=tool_config_overrides,
                 tool_init_overrides=tool_init_overrides,
                 execution_env=execution_env,

@@ -12,6 +12,7 @@ import hashlib
 import inspect
 import json
 import os
+import re
 import signal
 import stat
 import sys
@@ -77,19 +78,33 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.tool_environment import ToolEnvironment
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
-from mindroom.tool_system.worker_proxy_client import WorkerProxyClientConfig, execute_worker_proxy_request
+from mindroom.tool_system.worker_proxy_client import (
+    WorkerProxyClientConfig,
+    _WorkerHttpError,
+    execute_worker_proxy_request,
+)
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     ToolExecutionIdentity,
     agent_workspace_root_path,
     resolve_worker_key,
     resolve_worker_target,
+    serialize_tool_execution_identity,
 )
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerHandle, WorkerReadyProgress, WorkerSpec
+from mindroom.workers.protocol import (
+    WORKER_PROTOCOL_VERSION,
+    ExecuteRequest,
+    LeaseRequest,
+    SaveAttachmentRequest,
+    SaveAttachmentResponse,
+    WorkerRoute,
+)
+from tests.api.sandbox_runner_support import execute_call
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -270,7 +285,7 @@ def test_attachment_save_protocol_decode_preserves_error_strings(
     ("response_payload", "expected_error"),
     [
         (
-            {"worker_path": "sample.bin", "size_bytes": True, "sha256": "0" * 64},
+            {"worker_path": "sample.bin", "sha256": "0" * 64},
             "Sandbox save-attachment response is missing its receipt fields.",
         ),
         (
@@ -294,7 +309,7 @@ def test_attachment_save_protocol_receipt_validation_preserves_error_strings(
     """Bad worker receipts should keep the current primary-side error text."""
     payload_bytes = b"attachment-bytes"
     result = sandbox_proxy_module._validate_attachment_save_receipt(
-        response_payload,
+        SaveAttachmentResponse(ok=True, **response_payload),
         requested_path="sample.bin",
         byte_count=len(payload_bytes),
         sha256=hashlib.sha256(payload_bytes).hexdigest(),
@@ -309,7 +324,7 @@ def test_attachment_save_protocol_receipt_validation_returns_dataclass() -> None
     sha256 = hashlib.sha256(payload_bytes).hexdigest()
 
     receipt = sandbox_proxy_module._validate_attachment_save_receipt(
-        {"worker_path": "sample.bin", "size_bytes": len(payload_bytes), "sha256": sha256},
+        SaveAttachmentResponse(ok=True, worker_path="sample.bin", size_bytes=len(payload_bytes), sha256=sha256),
         requested_path="sample.bin",
         byte_count=len(payload_bytes),
         sha256=sha256,
@@ -379,6 +394,10 @@ def _worker_target(
         account_id=runtime_paths.env_value("ACCOUNT_ID"),
         private_agent_names=private_agent_names,
     )
+
+
+def _execute_request(tool_name: str, function_name: str) -> ExecuteRequest:
+    return ExecuteRequest(protocol=WORKER_PROTOCOL_VERSION, tool_name=tool_name, function_name=function_name)
 
 
 class _FakeResponse:
@@ -555,20 +574,28 @@ def _runner_routes_responder(runner_runtime_paths: RuntimePaths) -> Callable[[st
 
     def responder(url: str, payload: dict[str, Any]) -> object:
         if url.endswith("/leases"):
-            lease = sandbox_runner_module.sandbox_worker_prep.create_credential_lease(**payload)
+            lease_request = LeaseRequest.model_validate(payload)
+            lease = sandbox_runner_module.sandbox_worker_prep.create_credential_lease(
+                **lease_request.model_dump(exclude={"protocol"}),
+            )
             return {"lease_id": lease.lease_id, "expires_at": lease.expires_at, "max_uses": lease.uses_remaining}
-        request = sandbox_runner_module.SandboxRunnerExecuteRequest.model_validate(payload)
-        if request.lease_id is not None:
-            request.credential_overrides = sandbox_runner_module.sandbox_worker_prep.consume_credential_lease(
+        request = ExecuteRequest.model_validate(payload)
+        credential_overrides = (
+            sandbox_runner_module.sandbox_worker_prep.consume_credential_lease(
                 request.lease_id,
                 tool_name=request.tool_name,
                 function_name=request.function_name,
             )
+            if request.lease_id is not None
+            else {}
+        )
         response = sandbox_runner_module._execute_request_subprocess_sync(
-            request,
-            runner_runtime_paths,
-            sandbox_runner_module._runtime_config_or_empty(runner_runtime_paths),
-            runner_token=_TEST_AUTH_TOKEN,
+            execute_call(
+                runner_runtime_paths,
+                runner_token=_TEST_AUTH_TOKEN,
+                credential_overrides=credential_overrides,
+                **request.model_dump(exclude={"protocol"}),
+            ),
         )
         return response.model_dump(mode="json")
 
@@ -599,10 +626,8 @@ def test_worker_proxy_client_records_worker_success() -> None:
             credential_policy={},
             lease_tool_credentials=False,
         ),
-        payload={"tool_name": "shell", "function_name": "run_shell_command"},
+        request=_execute_request("shell", "run_shell_command"),
         credentials_manager=None,
-        tool_name="shell",
-        function_name="run_shell_command",
         worker_target=None,
         worker_handle=handle,
         worker_manager=manager,
@@ -655,10 +680,8 @@ def test_cancelled_dedicated_worker_call_stops_at_that_worker() -> None:
                 credential_policy={},
                 lease_tool_credentials=False,
             ),
-            payload={"tool_name": "shell", "function_name": "run_shell_command"},
+            request=_execute_request("shell", "run_shell_command"),
             credentials_manager=None,
-            tool_name="shell",
-            function_name="run_shell_command",
             worker_target=None,
             worker_handle=handle,
             worker_manager=manager,
@@ -668,7 +691,7 @@ def test_cancelled_dedicated_worker_call_stops_at_that_worker() -> None:
 
     (_, execute), (cancel_url, cancel) = calls
     assert cancel_url == "http://worker/api/sandbox-runner/execute/cancel"
-    assert cancel == {"request_id": execute["request_id"]}
+    assert cancel == {"protocol": WORKER_PROTOCOL_VERSION, "request_id": execute["request_id"]}
     assert last_post["headers"] == {"x-mindroom-sandbox-token": _TEST_AUTH_TOKEN}
     # A stopped call is a tool outcome, never a worker failure.
     assert manager.failures == []
@@ -715,10 +738,8 @@ def _run_worker_proxy_request_with_exception(
                 credential_policy={},
                 lease_tool_credentials=False,
             ),
-            payload={"tool_name": "shell", "function_name": "run_shell_command"},
+            request=_execute_request("shell", "run_shell_command"),
             credentials_manager=None,
-            tool_name="shell",
-            function_name="run_shell_command",
             worker_target=None,
             worker_handle=handle,
             worker_manager=manager,
@@ -803,11 +824,25 @@ def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result == "sandbox-result"
     assert captured["url"] == "http://sandbox-runner:8765/api/sandbox-runner/execute"
     assert captured["json"] == {
+        "protocol": WORKER_PROTOCOL_VERSION,
+        "worker_key": None,
+        "worker_scope": None,
+        "routing_agent_name": None,
+        "execution_identity": None,
+        "private_agent_names": None,
+        "config_snapshot": None,
+        "base_dir": None,
         "tool_name": "calculator",
         "function_name": "add",
         "args": [1, 2],
         "kwargs": {},
-        "config_snapshot": None,
+        "lease_id": None,
+        "tool_config_overrides": {},
+        "tool_init_overrides": {},
+        "execution_env": {},
+        "environment": {"set_names": [], "unset_names": [], "path_prepend": []},
+        "extra_env_passthrough": None,
+        "request_id": None,
         "run_as_job": False,
     }
     assert captured["headers"] == {"x-mindroom-sandbox-token": "test-token"}
@@ -1017,7 +1052,8 @@ async def test_sandbox_runner_save_attachment_writes_worker_workspace(tmp_path: 
 
     response = await sandbox_runner_module.save_attachment_to_worker(
         SimpleNamespace(app=app),
-        sandbox_runner_module.SandboxRunnerSaveAttachmentRequest(
+        SaveAttachmentRequest(
+            protocol=WORKER_PROTOCOL_VERSION,
             worker_key="worker-test",
             attachment_id="att_sample",
             mindroom_output_path="inputs/sample.bin",
@@ -1061,7 +1097,8 @@ async def test_sandbox_runner_save_attachment_rejects_sha_mismatch_and_unsafe_pa
 
     mismatch = await sandbox_runner_module.save_attachment_to_worker(
         request,
-        sandbox_runner_module.SandboxRunnerSaveAttachmentRequest(
+        SaveAttachmentRequest(
+            protocol=WORKER_PROTOCOL_VERSION,
             worker_key="worker-test",
             attachment_id="att_sample",
             mindroom_output_path="inputs/sample.bin",
@@ -1072,7 +1109,8 @@ async def test_sandbox_runner_save_attachment_rejects_sha_mismatch_and_unsafe_pa
     )
     unsafe = await sandbox_runner_module.save_attachment_to_worker(
         request,
-        sandbox_runner_module.SandboxRunnerSaveAttachmentRequest(
+        SaveAttachmentRequest(
+            protocol=WORKER_PROTOCOL_VERSION,
             worker_key="worker-test",
             attachment_id="att_sample",
             mindroom_output_path="../escape.bin",
@@ -1113,7 +1151,8 @@ async def test_sandbox_runner_save_attachment_rejects_unsafe_path_before_decodin
 
     response = await sandbox_runner_module.save_attachment_to_worker(
         SimpleNamespace(app=app),
-        sandbox_runner_module.SandboxRunnerSaveAttachmentRequest(
+        SaveAttachmentRequest(
+            protocol=WORKER_PROTOCOL_VERSION,
             worker_key="worker-test",
             attachment_id="att_sample",
             mindroom_output_path="../escape.bin",
@@ -1151,7 +1190,8 @@ async def test_sandbox_runner_save_attachment_supports_static_unkeyed_workspace(
 
     response = await sandbox_runner_module.save_attachment_to_worker(
         SimpleNamespace(app=app),
-        sandbox_runner_module.SandboxRunnerSaveAttachmentRequest(
+        SaveAttachmentRequest(
+            protocol=WORKER_PROTOCOL_VERSION,
             routing_agent_name="code",
             attachment_id="att_sample",
             mindroom_output_path="inputs/static.bin",
@@ -1202,14 +1242,16 @@ async def test_static_runner_redirect_resolves_agent_workspace_without_prepared_
         agents={"general": AgentConfig(display_name="General", memory_backend="file")},
         models={},
     )
-    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
+    call = execute_call(
+        runtime_paths,
+        config,
         tool_name=tool_name,
         function_name="large",
         kwargs={OUTPUT_PATH_ARGUMENT: "tool-results/static.txt"},
         routing_agent_name="general",
     )
     try:
-        response = await sandbox_runner_module._execute_request_inprocess(request, runtime_paths, config)
+        response = await sandbox_runner_module._execute_request_inprocess(call)
 
         workspace = agent_workspace_root_path(storage_root, "general")
         output_path = workspace / "tool-results/static.txt"
@@ -1280,23 +1322,36 @@ async def test_worker_redirect_uses_agent_workspace_not_worker_scratch(tmp_path:
             created_at=0.0,
         ),
         paths=worker_paths,
-        runtime_overrides={"base_dir": worker_paths.workspace},
+        base_dir=worker_paths.workspace,
     )
-    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
+    request = ExecuteRequest(
+        protocol=WORKER_PROTOCOL_VERSION,
         tool_name=tool_name,
         function_name="large",
         kwargs={OUTPUT_PATH_ARGUMENT: "tool-results/worker.json"},
         worker_key=worker_key,
         worker_scope="shared",
         routing_agent_name="general",
-        execution_identity=asdict(execution_identity),
+        execution_identity=serialize_tool_execution_identity(execution_identity),
+    )
+    # A worker request that names no base_dir acts in its routing agent's workspace, not the worker's scratch.
+    route = sandbox_runner_module._PreparedRoute(
+        runtime_paths=runtime_paths,
+        config=config,
+        worker_key=worker_key,
+        identity=execution_identity,
+        worker=prepared_worker,
+        workspace=sandbox_runner_module._route_workspace(
+            request,
+            prepared_worker,
+            runtime_paths=runtime_paths,
+            config=config,
+            identity=execution_identity,
+        ),
     )
     try:
         response = await sandbox_runner_module._execute_request_inprocess(
-            request,
-            runtime_paths,
-            config,
-            prepared_worker=prepared_worker,
+            sandbox_runner_module._ExecuteCall(request=request, route=route),
         )
 
         workspace = agent_workspace_root_path(storage_root, "general")
@@ -1361,7 +1416,7 @@ def test_proxy_payload_includes_tool_config_overrides(monkeypatch: pytest.Monkey
 
         assert result == "sandbox-result"
         assert captured["json"]["tool_config_overrides"] == {"label": "from-config"}
-        assert "tool_init_overrides" not in captured["json"]
+        assert captured["json"]["tool_init_overrides"] == {}
     finally:
         restore_tool_registry_snapshot(snapshot)
 
@@ -1724,10 +1779,8 @@ def test_dedicated_worker_calls_lease_the_callers_own_tool_settings(
             credential_policy={},
             lease_tool_credentials=False,
         ),
-        payload={"tool_name": "calculator", "function_name": "add"},
+        request=_execute_request("calculator", "add"),
         credentials_manager=manager,
-        tool_name="calculator",
-        function_name="add",
         worker_target=target,
         worker_handle=handle,
         worker_manager=_TrackingWorkerManager(),
@@ -1748,10 +1801,12 @@ def test_dedicated_worker_calls_lease_the_callers_own_tool_settings(
     assert result == "sandbox-result"
     if expected_key is None:
         assert [url for url, _payload in captured_calls] == ["http://worker/api/sandbox-runner/execute"]
-        assert "lease_id" not in captured_calls[0][1]
+        assert captured_calls[0][1]["lease_id"] is None
     else:
         assert [url.rsplit("/", 1)[-1] for url, _payload in captured_calls] == ["leases", "execute"]
         assert captured_calls[0][1]["credential_overrides"] == {"api_key": expected_key}
+        assert captured_calls[1][1]["lease_id"] == "lease-123"
+    assert [payload["protocol"] for _url, payload in captured_calls] == [WORKER_PROTOCOL_VERSION] * len(captured_calls)
 
 
 def test_scoped_calls_do_not_lease_settings_the_primary_does_not_own(tmp_path: Path) -> None:
@@ -1783,10 +1838,8 @@ def test_scoped_calls_do_not_lease_settings_the_primary_does_not_own(tmp_path: P
             credential_policy={},
             lease_tool_credentials=False,
         ),
-        payload={"tool_name": tool_name, "function_name": "run"},
+        request=_execute_request(tool_name, "run"),
         credentials_manager=manager,
-        tool_name=tool_name,
-        function_name="run",
         worker_target=target,
         worker_handle=handle,
         worker_manager=_TrackingWorkerManager(),
@@ -1849,11 +1902,10 @@ def test_save_attachment_to_worker_posts_with_worker_token_and_size_cap(
         runtime_paths=runtime_paths,
         runtime_config=None,
         worker_target=worker_target,
+        workspace_root=runtime_paths.storage_root / "agents" / "code" / "workspace",
         attachment_id="att_sample",
         mindroom_output_path="sample.bin",
         payload_bytes=payload_bytes,
-        mime_type="application/octet-stream",
-        filename="sample.bin",
     )
 
     assert receipt is not None
@@ -1866,6 +1918,11 @@ def test_save_attachment_to_worker_posts_with_worker_token_and_size_cap(
     assert request_json["worker_key"] == worker_target.worker_key
     assert base64.b64decode(request_json["bytes_b64"]) == payload_bytes
     assert request_json["sha256"] == sha256
+    assert request_json["protocol"] == WORKER_PROTOCOL_VERSION
+    # The attachments tool's workspace travels relative to the storage root the worker mounts.
+    assert request_json["base_dir"] == "agents/code/workspace"
+    assert "mime_type" not in request_json
+    assert "filename" not in request_json
     assert manager.touched == [worker_target.worker_key]
 
     monkeypatch.setenv("MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES", "3")
@@ -1875,11 +1932,10 @@ def test_save_attachment_to_worker_posts_with_worker_token_and_size_cap(
             runtime_config=None,
             worker_target=worker_target,
             worker_tools_override=["file"],
+            workspace_root=None,
             attachment_id="att_sample",
             mindroom_output_path="sample.bin",
             payload_bytes=payload_bytes,
-            mime_type=None,
-            filename=None,
         )
 
 
@@ -1983,11 +2039,13 @@ def test_view_file_from_worker_posts_and_decodes_bounded_media(
         ),
     )
 
+    workspace_root = runtime_paths.storage_root / "agents" / "code" / "workspace"
     result = sandbox_proxy_module.view_file_from_worker(
         runtime_paths=runtime_paths,
         runtime_config=None,
         worker_target=worker_target,
-        path="plots/result.png",
+        workspace_root=workspace_root,
+        path=str(workspace_root / "plots" / "result.png"),
     )
 
     assert result is not None
@@ -1996,6 +2054,9 @@ def test_view_file_from_worker_posts_and_decodes_bounded_media(
     assert captured["url"] == "http://worker/api/sandbox-runner/view-file"
     assert captured["json"]["path"] == "plots/result.png"
     assert captured["json"]["worker_key"] == worker_target.worker_key
+    assert captured["json"]["protocol"] == WORKER_PROTOCOL_VERSION
+    assert captured["json"]["base_dir"] == "agents/code/workspace"
+    assert "tool_init_overrides" not in captured["json"]
     assert manager.touched == [worker_target.worker_key]
 
 
@@ -2050,7 +2111,7 @@ async def test_view_file_reports_malformed_worker_responses(
     assert receipt["view_status"] == "error"
     assert receipt["path"] == "plots/result.png"
     assert receipt["message"] == (
-        "Sandbox view-file returned a non-object response."
+        "Sandbox view-file returned a malformed response: 1 invalid field(s)."
         if non_object
         else "Sandbox view-file returned a non-media result."
     )
@@ -2068,7 +2129,11 @@ async def test_view_file_reports_malformed_worker_responses(
             "SHA256 does not match",
         ),
         (
-            {"ok": True, "worker_path": "sample.bin", "size_bytes": True, "sha256": "0" * 64},
+            {"ok": True, "worker_path": "sample.bin", "size_bytes": "sixteen", "sha256": "0" * 64},
+            "malformed response",
+        ),
+        (
+            {"ok": True, "worker_path": "sample.bin", "size_bytes": 16},
             "missing its receipt fields",
         ),
         (
@@ -2118,11 +2183,10 @@ def test_save_attachment_to_worker_rejects_bad_receipts(
             runtime_paths=runtime_paths,
             runtime_config=None,
             worker_target=worker_target,
+            workspace_root=None,
             attachment_id="att_sample",
             mindroom_output_path="sample.bin",
             payload_bytes=b"attachment-bytes",
-            mime_type=None,
-            filename=None,
         )
 
     assert manager.failures
@@ -2174,11 +2238,10 @@ def test_save_attachment_to_worker_request_failure_does_not_record_worker_failur
             runtime_paths=runtime_paths,
             runtime_config=None,
             worker_target=worker_target,
+            workspace_root=None,
             attachment_id="att_sample",
             mindroom_output_path="../escape.bin",
             payload_bytes=b"attachment-bytes",
-            mime_type=None,
-            filename=None,
         )
 
     assert manager.failures == []
@@ -2456,21 +2519,23 @@ def test_save_attachment_to_static_runner_posts_without_worker_key(
         ),
     )
 
+    workspace_root = runtime_paths.storage_root / "agents" / "code" / "workspace"
     receipt = sandbox_proxy_module.save_attachment_to_worker(
         runtime_paths=runtime_paths,
         runtime_config=None,
         worker_target=worker_target,
+        workspace_root=workspace_root,
         attachment_id="att_sample",
         mindroom_output_path="sample.bin",
         payload_bytes=payload_bytes,
-        mime_type=None,
-        filename=None,
     )
 
     assert receipt is not None
     assert captured["url"] == "http://sandbox-runner:8765/api/sandbox-runner/save-attachment"
-    assert "worker_key" not in captured["json"]
+    assert captured["json"]["worker_key"] is None
     assert captured["json"]["routing_agent_name"] == "code"
+    # A request that names no worker keeps the workspace in this primary's own spelling.
+    assert captured["json"]["base_dir"] == str(workspace_root)
 
 
 def test_get_tool_by_name_rejects_unsafe_tool_init_overrides() -> None:
@@ -3202,7 +3267,7 @@ async def test_proxy_forwards_configured_shell_execution_env_only_for_execution_
     assert calculator_entrypoint is not None
     calculator_entrypoint(1, 2)
 
-    assert "execution_env" not in captured["json"]
+    assert captured["json"]["execution_env"] == {}
 
 
 @pytest.mark.asyncio
@@ -3366,7 +3431,9 @@ async def test_inprocess_runner_shell_uses_request_scoped_extra_env_snapshot(
         process_env={},
     )
     config = sandbox_runner_module._runtime_config_or_empty(runtime_paths)
-    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
+    call = execute_call(
+        runtime_paths,
+        config,
         tool_name="shell",
         function_name="run_shell_command",
         args=[
@@ -3380,11 +3447,7 @@ async def test_inprocess_runner_shell_uses_request_scoped_extra_env_snapshot(
         extra_env_passthrough="GITEA_*",
     )
 
-    response = await sandbox_runner_module._execute_request_inprocess(
-        request,
-        runtime_paths,
-        config,
-    )
+    response = await sandbox_runner_module._execute_request_inprocess(call)
 
     assert response.ok is True
     assert response.result == "request-gitea-token|"
@@ -3450,29 +3513,31 @@ def test_proxy_holds_manager_lease_through_success_bookkeeping(
             lease_active = False
             events.append("exit")
 
-    def _fake_build_worker_routing_payload(
+    def _fake_worker_route(
         *,
         runtime_paths: RuntimePaths,
+        runtime_config: Config | None,
         tool_name: str,
         function_name: str,
         worker_target: ResolvedWorkerTarget | None,
         worker_manager: object | None = None,
+        base_dir: str | None,
         progress_sink: object = None,
-    ) -> tuple[dict[str, object], WorkerHandle | None]:
-        _ = worker_target, progress_sink
+    ) -> tuple[WorkerRoute, WorkerHandle | None]:
+        _ = runtime_config, worker_target, base_dir, progress_sink
         assert runtime_paths is not None
         assert tool_name == "calculator"
         assert function_name == "add"
         assert worker_manager is worker_manager_ref
         events.append("build")
-        return {"worker_key": "worker-key"}, worker_handle
+        return WorkerRoute(protocol=WORKER_PROTOCOL_VERSION, worker_key="worker-key"), worker_handle
 
     def _fake_lease_primary_worker_manager(*_args: object, **_kwargs: object) -> _FakeLease:
         return _FakeLease()
 
     worker_manager_ref = worker_manager
     monkeypatch.setattr(sandbox_proxy_module, "lease_primary_worker_manager", _fake_lease_primary_worker_manager)
-    monkeypatch.setattr(sandbox_proxy_module, "_build_worker_routing_payload", _fake_build_worker_routing_payload)
+    monkeypatch.setattr(sandbox_proxy_module, "_worker_route", _fake_worker_route)
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
         _recording_client_class(
@@ -3554,28 +3619,30 @@ def test_proxy_holds_manager_lease_through_failure_bookkeeping(
             lease_active = False
             events.append("exit")
 
-    def _fake_build_worker_routing_payload(
+    def _fake_worker_route(
         *,
         runtime_paths: RuntimePaths,
+        runtime_config: Config | None,
         tool_name: str,
         function_name: str,
         worker_target: ResolvedWorkerTarget | None,
         worker_manager: object | None = None,
+        base_dir: str | None,
         progress_sink: object = None,
-    ) -> tuple[dict[str, object], WorkerHandle | None]:
-        _ = runtime_paths, worker_target, progress_sink
+    ) -> tuple[WorkerRoute, WorkerHandle | None]:
+        _ = runtime_paths, runtime_config, worker_target, base_dir, progress_sink
         assert tool_name == "calculator"
         assert function_name == "add"
         assert worker_manager is worker_manager_ref
         events.append("build")
-        return {"worker_key": "worker-key"}, worker_handle
+        return WorkerRoute(protocol=WORKER_PROTOCOL_VERSION, worker_key="worker-key"), worker_handle
 
     def _fake_lease_primary_worker_manager(*_args: object, **_kwargs: object) -> _FakeLease:
         return _FakeLease()
 
     worker_manager_ref = worker_manager
     monkeypatch.setattr(sandbox_proxy_module, "lease_primary_worker_manager", _fake_lease_primary_worker_manager)
-    monkeypatch.setattr(sandbox_proxy_module, "_build_worker_routing_payload", _fake_build_worker_routing_payload)
+    monkeypatch.setattr(sandbox_proxy_module, "_worker_route", _fake_worker_route)
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
         _recording_client_class(
@@ -3758,7 +3825,7 @@ def test_proxy_worker_routed_lease_skips_non_grantable_shared_credentials(
     assert len(captured_calls) == 1
     execute_url, execute_payload = captured_calls[0]
     assert execute_url.endswith("/api/sandbox-runner/execute")
-    assert "lease_id" not in execute_payload
+    assert execute_payload["lease_id"] is None
 
 
 def test_proxy_worker_routed_lease_uses_build_config_grants_without_tool_context(
@@ -4095,15 +4162,25 @@ def test_unscoped_dedicated_worker_payload_reconciles_via_ensure_worker(
         account_id=identity_account_id,
     )
 
-    payload, worker_handle = sandbox_proxy_module._build_worker_routing_payload(
+    worker_target = _worker_target(runtime_paths, None, "code", identity)
+    assert worker_target.execution_identity is not None
+    route, worker_handle = sandbox_proxy_module._worker_route(
         runtime_paths=runtime_paths,
+        runtime_config=None,
         tool_name="shell",
         function_name="run_shell_command",
-        worker_target=_worker_target(runtime_paths, None, "code", identity),
+        worker_target=worker_target,
         worker_manager=fake_manager,
+        base_dir=None,
     )
 
-    assert payload == {"routing_agent_name": "code", "worker_key": expected_worker_key}
+    # The dedicated worker serves the call on behalf of its caller, so the caller's identity travels too.
+    assert route == WorkerRoute(
+        protocol=WORKER_PROTOCOL_VERSION,
+        worker_key=expected_worker_key,
+        routing_agent_name="code",
+        execution_identity=serialize_tool_execution_identity(worker_target.execution_identity),
+    )
     assert worker_handle is refreshed_handle
     assert fake_manager.ensure_calls == [expected_worker_key]
 
@@ -4157,15 +4234,18 @@ def test_scoped_dedicated_worker_payload_preserves_resolved_worker_key(monkeypat
     expected_worker_key = resolve_worker_key("user", execution_identity, agent_name="code")
     assert expected_worker_key is not None
 
-    payload, worker_handle = sandbox_proxy_module._build_worker_routing_payload(
+    route, worker_handle = sandbox_proxy_module._worker_route(
         runtime_paths=runtime_paths,
+        runtime_config=None,
         tool_name="shell",
         function_name="run_shell_command",
         worker_target=_worker_target(runtime_paths, "user", "code", execution_identity),
         worker_manager=fake_manager,
+        base_dir=None,
     )
 
-    assert payload["worker_key"] == expected_worker_key
+    assert route.worker_key == expected_worker_key
+    assert route.worker_scope == "user"
     assert worker_handle is ensured_handle
     assert fake_manager.ensure_calls == [expected_worker_key]
 
@@ -5214,7 +5294,11 @@ def test_proxy_leases_worker_manager_from_backend_settings_and_grants_from_build
         return "proxied"
 
     monkeypatch.setattr(sandbox_proxy_module, "lease_primary_worker_manager", _fake_lease_primary_worker_manager)
-    monkeypatch.setattr(sandbox_proxy_module, "_build_worker_routing_payload", lambda **_kwargs: ({}, None))
+    monkeypatch.setattr(
+        sandbox_proxy_module,
+        "_worker_route",
+        lambda **_kwargs: (WorkerRoute(protocol=WORKER_PROTOCOL_VERSION), None),
+    )
     monkeypatch.setattr(sandbox_proxy_module, "execute_worker_proxy_request", _fake_execute_worker_proxy_request)
 
     result = call_proxy_sync_for_test(
@@ -5361,9 +5445,8 @@ def test_proxy_sends_live_config_snapshot_without_secrets(
     monkeypatch.setattr(
         sandbox_proxy_module,
         "lease_primary_worker_manager",
-        lambda *_args, **_kwargs: _static_worker_manager_lease(object()),
+        lambda *_args, **_kwargs: _static_worker_manager_lease(_TrackingWorkerManager()),
     )
-    monkeypatch.setattr(sandbox_proxy_module, "_build_worker_routing_payload", lambda **_kwargs: ({}, None))
     monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _recording_client_class(captured=captured))
 
     call_proxy_sync_for_test(
@@ -5374,6 +5457,7 @@ def test_proxy_sends_live_config_snapshot_without_secrets(
         kwargs={},
         credentials_manager=None,
         runtime_config=live_config,
+        worker_target=_worker_target(runtime_paths, None, "mind", _MIND_EXECUTION_IDENTITY),
     )
 
     assert (captured["json"]["config_snapshot"] is not None) is sends_snapshot
@@ -5666,7 +5750,7 @@ async def test_cancelled_worker_call_asks_the_runner_to_stop_that_request(monkey
     assert await asyncio.to_thread(stopped.wait, 10)
     (_, execute), (cancel_url, cancel) = [(url, payload) for url, payload in calls if "/execute" in url]
     assert cancel_url == "http://sandbox-runner:8765/api/sandbox-runner/execute/cancel"
-    assert cancel == {"request_id": execute["request_id"]}
+    assert cancel == {"protocol": WORKER_PROTOCOL_VERSION, "request_id": execute["request_id"]}
 
 
 @pytest.mark.asyncio
@@ -5676,13 +5760,13 @@ async def test_worker_call_cancelled_before_dispatch_is_never_sent(monkeypatch: 
     preparing = threading.Event()
     release = threading.Event()
     finished = threading.Event()
-    build_routing = sandbox_proxy_module._build_worker_routing_payload
+    worker_route = sandbox_proxy_module._worker_route
     execute = sandbox_proxy_module.execute_worker_proxy_request
 
     def slow_routing(**kwargs: object) -> object:
         preparing.set()
         assert release.wait(10)
-        return build_routing(**kwargs)
+        return worker_route(**kwargs)
 
     def tracked_execute(**kwargs: object) -> object:
         try:
@@ -5690,7 +5774,7 @@ async def test_worker_call_cancelled_before_dispatch_is_never_sent(monkeypatch: 
         finally:
             finished.set()
 
-    monkeypatch.setattr(sandbox_proxy_module, "_build_worker_routing_payload", slow_routing)
+    monkeypatch.setattr(sandbox_proxy_module, "_worker_route", slow_routing)
     monkeypatch.setattr(sandbox_proxy_module, "execute_worker_proxy_request", tracked_execute)
     call = asyncio.create_task(entrypoint("echo never"))
     assert await asyncio.to_thread(preparing.wait, 10)
@@ -5716,11 +5800,10 @@ def test_static_runner_saves_attachment_for_agent_added_after_seeding(
         runtime_paths=primary_paths,
         runtime_config=live_config,
         worker_target=_worker_target(primary_paths, None, "mind", _MIND_EXECUTION_IDENTITY),
+        workspace_root=workspace,
         attachment_id="att_sample",
         mindroom_output_path="inputs/live.bin",
         payload_bytes=payload_bytes,
-        mime_type=None,
-        filename=None,
     )
 
     assert receipt is not None
@@ -5743,6 +5826,7 @@ def test_static_runner_views_file_for_agent_added_after_seeding(
         runtime_paths=primary_paths,
         runtime_config=live_config,
         worker_target=_worker_target(primary_paths, None, "mind", _MIND_EXECUTION_IDENTITY),
+        workspace_root=None,
         path="plot.png",
     )
 
@@ -6326,9 +6410,15 @@ def test_worker_routed_legacy_structured_failure_records_worker_failure(
     assert manager.failures == [(worker_target.worker_key, "Sandbox subprocess timed out.")]
 
 
+@pytest.mark.parametrize(
+    "response_payload",
+    [["not", "an", "object"], {"ok": True, "result": "done", "unexpected": "field"}],
+    ids=["non-object", "unknown-field"],
+)
 def test_worker_routed_malformed_success_payload_records_worker_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    response_payload: object,
 ) -> None:
     """Malformed 2xx worker responses should evict the worker before raising."""
     execution_identity = ToolExecutionIdentity(
@@ -6363,7 +6453,7 @@ def test_worker_routed_malformed_success_payload_records_worker_failure(
         def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:
             del json, headers
             assert url == "http://worker/api/sandbox-runner/execute"
-            return _FakeResponse(["not", "an", "object"])
+            return _FakeResponse(response_payload)
 
     tool = get_tool_by_name(
         "file",
@@ -6374,6 +6464,7 @@ def test_worker_routed_malformed_success_payload_records_worker_failure(
     )
     entrypoint = tool.functions["read_file"].entrypoint
     assert entrypoint is not None
+    error = "Sandbox execute returned a malformed response: 1 invalid field(s)."
 
     with (
         patch.object(
@@ -6382,30 +6473,76 @@ def test_worker_routed_malformed_success_payload_records_worker_failure(
             lambda *_args, **_kwargs: _static_worker_manager_lease(manager),
         ),
         patch("mindroom.tool_system.sandbox_proxy.httpx.Client", _MalformedSuccessClient),
-        pytest.raises(TypeError, match=r"Sandbox proxy returned a non-object response\."),
+        pytest.raises(RuntimeError, match=re.escape(error)),
     ):
         entrypoint("missing.txt")
 
     assert manager.touched == []
-    assert manager.failures == [(worker_target.worker_key, "Sandbox proxy returned a non-object response.")]
+    assert manager.failures == [(worker_target.worker_key, error)]
 
 
 @pytest.mark.parametrize(
-    ("status_code", "payload"),
+    ("status_code", "payload", "error", "worker_failure"),
     [
-        (400, {"detail": "credential_overrides must be supplied via lease_id."}),
-        (422, {"detail": "Input should be a valid dictionary"}),
-        (422, {"detail": [{"msg": "Input should be a valid dictionary", "type": "dict_type"}]}),
-        (404, {"detail": "Tool 'file' does not expose 'read_file'."}),
+        (
+            400,
+            {"ok": False, "error": "credential_overrides must be supplied via lease_id.", "failure_kind": "tool"},
+            "credential_overrides must be supplied via lease_id.",
+            False,
+        ),
+        (
+            422,
+            {"ok": False, "error": "Input should be a valid dictionary", "failure_kind": "tool"},
+            "Input should be a valid dictionary",
+            False,
+        ),
+        (
+            404,
+            {"ok": False, "error": "Tool 'file' does not expose 'read_file'.", "failure_kind": "tool"},
+            "Tool 'file' does not expose 'read_file'.",
+            False,
+        ),
+        (
+            503,
+            {"ok": False, "error": "Worker is not ready.", "failure_kind": "worker"},
+            "Worker is not ready.",
+            True,
+        ),
+        (
+            400,
+            {"detail": "credential_overrides must be supplied via lease_id."},
+            "credential_overrides must be supplied via lease_id.",
+            True,
+        ),
+        (
+            422,
+            {"detail": [{"msg": "Input should be a valid dictionary", "type": "dict_type"}]},
+            "Input should be a valid dictionary",
+            True,
+        ),
+        (401, {"detail": "Unauthorized sandbox runner request"}, "Unauthorized sandbox runner request", True),
+        (404, {"detail": "Not Found"}, "Not Found", True),
+    ],
+    ids=[
+        "typed-400",
+        "typed-422",
+        "typed-404",
+        "typed-worker-503",
+        "untyped-400",
+        "untyped-422",
+        "untyped-401",
+        "route-missing-404",
     ],
 )
-def test_worker_routed_http_request_error_does_not_record_worker_failure(
+def test_worker_routed_http_error_spares_the_worker_only_for_a_typed_tool_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     status_code: int,
     payload: dict[str, object],
+    error: str,
+    worker_failure: bool,
 ) -> None:
-    """Client-side HTTP errors from a healthy worker should fail the call without tearing down the worker."""
+    """An HTTP error counts against the worker unless its body is the worker's typed account blaming the request."""
     execution_identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="code",
@@ -6444,73 +6581,16 @@ def test_worker_routed_http_request_error_does_not_record_worker_failure(
             "mindroom.tool_system.sandbox_proxy.httpx.Client",
             _http_status_client_class(status_code=status_code, payload=payload),
         ),
-        pytest.raises(httpx.HTTPStatusError),
+        pytest.raises(_WorkerHttpError, match=re.escape(error)),
     ):
         entrypoint("missing.txt")
 
-    assert manager.touched == [worker_target.worker_key]
-    assert manager.failures == []
-
-
-@pytest.mark.parametrize(
-    ("status_code", "payload"),
-    [
-        (401, {"detail": "Unauthorized sandbox runner request"}),
-        (404, {"detail": "Not Found"}),
-    ],
-)
-def test_worker_routed_ambiguous_http_client_error_records_worker_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    status_code: int,
-    payload: dict[str, object],
-) -> None:
-    """Auth and ambiguous route failures should evict the worker instead of treating it as healthy."""
-    execution_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="code",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-1",
-    )
-    runtime_paths = _configure_proxy_runtime(
-        monkeypatch,
-        proxy_url="http://sandbox-runner:8765",
-        proxy_token=_TEST_AUTH_TOKEN,
-        execution_mode="off",
-    )
-    worker_target = _worker_target(runtime_paths, "shared", "code", execution_identity)
-    assert worker_target.worker_key is not None
-    manager = _TrackingWorkerManager()
-    tool = get_tool_by_name(
-        "file",
-        runtime_paths,
-        tool_init_overrides={"base_dir": str(tmp_path)},
-        worker_tools_override=["file"],
-        worker_target=worker_target,
-    )
-    entrypoint = tool.functions["read_file"].entrypoint
-    assert entrypoint is not None
-
-    with (
-        patch.object(
-            sandbox_proxy_module,
-            "lease_primary_worker_manager",
-            lambda *_args, **_kwargs: _static_worker_manager_lease(manager),
-        ),
-        patch(
-            "mindroom.tool_system.sandbox_proxy.httpx.Client",
-            _http_status_client_class(status_code=status_code, payload=payload),
-        ),
-        pytest.raises(httpx.HTTPStatusError),
-    ):
-        entrypoint("missing.txt")
-
-    assert manager.touched == []
-    assert len(manager.failures) == 1
-    assert manager.failures[0][0] == worker_target.worker_key
+    if worker_failure:
+        assert manager.touched == []
+        assert [worker_key for worker_key, _reason in manager.failures] == [worker_target.worker_key]
+    else:
+        assert manager.touched == [worker_target.worker_key]
+        assert manager.failures == []
 
 
 def test_worker_tools_override_can_use_docker_backend_without_proxy_url(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -7102,7 +7182,7 @@ class TestWorkerToolsOverride:
         assert captured["url"] == "http://sandbox:8765/api/sandbox-runner/execute"
 
     def test_get_tool_by_name_passes_tool_init_overrides_to_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Proxy execution should preserve non-secret tool init overrides like base_dir."""
+        """Proxy execution should send the tool's base_dir as the request's workspace, outside its init overrides."""
         captured: dict[str, Any] = {}
 
         runtime_paths = _configure_proxy_runtime(
@@ -7131,16 +7211,19 @@ class TestWorkerToolsOverride:
 
         assert result == "sandbox-result"
         assert captured["url"] == "http://sandbox:8765/api/sandbox-runner/execute"
-        assert captured["json"]["tool_init_overrides"] == {"base_dir": "/workspace/demo"}
+        assert captured["json"]["base_dir"] == "/workspace/demo"
+        assert captured["json"]["tool_init_overrides"] == {}
 
     def test_proxy_rewrites_storage_root_base_dir_to_shared_relative_path(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
-        """Worker-keyed proxy execution should rewrite canonical agent base_dir paths portably."""
+        """Worker-keyed proxy execution should send canonical agent base_dir paths relative to the storage root."""
         captured: dict[str, Any] = {}
+        storage_root = tmp_path / "mindroom_data"
 
-        monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
+        monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
         runtime_paths = _configure_proxy_runtime(
             monkeypatch,
             proxy_url="http://sandbox:8765",
@@ -7164,8 +7247,7 @@ class TestWorkerToolsOverride:
         tool = get_tool_by_name(
             "coding",
             runtime_paths,
-            tool_init_overrides={"base_dir": "/srv/mindroom/agents/general/workspace"},
-            shared_storage_root_path=Path("/srv/mindroom"),
+            tool_init_overrides={"base_dir": str(storage_root / "agents" / "general" / "workspace")},
             worker_tools_override=["coding"],
             worker_target=_worker_target(runtime_paths, "shared", "general", execution_identity),
         )
@@ -7175,7 +7257,9 @@ class TestWorkerToolsOverride:
 
         assert result == "sandbox-result"
         assert captured["url"].endswith("/api/sandbox-runner/execute")
-        assert captured["json"]["tool_init_overrides"] == {"base_dir": "agents/general/workspace"}
+        assert captured["json"]["worker_key"] is not None
+        assert captured["json"]["base_dir"] == "agents/general/workspace"
+        assert captured["json"]["tool_init_overrides"] == {}
 
     def test_proxy_preserves_storage_root_absolute_base_dir_without_worker_key(
         self,
@@ -7214,9 +7298,8 @@ class TestWorkerToolsOverride:
 
         assert result == "sandbox-result"
         assert captured["url"] == "http://sandbox:8765/api/sandbox-runner/execute"
-        assert captured["json"]["tool_init_overrides"] == {
-            "base_dir": str(base_dir),
-        }
+        assert captured["json"]["worker_key"] is None
+        assert captured["json"]["base_dir"] == str(base_dir)
 
     def test_proxy_preserves_unrelated_absolute_base_dir_for_worker_key(
         self,
@@ -7260,9 +7343,8 @@ class TestWorkerToolsOverride:
         result = entrypoint(path=".")
 
         assert result == "sandbox-result"
-        assert captured["json"]["tool_init_overrides"] == {
-            "base_dir": str(unrelated_base_dir),
-        }
+        assert captured["json"]["worker_key"] is not None
+        assert captured["json"]["base_dir"] == str(unrelated_base_dir)
 
 
 @pytest.mark.asyncio
@@ -7288,7 +7370,9 @@ async def test_inprocess_runner_blocks_cross_runtime_secret_leakage(
 
     # Client sends a request with WHISPER_* passthrough but only WHISPER_URL
     # in its execution_env.  The runner-only WHISPER_API_TOKEN must NOT leak.
-    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
+    call = execute_call(
+        runtime_paths,
+        config,
         tool_name="shell",
         function_name="run_shell_command",
         args=[
@@ -7298,11 +7382,7 @@ async def test_inprocess_runner_blocks_cross_runtime_secret_leakage(
         extra_env_passthrough="WHISPER_*",
     )
 
-    response = await sandbox_runner_module._execute_request_inprocess(
-        request,
-        runtime_paths,
-        config,
-    )
+    response = await sandbox_runner_module._execute_request_inprocess(call)
 
     assert response.ok is True
     # WHISPER_URL from execution_env should be visible; WHISPER_API_TOKEN should not.
@@ -7381,10 +7461,8 @@ def test_worker_client_returns_raw_browser_envelopes(tool_name: str) -> None:
             credential_policy={},
             lease_tool_credentials=False,
         ),
-        payload={"tool_name": tool_name, "function_name": "browser_take_screenshot"},
+        request=_execute_request(tool_name, "browser_take_screenshot"),
         credentials_manager=None,
-        tool_name=tool_name,
-        function_name="browser_take_screenshot",
         worker_target=None,
         worker_handle=None,
         worker_manager=_TrackingWorkerManager(),

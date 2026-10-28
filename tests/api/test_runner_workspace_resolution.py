@@ -1,10 +1,9 @@
-"""Characterization of which workspace each sandbox-runner resolver picks for one request.
+"""Which workspace one sandbox-runner request acts in, as each place that uses it sees it.
 
-The runner answers "which workspace does this request act in" in several places: the shell/python HOME and
-`.mindroom/worker-env.sh` workspace, the execute output root, the subprocess cwd, the browser output workspace,
-the save-attachment target, the view-file root, and the worker preparation that confines a client `base_dir`.
-These tests pin today's answers, including the places where those resolvers disagree for the same request,
-so a refactor that unifies them changes each answer deliberately.
+The runner resolves one workspace per request and uses it for the shell/python HOME and `.mindroom/worker-env.sh`
+workspace, the execute output root, the subprocess cwd, the browser workspace, the save-attachment target and the
+view-file root; worker preparation confines a client `base_dir` first.
+These tests pin the answer at every one of those places for each request shape.
 """
 
 from __future__ import annotations
@@ -36,6 +35,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.worker_computer.worker_browser import WorkerBrowserRuntime
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
+from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteRequest, WorkerFailure
 from tests.api.test_view_file import HEADERS, TOKEN
 
 if TYPE_CHECKING:
@@ -66,7 +66,6 @@ class _Shape:
     runtime_paths: RuntimePaths
     config: Config
     routing: dict[str, object]
-    tool_init_overrides: dict[str, object]
     # Workspace names in match order; a resolved path is reported by the first name it equals.
     labels: dict[str, Path]
 
@@ -84,21 +83,11 @@ class _Shape:
         return next((name for name, root in self.labels.items() if resolved == root.resolve()), str(resolved))
 
     def execute_payload(self, tool_name: str, function_name: str) -> dict[str, object]:
-        # The browser declares no init overrides, so the runner refuses any base_dir sent with it.
-        tool_init_overrides = {} if tool_name == "browser" else self.tool_init_overrides
-        return {
-            **self.routing,
-            "tool_name": tool_name,
-            "function_name": function_name,
-            "args": [],
-            "kwargs": {},
-            "tool_init_overrides": tool_init_overrides,
-        }
+        return {**self.routing, "tool_name": tool_name, "function_name": function_name, "args": [], "kwargs": {}}
 
     def attachment_payload(self) -> dict[str, object]:
-        routing = {name: value for name, value in self.routing.items() if name != "worker_scope"}
         return {
-            **routing,
+            **self.routing,
             "attachment_id": "att_sample",
             "mindroom_output_path": "incoming/sample.txt",
             "sha256": hashlib.sha256(_PAYLOAD).hexdigest(),
@@ -107,8 +96,7 @@ class _Shape:
         }
 
     def view_payload(self) -> dict[str, object]:
-        routing = {name: value for name, value in self.routing.items() if name != "worker_scope"}
-        return {**routing, "tool_init_overrides": self.tool_init_overrides, "path": "sample.png"}
+        return {**self.routing, "path": "sample.png"}
 
 
 def _identity(agent_name: str | None) -> ToolExecutionIdentity:
@@ -181,6 +169,8 @@ def _shape(tmp_path: Path, *, scope: str | None, agent: str | None, client_base_
     labels["runner_cwd"] = Path.cwd()
     labels["runner_home"] = Path(os.environ["HOME"])
     routing: dict[str, object] = {
+        "protocol": WORKER_PROTOCOL_VERSION,
+        "base_dir": raw_base_dir,
         "worker_key": worker_key,
         "worker_scope": scope,
         "routing_agent_name": agent,
@@ -192,7 +182,6 @@ def _shape(tmp_path: Path, *, scope: str | None, agent: str | None, client_base_
         runtime_paths=runtime_paths,
         config=config,
         routing=routing,
-        tool_init_overrides={} if raw_base_dir is None else {"base_dir": raw_base_dir},
         labels=labels,
     )
 
@@ -206,15 +195,16 @@ def _resolve_every_endpoint(shape: _Shape, monkeypatch: pytest.MonkeyPatch) -> d
     """Return the workspace label, or failure, each resolver picks for one request shape."""
     resolved: dict[str, str | None] = {}
 
-    # Execute shell: HOME and the worker-env.sh workspace (resolver A), the output root (B), the subprocess cwd (F).
-    request = sandbox_runner.SandboxRunnerExecuteRequest(**shape.execute_payload("shell", "run_shell_command"))
-    context = sandbox_runner._prepare_execute_request(
+    # Execute shell: HOME and the worker-env.sh workspace, the output root, the subprocess cwd.
+    request = ExecuteRequest(**shape.execute_payload("shell", "run_shell_command"))
+    route = sandbox_runner._prepare_route_with_config(
         request,
-        shape.runtime_paths,
-        None,
+        runtime_paths=shape.runtime_paths,
         config=shape.config,
         runner_token=TOKEN,
     )
+    assert not isinstance(route, WorkerFailure), route
+    context = sandbox_runner._prepare_execute_request(sandbox_runner._ExecuteCall(request=request, route=route))
     resolved["home"] = shape.label(context.execution_env.get("HOME"))
     resolved["hook_workspace"] = shape.label(context.execution_env.get("MINDROOM_AGENT_WORKSPACE"))
     resolved["subprocess_cwd"] = shape.label(sandbox_runner._prepare_subprocess_context(context).subprocess_cwd)
@@ -250,17 +240,18 @@ def _resolve_every_endpoint(shape: _Shape, monkeypatch: pytest.MonkeyPatch) -> d
         browser_roots.append(kwargs["tool_output_workspace_root"])
         raise HTTPException(status_code=418, detail="captured")
 
-    # Resolver D: the browser tool is never built; only the workspace it would be bound to is recorded.
+    # The browser tool is never built; only the workspace it would be bound to is recorded.
     monkeypatch.setattr(sandbox_runner, "_resolve_entrypoint", capture_browser)
     browsed = client.post(
         "/api/sandbox-runner/execute",
         headers=HEADERS,
         json=shape.execute_payload("browser", "browser_control"),
     )
-    if browsed.status_code == 418:
+    assert browsed.status_code == 200, browsed.text
+    if browser_roots:
         resolved["browser"] = shape.label(browser_roots[0])
     else:
-        resolved["browser"] = f"http:{browsed.status_code}"
+        resolved["browser"] = f"fail:{browsed.json()['failure_kind']}"
     return resolved
 
 
@@ -282,37 +273,38 @@ def _row(*values: str | None) -> dict[str, str | None]:
 @pytest.mark.parametrize(
     ("scope", "agent", "client_base_dir", "expected"),
     [
-        # (1) Unkeyed static-runner request with a routing agent.
+        # Unkeyed static-runner request with a routing agent acts in that agent's workspace; the browser needs a
+        # dedicated worker.
         pytest.param(
             None,
             "general",
             "none",
-            _row("agent", "agent", "agent", "agent", "agent", "agent", "http:400"),
+            _row("agent", "agent", "agent", "agent", "agent", "agent", "fail:tool"),
             id="unkeyed-agent",
         ),
-        # (2) Unkeyed request without an agent but with an absolute base_dir: only execute honors the base_dir.
+        # Unkeyed request without an agent acts in its absolute base_dir.
         pytest.param(
             None,
             None,
             "absolute",
-            _row("client", "client", "client", None, "fail:worker", "fail:worker", "http:400"),
+            _row("client", "client", "client", "client", "client", "client", "fail:tool"),
             id="unkeyed-absolute-base-dir",
         ),
-        # Unkeyed request routed to an agent without a workspace: shell keeps the runner's own HOME and cwd,
-        # and save-attachment and view-file blame the worker.
+        # Unkeyed request routed to an agent without a workspace has none: shell keeps the runner's own HOME and
+        # cwd, and save-attachment and view-file refuse the call.
         pytest.param(
             None,
             "bare",
             "none",
-            _row("runner_home", None, "runner_cwd", None, "fail:worker", "fail:worker", "http:400"),
+            _row("runner_home", None, "runner_cwd", None, "fail:tool", "fail:tool", "fail:tool"),
             id="unkeyed-agent-without-workspace",
         ),
-        # (3) Keyed dedicated shared-scope worker with a routing agent.
+        # Keyed dedicated shared-scope worker: without a base_dir the routing agent's workspace.
         pytest.param(
             "shared",
             "general",
             "none",
-            _row("agent", "agent", "agent", "agent", "agent", "worker_default", "agent"),
+            _row("agent", "agent", "agent", "agent", "agent", "agent", "agent"),
             id="shared-no-base-dir",
         ),
         pytest.param(
@@ -322,36 +314,36 @@ def _row(*values: str | None) -> dict[str, str | None]:
             _row("agent", "agent", "agent", "agent", "agent", "agent", "agent"),
             id="shared-agent-base-dir",
         ),
+        # A keyed base_dir inside the worker root wins over the routing agent's workspace.
         pytest.param(
             "shared",
             "general",
             "scratch",
-            _row("agent", "agent", "agent", "agent", "agent", "client", "agent"),
+            _row("client", "client", "client", "client", "client", "client", "client"),
             id="shared-scratch-base-dir",
         ),
-        # Keyed shared worker routed to an agent without a workspace: HOME is the worker root, not its workspace,
-        # and save-attachment blames the worker although view-file and the browser use the prepared workspace.
+        # Keyed shared worker routed to an agent without a workspace acts in the worker's default workspace.
         pytest.param(
             "shared",
             "bare",
             "none",
             _row(
-                "worker_root",
-                None,
                 "worker_default",
-                None,
-                "fail:worker",
+                "worker_default",
+                "worker_default",
+                "worker_default",
+                "worker_default",
                 "worker_default",
                 "worker_default",
             ),
             id="shared-agent-without-workspace",
         ),
-        # (4) Keyed user-scope worker routed to a user-scope agent.
+        # Keyed user-scope worker routed to a user-scope agent.
         pytest.param(
             "user",
             "coder",
             "none",
-            _row("agent", "agent", "agent", "agent", "agent", "worker_default", "agent"),
+            _row("agent", "agent", "agent", "agent", "agent", "agent", "agent"),
             id="user-no-base-dir",
         ),
         pytest.param(
@@ -365,15 +357,15 @@ def _row(*values: str | None) -> dict[str, str | None]:
             "user",
             "coder",
             "scratch",
-            _row("agent", "agent", "agent", "agent", "agent", "client", "agent"),
+            _row("client", "client", "client", "client", "client", "client", "client"),
             id="user-scratch-base-dir",
         ),
-        # (5) Keyed user_agent worker of a private agent: HOME follows the prepared base_dir, output follows the agent.
+        # Keyed user_agent worker of a private agent.
         pytest.param(
             "user_agent",
             "writer",
             "none",
-            _row("worker_default", "worker_default", "worker_default", "agent", "agent", "worker_default", "agent"),
+            _row("agent", "agent", "agent", "agent", "agent", "agent", "agent"),
             id="user-agent-no-base-dir",
         ),
         pytest.param(
@@ -387,7 +379,7 @@ def _row(*values: str | None) -> dict[str, str | None]:
             "user_agent",
             "writer",
             "scratch",
-            _row("client", "client", "client", "agent", "agent", "client", "agent"),
+            _row("client", "client", "client", "client", "client", "client", "client"),
             id="user-agent-scratch-base-dir",
         ),
     ],
@@ -407,68 +399,65 @@ def test_each_resolver_picks_the_pinned_workspace(
 
 
 @pytest.mark.parametrize("client_base_dir", ["outside", "absolute"])
-@pytest.mark.parametrize("route", ["execute", "view-file"])
-def test_keyed_base_dir_outside_visible_roots_is_refused(tmp_path: Path, client_base_dir: str, route: str) -> None:
-    """A keyed request whose base_dir leaves the worker root and its visible workspaces gets HTTP 400 before dispatch."""
-    # Save-attachment carries no base_dir, so this shape cannot reach it.
+@pytest.mark.parametrize("route", ["execute", "view-file", "save-attachment", "browser"])
+def test_keyed_base_dir_outside_visible_roots_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    client_base_dir: str,
+    route: str,
+) -> None:
+    """A keyed base_dir outside the worker root and its visible workspaces is refused, never replaced."""
     shape = _shape(tmp_path, scope="shared", agent="general", client_base_dir=client_base_dir)
-    payload = shape.execute_payload("shell", "run_shell_command") if route == "execute" else shape.view_payload()
+    payload = {
+        "execute": shape.execute_payload("shell", "run_shell_command"),
+        "view-file": shape.view_payload(),
+        "save-attachment": shape.attachment_payload(),
+        "browser": shape.execute_payload("browser", "browser_control"),
+    }[route]
+    endpoint = "execute" if route == "browser" else route
+    built: list[object] = []
+    monkeypatch.setattr(sandbox_runner, "_resolve_entrypoint", lambda **kwargs: built.append(kwargs))
 
-    response = shape.client().post(f"/api/sandbox-runner/{route}", headers=HEADERS, json=payload)
+    response = shape.client().post(f"/api/sandbox-runner/{endpoint}", headers=HEADERS, json=payload)
 
-    assert response.status_code == 400, response.text
-    assert "base_dir must stay inside a visible workspace or the worker root" in response.json()["detail"]
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "ok": False,
+        "error": response.json()["error"],
+        "failure_kind": "tool",
+    }
+    assert "base_dir must stay inside a visible workspace or the worker root" in response.json()["error"]
+    assert built == []
+    assert not list(tmp_path.rglob("sample.txt"))
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
-@pytest.mark.parametrize(
-    ("route", "scope", "expected_failure_kind", "expected_error"),
-    [
-        # The env-hook resolver creates a shared agent's workspace unguarded, so its raw OSError blames the worker.
-        ("execute", "shared", "worker", "Sandbox execution failed: PermissionError"),
-        ("execute", "user_agent", "tool", "Agent workspace is not mounted in this worker yet"),
-        # The browser path does not catch the output resolver's retryable error, so it escapes as an HTTP 500.
-        ("browser", "shared", None, "Agent workspace is not mounted in this worker yet"),
-        ("browser", "user_agent", None, "Agent workspace is not mounted in this worker yet"),
-        ("save-attachment", "shared", "tool", "Agent workspace is not mounted in this worker yet"),
-        ("save-attachment", "user_agent", "tool", "Agent workspace is not mounted in this worker yet"),
-    ],
-)
-def test_unmounted_agent_workspace_failure_kind(
-    tmp_path: Path,
-    route: str,
-    scope: str,
-    expected_failure_kind: str | None,
-    expected_error: str,
-) -> None:
-    """An agent workspace the dedicated worker cannot create fails with the pinned failure_kind, or raises, per route."""
+@pytest.mark.parametrize("route", ["execute", "browser", "save-attachment", "view-file"])
+@pytest.mark.parametrize("scope", ["shared", "user_agent"])
+def test_unmounted_agent_workspace_is_a_tool_failure(tmp_path: Path, route: str, scope: str) -> None:
+    """An agent workspace the dedicated worker cannot create fails the call, not the worker, at every endpoint."""
     agent = "writer" if scope == "user_agent" else "general"
     shape = _shape(tmp_path, scope=scope, agent=agent, client_base_dir="none")
     # Only a read-only parent lies where the unmounted workspace belongs.
     unmounted_parent = shape.labels["agent"].parent
     unmounted_parent.mkdir(parents=True)
     unmounted_parent.chmod(0o555)
-    if route == "save-attachment":
-        endpoint, payload = "save-attachment", shape.attachment_payload()
-    elif route == "browser":
-        endpoint, payload = "execute", shape.execute_payload("browser", "browser_control")
-    else:
-        endpoint, payload = "execute", shape.execute_payload("shell", "run_shell_command")
-    client = TestClient(shape.client().app)
+    endpoint, payload = {
+        "save-attachment": ("save-attachment", shape.attachment_payload()),
+        "view-file": ("view-file", shape.view_payload()),
+        "browser": ("execute", shape.execute_payload("browser", "browser_control")),
+        "execute": ("execute", shape.execute_payload("shell", "run_shell_command")),
+    }[route]
     try:
-        if expected_failure_kind is None:
-            with pytest.raises(sandbox_worker_prep.WorkerRequestPreparationError, match=expected_error):
-                client.post(f"/api/sandbox-runner/{endpoint}", headers=HEADERS, json=payload)
-            return
-        response = client.post(f"/api/sandbox-runner/{endpoint}", headers=HEADERS, json=payload)
+        response = shape.client().post(f"/api/sandbox-runner/{endpoint}", headers=HEADERS, json=payload)
     finally:
         unmounted_parent.chmod(0o755)
 
     assert response.status_code == 200, response.text
     result = _response_line(response)
     assert result["ok"] is False
-    assert result["failure_kind"] == expected_failure_kind
-    assert str(result["error"]).startswith(expected_error), result
+    assert result["failure_kind"] == "tool"
+    assert str(result["error"]).startswith("Agent workspace is not mounted in this worker yet"), result
 
 
 @pytest.mark.parametrize(

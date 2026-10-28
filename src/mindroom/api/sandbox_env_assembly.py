@@ -14,7 +14,6 @@ ordering is unit testable in isolation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom import constants
@@ -27,42 +26,27 @@ if TYPE_CHECKING:
     from mindroom.api import sandbox_worker_prep
 
 
-@dataclass(frozen=True, slots=True)
-class _RequestExecutionEnv:
-    """Outcome of assembling one request's execution environment."""
-
-    workspace_home: Path | None
-    trusted_overlay: dict[str, str]
-
-
 def build_request_execution_env(
     *,
     request_workspace: Path | None,
     prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
     execution_env: dict[str, str],
-    apply_workspace_home_contract: bool = True,
-    apply_workspace_env_hook: bool = True,
-) -> _RequestExecutionEnv:
-    """Apply request env overlays in the security-sensitive canonical order.
+) -> dict[str, str]:
+    """Apply request env overlays in the security-sensitive canonical order and return the trusted hook overlay.
 
     ``request_workspace`` is the already-resolved workspace for this request, or
     ``None`` when the tool does not support workspace hooks or no workspace
     applies. ``execution_env`` is mutated in place.
-
-    ``workspace_home`` in the result is ``None`` whenever the HOME contract is not
-    applied, even when ``request_workspace`` is provided, so callers that key
-    protected-name filtering off the result keep protecting only worker-runtime
-    names in the trusted-child subprocess path.
 
     Raises :class:`sandbox_exec.WorkspaceEnvHookError` when the workspace hook
     exists but fails to source.
     """
     workspace_home = (
         _apply_workspace_home_contract(request_workspace, execution_env, prepared=prepared)
-        if apply_workspace_home_contract and request_workspace is not None
+        if request_workspace is not None
         else None
     )
-    protected_names = protected_execution_env_names(workspace_home=workspace_home, prepared=prepared)
+    protected_names = _protected_execution_env_names(workspace_home=workspace_home, prepared=prepared)
     protected_env = _protected_execution_env(
         workspace_home=workspace_home,
         prepared=prepared,
@@ -72,16 +56,15 @@ def build_request_execution_env(
         request_workspace=request_workspace,
         prepared=prepared,
         execution_env=execution_env,
-        apply=apply_workspace_env_hook,
     )
-    trusted_overlay = trusted_workspace_overlay_for_runtime_paths(overlay, protected_names)
+    trusted_overlay = _trusted_workspace_overlay(overlay, protected_names)
     if trusted_overlay:
         execution_env.update(trusted_overlay)
     execution_env.update(protected_env)
-    return _RequestExecutionEnv(workspace_home=workspace_home, trusted_overlay=trusted_overlay)
+    return trusted_overlay
 
 
-def protected_execution_env_names(
+def _protected_execution_env_names(
     *,
     workspace_home: Path | None,
     prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
@@ -94,7 +77,7 @@ def protected_execution_env_names(
     return frozenset()
 
 
-def trusted_workspace_overlay_for_runtime_paths(
+def _trusted_workspace_overlay(
     overlay: dict[str, str],
     protected_names: Collection[str],
 ) -> dict[str, str]:
@@ -169,17 +152,14 @@ def _workspace_env_overlay(
     request_workspace: Path | None,
     prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
     execution_env: dict[str, str],
-    apply: bool,
 ) -> dict[str, str]:
     """Source ``.mindroom/worker-env.sh`` for one request.
 
-    Returns the hook overlay, empty when the hook is absent, ``request_workspace``
-    is ``None``, or ``apply`` is False (the in-subprocess re-execution path after
-    the parent already sourced the hook). Raises
-    :class:`sandbox_exec.WorkspaceEnvHookError` when the hook exists but fails to
-    source.
+    Returns the hook overlay, empty when the hook is absent or ``request_workspace``
+    is ``None``. Raises :class:`sandbox_exec.WorkspaceEnvHookError` when the hook
+    exists but fails to source.
     """
-    if not apply or request_workspace is None:
+    if request_workspace is None:
         return {}
     hook_path = sandbox_exec.resolve_workspace_env_hook_path(request_workspace)
     if hook_path is None:

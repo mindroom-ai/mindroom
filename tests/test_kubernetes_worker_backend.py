@@ -65,8 +65,8 @@ from mindroom.workers.backends.kubernetes_resources import (
     ANNOTATION_WORKER_KEY,
     worker_auth_token,
 )
-from mindroom.workers.compatibility import _WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import WorkerHandle, WorkerLaunchConfig, WorkerReadyProgress, WorkerSpec
+from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION
 from mindroom.workers.runtime import (
     build_worker_launch_config,
     primary_worker_backend_available,
@@ -795,7 +795,7 @@ def _backend(
             spec=SimpleNamespace(replicas=1),
             status=SimpleNamespace(ready_replicas=1, observed_generation=1),
         )
-    _answer_worker_health(backend, lambda: _WORKER_PROTOCOL_VERSION)
+    _answer_worker_health(backend, lambda: WORKER_PROTOCOL_VERSION)
     return backend, apps_api, core_api
 
 
@@ -4730,7 +4730,7 @@ def test_kubernetes_stale_worker_is_recreated_before_a_call_reaches_it(stale_pro
     backend, apps_api, _core_api = _backend()
     reads = _answer_worker_health(
         backend,
-        lambda: _WORKER_PROTOCOL_VERSION if len(apps_api.created_bodies) > 1 else stale_protocol,
+        lambda: WORKER_PROTOCOL_VERSION if len(apps_api.created_bodies) > 1 else stale_protocol,
     )
 
     handle = backend.ensure_worker(_spec(backend, _TEST_SCOPED_WORKER_KEY_A), now=10.0)
@@ -4749,7 +4749,7 @@ def test_kubernetes_stale_running_worker_is_recreated_after_primary_restart() ->
     assert first_handle.startup_count == 1
     # Manager replacement, as on a primary restart, forgets which workers were already checked.
     backend.shutdown()
-    _answer_worker_health(backend, lambda: _WORKER_PROTOCOL_VERSION if len(apps_api.created_bodies) > 1 else 3)
+    _answer_worker_health(backend, lambda: WORKER_PROTOCOL_VERSION if len(apps_api.created_bodies) > 1 else 3)
 
     recovered_handle = backend.ensure_worker(_spec(backend, _TEST_SCOPED_WORKER_KEY_A), now=20.0)
 
@@ -4765,7 +4765,7 @@ def test_kubernetes_stale_worker_replacement_is_not_retried() -> None:
     backend, apps_api, core_api = _backend()
     _answer_worker_health(backend, lambda: 3)
 
-    with pytest.raises(WorkerBackendError, match=f"expected worker protocol {_WORKER_PROTOCOL_VERSION}, got 3") as exc:
+    with pytest.raises(WorkerBackendError, match=f"expected worker protocol {WORKER_PROTOCOL_VERSION}, got 3") as exc:
         backend.ensure_worker(_spec(backend, _TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
     assert str(exc.value).startswith("Kubernetes worker image 'ghcr.io/mindroom-ai/mindroom:latest' is incompatible")
@@ -4794,7 +4794,7 @@ def test_kubernetes_stale_running_worker_is_refused_when_its_replacement_is_stil
     _install_real_elapsed_wait_for_ready(backend, ready_after_seconds=1.6)
     events: list[WorkerReadyProgress] = []
 
-    with pytest.raises(WorkerBackendError, match=f"expected worker protocol {_WORKER_PROTOCOL_VERSION}, got 3"):
+    with pytest.raises(WorkerBackendError, match=f"expected worker protocol {WORKER_PROTOCOL_VERSION}, got 3"):
         backend.ensure_worker(_spec(backend, _TEST_SCOPED_WORKER_KEY_A), now=20.0, progress_sink=events.append)
 
     worker_id = first_handle.worker_id
@@ -4823,7 +4823,7 @@ def test_kubernetes_stale_worker_refusal_under_always_blames_no_cached_copy() ->
 def test_kubernetes_newer_worker_refusal_says_to_run_the_primary_on_its_release(image_pull_policy: str) -> None:
     """A worker that started from a newer tag than the primary is refused with the fix on the primary's side."""
     backend, apps_api, _core_api = _backend(image_pull_policy=image_pull_policy)
-    newer_protocol = _WORKER_PROTOCOL_VERSION + 1
+    newer_protocol = WORKER_PROTOCOL_VERSION + 1
     _answer_worker_health(backend, lambda: newer_protocol)
 
     with pytest.raises(WorkerBackendError, match=f"got {newer_protocol} ") as exc:

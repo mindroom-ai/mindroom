@@ -76,8 +76,8 @@ from mindroom.workers.backends.docker_projection import (
 )
 from mindroom.workers.backends.legacy_state_root_mounts import _remove_docker_workers_mounting_state_roots
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
-from mindroom.workers.compatibility import _WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import WorkerLaunchConfig, WorkerReadyProgress, WorkerSpec
+from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION
 from mindroom.workers.runtime import (
     build_worker_launch_config,
     primary_worker_backend_available,
@@ -1064,7 +1064,7 @@ def _install_health_by_image(
                 None,
             )
             assert container is not None, f"no running fake container publishes host port {port}"
-            protocol = _WORKER_PROTOCOL_VERSION if container.attrs["Image"] == "sha256:image-v2" else stale_protocol
+            protocol = WORKER_PROTOCOL_VERSION if container.attrs["Image"] == "sha256:image-v2" else stale_protocol
             return httpx.Response(
                 200,
                 json={"status": "ok", "mindroom_version": "test", "worker_protocol": protocol},

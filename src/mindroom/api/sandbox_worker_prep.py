@@ -41,7 +41,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _MAX_LEASE_TTL_SECONDS = 3600
-DEFAULT_LEASE_TTL_SECONDS = 60
 
 
 @dataclass
@@ -64,11 +63,15 @@ _LEASES_LOCK = threading.Lock()
 
 @dataclass(frozen=True)
 class PreparedWorkerRequest:
-    """Prepared worker state reused across validation and dispatch."""
+    """Prepared worker state reused across validation and dispatch.
+
+    ``base_dir`` is the request's ``base_dir`` confined to the worker root or one of its visible workspaces, or the
+    worker's default workspace when the request named none.
+    """
 
     handle: WorkerHandle
     paths: LocalWorkerStatePaths
-    runtime_overrides: dict[str, object]
+    base_dir: Path
 
 
 class WorkerRequestPreparationError(ValueError):
@@ -223,15 +226,12 @@ def _resolve_worker_base_dir(
     paths: LocalWorkerStatePaths,
     storage_root: Path,
     worker_key: str,
-    requested_base_dir: object | None,
+    requested_base_dir: str | None,
     workspace_roots: tuple[Path, ...],
 ) -> Path:
     """Resolve the effective base_dir inside one visible workspace or the worker root."""
     if requested_base_dir is None:
         return paths.workspace.resolve()
-    if not isinstance(requested_base_dir, str):
-        msg = "base_dir must be a string path."
-        raise TypeError(msg)
 
     raw_path = Path(requested_base_dir).expanduser()
     if raw_path.is_absolute():
@@ -254,17 +254,6 @@ def _resolve_worker_base_dir(
     raise ValueError(msg)
 
 
-def ready_runtime_overrides(runtime_overrides: dict[str, object] | None) -> dict[str, object] | None:
-    """Materialize runtime override paths before tool execution."""
-    if runtime_overrides is None:
-        return None
-
-    base_dir = runtime_overrides.get("base_dir")
-    if isinstance(base_dir, Path):
-        base_dir.mkdir(parents=True, exist_ok=True)
-    return runtime_overrides
-
-
 def _explicit_private_agent_names(
     worker_key: str,
     private_agent_names: frozenset[str] | None,
@@ -281,13 +270,13 @@ def _explicit_private_agent_names(
 def prepare_worker_request(
     *,
     worker_key: str | None,
-    tool_init_overrides: dict[str, object],
+    base_dir: str | None,
     runtime_paths: RuntimePaths,
     agent_policies: Mapping[str, ResolvedAgentPolicy],
     private_agent_names: frozenset[str] | None = None,
     runner_token: str | None = None,
 ) -> PreparedWorkerRequest:
-    """Prepare one worker-backed request for execution."""
+    """Prepare one worker-backed request for execution, confining its ``base_dir``."""
     if worker_key is None:
         msg = "worker_key is required for worker-backed sandbox execution."
         raise WorkerRequestPreparationError(msg, failure_kind="request")
@@ -305,51 +294,22 @@ def prepare_worker_request(
     try:
         paths = local_worker_state_paths_from_handle(worker_handle)
         storage_root = sandbox_exec.runner_storage_root(runtime_paths)
-        runtime_overrides: dict[str, object] = {
-            "base_dir": _resolve_worker_base_dir(
-                paths,
+        confined_base_dir = _resolve_worker_base_dir(
+            paths,
+            storage_root,
+            worker_key,
+            base_dir,
+            visible_workspace_roots(
                 storage_root,
                 worker_key,
-                tool_init_overrides.get("base_dir"),
-                visible_workspace_roots(
-                    storage_root,
-                    worker_key,
-                    agent_policies,
-                    private_agent_names=_explicit_private_agent_names(worker_key, private_agent_names),
-                ),
+                agent_policies,
+                private_agent_names=_explicit_private_agent_names(worker_key, private_agent_names),
             ),
-        }
+        )
     except (FileNotFoundError, TypeError, ValueError) as exc:
         raise WorkerRequestPreparationError(str(exc), failure_kind="request") from exc
 
-    return PreparedWorkerRequest(
-        handle=worker_handle,
-        paths=paths,
-        runtime_overrides=runtime_overrides,
-    )
-
-
-def resolve_prepared_worker_request(
-    *,
-    worker_key: str | None,
-    tool_init_overrides: dict[str, object],
-    runtime_paths: RuntimePaths,
-    agent_policies: Mapping[str, ResolvedAgentPolicy],
-    private_agent_names: frozenset[str] | None = None,
-    prepared_worker: PreparedWorkerRequest | None,
-    runner_token: str | None = None,
-) -> PreparedWorkerRequest | None:
-    """Reuse or prepare worker state for one request."""
-    if worker_key is None:
-        return None
-    return prepared_worker or prepare_worker_request(
-        worker_key=worker_key,
-        tool_init_overrides=tool_init_overrides,
-        runtime_paths=runtime_paths,
-        agent_policies=agent_policies,
-        private_agent_names=private_agent_names,
-        runner_token=runner_token,
-    )
+    return PreparedWorkerRequest(handle=worker_handle, paths=paths, base_dir=confined_base_dir)
 
 
 def record_worker_failure(

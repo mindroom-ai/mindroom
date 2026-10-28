@@ -5,7 +5,8 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from mindroom.workers.compatibility import _WORKER_PROTOCOL_VERSION, worker_health_compatibility_error
+from mindroom.workers.compatibility import worker_health_compatibility_error
+from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION
 
 
 def test_worker_health_accepts_matching_protocol() -> None:
@@ -15,7 +16,7 @@ def test_worker_health_accepts_matching_protocol() -> None:
         json={
             "status": "ok",
             "mindroom_version": "2026.8.1",
-            "worker_protocol": _WORKER_PROTOCOL_VERSION,
+            "worker_protocol": WORKER_PROTOCOL_VERSION,
         },
     )
 
@@ -45,7 +46,7 @@ def test_worker_health_rejects_older_or_invalid_protocol(payload: dict[str, obje
 
     assert error is not None
     assert "mindroom:stale" in error
-    assert f"expected worker protocol {_WORKER_PROTOCOL_VERSION}" in error
+    assert f"expected worker protocol {WORKER_PROTOCOL_VERSION}" in error
     assert "Use a worker image built for this MindRoom release" in error
 
 
@@ -53,7 +54,7 @@ def test_worker_health_sends_a_newer_worker_to_the_primary_release() -> None:
     """A worker from a newer release is fixed on the primary's side, so only the caller's newer-worker hint applies."""
     response = httpx.Response(
         200,
-        json={"status": "ok", "mindroom_version": "2026.11.1", "worker_protocol": _WORKER_PROTOCOL_VERSION + 1},
+        json={"status": "ok", "mindroom_version": "2026.11.1", "worker_protocol": WORKER_PROTOCOL_VERSION + 1},
     )
 
     error = worker_health_compatibility_error(
@@ -65,7 +66,7 @@ def test_worker_health_sends_a_newer_worker_to_the_primary_release() -> None:
     )
 
     assert error is not None
-    assert f"got {_WORKER_PROTOCOL_VERSION + 1} (worker MindRoom version 2026.11.1)" in error
+    assert f"got {WORKER_PROTOCOL_VERSION + 1} (worker MindRoom version 2026.11.1)" in error
     assert error.endswith(
         "The worker image comes from a newer MindRoom release: "
         "upgrade this runtime to the worker's release, or pin both to one release tag. newer-worker hint",

@@ -43,6 +43,8 @@ from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.workers.backends import local as local_workers
 from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
 from mindroom.workers.models import WorkerHandle
+from mindroom.workers.protocol import CallEnvironment
+from tests.api.sandbox_runner_support import execute_call
 from tests.api.test_sandbox_runner_api import SANDBOX_TOKEN, _write_general_agent_config
 from tests.conftest import runtime_paths_for
 from tests.test_plugins import _bind_runtime_paths, _preserved_plugin_loader_state
@@ -260,7 +262,7 @@ async def test_a_removal_also_keeps_an_inherited_variable_from_the_command(
 
     assert (inherited, removed) == ("http://operator-proxy:3128", "unset")
     if shell.sent:
-        assert shell.sent[-1]["execution_env_unset"] == ["HTTPS_PROXY"]
+        assert shell.sent[-1]["environment"]["unset_names"] == ["HTTPS_PROXY"]
 
 
 @pytest.mark.parametrize("pattern", ["MINDROOM_*", "*"])
@@ -310,7 +312,7 @@ async def test_a_hook_s_values_win_over_the_workspace_script_of_a_worker(
 
     assert script_only == "from-script|from-script|from-script"
     assert with_hook == "from-hook|unset|from-script"
-    assert shell.sent[-1]["execution_env_set"] == ["GITHUB_TOKEN"]
+    assert shell.sent[-1]["environment"]["set_names"] == ["GITHUB_TOKEN"]
 
 
 @pytest.mark.asyncio
@@ -425,20 +427,19 @@ async def test_a_hook_s_path_keeps_the_entries_a_dedicated_worker_adds(tmp_path:
     )
     hook_path = os.pathsep.join(("/plugin/bin", os.environ["PATH"]))
     prepared = sandbox_runner._prepare_execute_request(
-        sandbox_runner.SandboxRunnerExecuteRequest(
+        execute_call(
+            worker_runtime,
+            prepared_worker=sandbox_runner.sandbox_worker_prep.PreparedWorkerRequest(
+                handle=handle,
+                paths=worker_paths,
+                base_dir=workspace,
+            ),
             tool_name="shell",
             function_name="run_shell_command",
             worker_key=worker_key,
             args=[["bash", "-c", 'printf "%s\\n" "$PATH"; worker-venv-tool']],
             execution_env={"PATH": hook_path},
-            execution_env_set=["PATH"],
-            execution_path_prepend=["/plugin/wrapper"],
-        ),
-        worker_runtime,
-        prepared_worker=sandbox_runner.sandbox_worker_prep.PreparedWorkerRequest(
-            handle=handle,
-            paths=worker_paths,
-            runtime_overrides={"base_dir": str(workspace)},
+            environment=CallEnvironment(set_names=["PATH"], path_prepend=["/plugin/wrapper"]),
         ),
     )
 

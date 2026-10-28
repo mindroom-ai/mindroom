@@ -27,6 +27,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_unscoped_worker_key,
     resolve_worker_target,
 )
+from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, WorkerRoute
 from tests.conftest import call_proxy_sync_for_test
 
 if TYPE_CHECKING:
@@ -173,11 +174,15 @@ def payloads(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 def dedicated_routing(monkeypatch: pytest.MonkeyPatch) -> None:
     """Route calls to a dedicated worker whose key is the target's own or, for unscoped targets, a routed one."""
 
-    def routing_payload(*, worker_target: ResolvedWorkerTarget | None, **_kwargs: object) -> tuple[dict, None]:
+    def worker_route(*, worker_target: ResolvedWorkerTarget | None, **_kwargs: object) -> tuple[WorkerRoute, None]:
         assert worker_target is not None
-        return {"worker_key": worker_target.worker_key or _ROUTED_UNSCOPED_KEY}, None
+        route = WorkerRoute(
+            protocol=WORKER_PROTOCOL_VERSION,
+            worker_key=worker_target.worker_key or _ROUTED_UNSCOPED_KEY,
+        )
+        return route, None
 
-    monkeypatch.setattr(sandbox_proxy_module, "_build_worker_routing_payload", routing_payload)
+    monkeypatch.setattr(sandbox_proxy_module, "_worker_route", worker_route)
 
 
 def _call(
@@ -301,7 +306,7 @@ async def test_static_runner_shell_call_signs_unscoped_worker_key(
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         _call(runtime_paths, config, "python", target, manager)
     [payload] = payloads
-    assert "worker_key" not in payload
+    assert payload["worker_key"] is None
     assert "HTTPS_PROXY" in payload["execution_env"]
     assert _token_worker_key(runtime_paths, payload["execution_env"]) == resolve_unscoped_worker_key("code")
 
