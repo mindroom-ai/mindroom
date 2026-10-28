@@ -1485,6 +1485,11 @@ async def test_an_approved_resume_shows_a_failed_run_s_reason_after_the_text_its
             "Checker unavailable: api_key=***redacted***",
             id="failed-before-writing",
         ),
+        pytest.param(
+            [[TextDelta("Checking it"), Await(_checker_overloaded)]],
+            "Checking it\n\nChecker overloaded",
+            id="failed-after-writing-a-reason-with-nothing-to-redact",
+        ),
     ],
 )
 async def test_a_streamed_team_reply_shows_a_failed_member_run_s_reason_after_the_text_it_streamed(
@@ -1937,25 +1942,37 @@ async def _lose_the_provider() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [True, False])
 @pytest.mark.parametrize(
-    "leader",
+    ("leader", "recorded"),
     [
         pytest.param(
-            [delegate("call-check", "checker", "Check"), [TextDelta("Checked once."), Await(_lose_the_provider)]],
+            [delegate("call-check", "checker", "Check"), [Await(_lose_the_provider)]],
+            "**Checker**: Checker overloaded\n\n\n**Team Consensus**:\n\nprovider connection lost",
             id="after-a-member-failed",
         ),
-        pytest.param([[TextDelta("Checked once."), Await(_lose_the_provider)]], id="on-the-first-request"),
+        pytest.param(
+            [[Await(_lose_the_provider)]],
+            "\n**Team Consensus**:\n\nprovider connection lost",
+            id="on-the-first-request",
+        ),
+        pytest.param(
+            [[TextDelta("Checked once."), Await(_lose_the_provider)]],
+            "\n**Team Consensus**:\n\nChecked once.\n\nprovider connection lost",
+            id="after-streaming-text",
+        ),
     ],
 )
-async def test_a_failed_team_turn_records_the_document_it_had_shown(
+async def test_a_failed_team_turn_records_why_its_runs_failed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     leader: list[list[ScriptStep]],
+    recorded: str,
     stream: bool,
 ) -> None:
-    """A turn whose leader request fails records the document it had shown, on either path.
+    """A turn whose leader request fails records its document with each failed run's reason, on either path.
 
-    The failed runs' reasons stay in their stored records, the leader's as its content since its request completed no
-    text; the document shows a failed member's reason only once the team run ends.
+    A member that failed before any text shows its error; the leader's failure stands in its consensus, after any
+    text the failed request had streamed. A document of the consensus alone starts with the line break before its
+    label, which the replayed record strips.
     """
     team = squad_turn(tmp_path, monkeypatch, leader=leader, checker=[[Await(_checker_overloaded)]])
 
@@ -1964,7 +1981,7 @@ async def test_a_failed_team_turn_records_the_document_it_had_shown(
     record, _ = team.stored_runs()
     assert (record.status, record.content) == (RunStatus.error, "provider connection lost")
     assert team.recorder.outcome == "interrupted"
-    assert team.recorder.assistant_text == "\n**Team Consensus**:\n\nChecked once."
+    assert team.recorder.assistant_text == recorded
 
 
 async def _lose_the_provider_and_leak_its_key() -> None:
@@ -1973,19 +1990,17 @@ async def _lose_the_provider_and_leak_its_key() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_failed_team_turn_shows_and_records_its_leader_s_reason_redacted(
+async def test_a_failed_team_turn_records_its_leader_s_redacted_reason(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A turn whose leader fails before writing answers with why it failed and records nothing, credentials redacted."""
+    """The text a turn records when its leader fails before writing is why it failed, credentials redacted."""
     team = squad_turn(tmp_path, monkeypatch, leader=[[Await(_lose_the_provider_and_leak_its_key)]])
 
-    text = await team.respond(show_tool_calls=False)
+    await team.respond(show_tool_calls=False)
 
-    assert "provider connection lost" in text
-    assert _KEY not in text
     assert team.recorder.outcome == "interrupted"
-    assert team.recorder.assistant_text == ""
+    assert team.recorder.assistant_text == "\n**Team Consensus**:\n\nprovider connection lost: api_key=***redacted***"
 
 
 @pytest.mark.asyncio
@@ -2587,14 +2602,16 @@ async def test_a_stopped_member_keeps_its_usage_and_both_rows_end_cancelled(
 
 
 @pytest.mark.asyncio
-async def test_a_stopped_blocking_team_turn_records_the_document_it_had_shown(
+@pytest.mark.parametrize("stream", [True, False])
+async def test_a_stopped_team_turn_records_its_member_runs_in_configured_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
 ) -> None:
-    """A Stop of a blocking turn records the document its run's events had built, as a streamed turn does.
+    """A Stop records the document its run's events built, each member in its configured slot, on either path.
 
-    The writer, stopped while its call ran, shows what it wrote before; the checker failed before any text, and the
-    document shows a failed member's reason only once the team run ends.
+    The writer, stopped while its call ran, shows what it wrote before; the checker failed before any text and shows
+    its error.
     """
     team = squad_turn(
         tmp_path,
@@ -2603,7 +2620,7 @@ async def test_a_stopped_blocking_team_turn_records_the_document_it_had_shown(
         checker=[[Await(_checker_overloaded)]],
         writer=[calls(tool_call("touch", "call-touch", label="draft", wait=True), content="Drafting.")],
     )
-    task = asyncio.create_task(team.respond(show_tool_calls=False))
+    task = asyncio.create_task(team.reply(stream=stream, show_tool_calls=False))
     await asyncio.wait_for(ProbeToolkit.waiting.wait(), timeout=5)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -2612,7 +2629,7 @@ async def test_a_stopped_blocking_team_turn_records_the_document_it_had_shown(
     record, members = team.stored_runs()
     assert [run.status for run in (record, *members)] == [RunStatus.cancelled, RunStatus.error, RunStatus.cancelled]
     assert team.recorder.outcome == "interrupted"
-    assert team.recorder.assistant_text == "**Writer**: Drafting."
+    assert team.recorder.assistant_text == "**Writer**: Drafting.\n\n**Checker**: Checker overloaded"
 
 
 @pytest.mark.asyncio

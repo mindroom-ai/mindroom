@@ -45,13 +45,16 @@ def _unshown_handover(run: AnyRunRecord, *, streamed: bool) -> str | None:
     """Return what ``run`` hands over beyond its pause (``new_handover_content``) that its events have not shown.
 
     A run's deltas show its content as it is written, so a run that streamed text has shown what it hands over,
-    unless that is not its content: a failed run hands over why it failed. What a resumed run carried over from its
-    pause the document the resume continues already accounts for. A paused run shows nothing more: beyond the text
-    it streamed, its content is a paused notice, which a team reply never shows, as a pause of a live turn does not.
+    unless it failed: a failed run hands over why it failed, which no delta shows, even when its content is that
+    reason because its model said nothing it kept. What a resumed run carried over from its pause the document the
+    resume continues already accounts for. A paused run shows nothing more: beyond the text it streamed, its content
+    is a paused notice, which a team reply never shows, as a pause of a live turn does not.
     """
     if run.status is RunStatus.paused:
         return None
     handover = run.new_handover_content
+    if run.status is RunStatus.error:
+        return handover
     return None if streamed and handover == run.content else handover
 
 
@@ -139,14 +142,15 @@ class TeamAttempt:
             self.presentation.append_member(member_id, handover, separate=True)
 
     def show_failure_reasons(self, record: TeamRunRecord) -> None:
-        """Add the reason each failed member run of ``record`` recorded, credentials redacted, that its deltas did not show.
+        """Add the reason each failed run of ``record``, the team run or a member run, recorded, credentials redacted.
 
-        A turn shows its runs' deltas and, when the team run ends, each failed member run's reason, as a resumed reply
-        shows it (``show_unshown_handover``).
+        A turn shows its runs' deltas and, once the team run ends however it ends, each failed run's reason, as a
+        resumed reply shows it (``show_unshown_handover``): a failed leader's in the consensus, a failed member's in
+        its slot.
         """
-        for member in record.ended_member_runs:
-            if member.status is RunStatus.error:
-                self.show_unshown_handover(member)
+        for run in (record, *record.ended_member_runs):
+            if run.status is RunStatus.error:
+                self.show_unshown_handover(run)
 
     def chunk(self, *, finished: bool) -> StructuredStreamChunk | None:
         """Return the rendered document as a stream chunk, or None while it is still empty.
