@@ -261,7 +261,7 @@ def test_a_compaction_summary_stored_with_an_untagged_request_reports_its_model(
     config, paths = _usage_runtime(tmp_path)
     storage = create_state_storage("code", tmp_path / "agents/code")
     counters = {"input_tokens": 40, "output_tokens": 4, "total_tokens": 44}
-    # The row as compaction summaries stored it through v2026.10.624.
+    # The row as compaction summaries stored it before its request named its model.
     stored = {
         "run_id": "compaction:summary",
         "parent_run_id": None,

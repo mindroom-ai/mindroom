@@ -312,7 +312,8 @@ class HelperUsage:
     usage describes it alone: a retried request's usage sums its attempts, so ``metrics`` counts it but ``requests``
     does not list it. ``voice`` is set for a live voice session, which is billed by duration and lists no requests.
     ``created_at`` defaults to when the value is built, which is when a helper prompt finished; Mem0 dates it by its
-    first call, and voice transcription by when its request was sent.
+    first call, voice transcription by when its request was sent, a helper run by its start, a live voice or realtime
+    call by its start, and a compaction summary by when it was stored.
     """
 
     run_id: str
