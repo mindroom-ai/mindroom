@@ -108,6 +108,7 @@ _.force_join_user  # hook plugins call this public Matrix admin method (src/mind
 _.kick_user  # hook plugins call this public Matrix admin method (src/mindroom/hooks/types.py, src/mindroom/hooks/matrix_admin.py)
 _.get_profile_avatar  # hook plugins call this public Matrix admin method (src/mindroom/hooks/types.py, src/mindroom/hooks/matrix_admin.py)
 _.get_room_state_event  # hook plugins call this public Matrix admin method (src/mindroom/hooks/types.py, src/mindroom/hooks/matrix_admin.py)
+_.put_room_state  # hook plugins call this public Matrix admin and hook-context method (src/mindroom/hooks/types.py, src/mindroom/hooks/matrix_admin.py, src/mindroom/hooks/context.py)
 _.make_request  # unused method (src/mindroom/tools/custom_api.py)
 _._async_crawl  # unused method (src/mindroom/tools/crawl4ai.py)
 _.redirect_request  # unused method (src/mindroom/tools/approved_egress.py, src/mindroom/agent_cli/client.py)

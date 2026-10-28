@@ -3090,18 +3090,6 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
-    # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(
-        _client: AsyncMock,
-        _room_id: str,
-        _config: Config,
-        _runtime_paths: object,
-        _conversation_reader: object,
-    ) -> int:
-        return 0
-
-    monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
-
     # Mock resolve_room_aliases
     def mock_resolve_room_aliases(aliases: list[str], _runtime_paths: object | None = None) -> list[str]:
         return list(aliases)
@@ -3173,21 +3161,6 @@ async def test_router_updates_rooms_on_config_reload(
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
-    # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(
-        _client: AsyncMock,
-        _room_id: str,
-        _config: Config,
-        _runtime_paths: object,
-        _conversation_reader: object,
-        *,
-        config_provider: Callable[[], Config | None] | None = None,
-    ) -> int:
-        del config_provider
-        return 0
-
-    monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
-
     # Mock resolve_room_aliases
     def mock_resolve_room_aliases(aliases: list[str], _runtime_paths: object | None = None) -> list[str]:
         return list(aliases)
@@ -3255,18 +3228,6 @@ async def test_new_agent_joins_rooms_on_config_reload(
 
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
 
-    # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(
-        _client: AsyncMock,
-        _room_id: str,
-        _config: Config,
-        _runtime_paths: object,
-        _conversation_reader: object,
-    ) -> int:
-        return 0
-
-    monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
-
     # Mock resolve_room_aliases
     def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
         return list(aliases)
@@ -3328,18 +3289,6 @@ async def test_team_room_changes_on_config_reload(
 
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
-
-    # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(
-        _client: AsyncMock,
-        _room_id: str,
-        _config: Config,
-        _runtime_paths: object,
-        _conversation_reader: object,
-    ) -> int:
-        return 0
-
-    monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
 
     # Mock resolve_room_aliases
     def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
@@ -3482,7 +3431,7 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
 
 
 @pytest.mark.asyncio
-async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
+async def test_room_membership_state_after_config_update(  # noqa: C901
     initial_config: Config,  # noqa: ARG001
     updated_config: Config,  # noqa: ARG001
     mock_agent_users: dict[str, AgentMatrixUser],
@@ -3522,21 +3471,6 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
 
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
-
-    # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(
-        _client: AsyncMock,
-        _room_id: str,
-        _config: Config,
-        _runtime_paths: object,
-        _conversation_reader: object,
-        *,
-        config_provider: Callable[[], Config | None] | None = None,
-    ) -> int:
-        del config_provider
-        return 0
-
-    monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
 
     # Mock resolve_room_aliases
     def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:

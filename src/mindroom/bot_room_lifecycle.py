@@ -115,6 +115,8 @@ class BotRoomLifecycleDeps:
     change_membership: _ChangeRoomMembership
     admit_response: Callable[[], AbstractAsyncContextManager[None]]
     on_configured_room_joined: Callable[[str], Awaitable[None]]
+    # Every successful join, configured or invited, so the bot restores the room's schedules.
+    on_room_joined: Callable[[str], Awaitable[None]]
     get_conversation_reader: Callable[[], ConversationReader]
 
 
@@ -390,6 +392,7 @@ class BotRoomLifecycle:
             if room_id in current_rooms:
                 self._logger().debug("Already joined room", room_id=room_id)
                 if await self.deps.change_membership(room_id, "join"):
+                    await self.deps.on_room_joined(room_id)
                     await self.deps.on_configured_room_joined(room_id)
                 else:
                     self._logger().warning(
@@ -401,6 +404,7 @@ class BotRoomLifecycle:
             if await self._join_room_with_decrypt_notice_fence(room_id):
                 current_rooms.add(room_id)
                 self._logger().info("Joined room", room_id=room_id)
+                await self.deps.on_room_joined(room_id)
                 await self.deps.on_configured_room_joined(room_id)
             else:
                 self._logger().warning("Failed to join room", room_id=room_id)
@@ -664,6 +668,7 @@ class BotRoomLifecycle:
             await self._send_invite_welcome(room.room_id, sender)
             if not joined:
                 await self._send_managed_room_notice(room, sender)
+            await self.deps.on_room_joined(room.room_id)
             await self._forget_pending_room_invite(room.room_id, expected_sender=sender)
 
     async def _join_current_invitation(self, room_id: str, sender: str) -> bool:

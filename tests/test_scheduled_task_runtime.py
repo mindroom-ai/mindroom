@@ -1,0 +1,468 @@
+"""The scheduled-task runtime owns every runner and gates each runner's use of its owner's live bot."""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, patch
+
+import nio
+import pytest
+
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.orchestration.entity_fleet import _FleetShutdown
+from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.scheduling import runtime as scheduling_runtime
+from mindroom.scheduling.executor import ScheduledWorkflowOutcome
+from mindroom.scheduling.tasks import ScheduledTaskRecord, ScheduledWorkflow
+from tests.conftest import install_bots, make_matrix_client_mock, orchestrator_runtime_paths
+from tests.identity_helpers import entity_ids
+from tests.scheduling_helpers import (
+    persist_schedule_writer,
+    scheduled_task_runtime,
+    scheduled_task_state_event,
+    scheduling_bot,
+    serve_task_state_events,
+)
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from mindroom.bot import AgentBot
+    from mindroom.constants import RuntimePaths
+    from mindroom.scheduling.runtime import ScheduledTaskRuntime
+
+ROOM_ID = "!room:localhost"
+TASK_ID = "task1"
+
+
+@pytest.fixture(autouse=True)
+def _fast_owner_poll(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let a waiting runner notice its owner again within one loop turn."""
+    monkeypatch.setattr(scheduling_runtime, "_OWNER_POLL_INTERVAL_SECONDS", 0)
+
+
+def _config_and_ids(tmp_path: Path) -> tuple[Config, RuntimePaths, dict[str, str]]:
+    config = Config(agents={"general": AgentConfig(display_name="General")})
+    runtime_paths = orchestrator_runtime_paths(tmp_path)
+    ids = {name: matrix_id.full_id for name, matrix_id in entity_ids(config, runtime_paths).items()}
+    return config, runtime_paths, ids
+
+
+def _client(user_id: str) -> AsyncMock:
+    client = make_matrix_client_mock(user_id=user_id)
+    client.homeserver = "https://localhost"
+    return client
+
+
+def _workflow(*, due: bool = True) -> ScheduledWorkflow:
+    return ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + (timedelta(seconds=-1) if due else timedelta(hours=1)),
+        message="Water the plants",
+        description="Plants",
+        room_id=ROOM_ID,
+        thread_id="$thread",
+        created_by="@alice:localhost",
+    )
+
+
+def _record(workflow: ScheduledWorkflow) -> ScheduledTaskRecord:
+    return ScheduledTaskRecord(TASK_ID, ROOM_ID, "pending", None, workflow)
+
+
+class _Bots(dict[str, "AgentBot"]):
+    """The fleet's live bots, which a test replaces the way a restart does."""
+
+
+def _runtime(runtime_paths: RuntimePaths, config: Config, bots: _Bots) -> ScheduledTaskRuntime:
+    runtime = scheduled_task_runtime(runtime_paths, config=config)
+    runtime.bots = lambda: bots
+    return runtime
+
+
+def _stopped(bot: AgentBot) -> AgentBot:
+    bot.running = False
+    bot.first_sync_complete = False
+    return bot
+
+
+@pytest.mark.asyncio
+async def test_runner_waits_through_its_owners_restart_and_fires_once_on_the_new_client(tmp_path: Path) -> None:
+    """A DM reminder whose agent restarts fires once, through the replacement's client, never the closed one."""
+    config, runtime_paths, _ids = _config_and_ids(tmp_path)
+    old_bot = _stopped(scheduling_bot(_client("@general:localhost"), agent_name="general"))
+    bots = _Bots(general=old_bot)
+    runtime = _runtime(runtime_paths, config, bots)
+    workflow = _workflow()
+    owner_polled = asyncio.Event()
+    real_ready_bot = runtime._ready_bot
+
+    def ready_bot(entity_name: str) -> AgentBot | None:
+        owner_polled.set()
+        return real_ready_bot(entity_name)
+
+    with (
+        patch.object(runtime, "_ready_bot", side_effect=ready_bot),
+        patch("mindroom.scheduling.tasks._get_pending_task_record", new=AsyncMock(return_value=_record(workflow))),
+        patch("mindroom.scheduling.tasks._scheduled_task_creator_is_joined", new=AsyncMock(return_value=True)),
+        patch(
+            "mindroom.scheduling.executor.execute_scheduled_workflow",
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
+        ) as execute,
+        patch("mindroom.scheduling.tasks._save_task_status", new=AsyncMock()) as save_status,
+    ):
+        assert runtime._start_runner("general", TASK_ID, workflow)
+        _runner, task = runtime._runners[TASK_ID]
+        await owner_polled.wait()
+        execute.assert_not_awaited()
+        new_bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
+        bots["general"] = new_bot
+        await task
+
+    execute.assert_awaited_once()
+    assert execute.await_args.args[0] is new_bot.client
+    assert save_status.await_args.args[0] is new_bot.client
+    assert save_status.await_args.args[2] == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["first_sync_complete", "running"])
+async def test_overdue_task_waits_until_its_owner_runs_and_finished_its_first_sync(
+    tmp_path: Path,
+    missing: str,
+) -> None:
+    """A task restored before its owner synced, or while it is not running, fires only once both hold."""
+    config, runtime_paths, _ids = _config_and_ids(tmp_path)
+    bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
+    setattr(bot, missing, False)
+    runtime = _runtime(runtime_paths, config, _Bots(general=bot))
+    workflow = _workflow()
+    owner_polled = asyncio.Event()
+    real_ready_bot = runtime._ready_bot
+
+    def ready_bot(entity_name: str) -> AgentBot | None:
+        owner_polled.set()
+        return real_ready_bot(entity_name)
+
+    with (
+        patch.object(runtime, "_ready_bot", side_effect=ready_bot),
+        patch("mindroom.scheduling.tasks._get_pending_task_record", new=AsyncMock(return_value=_record(workflow))),
+        patch("mindroom.scheduling.tasks._scheduled_task_creator_is_joined", new=AsyncMock(return_value=True)),
+        patch(
+            "mindroom.scheduling.executor.execute_scheduled_workflow",
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
+        ) as execute,
+        patch("mindroom.scheduling.tasks._save_task_status", new=AsyncMock()),
+    ):
+        assert runtime._start_runner("general", TASK_ID, workflow)
+        _runner, task = runtime._runners[TASK_ID]
+        await owner_polled.wait()
+        execute.assert_not_awaited()
+        setattr(bot, missing, True)
+        await task
+
+    execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_release_fences_the_owner_then_waits_for_its_in_flight_operation(tmp_path: Path) -> None:
+    """A stopping owner admits no new operation, and its stop waits until the operation in flight ends."""
+    config, runtime_paths, _ids = _config_and_ids(tmp_path)
+    bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
+    runtime = _runtime(runtime_paths, config, _Bots(general=bot))
+    operation_started = asyncio.Event()
+    finish_operation = asyncio.Event()
+
+    async def in_flight_operation() -> None:
+        async with runtime.operation("general"):
+            operation_started.set()
+            await finish_operation.wait()
+
+    operation = asyncio.create_task(in_flight_operation())
+    await operation_started.wait()
+    release = asyncio.create_task(runtime.release({"general"}))
+    await asyncio.sleep(0)
+
+    assert runtime._ready_bot("general") is None
+    assert runtime._is_fenced(bot)
+    assert not release.done()
+    finish_operation.set()
+    await release
+    await operation
+
+
+@pytest.mark.asyncio
+async def test_release_stops_waiting_at_its_bound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operation that outlives the stop budget does not hold the owner's stop."""
+    config, runtime_paths, _ids = _config_and_ids(tmp_path)
+    monkeypatch.setattr(scheduling_runtime, "SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.01)
+    bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
+    runtime = _runtime(runtime_paths, config, _Bots(general=bot))
+    operation_started = asyncio.Event()
+    finish_operation = asyncio.Event()
+
+    async def stuck_operation() -> None:
+        async with runtime.operation("general"):
+            operation_started.set()
+            await finish_operation.wait()
+
+    operation = asyncio.create_task(stuck_operation())
+    await operation_started.wait()
+
+    await runtime.release({"general"})
+
+    assert not operation.done()
+    finish_operation.set()
+    await operation
+
+
+@pytest.mark.asyncio
+async def test_one_time_send_cut_off_by_its_owners_stop_is_failed_and_never_resent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A one-time trigger whose client closed under it is marked failed once the owner runs again."""
+    config, runtime_paths, _ids = _config_and_ids(tmp_path)
+    monkeypatch.setattr(scheduling_runtime, "SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.01)
+    old_bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
+    bots = _Bots(general=old_bot)
+    runtime = _runtime(runtime_paths, config, bots)
+    workflow = _workflow()
+    send_started = asyncio.Event()
+    client_closed = asyncio.Event()
+
+    async def send_cut_off(*_args: object, **_kwargs: object) -> ScheduledWorkflowOutcome:
+        send_started.set()
+        await client_closed.wait()
+        return ScheduledWorkflowOutcome(status="failed", failure_reason="client closed")
+
+    with (
+        patch("mindroom.scheduling.tasks._get_pending_task_record", new=AsyncMock(return_value=_record(workflow))),
+        patch("mindroom.scheduling.tasks._scheduled_task_creator_is_joined", new=AsyncMock(return_value=True)),
+        patch(
+            "mindroom.scheduling.executor.execute_scheduled_workflow",
+            new=AsyncMock(side_effect=send_cut_off),
+        ) as send,
+        patch("mindroom.scheduling.tasks._save_task_status", new=AsyncMock()) as save_status,
+    ):
+        assert runtime._start_runner("general", TASK_ID, workflow)
+        _runner, task = runtime._runners[TASK_ID]
+        await send_started.wait()
+        await runtime.release({"general"})
+        bots["general"] = new_bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
+        client_closed.set()
+        await task
+
+    send.assert_awaited_once()
+    save_status.assert_awaited_once()
+    assert save_status.await_args.args[0] is new_bot.client
+    assert save_status.await_args.args[2] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_status_write_cut_off_by_its_owners_stop_is_written_again_by_the_replacement(tmp_path: Path) -> None:
+    """After a send, only the status write repeats when the owner's stop closed its client under it."""
+    config, runtime_paths, _ids = _config_and_ids(tmp_path)
+    old_bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
+    bots = _Bots(general=old_bot)
+    runtime = _runtime(runtime_paths, config, bots)
+    new_bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
+    writers: list[object] = []
+
+    async def write_status(client: object, *_args: object, **_kwargs: object) -> None:
+        writers.append(client)
+        if client is old_bot.client:
+            runtime._fenced.add(old_bot)
+            bots["general"] = new_bot
+            msg = "client closed"
+            raise RuntimeError(msg)
+
+    with patch("mindroom.scheduling.tasks._save_task_status", new=AsyncMock(side_effect=write_status)):
+        await scheduling_runtime._TaskRunner(runtime, "general", ROOM_ID, TASK_ID)._save_status(
+            _record(_workflow()),
+            "completed",
+        )
+
+    assert writers == [old_bot.client, new_bot.client]
+
+
+@pytest.mark.asyncio
+async def test_removed_agent_fails_its_tasks_and_says_so_where_they_post(tmp_path: Path) -> None:
+    """A removed agent's tasks are never handed to another bot: each ends, fails, and the agent explains why."""
+    config, runtime_paths, _ids = _config_and_ids(tmp_path)
+    removed_bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
+    router_bot = scheduling_bot(_client("@router:localhost"))
+    runtime = _runtime(runtime_paths, config, _Bots(general=removed_bot, router=router_bot))
+    workflow = _workflow(due=False)
+    router_workflow = workflow.model_copy(update={"description": "Router task"})
+
+    async def wait_forever(*_args: object) -> None:
+        await asyncio.Event().wait()
+
+    with patch.object(scheduling_runtime._TaskRunner, "run_once", wait_forever):
+        assert runtime._start_runner("general", TASK_ID, workflow)
+        assert runtime._start_runner("router", "router_task", router_workflow)
+    _runner, removed_task = runtime._runners[TASK_ID]
+
+    with (
+        patch("mindroom.scheduling.tasks._get_pending_task_record", new=AsyncMock(return_value=_record(workflow))),
+        patch("mindroom.scheduling.tasks._save_task_status", new=AsyncMock()) as save_status,
+        patch("mindroom.scheduling.executor.send_scheduled_failure_notice", new=AsyncMock()) as notice,
+    ):
+        await runtime.fail_removed({"general"})
+
+    assert removed_task.cancelled()
+    assert list(runtime._runners) == ["router_task"]
+    save_status.assert_awaited_once()
+    assert save_status.await_args.args[0] is removed_bot.client
+    assert save_status.await_args.args[2] == "failed"
+    notice.assert_awaited_once()
+    assert notice.await_args.args[0] is removed_bot.client
+    assert notice.await_args.args[2].resolved_thread_id == "$thread"
+    assert "cancelled because its agent was removed" in notice.await_args.args[3]
+    await runtime.stop()
+
+
+def _room_state(writer_id: str, agent_id: str, task_content: dict[str, Any], *, agent_level: int) -> list[dict]:
+    """Return a room's full state: one agent joined at a power level, no router, and a task ``writer_id`` wrote."""
+
+    def state(event_type: str, state_key: str, content: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "type": event_type,
+            "state_key": state_key,
+            "content": content,
+            "sender": agent_id,
+            "event_id": f"${event_type}:{state_key}",
+            "origin_server_ts": 1,
+            "room_id": ROOM_ID,
+        }
+
+    return [
+        state("m.room.member", agent_id, {"membership": "join"}),
+        state("m.room.power_levels", "", {"users": {agent_id: agent_level}, "state_default": 50}),
+        scheduled_task_state_event(TASK_ID, task_content, room_id=ROOM_ID, sender=writer_id),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_may_write", [True, False])
+async def test_restore_fails_a_task_whose_owner_was_removed_while_mindroom_was_down(
+    tmp_path: Path,
+    agent_may_write: bool,
+) -> None:
+    """A restoring bot that may write schedule state fails a task whose owner is no longer configured."""
+    config, runtime_paths, ids = _config_and_ids(tmp_path)
+    retired_id = "@mindroom_retired:localhost"
+    persist_schedule_writer(runtime_paths, retired_id, entity_name="retired")
+    workflow = _workflow(due=False)
+    content = {"task_id": TASK_ID, "workflow": workflow.model_dump_json(), "status": "pending"}
+    client = _client(ids["general"])
+    client.room_get_state.return_value = nio.RoomGetStateResponse.from_dict(
+        _room_state(retired_id, ids["general"], content, agent_level=100 if agent_may_write else 0),
+        room_id=ROOM_ID,
+    )
+
+    async def read_task(room_id: str, event_type: str, state_key: str = "") -> nio.RoomGetStateEventResponse:
+        return nio.RoomGetStateEventResponse(dict(content), event_type, state_key, room_id)
+
+    client.room_get_state_event.side_effect = read_task
+    client.room_put_state.return_value = nio.RoomPutStateResponse("$failed", ROOM_ID)
+    serve_task_state_events(client, sender=retired_id)
+    bot = scheduling_bot(client, agent_name="general")
+    runtime = _runtime(runtime_paths, config, _Bots(general=bot))
+
+    with patch("mindroom.scheduling.executor.send_scheduled_failure_notice", new=AsyncMock()) as notice:
+        restored = await runtime.restore_room(bot, ROOM_ID)
+
+    assert restored == 0
+    assert not runtime._runners
+    if agent_may_write:
+        client.room_put_state.assert_awaited_once()
+        assert client.room_put_state.await_args.kwargs["content"]["status"] == "failed"
+        notice.assert_awaited_once()
+        assert "cancelled because its agent was removed" in notice.await_args.args[3]
+    else:
+        client.room_put_state.assert_not_awaited()
+        notice.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_restore_by_a_bot_that_does_not_own_the_task_starts_no_runner(tmp_path: Path) -> None:
+    """Only the owner the rule picks starts a task's runner; another bot joining the room leaves it alone."""
+    config, runtime_paths, ids = _config_and_ids(tmp_path)
+    workflow = _workflow(due=False)
+    content = {"task_id": TASK_ID, "workflow": workflow.model_dump_json(), "status": "pending"}
+    # The router is not joined, so the agent that wrote the task owns it.
+    state = _room_state(ids["general"], ids["general"], content, agent_level=100)
+    router_client = _client(ids["router"])
+    router_client.room_get_state.return_value = nio.RoomGetStateResponse.from_dict(state, room_id=ROOM_ID)
+    agent_client = _client(ids["general"])
+    agent_client.room_get_state.return_value = nio.RoomGetStateResponse.from_dict(state, room_id=ROOM_ID)
+    router = scheduling_bot(router_client)
+    agent = scheduling_bot(agent_client, agent_name="general")
+    runtime = _runtime(runtime_paths, config, _Bots(router=router, general=agent))
+
+    with patch.object(runtime, "_start_runner", return_value=True) as start:
+        assert await runtime.restore_room(router, ROOM_ID) == 0
+        assert await runtime.restore_room(agent, ROOM_ID) == 1
+
+    start.assert_called_once_with("general", TASK_ID, workflow)
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_fences_changing_entities_and_fails_removed_entities_tasks(tmp_path: Path) -> None:
+    """The fleet's change hook fences the stopping bots; its removal hook fails their tasks before approvals settle."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
+    install_bots(orchestrator, {"general": bot})
+    order: list[str] = []
+
+    async def fail_removed(names: set[str]) -> None:
+        order.append(f"scheduled tasks {sorted(names)}")
+
+    async def reconcile_approvals(names: set[str]) -> set[str]:
+        order.append(f"approvals {sorted(names)}")
+        return set()
+
+    await orchestrator._entities_changing({"general"})
+    with (
+        patch.object(orchestrator.scheduled_tasks, "fail_removed", side_effect=fail_removed),
+        patch.object(orchestrator._approval_recovery, "reconcile_removed_entities", side_effect=reconcile_approvals),
+    ):
+        unresolved = await orchestrator._reconcile_removed_entities({"general"})
+
+    assert orchestrator.scheduled_tasks._is_fenced(bot)
+    assert unresolved == set()
+    assert order == ["scheduled tasks ['general']", "approvals ['general']"]
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_cancels_runners_before_any_bot_stops(tmp_path: Path) -> None:
+    """Runners end before bots stop, so none uses a client process shutdown closes."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    order: list[str] = []
+    runner_cancelled = asyncio.Event()
+
+    async def wait_forever(*_args: object) -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            runner_cancelled.set()
+
+    with patch.object(scheduling_runtime._TaskRunner, "run_once", wait_forever):
+        assert orchestrator.scheduled_tasks._start_runner("router", TASK_ID, _workflow(due=False))
+    await asyncio.sleep(0)
+
+    async def stop_all() -> _FleetShutdown:
+        order.append(f"fleet stop, runner cancelled: {runner_cancelled.is_set()}")
+        return _FleetShutdown(failures=[], owns_resources=False)
+
+    with patch.object(orchestrator.fleet, "stop_all", side_effect=stop_all):
+        await orchestrator.stop()
+
+    assert order == ["fleet stop, runner cancelled: True"]
+    assert not orchestrator.scheduled_tasks._runners
+    assert not orchestrator.scheduled_tasks._start_runner("router", "late", _workflow(due=False))

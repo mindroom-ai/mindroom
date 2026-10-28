@@ -14,8 +14,6 @@ from mindroom.commands.handler import (
     handle_command,
 )
 from mindroom.commands.parsing import CommandType
-from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
-from mindroom.hooks import build_hook_matrix_admin
 from mindroom.inbound_turn_normalizer import TextNormalizationRequest
 from mindroom.model_selection import model_selection_targets_other_runtime
 from mindroom.turn_record import canonicalize_turn_record
@@ -27,10 +25,10 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.commands.parsing import Command
+    from mindroom.constants import RuntimePaths
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.dispatch_handoff import PreparedIngress
     from mindroom.handled_turns import TurnRecord
-    from mindroom.hooks import HookMatrixAdmin
     from mindroom.inbound_turn_normalizer import InboundTurnNormalizer
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.message_target import MessageTarget
@@ -187,7 +185,6 @@ class CommandTurnExecutor:
             runtime_paths=self.deps.runtime_paths,
             logger=self.deps.logger,
             conversation_reader=self.deps.conversation_reader,
-            matrix_admin=self._matrix_admin(),
             stable_target=target,
             record_handled_turn=record_command_turn,
             record_command_result=record_command_result,
@@ -196,7 +193,7 @@ class CommandTurnExecutor:
             responder_candidates_for_room=self.deps.turn_policy.responder_candidates_for_room,
             controller_identity=self.deps.controller_identity,
             agent_reply_memberships=self.deps.runtime.agent_reply_memberships,
-            config_provider=lambda: orchestrator.config if orchestrator is not None else self.deps.runtime.config,
+            scheduled_tasks=orchestrator.scheduled_tasks if orchestrator is not None else None,
         )
         await handle_command(
             context=context,
@@ -205,18 +202,6 @@ class CommandTurnExecutor:
             command=command,
             requester_user_id=requester_user_id,
             acts_for_requester=event.acts_for_requester,
-        )
-
-    def _matrix_admin(self) -> HookMatrixAdmin | None:
-        orchestrator = self.deps.runtime.orchestrator
-        if orchestrator is not None:
-            return orchestrator.hook_matrix_admin()
-        if self.deps.agent_name != ROUTER_AGENT_NAME:
-            return None
-        return build_hook_matrix_admin(
-            self._client(),
-            self.deps.runtime_paths,
-            config=self.deps.runtime.config,
         )
 
     async def _recover_visible_response(

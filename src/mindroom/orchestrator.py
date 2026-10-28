@@ -95,6 +95,7 @@ from mindroom.runtime_state import (
     set_runtime_starting,
 )
 from mindroom.scheduling.executor import set_scheduling_hook_registry
+from mindroom.scheduling.runtime import ScheduledTaskRuntime
 from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
 from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.startup_errors import EventJournalHoldLostError, PermanentStartupError
@@ -275,6 +276,7 @@ class _MultiAgentOrchestrator:
     storage_path: Path = field(init=False)
     config_path: Path = field(init=False)
     fleet: EntityFleet = field(init=False)
+    scheduled_tasks: ScheduledTaskRuntime = field(init=False)
     # The one journal every bot in this process borrows a store from, opened on
     # first use and closed after the last bot stops.
     _open_journal: OpenEventJournal | None = field(default=None, init=False, repr=False)
@@ -341,9 +343,15 @@ class _MultiAgentOrchestrator:
                 entities_changing=self._entities_changing,
                 entities_started=self._entities_started,
                 setup_rooms_after_retry=self._setup_rooms_after_retry,
-                reconcile_removed=lambda names: self._approval_recovery.reconcile_removed_entities(names),
+                reconcile_removed=self._reconcile_removed_entities,
                 end_replies=self._end_entity_replies,
             ),
+        )
+        self.scheduled_tasks = ScheduledTaskRuntime(
+            runtime_paths=self.runtime_paths,
+            config_provider=lambda: self.config,
+            bots=lambda: self.agent_bots,
+            matrix_admin=self.hook_matrix_admin,
         )
         self._knowledge_refresh_scheduler = KnowledgeRefreshScheduler.from_runtime(self.runtime_paths)
         self._knowledge_source_watcher = KnowledgeSourceWatcher(self._knowledge_refresh_scheduler, self.runtime_paths)
@@ -1011,13 +1019,19 @@ class _MultiAgentOrchestrator:
             for entity_name in sorted(entity_names)
         }
 
-    def _entities_changing(self, entity_names: set[str]) -> None:
+    async def _entities_changing(self, entity_names: set[str]) -> None:
         """Withdraw capabilities bound to these entities before any of them stops."""
         self._external_trigger_runtime.unbind_for_entity_changes(entity_names)
         self._computer_runtime.unbind_for_entity_changes(entity_names)
         if ROUTER_AGENT_NAME in entity_names:
             # Fence room-backed grants before stopping their sole control client.
             self.invalidate_agent_reply_memberships(reason="router_replacement")
+        await self.scheduled_tasks.release(entity_names)
+
+    async def _reconcile_removed_entities(self, entity_names: set[str]) -> set[str]:
+        """Settle removed entities' approvals and scheduled tasks while their bots exist; return unresolved approvals."""
+        await self.scheduled_tasks.fail_removed(entity_names)
+        return await self._approval_recovery.reconcile_removed_entities(entity_names)
 
     async def _entities_started(self, results: EntityStartResults) -> None:
         """Publish one batch of start outcomes to the runtime services that depend on live bots."""
@@ -1763,7 +1777,7 @@ class _MultiAgentOrchestrator:
             )
         return self._open_journal.store
 
-    async def stop(self) -> None:
+    async def stop(self) -> None:  # noqa: PLR0915 - one ordered shutdown sequence
         """Stop all agent bots."""
         self.running = False
         self._runtime_ready_event.clear()
@@ -1775,6 +1789,8 @@ class _MultiAgentOrchestrator:
             self._runtime_shutdown_event.set()
         self._external_trigger_runtime.unbind()
         self._computer_runtime.unbind()
+        # Runners borrow bots' clients, so they end before any bot stops.
+        await run_shutdown_step("scheduled_tasks", self.scheduled_tasks.stop())
         try:
             await run_shutdown_step("script_runtime", self._script_runtime.shutdown())
         except Exception:
@@ -1915,6 +1931,7 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and its worker-fac
     agent_reply_memberships: AgentReplyMembershipIndex | None = None,
     agent_cli_registry: TurnToolRegistry | None = None,
     budget_monitor: BudgetMonitor | None = None,
+    scheduled_tasks: ScheduledTaskRuntime | None = None,
 ) -> None:
     """Run the bundled dashboard/API server as an asyncio task."""
     from mindroom.api import main as api_main  # noqa: PLC0415
@@ -1932,6 +1949,7 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and its worker-fac
     api_state.active_script_runs = script_runtime.active_runs if script_runtime is not None else None
     api_state.config_reload_status = config_reload_status
     api_state.budget_monitor = budget_monitor
+    api_state.scheduled_tasks = scheduled_tasks
     if agent_reply_memberships is not None:
         api_state.agent_reply_memberships = agent_reply_memberships
     if script_runtime is not None:
@@ -1988,6 +2006,7 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and its worker-fac
         api_state.active_script_runs = None
         api_state.config_reload_status = None
         api_state.budget_monitor = None
+        api_state.scheduled_tasks = None
         api_state.agent_reply_memberships = AgentReplyMembershipIndex()
         if script_runtime is not None:
             await script_runtime.unbind_api()
@@ -2400,6 +2419,7 @@ async def _run_runtime(  # noqa: PLR0915
                     agent_reply_memberships=orchestrator.agent_reply_memberships,
                     agent_cli_registry=orchestrator.agent_cli_registry,
                     budget_monitor=orchestrator.budgets,
+                    scheduled_tasks=orchestrator.scheduled_tasks,
                 ),
                 name="api_server",
             )

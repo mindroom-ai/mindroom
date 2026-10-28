@@ -26,7 +26,6 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.scheduling import tasks as scheduling
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_origin import TurnIntent
@@ -317,7 +316,7 @@ class TestBotScheduleCommands:
                 room_id="!test:server",
                 task_id="task123",
                 runtime_paths=mock_agent_bot.runtime_paths,
-                matrix_admin=None,
+                task_runtime=None,
             )
 
     @pytest.mark.asyncio
@@ -351,7 +350,7 @@ class TestBotScheduleCommands:
                 client=mock_agent_bot.client,
                 room_id="!test:server",
                 runtime_paths=mock_agent_bot.runtime_paths,
-                matrix_admin=None,
+                task_runtime=None,
             )
 
         send_response_mock.assert_called_once()
@@ -477,71 +476,13 @@ class TestBotTaskRestoration:
     """Test scheduled task restoration on bot startup."""
 
     @pytest.mark.asyncio
-    async def test_restore_tasks_on_room_join(self) -> None:
-        """The started router registers as the scheduled-task runner owner and restores tasks when joining rooms."""
+    @pytest.mark.parametrize("agent_name", ["router", "general"])
+    async def test_every_bot_hands_each_joined_room_to_the_scheduled_task_runtime(self, agent_name: str) -> None:
+        """Router and agents alike restore the schedules they own in each room they join."""
         agent_user = AgentMatrixUser(
-            agent_name="router",
-            user_id="@mindroom_router:localhost",
-            display_name="Router Agent",
-            password=TEST_PASSWORD,
-            access_token=TEST_ACCESS_TOKEN,
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config = _runtime_bound_config(Config(), Path(tmpdir))  # Empty config for testing
-            bot = make_test_agent_bot(
-                agent_user=agent_user,
-                storage_path=Path(tmpdir),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
-            install_runtime_journal_support(bot)
-
-            # Mock the necessary methods
-            with (
-                patch("mindroom.bot.login_agent_owned_session") as mock_login,
-                patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock) as mock_restore,
-            ):
-                mock_client = AsyncMock()
-                mock_client.add_event_callback = MagicMock()
-                mock_client.add_response_callback = MagicMock()
-                mock_client.user_id = agent_user.user_id
-                mock_client.device_id = "TEST_DEVICE"
-                mock_client.access_token = TEST_ACCESS_TOKEN
-                mock_client.rooms = {}
-                mock_login.return_value = owned_matrix_login(mock_client)
-
-                # Mock the client.join method to return JoinResponse
-                mock_join_response = nio.JoinResponse.from_dict({"room_id": "!test:server"})
-                mock_client.join.return_value = mock_join_response
-
-                mock_restore.return_value = 2  # 2 tasks restored
-
-                await bot.start()
-                # New runners use the started router's client in rooms it can serve.
-                assert scheduling._runner_owner == scheduling.ScheduledTaskRunnerOwner(
-                    mock_client,
-                    bot._conversation_reader,
-                )
-                assert scheduling._state_writers == {agent_user.user_id: mock_client}
-                # Now have the bot join its configured rooms
-                await bot.join_configured_rooms()
-
-                # Verify restore was called for the room with config
-                mock_restore.assert_called_once()
-                assert mock_restore.call_args.args[1] == "!test:server"
-
-                # Just verify restore was called - logger testing is complex with the bind() method
-                assert mock_restore.called
-
-    @pytest.mark.asyncio
-    async def test_no_log_when_no_tasks_restored(self) -> None:
-        """Test that no log is generated when no tasks are restored."""
-        agent_user = AgentMatrixUser(
-            agent_name="general",
-            user_id="@mindroom_general:localhost",
-            display_name="General Agent",
+            agent_name=agent_name,
+            user_id=f"@mindroom_{agent_name}:localhost",
+            display_name=agent_name,
             password=TEST_PASSWORD,
             access_token=TEST_ACCESS_TOKEN,
         )
@@ -559,7 +500,6 @@ class TestBotTaskRestoration:
 
             with (
                 patch("mindroom.bot.login_agent_owned_session") as mock_login,
-                patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock) as mock_restore,
                 patch("mindroom.bot.AgentBot._set_presence_with_model_info", new_callable=AsyncMock),
             ):
                 mock_client = AsyncMock()
@@ -575,17 +515,13 @@ class TestBotTaskRestoration:
                 mock_join_response = nio.JoinResponse.from_dict({"room_id": "!test:server"})
                 mock_client.join.return_value = mock_join_response
 
-                mock_restore.return_value = 0  # No tasks restored
-
                 await bot.start()
-                # Only the router offers its runtime to new scheduled-task runners, but every bot may write state.
-                assert scheduling._runner_owner is None
-                assert scheduling._state_writers == {agent_user.user_id: mock_client}
-                # Now have the bot join its configured rooms
+                orchestrator = MagicMock()
+                orchestrator.scheduled_tasks.restore_room = AsyncMock(return_value=2)
+                bot.orchestrator = orchestrator
                 await bot.join_configured_rooms()
 
-                # Just verify restore was called with 0 - logger testing is complex with the bind() method
-                assert mock_restore.return_value == 0
+                orchestrator.scheduled_tasks.restore_room.assert_awaited_once_with(bot, "!test:server")
 
 
 class TestCommandHandling:

@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle
     from mindroom.response_admission import ResponseAdmissionGate
+    from mindroom.scheduling.runtime import ScheduledTaskRuntime
     from mindroom.skill_learning.runner import SkillReviewRunner
     from mindroom.tool_system.plugins import PluginReloadResult
 
@@ -71,6 +72,9 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
 
     @property
     def budgets(self) -> BudgetMonitor: ...  # noqa: D102
+
+    @property
+    def scheduled_tasks(self) -> ScheduledTaskRuntime: ...  # noqa: D102
 
     @property
     def agent_reply_memberships(self) -> AgentReplyMembershipIndex: ...  # noqa: D102

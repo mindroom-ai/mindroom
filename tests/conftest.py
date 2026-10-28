@@ -61,7 +61,6 @@ import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
 import mindroom.memory._entrypoint_snapshots as memory_entrypoint_snapshots_module
-import mindroom.scheduling.tasks as scheduling_module
 import mindroom.tool_jobs.instances as tool_jobs_instances
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom import ai as mindroom_ai
@@ -3282,13 +3281,6 @@ def _pin_matrix_homeserver(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MINDROOM_NAMESPACE", raising=False)
     monkeypatch.delenv("MINDROOM_CONFIG_PATH", raising=False)
     monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
-
-
-@pytest.fixture(autouse=True)
-def _reset_scheduled_task_runner_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep a router registered as the scheduled-task runner owner, or a bot as a state writer, from leaking."""
-    monkeypatch.setattr(scheduling_module, "_runner_owner", None)
-    monkeypatch.setattr(scheduling_module, "_state_writers", {})
 
 
 @pytest.fixture(autouse=True)

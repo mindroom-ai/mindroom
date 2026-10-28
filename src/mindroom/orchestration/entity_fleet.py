@@ -65,13 +65,14 @@ class EntityFleetHooks:
     create_bots: Callable[[set[str], Config], Awaitable[dict[str, _Bot]]]
     # Entities that must not start yet because a required MCP server is unavailable.
     start_blocked: Callable[[set[str]], set[str]]
-    # Withdraw capabilities bound to these entities before any of them stops.
-    entities_changing: Callable[[set[str]], None]
+    # Withdraw capabilities bound to these entities, and drain work borrowing their clients, before any of them stops.
+    entities_changing: Callable[[set[str]], Awaitable[None]]
     # Publish one batch of start outcomes: support bindings, approval cleanup, dispatch recovery.
     entities_started: Callable[[EntityStartResults], Awaitable[None]]
     # Reconcile rooms after a background retry started an entity, which no caller waits on.
     setup_rooms_after_retry: Callable[[str], Awaitable[None]]
-    # Settle a removed entity's approval continuations while its bot still exists; return the unresolved ones.
+    # Settle a removed entity's approval continuations and scheduled tasks while its bot still exists;
+    # return the entities whose approval settlement is unresolved.
     reconcile_removed: Callable[[set[str]], Awaitable[set[str]]]
     # End the journal replies of entities that no bot will ever finish.
     end_replies: Callable[[set[str]], Awaitable[None]]
@@ -421,7 +422,7 @@ class EntityFleet:
         for slot in slots.values():
             await cancel_task(slot.retry_task)
             slot.retry_task = None
-        self._hooks.entities_changing(set(slots))
+        await self._hooks.entities_changing(set(slots))
 
 
 async def _start_once(entity_name: str, bot: _Bot) -> bool | None:

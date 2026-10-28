@@ -7,11 +7,8 @@ import hashlib
 import json
 import typing
 import uuid
-from collections import deque
-from contextvars import Context
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from functools import partial
 from typing import TYPE_CHECKING, Literal, NamedTuple
 from weakref import WeakValueDictionary
 from zoneinfo import ZoneInfo
@@ -36,21 +33,13 @@ from mindroom.approval.tool_approval import (
 from mindroom.entity_resolution import entity_identity_registry, persisted_bot_user_ids
 from mindroom.failure_text import failure_text
 from mindroom.helper_usage import record_system_usage
-from mindroom.hooks import build_hook_matrix_admin
 from mindroom.llm.errors import ModelSafeguardRefusal
-from mindroom.logging_config import bound_log_context, get_logger
+from mindroom.logging_config import get_logger
 from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import parse_mentions_in_text
-from mindroom.message_target import MessageTarget
 from mindroom.providers import registry as provider_registry
 from mindroom.requester_identity import equivalent_requester_ids
-from mindroom.scheduling import executor as scheduling_executor
-from mindroom.scheduling.recurring_schedule import (
-    RecurringCheckpointUnavailableError,
-    complete_recurring_occurrence,
-    plan_recurring_occurrence,
-)
 from mindroom.thread_utils import filter_thread_agents_for_sender, get_agents_in_thread
 from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
 
@@ -61,8 +50,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ScheduledApprovalArmState
-    from mindroom.hooks import HookMatrixAdmin
     from mindroom.matrix.conversation_reads import ConversationReader
+    from mindroom.scheduling.runtime import ScheduledTaskRuntime
     from mindroom.scheduling.scheduled_tool_calls import LiveFunction
 
 logger = get_logger(__name__)
@@ -83,28 +72,6 @@ _SCHEDULE_UNSENT_REASON = "Scheduled task did not run."
 
 # Shared validation message for edit attempts that change task type.
 _SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR = "Changing schedule_type is not supported; cancel and recreate the schedule"
-
-# How often running tasks should re-check persisted Matrix state for edits/cancellations.
-_TASK_STATE_POLL_INTERVAL_SECONDS = 30
-
-# Maximum age (in seconds) for a missed one-time task to still be executed on restart.
-# Tasks older than this are marked as failed instead of executed.
-_MISSED_TASK_MAX_AGE_SECONDS = 86400  # 24 hours
-
-# Small pause between draining restored tasks after sync is ready.
-_DEFERRED_OVERDUE_TASK_START_DELAY_SECONDS = 0.25
-
-# Global task storage for running asyncio tasks
-_running_tasks: dict[str, asyncio.Task] = {}
-_deferred_overdue_tasks: deque[_DeferredOverdueTaskStart] = deque()
-_deferred_overdue_task_ids: set[str] = set()
-# The router restores runners when it starts and cancels them all when it stops, so new runners
-# use its runtime in rooms it can serve (write schedule state and send the trigger); a runner on
-# another bot's client outlives that client when the bot is replaced.
-_runner_owner: ScheduledTaskRunnerOwner | None = None
-# Every started bot's client by user ID. The router restores and runs schedules even in rooms only another
-# bot may write state in, such as a personal room an agent created, so their state writes go through that bot.
-_state_writers: dict[str, nio.AsyncClient] = {}
 
 # Shared by the runtime and API clients in this process; Matrix state has no compare-and-swap.
 _schedule_edit_locks: WeakValueDictionary[tuple[str, str, str], asyncio.Lock] = WeakValueDictionary()
@@ -333,49 +300,18 @@ class SchedulingRuntime:
     conversation_reader: ConversationReader
     agent_reply_memberships: AgentReplyMembershipIndex
     responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]]
-    matrix_admin: HookMatrixAdmin | None = None
-    config_provider: Callable[[], Config | None] | None = None
+    # Runs saved tasks; without an orchestrator a task is saved but no runner starts.
+    task_runtime: ScheduledTaskRuntime | None = None
     # The agent scheduling through its tool, whose timezone new tasks take; None for chat commands.
     agent_name: str | None = None
 
 
-@dataclass(frozen=True)
-class ScheduledTaskRunnerOwner:
-    """The started router's runtime, used for new runners in rooms it can serve."""
+class _StateWrite(NamedTuple):
+    """One persisted scheduled-task state event."""
 
-    client: nio.AsyncClient
-    conversation_reader: ConversationReader
-
-
-def set_scheduled_task_runner_owner(owner: ScheduledTaskRunnerOwner) -> None:
-    """Offer a started router's runtime to new scheduled-task runners."""
-    global _runner_owner
-    _runner_owner = owner
-
-
-def clear_scheduled_task_runner_owner() -> None:
-    """Stop starting runners on a router that is shutting down."""
-    global _runner_owner
-    _runner_owner = None
-
-
-def register_scheduled_task_state_writer(client: nio.AsyncClient) -> None:
-    """Let a started bot write schedule state in rooms where a schedule's own writer lacks the power."""
-    _state_writers[client.user_id] = client
-
-
-def unregister_scheduled_task_state_writer(client: nio.AsyncClient) -> None:
-    """Stop writing schedule state through a bot whose client is closing."""
-    if _state_writers.get(client.user_id) is client:
-        del _state_writers[client.user_id]
-
-
-@dataclass
-class _DeferredOverdueTaskStart:
-    """A scheduled task that should start after Matrix sync is live."""
-
-    task_id: str
-    workflow: ScheduledWorkflow
+    revision: str
+    # The account that wrote it, whose bot owns the task in rooms the router cannot serve.
+    writer_id: str
 
 
 def _parse_datetime(value: object) -> datetime | None:
@@ -608,225 +544,15 @@ def _validate_conditional_workflow(
     return None
 
 
-def _start_scheduled_task(
-    client: nio.AsyncClient,
-    task_id: str,
-    workflow: ScheduledWorkflow,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    conversation_reader: ConversationReader,
-    matrix_admin: HookMatrixAdmin | None = None,
-    config_provider: Callable[[], Config | None] | None = None,
-) -> bool:
-    """Start the asyncio task for a scheduled workflow and track it globally."""
-    existing_task = _running_tasks.get(task_id)
-    if existing_task is not None:
-        if existing_task.done():
-            del _running_tasks[task_id]
-        else:
-            logger.debug("Scheduled task already running; skipping duplicate start", task_id=task_id)
-            return False
-
-    # A schedule outlives the tool call or command that creates it, and a turn's contextvars hold its Agent and tools.
-    if workflow.schedule_type == "once":
-        task = asyncio.create_task(
-            _run_once_task(
-                client,
-                task_id,
-                workflow,
-                config,
-                runtime_paths,
-                conversation_reader,
-                matrix_admin,
-                config_provider=config_provider,
-            ),
-            context=Context(),
-        )
-    else:
-        task = asyncio.create_task(
-            _run_cron_task(
-                client,
-                task_id,
-                workflow,
-                _running_tasks,
-                config,
-                runtime_paths,
-                conversation_reader,
-                matrix_admin,
-                config_provider=config_provider,
-            ),
-            context=Context(),
-        )
-    _running_tasks[task_id] = task
-    return True
-
-
-def _router_runtime_for_room(workflow: ScheduledWorkflow) -> ScheduledTaskRunnerOwner | None:
-    """Return the router runtime when the router has joined the room and may write its state and triggers."""
-    assert workflow.room_id is not None  # Callers save the schedule in its room first.
-    owner = _runner_owner
-    if owner is None:
-        return None
-    room = owner.client.rooms.get(workflow.room_id)
-    if room is None:
-        return None
-    router_id = owner.client.user_id
-    trigger_type = (
-        "m.room.encrypted" if room.encrypted else scheduling_executor.scheduled_trigger_message_type(workflow)
-    )
-    if not (
-        room.power_levels.can_user_send_state(router_id, _SCHEDULED_TASK_EVENT_TYPE)
-        and room.power_levels.can_user_send_message(router_id, trigger_type)
-    ):
-        return None
-    return owner
-
-
-def _start_new_scheduled_task(
-    client: nio.AsyncClient,
-    task_id: str,
-    workflow: ScheduledWorkflow,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    conversation_reader: ConversationReader,
-    matrix_admin: HookMatrixAdmin | None = None,
-    config_provider: Callable[[], Config | None] | None = None,
-) -> None:
-    """Start a newly saved schedule's runner, on the router's runtime whenever the router can serve the room.
-
-    The router restores schedules when it starts and cancels them when it stops, so its runners never
-    outlive their client. A room the router cannot serve keeps the creating bot's runtime.
-    """
-    owner = _router_runtime_for_room(workflow)
-    if owner is not None:
-        client = owner.client
-        conversation_reader = owner.conversation_reader
-    _start_scheduled_task(
-        client,
-        task_id,
-        workflow,
-        config,
-        runtime_paths,
-        conversation_reader,
-        matrix_admin,
-        config_provider=config_provider,
-    )
-
-
-def _queue_deferred_overdue_task(task_id: str, workflow: ScheduledWorkflow) -> bool:
-    """Queue one restored task to be started after Matrix sync is ready."""
-    existing_task = _running_tasks.get(task_id)
-    if existing_task is not None and not existing_task.done():
-        logger.debug("Scheduled task already running; skipping deferred queue", task_id=task_id)
-        return False
-
-    if task_id in _deferred_overdue_task_ids:
-        logger.debug("Scheduled task already queued for deferred start", task_id=task_id)
-        return False
-
-    _deferred_overdue_tasks.append(_DeferredOverdueTaskStart(task_id=task_id, workflow=workflow))
-    _deferred_overdue_task_ids.add(task_id)
-    return True
-
-
-async def drain_deferred_overdue_tasks(
-    client: nio.AsyncClient,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    conversation_reader: ConversationReader,
-    config_provider: Callable[[], Config | None] | None = None,
-) -> int:
-    """Start queued restored tasks after Matrix sync is ready."""
-    drained_count = 0
-    matrix_admin = build_hook_matrix_admin(client, runtime_paths)
-
-    while _deferred_overdue_tasks:
-        queued_task = _deferred_overdue_tasks.popleft()
-        _deferred_overdue_task_ids.discard(queued_task.task_id)
-
-        try:
-            if _start_scheduled_task(
-                client,
-                queued_task.task_id,
-                queued_task.workflow,
-                config,
-                runtime_paths,
-                conversation_reader,
-                matrix_admin=matrix_admin,
-                config_provider=config_provider,
-            ):
-                drained_count += 1
-        except Exception:
-            logger.exception(
-                "Failed to start deferred overdue scheduled task",
-                task_id=queued_task.task_id,
-            )
-
-        if _deferred_overdue_tasks:
-            await asyncio.sleep(_DEFERRED_OVERDUE_TASK_START_DELAY_SECONDS)
-
-    if drained_count > 0:
-        logger.info("Drained deferred overdue scheduled tasks", drained_count=drained_count)
-
-    return drained_count
-
-
-def clear_deferred_overdue_tasks() -> int:
-    """Clear queued restored tasks that have not started yet."""
-    queued_count = len(_deferred_overdue_tasks)
-    _deferred_overdue_tasks.clear()
-    _deferred_overdue_task_ids.clear()
-    return queued_count
-
-
-def has_deferred_overdue_tasks() -> bool:
-    """Return whether any restored tasks are still queued."""
-    return bool(_deferred_overdue_tasks)
-
-
-def _cancel_running_task(task_id: str) -> None:
-    """Cancel a running scheduled task if it exists."""
-    if task_id in _running_tasks:
-        _running_tasks[task_id].cancel()
-        del _running_tasks[task_id]
-
-
-async def cancel_all_running_scheduled_tasks() -> int:
-    """Cancel all in-memory scheduled tasks and wait for shutdown."""
-    running_items = list(_running_tasks.items())
-    if not running_items:
-        return 0
-
-    for task_id, task in running_items:
-        task.cancel()
-        del _running_tasks[task_id]
-
-    await asyncio.gather(*(task for _, task in running_items), return_exceptions=True)
-
-    return len(running_items)
-
-
-def _workflows_differ(left: ScheduledWorkflow, right: ScheduledWorkflow) -> bool:
-    """Return whether two workflows differ in persisted state."""
-    return left.model_dump(mode="json") != right.model_dump(mode="json")
-
-
-def _cleanup_task_if_current(task_id: str, running_tasks: dict[str, asyncio.Task]) -> None:
-    """Remove task tracking if this coroutine still owns the task slot."""
-    current_task = asyncio.current_task()
-    if current_task and running_tasks.get(task_id) is current_task:
-        del running_tasks[task_id]
-
-
-def _parse_task_records_from_state(
+def task_records_with_writers(
     room_id: str,
     state_response: nio.RoomGetStateResponse,
     runtime_paths: RuntimePaths,
     include_non_pending: bool = False,
-) -> list[ScheduledTaskRecord]:
-    """Parse runtime-authored scheduled task records from a room state response."""
+) -> list[tuple[ScheduledTaskRecord, str]]:
+    """Parse runtime-authored scheduled task records from a room state response, each with the account that wrote it."""
     runtime_account_ids = persisted_bot_user_ids(runtime_paths)
-    tasks: list[ScheduledTaskRecord] = []
+    tasks: list[tuple[ScheduledTaskRecord, str]] = []
     for event in state_response.events:
         if event.get("type") != _SCHEDULED_TASK_EVENT_TYPE:
             continue
@@ -841,9 +567,22 @@ def _parse_task_records_from_state(
             continue
         if not include_non_pending and task.status != "pending":
             continue
-        tasks.append(task)
+        tasks.append((task, event["sender"]))
 
     return tasks
+
+
+def _parse_task_records_from_state(
+    room_id: str,
+    state_response: nio.RoomGetStateResponse,
+    runtime_paths: RuntimePaths,
+    include_non_pending: bool = False,
+) -> list[ScheduledTaskRecord]:
+    """Parse runtime-authored scheduled task records from a room state response."""
+    return [
+        task
+        for task, _writer_id in task_records_with_writers(room_id, state_response, runtime_paths, include_non_pending)
+    ]
 
 
 async def get_scheduled_tasks_for_room(
@@ -1024,93 +763,6 @@ async def _scheduled_task_creator_is_joined(
     return False
 
 
-async def _reconcile_runnable_task_retrying(  # noqa: C901
-    client: nio.AsyncClient,
-    room_id: str,
-    task_id: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    matrix_admin: HookMatrixAdmin | None = None,
-    config_provider: Callable[[], Config | None] | None = None,
-) -> ScheduledTaskRecord | None:
-    """Return runnable state, cancelling departed creators' tasks and retrying uncertainty."""
-    departed_task: ScheduledTaskRecord | None = None
-    while True:
-        try:
-            task = await _get_pending_task_record(
-                client=client,
-                room_id=room_id,
-                task_id=task_id,
-                runtime_paths=runtime_paths,
-            )
-            if task is None:
-                return None
-            if departed_task != task:
-                membership_config = config_provider() if config_provider is not None else config
-                if membership_config is None:
-                    msg = "Scheduled task membership configuration is unavailable"
-                    raise _ScheduledTaskStateReadError(msg)  # noqa: TRY301
-                creator_joined = await _scheduled_task_creator_is_joined(
-                    client,
-                    task,
-                    membership_config,
-                    runtime_paths,
-                )
-                if config_provider is not None and config_provider() is not membership_config:
-                    continue
-                if creator_joined:
-                    return task
-                departed_task = task
-
-            async with _schedule_edit_lock(client, room_id, task_id):
-                current_task = await _get_pending_task_record(
-                    client=client,
-                    room_id=room_id,
-                    task_id=task_id,
-                    runtime_paths=runtime_paths,
-                )
-                if current_task is None:
-                    return None
-                if current_task != departed_task:
-                    continue
-                if current_task.workflow.pre_approved_call:
-                    await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_CANCELLED_REASON)
-                await _persist_scheduled_task_state(
-                    client=client,
-                    room_id=room_id,
-                    task_id=task_id,
-                    workflow=current_task.workflow,
-                    timezone=scheduled_task_timezone(current_task.workflow, config),
-                    status="cancelled",
-                    created_at=current_task.created_at,
-                    matrix_admin=matrix_admin,
-                )
-        except _ScheduledTaskStateReadError as exc:
-            logger.warning(
-                "scheduled_task_state_read_failed_retrying",
-                room_id=room_id,
-                task_id=task_id,
-                error=str(exc),
-            )
-            await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
-        except ValueError as exc:
-            logger.warning(
-                "scheduled_task_owner_cancellation_failed_retrying",
-                room_id=room_id,
-                task_id=task_id,
-                error=str(exc),
-            )
-            await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
-        else:
-            logger.info(
-                "scheduled_task_cancelled_after_creator_left",
-                room_id=room_id,
-                task_id=task_id,
-                created_by=task.workflow.created_by,
-            )
-            return None
-
-
 def _serialize_scheduled_task_created_at(created_at: datetime | str | None) -> str:
     """Normalize persisted scheduled-task timestamps."""
     if isinstance(created_at, datetime):
@@ -1120,15 +772,18 @@ def _serialize_scheduled_task_created_at(created_at: datetime | str | None) -> s
     return datetime.now(UTC).isoformat()
 
 
-def _scheduled_task_permission_hint(client: nio.AsyncClient, room_id: str) -> str:
+def _scheduled_task_permission_hint(
+    client: nio.AsyncClient,
+    room_id: str,
+    writers: ScheduledTaskRuntime | None,
+) -> str:
     """Tell the room admin how to let MindRoom save schedule state in a room.
 
-    Name the running router whenever there is one: it restores every schedule after a restart and backs
-    other accounts' rejected writes, so its grant is the one that unblocks scheduling for the whole room.
+    Name the running router whenever there is one: it runs schedules in every room where it may write their state,
+    and backs other accounts' rejected writes, so its grant is the one that unblocks scheduling for the whole room.
     Rooms MindRoom did not create often leave it below the power level that room state needs.
     """
-    owner = _runner_owner
-    account = client if owner is None else owner.client
+    account = (writers.router_client() if writers is not None else None) or client
     room = account.rooms.get(room_id)
     if room is not None:
         required_level = room.power_levels.get_state_event_required_level(_SCHEDULED_TASK_EVENT_TYPE)
@@ -1139,19 +794,6 @@ def _scheduled_task_permission_hint(client: nio.AsyncClient, room_id: str) -> st
                 f"from {current_level} to {required_level}, then retry."
             )
     return f"Ensure {account.user_id} is joined with permission to write room state, then retry."
-
-
-def _room_state_writer(room_id: str, *, refused_user_id: str) -> nio.AsyncClient | None:
-    """Return a started bot, other than the refused account, whose power in the room lets it write schedule state."""
-    for writer in _state_writers.values():
-        room = writer.rooms.get(room_id)
-        if (
-            writer.user_id != refused_user_id
-            and room is not None
-            and room.power_levels.can_user_send_state(writer.user_id, _SCHEDULED_TASK_EVENT_TYPE)
-        ):
-            return writer
-    return None
 
 
 async def _write_scheduled_task_state(
@@ -1178,44 +820,25 @@ async def _put_scheduled_task_state_content(
     room_id: str,
     task_id: str,
     content: dict[str, typing.Any],
-    matrix_admin: HookMatrixAdmin | None = None,
-) -> None:
-    """Write scheduled-task state, falling back on rejection to the admin-capable path, then to a bot that may."""
-    active_write_failure = await _write_scheduled_task_state(client, room_id, task_id, content)
-    if active_write_failure is None:
-        return
+    writers: ScheduledTaskRuntime | None = None,
+) -> str:
+    """Write scheduled-task state, falling back on rejection to another bot that may, and return the writer's ID."""
+    failure = await _write_scheduled_task_state(client, room_id, task_id, content)
+    if failure is None:
+        return client.user_id
 
-    if matrix_admin is not None:
-        try:
-            admin_wrote = await matrix_admin.put_room_state(
-                room_id,
-                _SCHEDULED_TASK_EVENT_TYPE,
-                task_id,
-                content,
-            )
-        except Exception as exc:
-            msg = (
-                f"Failed to persist scheduled task state for task `{task_id}`: "
-                f"active write failed ({active_write_failure}); privileged fallback raised {type(exc).__name__}: {exc!s}. "
-                f"{_scheduled_task_permission_hint(client, room_id)}"
-            )
-            raise ValueError(msg) from exc
-        if admin_wrote:
-            logger.info("scheduled_task_state_persisted_via_admin", room_id=room_id, task_id=task_id)
-            return
-        active_write_failure = f"{active_write_failure}; privileged fallback failed"
-
-    writer = _room_state_writer(room_id, refused_user_id=client.user_id)
-    if writer is not None:
-        writer_failure = await _write_scheduled_task_state(writer, room_id, task_id, content)
-        if writer_failure is None:
-            logger.info("scheduled_task_state_persisted_via_room_writer", room_id=room_id, task_id=task_id)
-            return
-        active_write_failure = f"{active_write_failure}; {writer.user_id} write failed ({writer_failure})"
+    if writers is not None:
+        with writers.other_state_writer(room_id, refused_user_id=client.user_id) as writer:
+            if writer is not None:
+                writer_failure = await _write_scheduled_task_state(writer, room_id, task_id, content)
+                if writer_failure is None:
+                    logger.info("scheduled_task_state_persisted_via_room_writer", room_id=room_id, task_id=task_id)
+                    return writer.user_id
+                failure = f"{failure}; {writer.user_id} write failed ({writer_failure})"
 
     msg = (
-        f"Failed to persist scheduled task state for task `{task_id}`: {active_write_failure}. "
-        f"{_scheduled_task_permission_hint(client, room_id)}"
+        f"Failed to persist scheduled task state for task `{task_id}`: {failure}. "
+        f"{_scheduled_task_permission_hint(client, room_id, writers)}"
     )
     raise ValueError(msg)
 
@@ -1229,9 +852,9 @@ async def _persist_scheduled_task_state(
     timezone: str,
     status: str = "pending",
     created_at: datetime | str | None = None,
-    matrix_admin: HookMatrixAdmin | None = None,
-) -> str:
-    """Persist scheduled task state to Matrix and return its unique revision.
+    writers: ScheduledTaskRuntime | None = None,
+) -> _StateWrite:
+    """Persist scheduled task state to Matrix and return its unique revision and writer.
 
     `timezone` is the wall time the stored `cron_description` is written in for clients.
     """
@@ -1249,61 +872,51 @@ async def _persist_scheduled_task_state(
         "created_at": _serialize_scheduled_task_created_at(created_at),
         "updated_at": datetime.now(UTC).isoformat(),
     }
-    await _put_scheduled_task_state_content(
+    writer_id = await _put_scheduled_task_state_content(
         client=client,
         room_id=room_id,
         task_id=task_id,
         content=content,
-        matrix_admin=matrix_admin,
+        writers=writers,
     )
-    return revision
+    return _StateWrite(revision, writer_id)
 
 
 async def _save_pending_scheduled_task(
     client: nio.AsyncClient,
-    room_id: str,
+    room: nio.MatrixRoom,
     task_id: str,
     workflow: ScheduledWorkflow,
     config: Config,
-    runtime_paths: RuntimePaths,
-    conversation_reader: ConversationReader,
     created_at: datetime | str | None = None,
-    matrix_admin: HookMatrixAdmin | None = None,
-    config_provider: Callable[[], Config | None] | None = None,
+    task_runtime: ScheduledTaskRuntime | None = None,
 ) -> None:
-    """Persist one pending task and start or replace its in-memory runner."""
-    _cancel_running_task(task_id)
-    await _persist_scheduled_task_state(
+    """Persist one pending task and start or replace its runner."""
+    if task_runtime is not None:
+        task_runtime.cancel_runner(task_id)
+    written = await _persist_scheduled_task_state(
         client=client,
-        room_id=room_id,
+        room_id=room.room_id,
         task_id=task_id,
         workflow=workflow,
         timezone=scheduled_task_timezone(workflow, config),
         status="pending",
         created_at=created_at,
-        matrix_admin=matrix_admin,
+        writers=task_runtime,
     )
-    _start_new_scheduled_task(
-        client,
-        task_id,
-        workflow,
-        config,
-        runtime_paths,
-        conversation_reader,
-        matrix_admin,
-        config_provider=config_provider,
-    )
+    if task_runtime is not None:
+        task_runtime.start_new_task(room, task_id, workflow, writer_id=written.writer_id)
 
 
-async def _save_one_time_task_status(
+async def _save_task_status(
     client: nio.AsyncClient,
     task: ScheduledTaskRecord,
     status: str,
     *,
     timezone: str,
-    matrix_admin: HookMatrixAdmin | None = None,
+    writers: ScheduledTaskRuntime | None = None,
 ) -> None:
-    """Persist the terminal status for a one-time task without restarting it."""
+    """Persist a task's new status without touching its runner."""
     await _persist_scheduled_task_state(
         client=client,
         room_id=task.room_id,
@@ -1312,7 +925,7 @@ async def _save_one_time_task_status(
         timezone=timezone,
         status=status,
         created_at=task.created_at,
-        matrix_admin=matrix_admin,
+        writers=writers,
     )
 
 
@@ -1325,7 +938,7 @@ async def save_edited_scheduled_task(
     runtime_paths: RuntimePaths,
     *,
     timezone: str,
-    matrix_admin: HookMatrixAdmin | None = None,
+    writers: ScheduledTaskRuntime | None = None,
 ) -> ScheduledTaskRecord:
     """Persist edits to an existing task without touching runtime task runners."""
     if existing_task.status != "pending":
@@ -1346,7 +959,7 @@ async def save_edited_scheduled_task(
         if current_task != existing_task:
             msg = f"Task `{task_id}` changed while it was being edited; refresh and retry."
             raise ValueError(msg)
-        revision = await _persist_scheduled_task_state(
+        written = await _persist_scheduled_task_state(
             client=client,
             room_id=room_id,
             task_id=task_id,
@@ -1354,7 +967,7 @@ async def save_edited_scheduled_task(
             timezone=timezone,
             status="pending",
             created_at=current_task.created_at,
-            matrix_admin=matrix_admin,
+            writers=writers,
         )
 
     return ScheduledTaskRecord(
@@ -1363,7 +976,7 @@ async def save_edited_scheduled_task(
         status="pending",
         created_at=existing_task.created_at,
         workflow=workflow,
-        revision=revision,
+        revision=written.revision,
     )
 
 
@@ -1465,325 +1078,6 @@ async def _parse_workflow_schedule(
             error=f"Error parsing schedule: {failure_text(e)}",
             suggestion="Try a simpler format like 'Daily at 9am, check my email'",
         )
-
-
-async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
-    client: nio.AsyncClient,
-    task_id: str,
-    workflow: ScheduledWorkflow,
-    running_tasks: dict[str, asyncio.Task],
-    config: Config,
-    runtime_paths: RuntimePaths,
-    conversation_reader: ConversationReader,
-    matrix_admin: HookMatrixAdmin | None = None,
-    config_provider: Callable[[], Config | None] | None = None,
-) -> None:
-    """Run a recurring task based on cron schedule."""
-    if not workflow.room_id:
-        logger.error("No room_id provided for recurring task", task_id=task_id)
-        return
-
-    task_room_id = workflow.room_id
-    current_target = MessageTarget.for_scheduled_task(workflow)
-    try:
-        while True:
-            latest_task = await _reconcile_runnable_task_retrying(
-                client=client,
-                room_id=task_room_id,
-                task_id=task_id,
-                config=config,
-                runtime_paths=runtime_paths,
-                matrix_admin=matrix_admin,
-                config_provider=config_provider,
-            )
-            if not latest_task:
-                with bound_log_context(**current_target.log_context):
-                    logger.info("Recurring task is no longer pending, stopping", task_id=task_id)
-                return
-
-            latest_workflow = latest_task.workflow
-            workflow = latest_workflow
-            current_target = MessageTarget.for_scheduled_task(workflow)
-            with bound_log_context(**current_target.log_context):
-                cron_schedule = latest_workflow.cron_schedule
-                if not cron_schedule:
-                    logger.error("No cron schedule provided for recurring task", task_id=task_id)
-                    return
-
-                cron_string = cron_schedule.to_cron_string()
-                plan_occurrence = partial(
-                    plan_recurring_occurrence,
-                    runtime_paths,
-                    homeserver=client.homeserver,
-                    sender=client.user_id,
-                    room_id=task_room_id,
-                    task_id=task_id,
-                    workflow_json=workflow.model_dump_json(),
-                    cron=cron_string,
-                    grace_seconds=config.scheduler_catch_up_grace_seconds,
-                )
-                try:
-                    occurrence = await plan_occurrence(now=datetime.now(UTC))
-                except RecurringCheckpointUnavailableError:
-                    await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
-                    continue
-                next_run = occurrence.checkpoint.next_run_at
-                workflow_changed = False
-
-                while True:
-                    delay = (next_run - datetime.now(UTC)).total_seconds()
-                    if delay <= 0:
-                        break
-                    await asyncio.sleep(min(delay, _TASK_STATE_POLL_INTERVAL_SECONDS))
-
-                    refreshed_task = await _reconcile_runnable_task_retrying(
-                        client=client,
-                        room_id=task_room_id,
-                        task_id=task_id,
-                        config=config,
-                        runtime_paths=runtime_paths,
-                        matrix_admin=matrix_admin,
-                        config_provider=config_provider,
-                    )
-                    if not refreshed_task:
-                        logger.info("Recurring task cancelled while waiting, stopping", task_id=task_id)
-                        return
-
-                    refreshed_workflow = refreshed_task.workflow
-                    if not refreshed_workflow.cron_schedule:
-                        logger.error("No cron schedule provided for recurring task", task_id=task_id)
-                        return
-
-                    if _workflows_differ(workflow, refreshed_workflow):
-                        workflow = refreshed_workflow
-                        current_target = MessageTarget.for_scheduled_task(workflow)
-                        workflow_changed = True
-                        break
-
-                if workflow_changed:
-                    continue
-
-                latest_before_execute = await _reconcile_runnable_task_retrying(
-                    client=client,
-                    room_id=task_room_id,
-                    task_id=task_id,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    matrix_admin=matrix_admin,
-                    config_provider=config_provider,
-                )
-                if not latest_before_execute:
-                    logger.info("Recurring task cancelled before execution, stopping", task_id=task_id)
-                    return
-
-                latest_workflow = latest_before_execute.workflow
-                if not latest_workflow.cron_schedule:
-                    logger.error("No cron schedule provided for recurring task", task_id=task_id)
-                    return
-                if _workflows_differ(workflow, latest_workflow):
-                    workflow = latest_workflow
-                    current_target = MessageTarget.for_scheduled_task(workflow)
-                    continue
-
-                # A timer or state read may have stalled across more due slots.
-                # Cron has second precision; normal subsecond wake-up jitter
-                # must still fire a live timer when catch-up is disabled.
-                execute_now = datetime.now(UTC).replace(microsecond=0)
-                try:
-                    occurrence = await plan_occurrence(now=execute_now)
-                except RecurringCheckpointUnavailableError:
-                    await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
-                    continue
-                if occurrence.checkpoint.next_run_at > execute_now:
-                    continue
-
-                outcome = await scheduling_executor.execute_scheduled_workflow(
-                    client,
-                    workflow,
-                    config,
-                    runtime_paths,
-                    conversation_reader,
-                    task_id,
-                    matrix_admin,
-                    occurrence=occurrence,
-                )
-                if outcome.status in {"retry", "held"}:
-                    await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
-                    continue
-                await complete_recurring_occurrence(occurrence, cron_string, datetime.now(UTC))
-                if task_id not in running_tasks:
-                    logger.info("scheduled_task_missing_from_running_tasks", task_id=task_id)
-                    return
-    except asyncio.CancelledError:
-        with bound_log_context(**current_target.log_context):
-            logger.info("cron_task_cancelled", task_id=task_id)
-        raise
-    except Exception as e:
-        with bound_log_context(**current_target.log_context):
-            logger.exception("cron_task_failed", task_id=task_id)
-            if workflow.room_id:
-                error_message = (
-                    f"❌ Recurring task failed: {workflow.description}\nTask ID: {task_id}\nError: {failure_text(e)}"
-                )
-                await scheduling_executor.send_scheduled_failure_notice(
-                    client,
-                    workflow,
-                    current_target,
-                    error_message,
-                    conversation_reader,
-                )
-    finally:
-        _cleanup_task_if_current(task_id, running_tasks)
-
-
-async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
-    client: nio.AsyncClient,
-    task_id: str,
-    workflow: ScheduledWorkflow,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    conversation_reader: ConversationReader,
-    matrix_admin: HookMatrixAdmin | None = None,
-    config_provider: Callable[[], Config | None] | None = None,
-) -> None:
-    """Run a one-time scheduled task."""
-    if not workflow.room_id:
-        logger.error("No room_id provided for one-time task", task_id=task_id)
-        return
-
-    task_room_id = workflow.room_id
-    current_target = MessageTarget.for_scheduled_task(workflow)
-    latest_pending_task: ScheduledTaskRecord | None = None
-    approval_state: ScheduledApprovalArmState = "none"
-    try:
-        while True:
-            latest_task = await _reconcile_runnable_task_retrying(
-                client=client,
-                room_id=task_room_id,
-                task_id=task_id,
-                config=config,
-                runtime_paths=runtime_paths,
-                matrix_admin=matrix_admin,
-                config_provider=config_provider,
-            )
-            if not latest_task:
-                with bound_log_context(**current_target.log_context):
-                    logger.info("One-time task is no longer pending, stopping", task_id=task_id)
-                return
-
-            latest_workflow = latest_task.workflow
-            workflow = latest_workflow
-            current_target = MessageTarget.for_scheduled_task(workflow)
-            with bound_log_context(**current_target.log_context):
-                execute_at = latest_workflow.execute_at
-                if not execute_at:
-                    logger.error("No execution time provided for one-time task", task_id=task_id)
-                    return
-
-                delay = (execute_at - datetime.now(UTC)).total_seconds()
-                if delay <= 0:
-                    break
-                await asyncio.sleep(min(delay, _TASK_STATE_POLL_INTERVAL_SECONDS))
-
-        latest_before_execute = await _reconcile_runnable_task_retrying(
-            client=client,
-            room_id=task_room_id,
-            task_id=task_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            matrix_admin=matrix_admin,
-            config_provider=config_provider,
-        )
-        if not latest_before_execute:
-            with bound_log_context(**current_target.log_context):
-                logger.info("One-time task was cancelled before execution, stopping", task_id=task_id)
-            return
-
-        latest_workflow = latest_before_execute.workflow
-        latest_pending_task = latest_before_execute
-        workflow = latest_workflow
-        current_target = MessageTarget.for_scheduled_task(workflow)
-        with bound_log_context(**current_target.log_context):
-            if not latest_workflow.execute_at:
-                logger.error("No execution time provided for one-time task", task_id=task_id)
-                return
-
-            current_config = config_provider() if config_provider is not None else None
-            approval_state = (
-                await _arm_scheduled_call(task_id, latest_workflow, current_config or config)
-                if latest_workflow.pre_approved_call
-                else "none"
-            )
-            if approval_state == "denied":
-                logger.info("scheduled_tool_call_skipped_after_denial", task_id=task_id)
-                final_status = "cancelled"
-            else:
-                outcome = await scheduling_executor.execute_scheduled_workflow(
-                    client,
-                    latest_workflow,
-                    config,
-                    runtime_paths,
-                    conversation_reader,
-                    task_id,
-                    matrix_admin,
-                )
-                if approval_state == "armed" and outcome.status != "delivered":
-                    await _withdraw_unsent_scheduled_call(task_id)
-                final_status = "completed" if outcome.status == "delivered" else "failed"
-
-            try:
-                await _save_one_time_task_status(
-                    client=client,
-                    task=latest_pending_task,
-                    timezone=scheduled_task_timezone(latest_pending_task.workflow, config),
-                    status=final_status,
-                    matrix_admin=matrix_admin,
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to persist one-time task final state",
-                    task_id=task_id,
-                    status=final_status,
-                )
-    except asyncio.CancelledError:
-        if latest_pending_task is not None and latest_pending_task.workflow is not workflow:
-            workflow = latest_pending_task.workflow
-            current_target = MessageTarget.for_scheduled_task(workflow)
-        with bound_log_context(**current_target.log_context):
-            logger.info("one_time_task_cancelled", task_id=task_id)
-        raise
-    except Exception as e:
-        if latest_pending_task is not None and latest_pending_task.workflow is not workflow:
-            workflow = latest_pending_task.workflow
-            current_target = MessageTarget.for_scheduled_task(workflow)
-        with bound_log_context(**current_target.log_context):
-            logger.exception("one_time_task_failed", task_id=task_id)
-            if approval_state == "armed":
-                await _withdraw_unsent_scheduled_call(task_id)
-            if workflow.room_id:
-                error_message = (
-                    f"❌ One-time task failed: {workflow.description}\nTask ID: {task_id}\nError: {failure_text(e)}"
-                )
-                await scheduling_executor.send_scheduled_failure_notice(
-                    client,
-                    workflow,
-                    current_target,
-                    error_message,
-                    conversation_reader,
-                )
-            if latest_pending_task is not None:
-                try:
-                    await _save_one_time_task_status(
-                        client=client,
-                        task=latest_pending_task,
-                        timezone=scheduled_task_timezone(latest_pending_task.workflow, config),
-                        status="failed",
-                        matrix_admin=matrix_admin,
-                    )
-                except Exception:
-                    logger.exception("Failed to mark one-time task as failed", task_id=task_id)
-    finally:
-        _cleanup_task_if_current(task_id, _running_tasks)
 
 
 async def _validate_agent_mentions(
@@ -2086,20 +1380,17 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 timezone=task_timezone,
                 existing_task=existing_task,
                 runtime_paths=runtime_paths,
-                matrix_admin=runtime.matrix_admin,
+                writers=runtime.task_runtime,
             )
         else:
             await _save_pending_scheduled_task(
                 client=client,
-                room_id=room_id,
+                room=room,
                 task_id=task_id,
                 workflow=workflow_result,
                 config=config,
-                runtime_paths=runtime_paths,
-                conversation_reader=conversation_reader,
                 created_at=datetime.now(UTC).isoformat(),
-                matrix_admin=runtime.matrix_admin,
-                config_provider=runtime.config_provider,
+                task_runtime=runtime.task_runtime,
             )
     except ValueError as e:
         return (None, f"❌ Failed to schedule: {e!s}")
@@ -2319,14 +1610,14 @@ async def schedule_approved_tool_call(
         )
         if not card_reserved:
             return (None, "❌ Could not post an approvable approval card for this call; nothing was scheduled.")
-        await _persist_scheduled_task_state(
+        written = await _persist_scheduled_task_state(
             client=runtime.client,
             room_id=room_id,
             task_id=task_id,
             workflow=workflow,
             timezone=timezone,
             created_at=datetime.now(UTC).isoformat(),
-            matrix_admin=runtime.matrix_admin,
+            writers=runtime.task_runtime,
         )
         task_published = True
     except ValueError as e:
@@ -2335,16 +1626,8 @@ async def schedule_approved_tool_call(
         if not task_published and card_reserved is not False:
             await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_CANCELLED_REASON)
     scheduled_for = _format_scheduled_time(send_at, timezone)
-    _start_new_scheduled_task(
-        runtime.client,
-        task_id,
-        workflow,
-        config,
-        runtime.runtime_paths,
-        runtime.conversation_reader,
-        runtime.matrix_admin,
-        config_provider=runtime.config_provider,
-    )
+    if runtime.task_runtime is not None:
+        runtime.task_runtime.start_new_task(runtime.room, task_id, workflow, writer_id=written.writer_id)
     return (
         task_id,
         f"✅ Scheduled `{tool_name}` for {scheduled_for} (task `{task_id}`).\n"
@@ -2495,10 +1778,9 @@ async def cancel_scheduled_task(
     room_id: str,
     task_id: str,
     runtime_paths: RuntimePaths,
-    cancel_in_memory: bool = True,
-    matrix_admin: HookMatrixAdmin | None = None,
+    task_runtime: ScheduledTaskRuntime | None = None,
 ) -> str:
-    """Cancel a scheduled task."""
+    """Cancel a scheduled task and end its runner."""
     existing_content = await _read_scheduled_task_state(client, room_id, task_id, runtime_paths)
     if existing_content is None:
         return f"❌ Task `{task_id}` not found."
@@ -2514,13 +1796,13 @@ async def cancel_scheduled_task(
             room_id=room_id,
             task_id=task_id,
             content=_cancelled_task_content(task_id, existing_content),
-            matrix_admin=matrix_admin,
+            writers=task_runtime,
         )
     except ValueError as e:
         return f"❌ Failed to cancel task `{task_id}`: {e!s}"
 
-    if cancel_in_memory:
-        _cancel_running_task(task_id)
+    if task_runtime is not None:
+        task_runtime.cancel_runner(task_id)
 
     record = _parse_scheduled_task_record(room_id, task_id, existing_content)
     if record is not None and record.workflow.pre_approved_call:
@@ -2528,13 +1810,13 @@ async def cancel_scheduled_task(
     return f"✅ Cancelled task `{task_id}`"
 
 
-async def cancel_all_scheduled_tasks(
+async def cancel_all_scheduled_tasks(  # noqa: C901
     client: nio.AsyncClient,
     room_id: str,
     runtime_paths: RuntimePaths,
-    matrix_admin: HookMatrixAdmin | None = None,
+    task_runtime: ScheduledTaskRuntime | None = None,
 ) -> str:
-    """Cancel all scheduled tasks in a room."""
+    """Cancel all scheduled tasks in a room and end their runners."""
     # Get all scheduled tasks
     response = await client.room_get_state(room_id)
 
@@ -2561,9 +1843,10 @@ async def cancel_all_scheduled_tasks(
                         room_id=room_id,
                         task_id=task_id,
                         content=_cancelled_task_content(task_id, content),
-                        matrix_admin=matrix_admin,
+                        writers=task_runtime,
                     )
-                    _cancel_running_task(task_id)
+                    if task_runtime is not None:
+                        task_runtime.cancel_runner(task_id)
                     cancelled_count += 1
                     logger.info("scheduled_task_cancelled", task_id=task_id)
                 except Exception:
@@ -2579,90 +1862,3 @@ async def cancel_all_scheduled_tasks(
         result += f"\n⚠️ Failed to cancel {failed_count} task(s)"
 
     return result
-
-
-async def restore_scheduled_tasks(  # noqa: C901, PLR0912
-    client: nio.AsyncClient,
-    room_id: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    conversation_reader: ConversationReader,
-    config_provider: Callable[[], Config | None] | None = None,
-) -> int:
-    """Restore scheduled tasks from Matrix state after bot restart.
-
-    Returns:
-        Number of tasks restored
-
-    """
-    response = await client.room_get_state(room_id)
-    if not isinstance(response, nio.RoomGetStateResponse):
-        return 0
-
-    restored_count = 0
-    matrix_admin = build_hook_matrix_admin(client, runtime_paths)
-    for task in _parse_task_records_from_state(room_id, response, runtime_paths, include_non_pending=False):
-        task_id = task.task_id
-        workflow = task.workflow
-
-        if workflow.schedule_type == "once":
-            if not workflow.execute_at:
-                logger.warning("skipping_one_time_task_without_execution_time", task_id=task_id)
-                continue
-            # Handle past one-time tasks: execute if within grace period, fail if too old
-            now = datetime.now(UTC)
-            if workflow.execute_at <= now:
-                missed_by = (now - workflow.execute_at).total_seconds()
-                if missed_by > _MISSED_TASK_MAX_AGE_SECONDS:
-                    logger.warning(
-                        "Skipping ancient missed task",
-                        task_id=task_id,
-                        missed_by_seconds=missed_by,
-                    )
-                    try:
-                        await _persist_scheduled_task_state(
-                            client=client,
-                            room_id=room_id,
-                            task_id=task_id,
-                            workflow=workflow,
-                            timezone=scheduled_task_timezone(workflow, config),
-                            status="failed",
-                            created_at=task.created_at,
-                            matrix_admin=matrix_admin,
-                        )
-                    except Exception:
-                        logger.exception("Failed to mark ancient task as failed", task_id=task_id)
-                    continue
-                if _queue_deferred_overdue_task(task_id, workflow):
-                    logger.warning(
-                        "Queued missed one-time task until sync is ready",
-                        task_id=task_id,
-                        missed_by_seconds=missed_by,
-                    )
-                    restored_count += 1
-                continue
-        elif workflow.schedule_type == "cron" and not workflow.cron_schedule:
-            logger.warning("skipping_recurring_task_without_cron_schedule", task_id=task_id)
-            continue
-        elif workflow.schedule_type == "cron":
-            if _queue_deferred_overdue_task(task_id, workflow):
-                restored_count += 1
-            continue
-
-        # Start the appropriate task
-        if _start_scheduled_task(
-            client,
-            task_id,
-            workflow,
-            config,
-            runtime_paths,
-            conversation_reader,
-            matrix_admin=matrix_admin,
-            config_provider=config_provider,
-        ):
-            restored_count += 1
-
-    if restored_count > 0:
-        logger.info("Restored scheduled tasks in room", room_id=room_id, restored_count=restored_count)
-
-    return restored_count

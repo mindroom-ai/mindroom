@@ -587,7 +587,6 @@ class ThreadingBehaviorTestBase:
         )
         with (
             patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
-            patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
             bot_ready_context,
         ):
             await bot._on_sync_response(sync_response)

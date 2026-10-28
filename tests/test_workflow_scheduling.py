@@ -1023,24 +1023,23 @@ class TestIntegrationWithScheduling:
         )
         room.members_synced = True
 
-        with patch("mindroom.scheduling.tasks._run_cron_task", new=AsyncMock()):
-            task_id, message = await schedule_task(
-                runtime=make_test_scheduling_runtime(
-                    client=client,
-                    config=config,
-                    runtime_paths=runtime_paths_for(config),
-                    room=room,
-                    conversation_reader=make_conversation_reader_mock(),
-                ),
-                room_id="!room:server",
-                thread_id="$thread123",
-                scheduled_by="@user:server",
-                full_text="Daily at 9am, research AI news",
-            )
+        task_id, message = await schedule_task(
+            runtime=make_test_scheduling_runtime(
+                client=client,
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                room=room,
+                conversation_reader=make_conversation_reader_mock(),
+            ),
+            room_id="!room:server",
+            thread_id="$thread123",
+            scheduled_by="@user:server",
+            full_text="Daily at 9am, research AI news",
+        )
 
-            assert task_id is not None
-            assert "recurring task" in message
-            assert "0 9 * * *" in message
+        assert task_id is not None
+        assert "recurring task" in message
+        assert "0 9 * * *" in message
 
     async def test_edit_reparse_preserves_message_and_can_clear_history_limit(
         self,

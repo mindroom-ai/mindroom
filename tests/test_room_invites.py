@@ -566,17 +566,6 @@ async def test_agent_joins_configured_rooms(monkeypatch: pytest.MonkeyPatch, tmp
 
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
 
-    # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(
-        _client: AsyncMock,
-        _room_id: str,
-        _config: Config,
-        _runtime_paths: object,
-        _conversation_reader: object,
-    ) -> int:
-        return 0
-
-    monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
 
     # Test that the bot joins its configured rooms
@@ -614,7 +603,6 @@ async def test_agent_skips_rejoining_rooms_it_already_has(monkeypatch: pytest.Mo
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=["!room1:localhost"]))
-    monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", AsyncMock(return_value=0))
 
     await bot.join_configured_rooms()
 
@@ -857,7 +845,6 @@ async def test_agent_rejoins_persisted_invited_rooms_on_startup(
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
-    monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", AsyncMock(return_value=0))
 
     await bot.join_configured_rooms()
 
@@ -869,7 +856,7 @@ async def test_router_accepts_agent_invite_persists_and_rejoins_on_startup(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Router should auto-accept an internal agent invite as durable desired membership."""
+    """Router should auto-accept an internal agent invite as durable desired membership and restore its schedules."""
     config = bind_runtime_paths(
         Config(
             agents={"agent1": AgentConfig(display_name="Agent 1", role="Test agent")},
@@ -897,6 +884,10 @@ async def test_router_accepts_agent_invite_persists_and_rejoins_on_startup(
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
     welcome_message = AsyncMock()
     monkeypatch.setattr(bot._room_lifecycle, "send_welcome_message_if_empty", welcome_message)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.scheduled_tasks.restore_room = AsyncMock(return_value=0)
+    bot.orchestrator = orchestrator
 
     room = MagicMock(room_id="!router-invited:localhost")
     room.canonical_alias = None
@@ -905,6 +896,7 @@ async def test_router_accepts_agent_invite_persists_and_rejoins_on_startup(
     await _handle_invite(bot, room, event)
 
     join_room.assert_awaited_once_with(bot.client, "!router-invited:localhost")
+    orchestrator.scheduled_tasks.restore_room.assert_awaited_once_with(bot, "!router-invited:localhost")
     assert fenced_during_join == [True]
     welcome_message.assert_awaited_once_with("!router-invited:localhost", "@mindroom_agent1:localhost")
     assert bot._room_lifecycle.decrypt_notice_is_fenced("!router-invited:localhost")
@@ -2540,18 +2532,6 @@ async def test_agent_manages_rooms_on_config_update(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
     mock_client.room_leave = mock_room_leave
-
-    # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(
-        _client: AsyncMock,
-        _room_id: str,
-        _config: Config,
-        _runtime_paths: object,
-        _conversation_reader: object,
-    ) -> int:
-        return 0
-
-    monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
 
     # Mock joined_rooms to return room1 and room3 (agent is in both)
     joined_rooms_response = MagicMock()

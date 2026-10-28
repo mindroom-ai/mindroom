@@ -142,18 +142,6 @@ from .response_runner import (
     ResponseRunnerDeps,
 )
 from .response_shutdown_diagnostics import DeferredStopPhase
-from .scheduling.tasks import (
-    ScheduledTaskRunnerOwner,
-    cancel_all_running_scheduled_tasks,
-    clear_deferred_overdue_tasks,
-    clear_scheduled_task_runner_owner,
-    drain_deferred_overdue_tasks,
-    has_deferred_overdue_tasks,
-    register_scheduled_task_state_writer,
-    restore_scheduled_tasks,
-    set_scheduled_task_runner_owner,
-    unregister_scheduled_task_state_writer,
-)
 from .tool_jobs.client_cancel import cancel_room_jobs, handle_job_cancel_event, person_may_cancel
 from .tool_jobs.follow_ups import follow_up_event
 from .tool_jobs.runtime import get_background_runtime
@@ -382,7 +370,6 @@ class AgentBot:
     _request_payload_preparer: ResponsePayloadPreparer
     _hook_context_support: HookContextSupport
     _knowledge_access_support: KnowledgeAccessSupport
-    _deferred_overdue_task_drain_task: asyncio.Task[None] | None
     _call_manager: CallManager | None
     _calls_full_reconcile_pending: bool
     _call_rooms_reconcile_pending: set[str]
@@ -470,7 +457,6 @@ class AgentBot:
             orchestrator=None,
         )
         self._sync_continuity_store = SyncContinuityStore(self.storage_path, self.agent_name)
-        self._deferred_overdue_task_drain_task = None
         self._call_manager: CallManager | None = None
         self._calls_full_reconcile_pending = False
         self._call_rooms_reconcile_pending = set()
@@ -526,6 +512,7 @@ class AgentBot:
                     self.wait_for_admission_or_shutdown,
                 ),
                 on_configured_room_joined=self._post_join_room_setup,
+                on_room_joined=self._restore_scheduled_tasks,
                 get_conversation_reader=lambda: self._conversation_reader,
             ),
         )
@@ -1257,23 +1244,12 @@ class AgentBot:
         await self._room_lifecycle.join_configured_rooms()
 
     async def _post_join_room_setup(self, room_id: str) -> None:
-        """Run room setup that should happen after joins and across restarts."""
+        """Run room setup that should happen after configured joins and across restarts."""
         self._request_call_reconciliation(room_id)
         if self.agent_name != ROUTER_AGENT_NAME:
             return
 
         assert self.client is not None
-
-        restored_tasks = await restore_scheduled_tasks(
-            self.client,
-            room_id,
-            self.config,
-            self.runtime_paths,
-            self._conversation_reader,
-            config_provider=lambda: self.orchestrator.config if self.orchestrator is not None else self.config,
-        )
-        if restored_tasks > 0:
-            self.logger.info("restored_scheduled_tasks", room_id=room_id, restored_task_count=restored_tasks)
 
         restored_configs = await config_confirmation.restore_pending_changes(self.client, room_id)
         if restored_configs > 0:
@@ -1285,8 +1261,11 @@ class AgentBot:
 
         await self._send_welcome_message_if_empty(room_id)
 
-        if self._first_sync_done:
-            self._maybe_start_deferred_overdue_task_drain()
+    async def _restore_scheduled_tasks(self, room_id: str) -> None:
+        """Hand the schedules this bot owns in a room it joined to the runtime's scheduled-task owner."""
+        orchestrator = self.orchestrator
+        if orchestrator is not None:
+            await orchestrator.scheduled_tasks.restore_room(self, room_id)
 
     async def change_local_membership(
         self,
@@ -1632,9 +1611,6 @@ class AgentBot:
             await orchestrator.handle_bot_ready(self)
             self._orchestrator_ready_handled = True
 
-        if first_sync_response or has_deferred_overdue_tasks():
-            self._maybe_start_deferred_overdue_task_drain()
-
     def _apply_reply_membership_pre_admission(self, effects: ReplyMembershipPreAdmission) -> None:
         """Publish one router sync batch's fail-closed effects."""
         if effects.invalidate_reason is not None:
@@ -1923,9 +1899,6 @@ class AgentBot:
             # Note: Room joining is deferred until after invitations are handled
             self.logger.info("agent_setup_complete", user_id=self.agent_user.user_id)
             await self._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
-            if self.agent_name == ROUTER_AGENT_NAME:
-                set_scheduled_task_runner_owner(ScheduledTaskRunnerOwner(client, self._conversation_reader))
-            register_scheduled_task_state_writer(client)
         except BaseException:
             await self._close_owned_matrix_after_start_failure()
             raise
@@ -2252,18 +2225,6 @@ class AgentBot:
     ) -> None:
         """Release resources after every response owner is terminal."""
         try:
-            if self.client is not None:
-                unregister_scheduled_task_state_writer(self.client)
-            if self.agent_name == ROUTER_AGENT_NAME:
-                self._mark_deferred_stop_phase(DeferredStopPhase.ROUTER_OVERDUE_TASKS)
-                clear_scheduled_task_runner_owner()
-                cleared_queued_tasks = clear_deferred_overdue_tasks()
-                if cleared_queued_tasks > 0:
-                    self.logger.info("Cleared queued overdue scheduled tasks", count=cleared_queued_tasks)
-                cancelled_tasks = await cancel_all_running_scheduled_tasks()
-                if cancelled_tasks > 0:
-                    self.logger.info("Cancelled running scheduled tasks", count=cancelled_tasks)
-
             # Each of these owns a resource this bot alone holds, and none of them
             # may skip the others. A lane that already faulted makes dispatcher stop
             # raise, and before this isolation that exception skipped the store and
@@ -2330,51 +2291,6 @@ class AgentBot:
         """
         await self._room_lifecycle.send_welcome_message_if_empty(room_id, visible_to_sender_id)
 
-    def _maybe_start_deferred_overdue_task_drain(self) -> None:
-        """Start draining queued overdue tasks once Matrix sync is ready."""
-        if self.agent_name != ROUTER_AGENT_NAME or self.client is None or self._sync_shutting_down:
-            return
-
-        existing_task = self._deferred_overdue_task_drain_task
-        if existing_task is not None and not existing_task.done():
-            return
-
-        self._deferred_overdue_task_drain_task = asyncio.create_task(
-            self._drain_deferred_overdue_task_queue(),
-            name=f"deferred_overdue_task_drain_{self.agent_name}",
-        )
-
-    async def _drain_deferred_overdue_task_queue(self) -> None:
-        """Drain queued overdue tasks without blocking sync callbacks."""
-        assert self.client is not None
-
-        try:
-            drained_count = await drain_deferred_overdue_tasks(
-                self.client,
-                self.config,
-                self.runtime_paths,
-                self._conversation_reader,
-                config_provider=lambda: self.orchestrator.config if self.orchestrator is not None else self.config,
-            )
-            if drained_count > 0:
-                self.logger.info("Started deferred overdue scheduled tasks", count=drained_count)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            self.logger.exception("Failed to drain deferred overdue scheduled tasks")
-
-    async def _cancel_deferred_overdue_task_drain(self) -> None:
-        """Cancel the background overdue-task drain task if one exists."""
-        drain_task = self._deferred_overdue_task_drain_task
-        self._deferred_overdue_task_drain_task = None
-        if drain_task is None:
-            return
-
-        if not drain_task.done():
-            drain_task.cancel()
-
-        await asyncio.gather(drain_task, return_exceptions=True)
-
     def begin_process_shutdown(self) -> None:
         """Close response and callback admission before any shutdown teardown yields."""
         self._matrix_ingestion_quiesce_requested = True
@@ -2412,8 +2328,6 @@ class AgentBot:
             shutdown_budget = ShutdownBudget.start(SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS)
             self._sync_shutdown_budget = shutdown_budget
         await self._personal_room_lifecycle.cancel_reconciliation(timeout_seconds=shutdown_budget.remaining_seconds())
-        if self.agent_name == ROUTER_AGENT_NAME:
-            await self._cancel_deferred_overdue_task_drain()
         background_tasks_completed = await wait_for_background_tasks(
             timeout=shutdown_budget.remaining_seconds(),
             owner=self._runtime_view,

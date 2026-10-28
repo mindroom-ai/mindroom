@@ -20,11 +20,11 @@ from mindroom.matrix import client_delivery
 from mindroom.matrix.large_messages import MatrixEventTooLargeError
 from mindroom.scheduling import executor as scheduling_executor
 from mindroom.scheduling import recurring_schedule
-from mindroom.scheduling import tasks as scheduling
+from mindroom.scheduling import runtime as scheduling
 from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow
 from tests.conftest import delivered_matrix_event, delivered_matrix_side_effect
 from tests.conftest import test_runtime_paths as runtime_paths
-from tests.scheduling_helpers import persist_schedule_writer, serve_task_state_events
+from tests.scheduling_helpers import persist_schedule_writer, run_cron_task, serve_task_state_events
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -132,11 +132,10 @@ async def run_until_wait(
     paths = runtime_paths(tmp_path)
     persist_schedule_writer(paths, client.user_id)
     with suppress(asyncio.CancelledError):
-        await scheduling._run_cron_task(
+        await run_cron_task(
             client,
             "daily",
             task,
-            {},
             config or Config(),
             paths,
             AsyncMock(),

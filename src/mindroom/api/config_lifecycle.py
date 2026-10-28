@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.watch import KnowledgeSourceWatcher
     from mindroom.response_activity import ActiveScriptRunInfo, ResponseIdentity
     from mindroom.response_admission import ResponseAdmissionGate
+    from mindroom.scheduling.runtime import ScheduledTaskRuntime
     from mindroom.thread_export.workspace_sync import WorkspaceThreadExportRunner
     from mindroom.worker_computer.sessions import ComputerSessionStore
     from mindroom.workers.backend import WorkerBackend
@@ -133,6 +134,8 @@ class _MindroomAppState:
     agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=AgentReplyMembershipIndex)
     response_admission_gate: ResponseAdmissionGate | None = None
     budget_monitor: BudgetMonitor | None = None
+    # The embedded runtime's scheduled-task owner, whose bots back schedule edits the router may not write.
+    scheduled_tasks: ScheduledTaskRuntime | None = None
     openai_responses: set[ResponseIdentity] = field(default_factory=set)
     active_calls: Callable[[], list[ResponseIdentity]] | None = None
     active_script_runs: Callable[[], Awaitable[list[ActiveScriptRunInfo]]] | None = None

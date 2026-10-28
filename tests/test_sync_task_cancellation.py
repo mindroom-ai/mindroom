@@ -821,7 +821,7 @@ async def test_process_shutdown_preparation_does_not_wait_for_transport_close() 
 
 @pytest.mark.asyncio
 async def test_router_process_shutdown_fences_transport_before_first_await() -> None:
-    """Router cleanup cannot yield before new Matrix sends are refused."""
+    """Shutdown preparation cannot yield before new Matrix sends are refused."""
     router_cleanup_started = asyncio.Event()
     release_router_cleanup = asyncio.Event()
 
@@ -846,7 +846,7 @@ async def test_router_process_shutdown_fences_transport_before_first_await() -> 
         admission_deferred_count=0,
     )
 
-    async def block_router_cleanup() -> None:
+    async def block_router_cleanup(**_kwargs: object) -> None:
         router_cleanup_started.set()
         await release_router_cleanup.wait()
 
@@ -870,7 +870,8 @@ async def test_router_process_shutdown_fences_transport_before_first_await() -> 
     bot._delivery_recovery_wake = MagicMock()
     bot._response_runner = ResponseRunner(deps=MagicMock())
     bot._coalescing_gate = MagicMock(drain_all=AsyncMock(return_value=drain_result))
-    bot._cancel_deferred_overdue_task_drain = block_router_cleanup
+    # The first await of shutdown preparation, after the transport fence.
+    bot._personal_room_lifecycle.cancel_reconciliation = AsyncMock(side_effect=block_router_cleanup)
     bot.logger = MagicMock()
 
     with patch("mindroom.bot.wait_for_background_tasks", new=AsyncMock(return_value=True)):
@@ -1754,7 +1755,6 @@ async def test_delivery_recovery_asks_the_outbox_on_every_sync_response(
     with (
         patch.object(bot, "_delivery_gateway", new=SimpleNamespace(recover_deliveries=recover)),
         patch.object(bot, "_emit_agent_lifecycle_event", new=AsyncMock()),
-        patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
         patch("mindroom.bot._DELIVERY_RECOVERY_RETRY_INITIAL_DELAY_SECONDS", 0.0),
         patch("mindroom.bot._DELIVERY_RECOVERY_RETRY_MAX_DELAY_SECONDS", 0.0),
     ):
@@ -2227,7 +2227,7 @@ def _fleet_with_bots(bots: dict[str, AsyncMock] | dict[str, _FakeBot]) -> Entity
         EntityFleetHooks(
             create_bots=AsyncMock(return_value={}),
             start_blocked=lambda _entity_names: set(),
-            entities_changing=MagicMock(),
+            entities_changing=AsyncMock(),
             entities_started=AsyncMock(),
             setup_rooms_after_retry=AsyncMock(),
             reconcile_removed=AsyncMock(return_value=set()),
@@ -3559,7 +3559,6 @@ async def test_deferred_agent_stop_exposes_each_real_resource_release_phase() ->
     """A blocked real release keeps one fixed deferred-stop phase observable."""
     phases = (
         "recovery_proof",
-        "router_overdue_tasks",
         "journal_dispatcher",
         "ingestion_session",
         "journal_store",
@@ -3579,10 +3578,6 @@ async def test_deferred_agent_stop_exposes_each_real_resource_release_phase() ->
         assert 0 < timeout_seconds <= 0.1
         await gated_call("recovery_proof")()
         return True
-
-    async def cancel_router_tasks() -> int:
-        await gated_call("router_overdue_tasks")()
-        return 0
 
     runner = MagicMock()
     runner.finish_process_shutdown_recovery = AsyncMock(side_effect=finish_recovery)
@@ -3607,31 +3602,24 @@ async def test_deferred_agent_stop_exposes_each_real_resource_release_phase() ->
     bot._runtime_view = SimpleNamespace(client=client)
     bot.logger = MagicMock()
 
-    with (
-        patch("mindroom.bot.clear_deferred_overdue_tasks", return_value=0),
-        patch(
-            "mindroom.bot.cancel_all_running_scheduled_tasks",
-            new=AsyncMock(side_effect=cancel_router_tasks),
+    stopping = asyncio.create_task(
+        AgentBot.finish_deferred_stop(
+            bot,
+            shutdown_intent=ORDERLY_SHUTDOWN,
+            timeout_seconds=0.1,
         ),
-    ):
-        stopping = asyncio.create_task(
-            AgentBot.finish_deferred_stop(
-                bot,
-                shutdown_intent=ORDERLY_SHUTDOWN,
-                timeout_seconds=0.1,
-            ),
-        )
-        try:
-            for phase in phases:
-                started, release = gates[phase]
-                await started.wait()
-                assert bot.deferred_stop_phase == phase
-                release.set()
-            await stopping
-        finally:
-            for _started, release in gates.values():
-                release.set()
-            await asyncio.gather(stopping, return_exceptions=True)
+    )
+    try:
+        for phase in phases:
+            started, release = gates[phase]
+            await started.wait()
+            assert bot.deferred_stop_phase == phase
+            release.set()
+        await stopping
+    finally:
+        for _started, release in gates.values():
+            release.set()
+        await asyncio.gather(stopping, return_exceptions=True)
 
     assert bot.deferred_stop_phase is None
     assert not bot.deferred_stop_required

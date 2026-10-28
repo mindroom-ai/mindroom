@@ -22,13 +22,23 @@ from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.message_target import MessageTarget
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.scheduling import executor as scheduling_executor
+from mindroom.scheduling import runtime as scheduling_runtime
 from mindroom.scheduling import tasks as scheduling
 from mindroom.scheduling.executor import ScheduledWorkflowOutcome
 from mindroom.scheduling.recurring_schedule import RecurringOccurrence, _RecurringCheckpoint
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, build_scheduling_runtime_from_tool_runtime_context
-from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock
+from tests.conftest import install_bots, make_conversation_reader_mock, make_matrix_client_mock
 from tests.identity_helpers import persist_entity_accounts
-from tests.scheduling_helpers import schedule_runtime_paths, serve_task_state_events
+from tests.scheduling_helpers import (
+    run_cron_task,
+    run_once_task,
+    runnable_task,
+    schedule_runtime_paths,
+    scheduled_task_runtime,
+    scheduling_bot,
+    serve_task_state_events,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -120,7 +130,7 @@ async def test_departed_owner_cancels_persisted_schedule(
     cancel_approval = AsyncMock()
 
     with patch("mindroom.scheduling.tasks.withdraw_scheduled_call_approval", new=cancel_approval):
-        task = await scheduling._reconcile_runnable_task_retrying(
+        task = await runnable_task(
             client,
             "!test:server",
             "owner_task",
@@ -149,7 +159,7 @@ async def test_departed_owner_cancellation_retries_a_failed_approval_withdrawal(
         patch("mindroom.scheduling.tasks.withdraw_scheduled_call_approval", new=withdraw),
         patch("mindroom.scheduling.tasks.asyncio.sleep", new=AsyncMock()),
     ):
-        task = await scheduling._reconcile_runnable_task_retrying(
+        task = await runnable_task(
             client,
             "!test:server",
             "owner_task",
@@ -171,7 +181,7 @@ async def test_joined_schedule_stays_pending(
     """Schedules whose owner is joined must remain usable."""
     client, _, state = _owner_schedule([{"membership": "join"}], created_by=created_by)
 
-    task = await scheduling._reconcile_runnable_task_retrying(
+    task = await runnable_task(
         client,
         "!test:server",
         "owner_task",
@@ -190,7 +200,7 @@ async def test_creatorless_schedule_is_invalid_and_left_untouched(owner_membersh
     client, _, state = _owner_schedule([{"membership": "join"}], created_by=None)
 
     with pytest.raises(RuntimeError, match="has invalid state"):
-        await scheduling._reconcile_runnable_task_retrying(
+        await runnable_task(
             client,
             "!test:server",
             "owner_task",
@@ -204,27 +214,27 @@ async def test_creatorless_schedule_is_invalid_and_left_untouched(owner_membersh
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("schedule_type", ["once", "cron"])
-@pytest.mark.parametrize("use_admin", [False, True])
+@pytest.mark.parametrize("use_room_writer", [False, True])
 async def test_runner_cancels_absent_owner_before_waiting_or_firing(
     schedule_type: Literal["once", "cron"],
-    use_admin: bool,
+    use_room_writer: bool,
     tmp_path: Path,
 ) -> None:
     """Both runner paths must check ownership on startup, including restored tasks."""
     client, workflow, state = _owner_schedule([{"membership": "leave"}], schedule_type=schedule_type)
-    admin = None
-    if use_admin:
-        write_state = client.room_put_state.side_effect
-
-        async def admin_write(room_id: str, event_type: str, state_key: str, content: dict[str, Any]) -> bool:
-            await write_state(room_id, event_type, state_key, content)
-            return True
-
-        admin = AsyncMock()
-        admin.put_room_state.side_effect = admin_write
+    bots = [scheduling_bot(client, conversation_reader=make_conversation_reader_mock())]
+    if use_room_writer:
+        # The owner may not write the room's schedule state, so another bot that may writes the cancellation.
+        writer = make_matrix_client_mock(user_id="@mindroom_general:server")
+        room = nio.MatrixRoom("!test:server", writer.user_id)
+        room.power_levels.users[writer.user_id] = 100
+        writer.rooms = {"!test:server": room}
+        writer.room_put_state.side_effect = client.room_put_state.side_effect
         client.room_put_state.side_effect = None
         client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
-    runtime_paths = schedule_runtime_paths(tmp_path, _SCHEDULE_WRITER)
+        bots.append(scheduling_bot(writer, agent_name="general"))
+    runtime = scheduled_task_runtime(schedule_runtime_paths(tmp_path, _SCHEDULE_WRITER), *bots, config=Config())
+    runner = scheduling_runtime._TaskRunner(runtime, "router", "!test:server", "owner_task")
     with (
         patch(
             "mindroom.scheduling.tasks.asyncio.sleep",
@@ -235,27 +245,7 @@ async def test_runner_cancels_absent_owner_before_waiting_or_firing(
             return_value=ScheduledWorkflowOutcome(status="delivered"),
         ) as execute,
     ):
-        if schedule_type == "once":
-            await scheduling._run_once_task(
-                client,
-                "owner_task",
-                workflow,
-                Config(),
-                runtime_paths,
-                make_conversation_reader_mock(),
-                admin,
-            )
-        else:
-            await scheduling._run_cron_task(
-                client,
-                "owner_task",
-                workflow,
-                {},
-                Config(),
-                runtime_paths,
-                make_conversation_reader_mock(),
-                admin,
-            )
+        await (runner.run_once(workflow) if schedule_type == "once" else runner.run_cron(workflow))
 
     assert state["status"] == "cancelled"
     execute.assert_not_awaited()
@@ -286,7 +276,7 @@ async def test_unknown_membership_waits_for_authoritative_state(
         client.room_put_state.assert_not_awaited()
 
     with patch("mindroom.scheduling.tasks.asyncio.sleep", side_effect=wait_for_retry) as sleep:
-        task = await scheduling._reconcile_runnable_task_retrying(
+        task = await runnable_task(
             client,
             "!test:server",
             "owner_task",
@@ -338,7 +328,7 @@ async def test_edit_during_membership_lookup_survives_stale_departure(
     ) as execute:
         async with asyncio.timeout(2), asyncio.TaskGroup() as tasks:
             tasks.create_task(
-                scheduling._run_once_task(
+                run_once_task(
                     client,
                     "owner_task",
                     workflow,
@@ -411,7 +401,7 @@ async def test_edit_cannot_resurrect_schedule_while_cancellation_is_persisting(
 
     async with asyncio.timeout(2), asyncio.TaskGroup() as tasks:
         tasks.create_task(
-            scheduling._reconcile_runnable_task_retrying(
+            runnable_task(
                 client,
                 "!test:server",
                 "owner_task",
@@ -459,7 +449,7 @@ async def test_edit_during_cancellation_retry_invalidates_old_departure(
         )
 
     with patch("mindroom.scheduling.tasks.asyncio.sleep", side_effect=edit_on_retry):
-        runnable = await scheduling._reconcile_runnable_task_retrying(
+        runnable = await runnable_task(
             client,
             "!test:server",
             "owner_task",
@@ -526,28 +516,25 @@ async def test_departure_is_checked_while_waiting_and_before_firing(
     workflow.execute_at = execute_at
     state["workflow"] = workflow.model_dump_json()
     occurrence = RecurringOccurrence(tmp_path / "checkpoint.json", _RecurringCheckpoint("workflow", execute_at))
-    runtime_paths = schedule_runtime_paths(tmp_path, _SCHEDULE_WRITER)
+    runtime = scheduled_task_runtime(
+        schedule_runtime_paths(tmp_path, _SCHEDULE_WRITER),
+        scheduling_bot(client, conversation_reader=make_conversation_reader_mock()),
+        config=Config(),
+    )
     with (
-        patch("mindroom.scheduling.tasks.plan_recurring_occurrence", return_value=occurrence),
+        patch("mindroom.scheduling.runtime.plan_recurring_occurrence", return_value=occurrence),
         patch("mindroom.scheduling.tasks.asyncio.sleep", side_effect=[None, AssertionError("Task kept waiting")]),
         patch(
             "mindroom.scheduling.executor.execute_scheduled_workflow",
             return_value=ScheduledWorkflowOutcome(status="delivered"),
         ) as execute,
     ):
-        assert scheduling._start_scheduled_task(
-            client,
-            "owner_task",
-            workflow,
-            Config(),
-            runtime_paths,
-            make_conversation_reader_mock(),
-        )
-        task = scheduling._running_tasks["owner_task"]
+        assert runtime._start_runner("router", "owner_task", workflow)
+        _runner, task = runtime._runners["owner_task"]
         await task
 
     assert state["status"] == "cancelled"
-    assert "owner_task" not in scheduling._running_tasks
+    assert "owner_task" not in runtime._runners
     execute.assert_not_awaited()
 
 
@@ -566,7 +553,7 @@ async def test_cancellation_write_failure_retries_without_reviving_departed_owne
         client.room_put_state.side_effect = write_state
 
     with patch("mindroom.scheduling.tasks.asyncio.sleep", side_effect=recover_state_write) as sleep:
-        task = await scheduling._reconcile_runnable_task_retrying(
+        task = await runnable_task(
             client,
             "!test:server",
             "owner_task",
@@ -661,11 +648,11 @@ async def _run_alias_schedule(
     async def unexpected_retry(_delay: float) -> None:
         pytest.fail("A proven membership result must not keep the schedule waiting")
 
-    monkeypatch.setattr(scheduling.scheduling_executor, "execute_scheduled_workflow", deliver)
-    monkeypatch.setattr(scheduling, "plan_recurring_occurrence", plan)
+    monkeypatch.setattr(scheduling_executor, "execute_scheduled_workflow", deliver)
+    monkeypatch.setattr(scheduling_runtime, "plan_recurring_occurrence", plan)
     monkeypatch.setattr(scheduling.asyncio, "sleep", on_retry or unexpected_retry)
     if workflow.schedule_type == "once":
-        await scheduling._run_once_task(
+        await run_once_task(
             client,
             "owner_task",
             workflow,
@@ -674,11 +661,10 @@ async def _run_alias_schedule(
             make_conversation_reader_mock(),
         )
     else:
-        await scheduling._run_cron_task(
+        await run_cron_task(
             client,
             "owner_task",
             workflow,
-            {},
             config,
             runtime_paths,
             make_conversation_reader_mock(),
@@ -813,13 +799,10 @@ async def test_joined_alias_departure_cancels_schedule_before_next_fire(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("schedule_type", ["once", "cron"])
-@pytest.mark.parametrize("managed_runtime", [False, True], ids=["live-bot", "orchestrator"])
 async def test_running_schedule_stops_after_live_human_alias_revocation(  # noqa: PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     schedule_type: Literal["once", "cron"],
-    *,
-    managed_runtime: bool,
 ) -> None:
     """A joined bridge identity loses schedule authority when its live alias grant is removed."""
     client, workflow, state = _owner_schedule(
@@ -827,15 +810,16 @@ async def test_running_schedule_stops_after_live_human_alias_revocation(  # noqa
         schedule_type=schedule_type,
         writer=_ALIAS_SCHEDULE_WRITER,
     )
+    # The router writes the task, so the router's runner owns it.
+    client.user_id = _ALIAS_SCHEDULE_WRITER
     config, runtime_paths = _alias_schedule_config(tmp_path)
     config.agents["helper"].rooms = ["!test:server"]
     config.agents["helper"].access = ResponderAccessConfig(users=["@alice:server"])
     config.scheduler_catch_up_grace_seconds = 300
     memberships: dict[str, object] = {_HUMAN_ALIAS: "join"}
     _set_authoritative_alias_memberships(client, memberships)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=False) if managed_runtime else None
-    if orchestrator is not None:
-        orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=False)
+    orchestrator.config = config
     config.defaults.enable_streaming = False
     live_runtime = BotRuntimeState(
         client=client,
@@ -871,13 +855,14 @@ async def test_running_schedule_stops_after_live_human_alias_revocation(  # noqa
         raise asyncio.CancelledError
 
     monkeypatch.setattr(scheduling, "_parse_workflow_schedule", parsed_workflow)
-    monkeypatch.setattr(scheduling.scheduling_executor, "execute_scheduled_workflow", deliver)
+    monkeypatch.setattr(scheduling_executor, "execute_scheduled_workflow", deliver)
     journal = EventJournalStore.open_sqlite(tmp_path / "schedule-journal.sqlite3")
     principal = journal.principal("@router:server")
     reader = ConversationReader(
         store=principal,
         hydrator=ConversationHydrator(store=principal, runtime=live_runtime, self_sender="@router:server"),
     )
+    install_bots(orchestrator, {"router": scheduling_bot(client, conversation_reader=reader)})
     task: asyncio.Task | None = None
     try:
         context = ToolRuntimeContext(
@@ -896,7 +881,7 @@ async def test_running_schedule_stops_after_live_human_alias_revocation(  # noqa
         )
         if schedule_type == "cron":
             assert workflow.cron_schedule is not None
-            await scheduling.plan_recurring_occurrence(
+            await scheduling_runtime.plan_recurring_occurrence(
                 runtime_paths,
                 homeserver=client.homeserver,
                 sender=client.user_id,
@@ -916,16 +901,13 @@ async def test_running_schedule_stops_after_live_human_alias_revocation(  # noqa
             task_id="owner_task",
         )
         assert task_id == "owner_task", response
-        task = scheduling._running_tasks[task_id]
+        _runner, task = orchestrator.scheduled_tasks._runners[task_id]
         await asyncio.wait_for(alias_lookup_started.wait(), timeout=2)
 
         updated_config = config.model_copy(deep=True)
         updated_config.authorization.aliases = {}
-        if orchestrator is not None:
-            # A retired bot generation can retain its old local config while its schedules survive.
-            orchestrator.config = updated_config
-        else:
-            live_runtime.config = updated_config
+        # A retired bot generation can retain its old local config while its schedules survive.
+        orchestrator.config = updated_config
         finish_alias_lookup.set()
         with suppress(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=2)

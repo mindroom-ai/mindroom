@@ -89,7 +89,7 @@ class _Harness:
         async def create_bots(names: set[str], _config: Config) -> dict[str, _Bot]:
             return {name: self.built.setdefault(name, _Bot(name, self.order)) for name in names}
 
-        def entities_changing(names: set[str]) -> None:
+        async def entities_changing(names: set[str]) -> None:
             self.order.append(f"changing:{','.join(sorted(names))}")
 
         async def entities_started(results: EntityStartResults) -> None:

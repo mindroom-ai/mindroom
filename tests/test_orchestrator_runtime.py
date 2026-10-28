@@ -1489,9 +1489,11 @@ class TestAgentBot(AgentBotTestBase):
             config_reload_status: Callable[[], object],
             agent_cli_registry: object,
             budget_monitor: object,
+            scheduled_tasks: object,
         ) -> None:
             assert agent_cli_registry is mock_orchestrator.agent_cli_registry
             assert budget_monitor is mock_orchestrator.budgets
+            assert scheduled_tasks is mock_orchestrator.scheduled_tasks
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
             assert response_admission_gate is mock_orchestrator._response_admission_gate
@@ -1584,9 +1586,11 @@ class TestAgentBot(AgentBotTestBase):
             config_reload_status: Callable[[], object],
             agent_cli_registry: object,
             budget_monitor: object,
+            scheduled_tasks: object,
         ) -> None:
             assert agent_cli_registry is mock_orchestrator.agent_cli_registry
             assert budget_monitor is mock_orchestrator.budgets
+            assert scheduled_tasks is mock_orchestrator.scheduled_tasks
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
             assert response_admission_gate is mock_orchestrator._response_admission_gate
@@ -1674,9 +1678,11 @@ class TestAgentBot(AgentBotTestBase):
             config_reload_status: Callable[[], object],
             agent_cli_registry: object,
             budget_monitor: object,
+            scheduled_tasks: object,
         ) -> None:
             assert agent_cli_registry is mock_orchestrator.agent_cli_registry
             assert budget_monitor is mock_orchestrator.budgets
+            assert scheduled_tasks is mock_orchestrator.scheduled_tasks
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
             assert response_admission_gate is mock_orchestrator._response_admission_gate
@@ -5769,8 +5775,9 @@ async def test_dashboard_departure_uses_live_membership_owner(tmp_path: Path) ->
     assert gate.in_flight_response_count == 0
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("entities", "fenced"), [({ROUTER_AGENT_NAME, "general"}, True), ({"general"}, False)])
-def test_entity_changes_fence_room_grants_only_when_the_router_stops(
+async def test_entity_changes_fence_room_grants_only_when_the_router_stops(
     tmp_path: Path,
     entities: set[str],
     *,
@@ -5780,6 +5787,6 @@ def test_entity_changes_fence_room_grants_only_when_the_router_stops(
     orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
 
     with patch.object(orchestrator, "invalidate_agent_reply_memberships") as invalidate:
-        orchestrator._entities_changing(entities)
+        await orchestrator._entities_changing(entities)
 
     assert invalidate.call_args_list == ([call(reason="router_replacement")] if fenced else [])

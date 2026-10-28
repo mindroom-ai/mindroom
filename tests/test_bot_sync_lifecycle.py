@@ -89,7 +89,6 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
                     patch.object(bot, "_refresh_agent_reply_memberships_if_needed", AsyncMock()),
                     patch.object(bot, "_schedule_delivery_recovery"),
                     patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
-                    patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
                 ):
                     await bot._run_sync_response_side_effects(first_sync_response=first_sync_response)
             else:

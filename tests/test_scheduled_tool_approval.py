@@ -57,7 +57,6 @@ from mindroom.scheduling.tasks import (
     ScheduledTaskRecord,
     ScheduledWorkflow,
     _parse_scheduled_task_record,
-    _run_once_task,
     _scheduled_call_workflow_digest,
     cancel_scheduled_task,
     save_edited_scheduled_task,
@@ -85,7 +84,7 @@ from tests.conftest import (
 from tests.fakes.scripted_model import ScriptedModel
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
-from tests.scheduling_helpers import joined_member_state
+from tests.scheduling_helpers import joined_member_state, run_once_task, scheduled_task_runtime
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.test_scheduler_tool import _bind_runtime_paths, _make_context
 from tests.test_tool_hooks import _plugin
@@ -98,6 +97,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.approval.manager import ApprovalActionResult
     from mindroom.event_journal import ScheduledCallRefusal
+    from mindroom.scheduling.runtime import ScheduledTaskRuntime
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
 
 _ROOM = "!room:test"
@@ -1039,8 +1039,12 @@ def _tool_context(config: Config, *, thread_id: str | None = "$thread") -> ToolR
     )
 
 
-def _responders(config: Config, *entity_names: str) -> AbstractContextManager[object]:
-    """Let only these agents or teams reply to the requester in the scheduling room."""
+def _responders(
+    config: Config,
+    *entity_names: str,
+    task_runtime: ScheduledTaskRuntime | None = None,
+) -> AbstractContextManager[object]:
+    """Let only these agents or teams reply to the requester in the scheduling room, and run saved tasks on ``task_runtime``."""
     registry = entity_identity_registry(config, runtime_paths_for(config))
     responder_ids = [registry.current_id(name) for name in entity_names]
     build_runtime = build_scheduling_runtime_from_tool_runtime_context
@@ -1049,6 +1053,7 @@ def _responders(config: Config, *entity_names: str) -> AbstractContextManager[ob
         side_effect=lambda context: replace(
             build_runtime(context),
             responder_candidates_for_room=AsyncMock(return_value=responder_ids),
+            task_runtime=task_runtime,
         ),
     )
 
@@ -1166,12 +1171,13 @@ async def test_schedule_tool_call_stores_the_call_and_keeps_its_arguments_out_of
     config = _gated_config()
     context = _tool_context(config)
     request = AsyncMock(return_value=True)
+    task_runtime = scheduled_task_runtime(runtime_paths_for(config), config=config)
 
     with (
         patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
-        patch("mindroom.scheduling.tasks._start_new_scheduled_task") as start,
+        patch.object(task_runtime, "start_new_task") as start,
         tool_runtime_context(context),
-        _responders(context.config, "general"),
+        _responders(context.config, "general", task_runtime=task_runtime),
     ):
         result = await _schedule_from_tool()
 
@@ -1225,7 +1231,6 @@ async def test_schedule_tool_call_stores_and_shows_the_agents_timezone() -> None
 
     with (
         patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
-        patch("mindroom.scheduling.tasks._start_new_scheduled_task"),
         tool_runtime_context(context),
         _responders(context.config, "general"),
     ):
@@ -1256,7 +1261,6 @@ async def test_schedule_tool_call_offers_only_exact_approval_where_any_arguments
     with (
         patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
         patch("mindroom.scheduling.tasks.resolve_tool_approval_approver", return_value=approver),
-        patch("mindroom.scheduling.tasks._start_new_scheduled_task"),
         tool_runtime_context(context),
         _responders(context.config, "general"),
     ):
@@ -1319,7 +1323,6 @@ async def test_schedule_tool_call_stores_arguments_exactly_as_given() -> None:
 
     with (
         patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
-        patch("mindroom.scheduling.tasks._start_new_scheduled_task"),
         tool_runtime_context(context),
         _responders(context.config, "general"),
     ):
@@ -1413,13 +1416,14 @@ async def test_no_task_is_published_when_its_card_cannot_be_posted(
         else AsyncMock(return_value=request_outcome)
     )
     withdraw = AsyncMock()
+    task_runtime = scheduled_task_runtime(context.runtime_paths, config=context.config)
 
     with (
         patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
         patch("mindroom.scheduling.tasks.withdraw_scheduled_call_approval", new=withdraw),
-        patch("mindroom.scheduling.tasks._start_new_scheduled_task") as start,
+        patch.object(task_runtime, "start_new_task") as start,
         tool_runtime_context(context),
-        _responders(context.config, "general"),
+        _responders(context.config, "general", task_runtime=task_runtime),
         pytest.raises(raised),
     ):
         await _schedule_from_tool()
@@ -1440,13 +1444,14 @@ async def test_card_is_withdrawn_when_its_task_cannot_be_published() -> None:
     context.client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
     request = AsyncMock(return_value=True)
     withdraw = AsyncMock()
+    task_runtime = scheduled_task_runtime(context.runtime_paths, config=context.config)
 
     with (
         patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
         patch("mindroom.scheduling.tasks.withdraw_scheduled_call_approval", new=withdraw),
-        patch("mindroom.scheduling.tasks._start_new_scheduled_task") as start,
+        patch.object(task_runtime, "start_new_task") as start,
         tool_runtime_context(context),
-        _responders(context.config, "general"),
+        _responders(context.config, "general", task_runtime=task_runtime),
         pytest.raises(RuntimeError, match="Failed to schedule"),
     ):
         await _schedule_from_tool()
@@ -1536,7 +1541,7 @@ async def test_firing_task_arms_its_approval_and_skips_a_denied_send(
             new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
         ) as execute,
     ):
-        await _run_once_task(
+        await run_once_task(
             client,
             "task1234",
             workflow,
@@ -1601,7 +1606,7 @@ async def test_a_trigger_that_never_went_out_leaves_no_armed_approval(
             new=AsyncMock(return_value=ScheduledWorkflowOutcome(status=outcome, failure_reason="no")),
         ),
     ):
-        await _run_once_task(
+        await run_once_task(
             client,
             "task1234",
             workflow,
@@ -1724,7 +1729,7 @@ async def test_tasks_fire_without_an_armed_approval(
             new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
         ) as execute,
     ):
-        await _run_once_task(
+        await run_once_task(
             client,
             "task1234",
             workflow,
@@ -2237,7 +2242,6 @@ async def test_scheduling_a_name_two_toolkits_share_stores_the_toolkit_the_run_o
 
     with (
         patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
-        patch("mindroom.scheduling.tasks._start_new_scheduled_task"),
         tool_runtime_context(context),
         _responders(config, "general"),
     ):

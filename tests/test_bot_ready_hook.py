@@ -410,7 +410,6 @@ async def test_call_reconciliation_runs_once_per_sync_loop(tmp_path: Path) -> No
 
     with (
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
-        patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
     ):
         bot.mark_sync_loop_started()
         await _complete_frame(bot)
@@ -451,7 +450,6 @@ async def test_router_first_response_refreshes_room_backed_grants(tmp_path: Path
 
     with (
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
-        patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
     ):
         await _complete_frame(bot)
 
@@ -472,7 +470,6 @@ async def test_router_limited_sync_invalidates_then_rebuilds_room_backed_grants(
 
     with (
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
-        patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
     ):
         await _complete_frame(bot)
 

@@ -3251,6 +3251,7 @@ depends_on = [
     "mindroom.response_activity",
     "mindroom.response_admission",
     "mindroom.scheduling.executor",
+    "mindroom.scheduling.runtime",
     "mindroom.thread_export.workspace_sync",
     "mindroom.approval.tool_approval",
     "mindroom.tool_system.plugins",
@@ -5271,16 +5272,27 @@ path = "mindroom.scheduling.tasks"
 depends_on = [
     "mindroom.helper_usage",
     "mindroom.entity_resolution",
-    "mindroom.hooks",
     "mindroom.matrix.conversation_reads",
     "mindroom.providers.registry",
     "mindroom.agent_loop.helper",
     "mindroom.llm",
-    "mindroom.scheduling.executor",
-    "mindroom.scheduling.recurring_schedule",
     "mindroom.requester_identity",
     "mindroom.approval.tool_approval",
     "mindroom.failure_text",
+]
+
+[[modules]]
+path = "mindroom.scheduling.runtime"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.entity_resolution",
+    "mindroom.failure_text",
+    "mindroom.logging_config",
+    "mindroom.message_target",
+    "mindroom.runtime_shutdown",
+    "mindroom.scheduling.executor",
+    "mindroom.scheduling.recurring_schedule",
+    "mindroom.scheduling.tasks",
 ]
 
 [[modules]]
@@ -5301,8 +5313,8 @@ depends_on = [
     "mindroom.logging_config",
 ]
 visibility = [
-    "mindroom.scheduling.tasks",
     "mindroom.scheduling.executor",
+    "mindroom.scheduling.runtime",
 ]
 
 [[modules]]
@@ -5918,9 +5930,7 @@ depends_on = [
     "mindroom.model_selection",
     "mindroom.commands.handler",
     "mindroom.commands.parsing",
-    "mindroom.constants",
     "mindroom.handled_turns",
-    "mindroom.hooks",
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.identity",
     "mindroom.message_target",
