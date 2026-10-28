@@ -27,6 +27,9 @@ _DOWNLOAD_HOST = "files.slack.com"
 _MAX_NAME_CHARACTERS = 150
 _UNSAFE_NAME_CHARACTERS = re.compile(r"[^A-Za-z0-9._ -]")
 _NOT_THE_FILE = "Slack returned a page instead of the file; reconnect Slack and try again"
+# Canvases and posts download as HTML of a length `files.info` does not report.
+_DOCUMENT_MIMETYPE = "application/vnd.slack-docs"
+_DOCUMENT_FILETYPES = frozenset({"quip", "canvas", "space"})
 
 
 class SlackFileError(Exception):
@@ -37,12 +40,19 @@ def _is_html(media_type: object) -> bool:
     return isinstance(media_type, str) and media_type.split(";", 1)[0].strip().lower() == "text/html"
 
 
+def _is_document(file: Mapping[str, Any]) -> bool:
+    filetype = file.get("filetype")
+    return file.get("mimetype") == _DOCUMENT_MIMETYPE or (isinstance(filetype, str) and filetype in _DOCUMENT_FILETYPES)
+
+
 async def fetch_file(client: httpx.AsyncClient, token: str, file: Mapping[str, Any]) -> bytearray:
     """Return the bytes of a file `files.info` described, from Slack's file host, refusing them once they pass 50 MB.
 
     Slack answers a token it does not accept for files with a web page instead of the file, so an HTML answer for a file
     that is not HTML, or a byte count other than the file's size, is refused.
+    A Slack document, a canvas or a post, is HTML of its own length, so neither check applies to it.
     """
+    document = _is_document(file)
     link = file.get("url_private_download") or file.get("url_private")
     url = link if isinstance(link, str) else ""
     parts = urlsplit(url)
@@ -54,7 +64,7 @@ async def fetch_file(client: httpx.AsyncClient, token: str, file: Mapping[str, A
         if not response.is_success:
             msg = f"Slack refused the download with HTTP {response.status_code}"
             raise SlackFileError(msg)
-        if _is_html(response.headers.get("content-type")) and not _is_html(file.get("mimetype")):
+        if not document and _is_html(response.headers.get("content-type")) and not _is_html(file.get("mimetype")):
             raise SlackFileError(_NOT_THE_FILE)
         content = bytearray()
         async for chunk in response.aiter_bytes():
@@ -63,7 +73,7 @@ async def fetch_file(client: httpx.AsyncClient, token: str, file: Mapping[str, A
                 msg = f"The file is larger than {MAX_FILE_BYTES} bytes"
                 raise SlackFileError(msg)
     size = file.get("size")
-    if isinstance(size, int) and len(content) != size:
+    if not document and isinstance(size, int) and len(content) != size:
         raise SlackFileError(_NOT_THE_FILE)
     return content
 

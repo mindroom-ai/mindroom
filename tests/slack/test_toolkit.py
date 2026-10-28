@@ -600,6 +600,44 @@ async def test_download_keeps_an_html_file(
     assert result["file"]["size"] == len(page)
 
 
+@pytest.mark.parametrize(
+    ("mimetype", "filetype"),
+    [
+        ("application/vnd.slack-docs", "quip"),
+        ("application/vnd.slack-docs", None),
+        ("text/plain", "canvas"),
+        ("text/plain", "space"),
+    ],
+    ids=["canvas by mimetype and quip", "by mimetype", "canvas by filetype", "post by filetype"],
+)
+@pytest.mark.asyncio
+async def test_download_keeps_a_slack_document_whose_page_differs_in_length(
+    mimetype: str,
+    filetype: str | None,
+    tmp_path: Path,
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A canvas or post downloads as HTML of another length than `files.info` reports, which is no error page."""
+    _connect_alice(paths)
+    download_url = f"https://files.slack.com/files-pri/T0123ABCD-{FILE_ID}/canvas"
+    page = "<html><body><h1>Launch plan</h1></body></html>"
+    file = {"id": FILE_ID, "name": "Launch plan", "mimetype": mimetype, "size": 7, "url_private_download": download_url}
+    if filetype is not None:
+        file["filetype"] = filetype
+    FakeSlack(
+        {"files.info": {"ok": True, "file": file}, download_url: lambda _request: httpx.Response(200, html=page)},
+    ).install(monkeypatch)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    result = json.loads(await _tools(paths, tool_output_workspace_root=workspace).slack_download(FILE_ID))
+
+    saved = workspace / "slack-downloads" / f"{FILE_ID}-Launch plan"
+    assert result["path"] == str(saved)
+    assert saved.read_text() == page
+
+
 @pytest.mark.asyncio
 async def test_project_search_messages_refused(paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeSlack().install(monkeypatch)
