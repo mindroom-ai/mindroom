@@ -154,12 +154,10 @@ def _temperature(model: ModelProvider) -> float | None:
 
 def _history_plan(config: Config, entity_name: str) -> ResolvedHistoryExecutionPlan:
     """Resolve effective model and compaction budgets for one response scope."""
-    settings = config.resolve_entity(entity_name).history_settings
     model = config.resolve_runtime_model(entity_name=entity_name)
     return resolve_history_execution_plan(
         config=config,
-        compaction_config=settings.compaction_config,
-        has_authored_compaction_config=settings.has_authored_compaction_config,
+        history_settings=config.resolve_entity(entity_name).history_settings,
         active_model_name=model.model_name,
         active_context_window=model.context_window,
         static_prompt_tokens=0,
