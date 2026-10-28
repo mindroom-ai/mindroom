@@ -3838,6 +3838,63 @@ class TestStreamingBehavior:
         assert max_in_flight == 1
 
     @pytest.mark.asyncio
+    async def test_worker_cold_start_right_after_the_placeholder_is_shown(self) -> None:
+        """A cold start reported just after a hidden tool's placeholder is shown, not dropped by the edit throttle."""
+        placeholder_sent = asyncio.Event()
+        notice_shown = asyncio.Event()
+
+        async def record_send(_client: object, _room_id: str, content: dict[str, object]) -> DeliveredMatrixEvent:
+            placeholder_sent.set()
+            return DeliveredMatrixEvent(event_id="$stream", content_sent=dict(content))
+
+        async def record_edit(
+            _client: object,
+            _room_id: str,
+            _event_id: str,
+            new_content: dict[str, object],
+            new_text: str,
+        ) -> DeliveredMatrixEvent:
+            if "Preparing isolated worker" in new_text:
+                notice_shown.set()
+            return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
+
+        async def stream() -> AsyncIterator[object]:
+            yield ToolStarted(call=ToolExecution(tool_call_id="call-shell", tool_name="shell", tool_args={}).call)
+            await asyncio.wait_for(placeholder_sent.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+            pump = get_worker_progress_pump()
+            assert pump is not None
+            pump.queue.put_nowait(
+                WorkerProgressEvent(
+                    tool_name="shell",
+                    function_name="run",
+                    progress=WorkerReadyProgress(
+                        phase="cold_start",
+                        worker_key="worker-a",
+                        backend_name="docker",
+                        elapsed_seconds=0.1,
+                    ),
+                ),
+            )
+            # Docker reports nothing more until the worker is ready, so a dropped notice never comes back.
+            await asyncio.wait_for(notice_shown.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+            yield "done"
+
+        with (
+            patch("mindroom.streaming.send_message_result", new=AsyncMock(side_effect=record_send)),
+            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
+        ):
+            await send_streaming_response(
+                client=_make_matrix_client_mock(),
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=stream(),
+                show_tool_calls=False,
+            )
+
+        assert notice_shown.is_set()
+
+    @pytest.mark.asyncio
     async def test_worker_warmup_suffix_renders_and_clears_without_touching_accumulated_text(self) -> None:
         """Warmup notices should render as side-band text and disappear on ready."""
         mock_client = _make_matrix_client_mock()
