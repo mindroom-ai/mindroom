@@ -311,7 +311,6 @@ async def test_validated_replacement_source_completes_deferred_welcome(
             owner.runtime_paths,
             owner,
             lambda _: None,
-            lambda event: event.sender,
         )
         await lifecycle.member_event(
             nio.MatrixRoom(room_id, server.user_id),
@@ -327,7 +326,6 @@ async def test_validated_replacement_source_completes_deferred_welcome(
         restarted.runtime_paths,
         restarted,
         lambda _: PersonalRoomTarget(restarted, True),
-        lambda event: event.sender,
     )
     await router._reconcile()
     record = read_personal_room(path)
@@ -647,7 +645,6 @@ async def test_a_pending_guest_removal_retry_does_not_delay_shutdown(
         runtime_paths=owner.runtime_paths,
         service=owner,
         lookup_target=lambda _agent: None,
-        requester_user_id=lambda event: event.sender,
     )
 
     await asyncio.wait_for(lifecycle.cancel_reconciliation(timeout_seconds=1), timeout=2)
@@ -668,7 +665,6 @@ async def test_the_room_lifecycle_removes_an_invited_person(tmp_path: Path, monk
         runtime_paths=owner.runtime_paths,
         service=owner,
         lookup_target=lambda _agent: None,
-        requester_user_id=lambda event: event.sender,
     )
     room = nio.MatrixRoom(room_id, server.user_id)
     room.add_member("@alice:localhost", None, None)
@@ -1169,7 +1165,11 @@ async def test_self_command_ignores_forged_requester_and_argument(
     assert await router._on_message(room, event) is TurnDispatchOutcome.INTENTIONALLY_IGNORED
     assert [record.user_id for record in _personal_room_records(router.runtime_paths, "helper")] == ["@alice:localhost"]
     event.body = "!personal @bob:localhost"
-    assert not await router._personal_room_lifecycle.handle_command(room, event)
+    assert not await router._personal_room_lifecycle.handle_command(
+        room,
+        event,
+        router._ingress_validator.classify(event).lane_requester_id,
+    )
     assert server.create_count == 1
 
 
@@ -2471,7 +2471,6 @@ async def test_owner_event_retires_initial_join_after_later_invite(
         owner.runtime_paths,
         owner,
         lambda _agent: None,
-        lambda event: event.sender,
     )
     server.set_member(room_id, "@alice:localhost", observed_membership)
     event = _room_member_event(membership=observed_membership, prev_membership=previous_membership)
@@ -2513,7 +2512,6 @@ async def test_owner_event_retirement_requires_recorded_room_and_user(
         owner.runtime_paths,
         owner,
         lambda _agent: None,
-        lambda event: event.sender,
     )
     leave = _room_member_event(membership="leave", prev_membership="invite")
     await lifecycle.member_event(nio.MatrixRoom("!other:localhost", server.user_id), leave)
@@ -2542,7 +2540,6 @@ async def test_unrecorded_owner_event_creates_no_lock_when_feature_disabled(
         owner.runtime_paths,
         owner,
         lambda _agent: None,
-        lambda event: event.sender,
     )
     await lifecycle.member_event(
         nio.MatrixRoom("!other:localhost", server.user_id),
@@ -2903,7 +2900,11 @@ async def test_self_command_rejects_service_account_original_sender_relays(
         },
     )
     room = nio.MatrixRoom("!lobby:localhost", router.agent_user.user_id)
-    assert await router._personal_room_lifecycle.handle_command(room, event)
+    assert await router._personal_room_lifecycle.handle_command(
+        room,
+        event,
+        router._ingress_validator.classify(event).lane_requester_id,
+    )
     assert server.create_count == 0
 
 

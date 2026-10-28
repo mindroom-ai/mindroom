@@ -572,7 +572,7 @@ async def test_sidecar_preview_claims_interactive_text_by_durable_source_event(
             new_callable=AsyncMock,
         ) as mock_enqueue,
     ):
-        await bot._turn_ingress._handle_media_message_inner(room, sidecar_event)
+        await bot._turn_ingress.handle_media_event(room, sidecar_event)
 
     interactive_questions.claim_interactive_text.assert_awaited_once_with(
         source_event_id=prepared_event.event_id,

@@ -297,11 +297,11 @@ def _install_text_dispatch_mock(
     monkeypatch: pytest.MonkeyPatch,
     bot: AgentBot,
 ) -> AsyncMock:
-    """Replace the unwrapped text-dispatch collaborator through an auto-restored seam."""
+    """Replace text handling past the approval reply, through an auto-restored seam."""
     handle_text_event = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
     monkeypatch.setattr(
         bot._turn_ingress,
-        "handle_text_event",
+        "_handle_message_inner",
         handle_text_event,
     )
     return handle_text_event
@@ -2224,7 +2224,7 @@ class TestAgentBot(AgentBotTestBase):
             raise RuntimeError(message)
 
         journal = bot._journal_dispatcher.store
-        with patch("mindroom.bot.maybe_handle_tool_approval_reply", side_effect=consume_then_crash):
+        with patch("mindroom.turns.ingress.maybe_handle_tool_approval_reply", side_effect=consume_then_crash):
             await admit_dispatch_event(
                 bot._journal_dispatcher,
                 room,

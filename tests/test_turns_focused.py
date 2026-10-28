@@ -77,6 +77,7 @@ from mindroom.event_journal import (
     EventKind,
     InboundEvent,
     PrincipalStore,
+    SemanticConsumer,
     TurnRecordStore,
     VisibleMessage,
     journal,
@@ -153,6 +154,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Iterable
     from pathlib import Path
 
+    from mindroom.coalescing.ingress_ticket import IngressTicket
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client import ResolvedVisibleMessage
@@ -406,6 +408,16 @@ async def _unused_hook_send_message(*_args: object, **_kwargs: object) -> str | 
     """Hook message sending must not happen in these tests (the hook registry is empty)."""
     msg = "hook_send_message must not be called in focused turn tests"
     raise AssertionError(msg)
+
+
+async def _claim_semantic_consumer(_consumer: SemanticConsumer) -> bool:
+    """Record nothing: these turns run outside a journal callback, as a fresh event's would before its claim."""
+    return True
+
+
+async def _no_personal_room_command(*_args: object) -> bool:
+    """No personal-room onboarding is configured in these tests."""
+    return False
 
 
 class _UnusedEditRegenerator:
@@ -802,6 +814,9 @@ def _build_harness(
             dispatcher=dispatcher,
             selections=selections,
             voice=voice,
+            semantic_consumer=lambda: None,
+            claim_semantic_consumer=_claim_semantic_consumer,
+            personal_room_command=_no_personal_room_command,
         ),
     )
     return _Harness(
@@ -1933,6 +1948,146 @@ async def test_a_turn_whose_requester_lost_access_in_the_queue_settles_its_sourc
     assert harness.policy.plan_turn_calls == 0
     assert harness.runner.requests == []
     assert not harness.turn_store.has_live_turn_claim(event.event_id)
+
+
+def _approval_reply(event_id: str = "$approval-reply:localhost") -> nio.RoomMessageText:
+    """Return a person's reply to an approval card."""
+    return nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "no, use the other file",
+                "msgtype": "m.text",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$approval-card:localhost"}},
+            },
+            "event_id": event_id,
+            "sender": _SENDER,
+            "origin_server_ts": 1_000_000,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_claimed", [False, True])
+async def test_an_approval_reply_claims_its_consumer_before_its_effect_and_answers_no_turn(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    already_claimed: bool,
+) -> None:
+    """A reply an approval card consumes claims that consumer durably first, and its card is its answer.
+
+    A replay whose consumer is already claimed runs the approval path without claiming again, and never becomes a turn,
+    even when the approval it answered is gone.
+    """
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _approval_reply()
+    steps: list[str] = []
+
+    async def claim(consumer: SemanticConsumer) -> bool:
+        steps.append(f"claim:{consumer.value}")
+        return True
+
+    async def maybe_approval(*, before_consume: Callable[[], Awaitable[None]] | None, **_kwargs: object) -> bool:
+        if already_claimed:
+            assert before_consume is None
+            return False
+        assert before_consume is not None
+        await before_consume()
+        steps.append("deny_approval")
+        return True
+
+    _replace_harness_deps(
+        harness,
+        semantic_consumer=lambda: SemanticConsumer.APPROVAL_REPLY if already_claimed else None,
+        claim_semantic_consumer=claim,
+    )
+    monkeypatch.setattr("mindroom.turns.ingress.maybe_handle_tool_approval_reply", maybe_approval)
+
+    outcome = await harness.ingress.handle_text_event(room, event)
+    await harness.gate.drain_all()
+
+    assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
+    assert steps == ([] if already_claimed else [f"claim:{SemanticConsumer.APPROVAL_REPLY.value}", "deny_approval"])
+    assert harness.gate_batches == []
+    assert harness.runner.requests == []
+    # Its card answers it, so a message that waited for the approval is not skipped as older than it.
+    assert await harness.turn_store.is_handled(_ROOM_ID, event.event_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("active_card", [False, True])
+async def test_a_reply_that_is_no_approval_answer_is_classified_once_and_dispatched(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    active_card: bool,
+) -> None:
+    """A text event's provenance is classified once for onboarding, approval, and its turn.
+
+    A reply to an approval card this process holds keeps the lane slot it took before the approval lookup.
+    """
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _approval_reply()
+    classified: list[str] = []
+    onboarding_requesters: list[str] = []
+    reservations: list[str] = []
+    classify_event = IngressValidator.classify
+
+    def classify(validator: IngressValidator, inbound: nio.RoomMessageText, **kwargs: str | None) -> IngressFacts:
+        classified.append(inbound.event_id)
+        return classify_event(validator, inbound, **kwargs)
+
+    async def onboarding(_room: nio.MatrixRoom, _event: nio.RoomMessageFormatted, requester_user_id: str) -> bool:
+        onboarding_requesters.append(requester_user_id)
+        return False
+
+    reserve = harness.ingress.reserve_prompt_ingress_order
+
+    def record_reservation(room: nio.MatrixRoom, requester_user_id: str, **kwargs: object) -> IngressTicket:
+        reservations.append(requester_user_id)
+        return reserve(room, requester_user_id, **kwargs)
+
+    monkeypatch.setattr(IngressValidator, "classify", classify)
+    _replace_harness_deps(harness, personal_room_command=onboarding)
+    monkeypatch.setattr(harness.ingress, "reserve_prompt_ingress_order", record_reservation)
+    monkeypatch.setattr("mindroom.turns.ingress.is_process_active_approval_card", lambda _event_id: active_card)
+    monkeypatch.setattr("mindroom.turns.ingress.maybe_handle_tool_approval_reply", AsyncMock(return_value=False))
+
+    await harness.deliver(room, event)
+
+    assert classified == [event.event_id]
+    assert onboarding_requesters == [_SENDER]
+    assert reservations == [_SENDER]
+    assert [batch.handled_turn.source_event_ids for batch in harness.gate_batches] == [(event.event_id,)]
+
+
+@pytest.mark.asyncio
+async def test_a_personal_room_command_is_handled_before_any_approval_lookup(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An onboarding command ends its callback before the approval path or a turn sees it."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _approval_reply()
+    approval = AsyncMock(return_value=True)
+
+    async def onboarding(*_args: object) -> bool:
+        return True
+
+    _replace_harness_deps(harness, personal_room_command=onboarding)
+    monkeypatch.setattr("mindroom.turns.ingress.maybe_handle_tool_approval_reply", approval)
+
+    outcome = await harness.ingress.handle_text_event(room, event)
+
+    assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
+    approval.assert_not_awaited()
+    assert not await harness.turn_store.is_handled(_ROOM_ID, event.event_id)
 
 
 @pytest.mark.asyncio

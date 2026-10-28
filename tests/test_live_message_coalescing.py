@@ -3705,8 +3705,8 @@ async def test_active_approval_fallthrough_reserves_before_async_approval_lookup
     later = _text_event(event_id="$later:localhost", body="later", server_timestamp=1_000_001)
 
     with (
-        patch("mindroom.bot.is_process_active_approval_card", return_value=True),
-        patch("mindroom.bot.maybe_handle_tool_approval_reply", side_effect=maybe_approval),
+        patch("mindroom.turns.ingress.is_process_active_approval_card", return_value=True),
+        patch("mindroom.turns.ingress.maybe_handle_tool_approval_reply", side_effect=maybe_approval),
     ):
         first_task = asyncio.create_task(bot._on_message(room, first))
         await _wait_for(approval_lookup_started.is_set)
@@ -3766,8 +3766,8 @@ async def test_trusted_relay_approval_fallthrough_reserves_effective_requester(t
     )
 
     with (
-        patch("mindroom.bot.is_process_active_approval_card", return_value=True),
-        patch("mindroom.bot.maybe_handle_tool_approval_reply", side_effect=maybe_approval),
+        patch("mindroom.turns.ingress.is_process_active_approval_card", return_value=True),
+        patch("mindroom.turns.ingress.maybe_handle_tool_approval_reply", side_effect=maybe_approval),
     ):
         first_task = asyncio.create_task(bot._on_message(room, first))
         await _wait_for(approval_lookup_started.is_set)
@@ -3849,15 +3849,17 @@ async def test_enqueue_for_dispatch_timing_events_include_explicit_scope(tmp_pat
 async def test_matrix_ingress_logging_includes_receive_lag(tmp_path: Path) -> None:
     """Matrix callback logs should include receive lag when origin_server_ts is present."""
     bot = _make_bot(tmp_path)
-    bot.logger = MagicMock()
-    bot._turn_ingress.handle_text_event = AsyncMock()
+    logger = MagicMock()
+    replace_turn_deps(bot, logger=logger)
+    handle_message = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+    bot._turn_ingress._handle_message_inner = handle_message
     room = _make_room()
     event = _text_event(event_id="$m1", body="hello", server_timestamp=1000, thread_id="$thread")
 
-    with patch("mindroom.bot.time.time", return_value=2.5):
+    with patch("mindroom.turns.ingress.time.time", return_value=2.5):
         await bot._on_message(room, event)
 
-    bot.logger.info.assert_any_call(
+    logger.info.assert_any_call(
         "matrix_event_callback_started",
         callback="message",
         event_id="$m1",
@@ -3867,27 +3869,29 @@ async def test_matrix_ingress_logging_includes_receive_lag(tmp_path: Path) -> No
         origin_server_ts_ms=1000,
         matrix_event_receive_lag_ms=1500.0,
     )
-    bot._turn_ingress.handle_text_event.assert_awaited_once()
-    assert bot._turn_ingress.handle_text_event.await_args.args == (room, event)
-    assert isinstance(bot._turn_ingress.handle_text_event.await_args.kwargs["receipt_time"], float)
+    handle_message.assert_awaited_once()
+    assert handle_message.await_args.args[:2] == (room, event)
+    assert isinstance(handle_message.await_args.kwargs["receipt_time"], float)
 
 
 @pytest.mark.asyncio
 async def test_matrix_ingress_logging_handles_missing_origin_timestamp(tmp_path: Path) -> None:
     """Matrix callback logs should tolerate events without origin_server_ts."""
     bot = _make_bot(tmp_path)
-    bot.logger = MagicMock()
-    bot._turn_ingress.handle_text_event = AsyncMock()
+    logger = MagicMock()
+    replace_turn_deps(bot, logger=logger)
+    handle_message = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+    bot._turn_ingress._handle_message_inner = handle_message
     room = _make_room()
     event = MagicMock(spec=nio.RoomMessageText)
     event.event_id = "$m1"
     event.sender = "@user:localhost"
     event.source = {"content": {"msgtype": "m.text", "body": "hello"}}
 
-    with patch("mindroom.bot.time.time", return_value=2.5):
+    with patch("mindroom.turns.ingress.time.time", return_value=2.5):
         await bot._on_message(room, event)
 
-    log_call = next(call for call in bot.logger.info.call_args_list if call.args == ("matrix_event_callback_started",))
+    log_call = next(call for call in logger.info.call_args_list if call.args == ("matrix_event_callback_started",))
     assert log_call.kwargs == {
         "callback": "message",
         "event_id": "$m1",
@@ -3895,9 +3899,9 @@ async def test_matrix_ingress_logging_handles_missing_origin_timestamp(tmp_path:
         "agent_name": "test_agent",
         "receive_timestamp_ms": 2500,
     }
-    bot._turn_ingress.handle_text_event.assert_awaited_once()
-    assert bot._turn_ingress.handle_text_event.await_args.args == (room, event)
-    assert isinstance(bot._turn_ingress.handle_text_event.await_args.kwargs["receipt_time"], float)
+    handle_message.assert_awaited_once()
+    assert handle_message.await_args.args[:2] == (room, event)
+    assert isinstance(handle_message.await_args.kwargs["receipt_time"], float)
 
 
 @pytest.mark.asyncio

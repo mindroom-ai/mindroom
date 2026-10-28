@@ -399,8 +399,10 @@ async def test_abandoned_lane_slot_releases_claim_exactly_once(
         await worker
     await asyncio.wait_for(ticket.slot.settled.wait(), timeout=1.0)
 
+    # The callback's own reservation is the slot whose lane died.
+    monkeypatch.setattr(harness.ingress, "reserve_prompt_ingress_order", lambda *_args, **_kwargs: ticket)
     with pytest.raises(IngressAdmissionClosedError):
-        await harness.ingress.handle_text_event(room, event, ticket=ticket)
+        await harness.ingress.handle_text_event(room, event)
 
     assert ledger.kinds() == ["claim", "release"]
     _assert_claims_released_exactly_once(ledger)

@@ -2098,7 +2098,7 @@ async def test_router_precheck_allows_self_authored_hook_dispatch_without_reques
         ),
     )
 
-    prechecked = await bot._turn_ingress._precheck_dispatch_event(room, event)
+    prechecked = await bot._turn_ingress._precheck_dispatch_event(room, event, bot._ingress_validator.classify(event))
 
     assert prechecked is not None
     assert prechecked.facts.lane_requester_id == "@mindroom_router:localhost"
@@ -2148,7 +2148,7 @@ async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(
         },
     )
 
-    prechecked = await bot._turn_ingress._precheck_dispatch_event(room, event)
+    prechecked = await bot._turn_ingress._precheck_dispatch_event(room, event, bot._ingress_validator.classify(event))
 
     assert prechecked is None
     turn_store.record_turn.assert_called_once_with(TurnRecord.create([event.event_id]), room_id=room.room_id)

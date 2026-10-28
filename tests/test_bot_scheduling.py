@@ -1294,7 +1294,11 @@ class TestCommandHandling:
                 },
             )
 
-            result = await bot._turn_ingress._precheck_dispatch_event(room, event)
+            result = await bot._turn_ingress._precheck_dispatch_event(
+                room,
+                event,
+                bot._ingress_validator.classify(event),
+            )
 
         assert result is not None
         assert result.facts.lane_requester_id == "@mindroom_router:localhost"

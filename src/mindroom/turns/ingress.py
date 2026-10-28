@@ -9,6 +9,8 @@ from enum import Enum
 from functools import partial
 from typing import TYPE_CHECKING, Any, Protocol
 
+from mindroom.approval.inbound import maybe_handle_tool_approval_reply
+from mindroom.approval.tool_approval import is_process_active_approval_card
 from mindroom.authorization import ensure_room_membership_synced
 from mindroom.coalescing.batch import (
     CoalescingKey,
@@ -39,13 +41,14 @@ from mindroom.dispatch_source import (
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
+from mindroom.event_journal import SemanticConsumer
 from mindroom.hooks import hook_ingress_policy
 from mindroom.inbound_turn_normalizer import (
     InboundTurnNormalizer,
     TextNormalizationRequest,
 )
 from mindroom.matrix.client_visible_messages import extract_visible_edit_body
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.event_info import EventInfo, origin_server_ts_from_event_source
 from mindroom.matrix.media import (
     FileMessageEvent,
     MatrixMediaEvent,
@@ -78,6 +81,8 @@ from mindroom.turns.facts import PrecheckedEvent, command_for, is_router_voice_e
 from mindroom.turns.queued_notice import mark_waiting_for_approval, queued_notice_reservation_if_busy
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     import nio
     import structlog
 
@@ -153,6 +158,11 @@ class TurnIngressDeps:
     dispatcher: TurnDispatcher
     selections: InteractiveSelections
     voice: VoiceIngress
+    # The durable consumer the running journal event already claimed, and the claim of one before its effects.
+    semantic_consumer: Callable[[], SemanticConsumer | None]
+    claim_semantic_consumer: Callable[[SemanticConsumer], Awaitable[bool]]
+    # Runs a personal-room onboarding command for its requester; True when the text was one.
+    personal_room_command: Callable[[nio.MatrixRoom, nio.RoomMessageFormatted, str], Awaitable[bool]]
 
 
 @dataclass
@@ -185,16 +195,37 @@ class TurnIngress:
             turn_store=self.deps.turn_store,
         )
 
+    def _log_callback_started(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageFormatted | MatrixMediaEvent,
+        *,
+        callback_name: str,
+    ) -> None:
+        """Log Matrix ingress timing without message content."""
+        receive_timestamp_ms = int(time.time() * 1000)
+        origin_server_ts = origin_server_ts_from_event_source(event.source)
+        log_context: dict[str, object] = {
+            "callback": callback_name,
+            "event_id": event.event_id,
+            "room_id": room.room_id,
+            "agent_name": self.deps.agent_name,
+            "receive_timestamp_ms": receive_timestamp_ms,
+        }
+        if origin_server_ts is not None:
+            log_context["origin_server_ts_ms"] = origin_server_ts
+            log_context["matrix_event_receive_lag_ms"] = round(receive_timestamp_ms - float(origin_server_ts), 1)
+        self.deps.logger.info("matrix_event_callback_started", **log_context)
+
     async def _precheck_dispatch_event[T: DispatchEvent | MatrixMediaEvent](
         self,
         room: nio.MatrixRoom,
         event: T,
+        facts: IngressFacts,
         *,
-        source_kind: str | None = None,
         is_edit: bool = False,
     ) -> PrecheckedEvent[T] | None:
-        """Classify one event once, then run the shared prechecks on that classification."""
-        facts = self.deps.ingress.classify(event, source_kind=source_kind)
+        """Run the shared prechecks on the event's one classification."""
         async with admitted_response_decision(
             self.deps.runtime.response_admission_gate,
             self.deps.response_runner.wait_for_admission_or_shutdown,
@@ -467,7 +498,6 @@ class TurnIngress:
         self,
         room: nio.MatrixRoom,
         prechecked_event: PrecheckedEvent[nio.RoomMessageFormatted],
-        event_info: EventInfo,
     ) -> bool | None:
         """Apply a person's edit to their message still waiting in a queue, or hand it to the edit regenerator.
 
@@ -475,6 +505,7 @@ class TurnIngress:
         """
         if prechecked_event.facts.sender_is_managed:
             return None
+        event_info = EventInfo.from_event(prechecked_event.event.source)
         async with self.deps.ingress.admitted_reply_decision(
             prechecked_event.facts.lane_requester_id,
             room.room_id,
@@ -703,50 +734,91 @@ class TurnIngress:
         )
         return _IngressAdmissionOutcome.DEFERRED
 
-    async def handle_text_event(
-        self,
-        room: nio.MatrixRoom,
-        event: nio.RoomMessageFormatted,
-        *,
-        receipt_time: float | None = None,
-        ticket: IngressTicket | None = None,
-    ) -> TurnDispatchOutcome:
-        """Handle one inbound text event, through a ticket the caller reserved early or one of its own."""
-        async with self.deps.resolver.turn_lookup_scope():
-            return await self._handle_message_inner(
-                room,
-                event,
-                receipt_time=receipt_time,
-                ticket=ticket,
-            )
+    async def handle_text_event(self, room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
+        """Handle one inbound text event from its journal callback.
+
+        A personal-room onboarding command goes first, then a reply to an
+        approval card, then the event as a turn. Its provenance is classified
+        once, for all three.
+        """
+        receipt_time = time.monotonic()
+        event_info = EventInfo.from_event(event.source)
+        # Another entity's finished reply arrives as an edit of its placeholder; its mentions dispatch like a message.
+        final_reply = self._mentioned_entity_final_reply(room, event) if event_info.is_edit else None
+        is_edit = event_info.is_edit and final_reply is None
+        turn_event = event if final_reply is None else final_reply
+        facts = self.deps.ingress.classify(turn_event, source_kind=EDIT_SOURCE_KIND if is_edit else None)
+        if await self.deps.personal_room_command(room, event, facts.lane_requester_id):
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+        self._log_callback_started(room, event, callback_name="message")
+        ticket = None
+        approval_card_event_id = event_info.reply_to_event_id
+        if approval_card_event_id is not None and is_process_active_approval_card(approval_card_event_id):
+            # The approval lookup awaits, so a reply that falls through to a turn takes its place in the lane first:
+            # a later message cannot overtake it.
+            ticket = self.reserve_prompt_ingress_order(room, facts.lane_requester_id, receipt_time=receipt_time)
+        try:
+            if await self._approval_reply_consumed(room, event):
+                # Its card answers it, so a message that waited for the approval is not skipped as older than it.
+                await self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]), room_id=room.room_id)
+                return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+            async with self.deps.resolver.turn_lookup_scope():
+                return await self._handle_message_inner(
+                    room,
+                    event,
+                    PrecheckedEvent(event=turn_event, facts=facts),
+                    is_edit=is_edit,
+                    receipt_time=receipt_time,
+                    ticket=ticket,
+                )
+        finally:
+            if ticket is not None:
+                ticket.close()
+
+    async def _approval_reply_consumed(self, room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> bool:
+        """Route a reply to an approval card only to the approval consumer, claimed durably before any effect."""
+        approval_claimed = self.deps.semantic_consumer() is SemanticConsumer.APPROVAL_REPLY
+
+        async def claim_approval_reply() -> None:
+            nonlocal approval_claimed
+            await self.deps.claim_semantic_consumer(SemanticConsumer.APPROVAL_REPLY)
+            approval_claimed = True
+
+        approval_handled = await maybe_handle_tool_approval_reply(
+            room=room,
+            event=event,
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
+            orchestrator=self.deps.runtime.orchestrator,
+            logger=self.deps.logger,
+            before_consume=None if approval_claimed else claim_approval_reply,
+            membership_index=self.deps.runtime.agent_reply_memberships,
+        )
+        return approval_claimed or approval_handled
 
     async def _handle_message_inner(
         self,
         room: nio.MatrixRoom,
         event: nio.RoomMessageFormatted,
+        classified: PrecheckedEvent[nio.RoomMessageFormatted],
         *,
-        receipt_time: float | None = None,
-        ticket: IngressTicket | None = None,
+        is_edit: bool,
+        receipt_time: float,
+        ticket: IngressTicket | None,
     ) -> TurnDispatchOutcome:
-        """Handle one text message inside the per-turn conversation lookup scope."""
-        event_info = EventInfo.from_event(event.source)
+        """Handle one text message as a turn inside the per-turn conversation lookup scope.
+
+        ``classified`` is the event the turn reads, a finished reply in place of
+        the edit that delivered it, with its facts; it is not prechecked yet.
+        """
         event_content = event.source.get("content") if isinstance(event.source, dict) else None
         is_nonterminal_stream = isinstance(event_content, dict) and is_unfinished_reply(event_content)
         # A placeholder still streaming names no requester, so refusing it here would mark the turn its finished
         # reply needs as handled.
         if not isinstance(event.body, str) or is_nonterminal_stream:
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-        # Another entity's finished reply arrives as an edit of its placeholder; its mentions dispatch like a message.
-        final_reply = self._mentioned_entity_final_reply(room, event) if event_info.is_edit else None
-        if final_reply is not None:
-            event = final_reply
-        is_edit = event_info.is_edit and final_reply is None
-        prechecked_event = await self._precheck_dispatch_event(
-            room,
-            event,
-            source_kind=EDIT_SOURCE_KIND if is_edit else None,
-            is_edit=is_edit,
-        )
+        event = classified.event
+        prechecked_event = await self._precheck_dispatch_event(room, event, classified.facts, is_edit=is_edit)
         if prechecked_event is None:
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         await ensure_room_membership_synced(
@@ -769,7 +841,7 @@ class TurnIngress:
         try:
             if is_edit:
                 ticket.close()
-                handed_off = await self._handle_edit_event(room, prechecked_event, event_info)
+                handed_off = await self._handle_edit_event(room, prechecked_event)
                 return TurnDispatchOutcome.DEFERRED if handed_off is True else TurnDispatchOutcome.INTENTIONALLY_IGNORED
             discovery_alias = prechecked_event.facts.discovery_event_id
             claimed = await ticket.claim_turn(
@@ -848,14 +920,10 @@ class TurnIngress:
             coalescing_thread_id=ingress_thread_id,
         )
 
-    async def handle_media_event(
-        self,
-        room: nio.MatrixRoom,
-        event: MatrixMediaEvent,
-        *,
-        receipt_time: float | None = None,
-    ) -> TurnDispatchOutcome:
-        """Handle one inbound media event."""
+    async def handle_media_event(self, room: nio.MatrixRoom, event: MatrixMediaEvent) -> TurnDispatchOutcome:
+        """Handle one inbound media event from its journal callback."""
+        receipt_time = time.monotonic()
+        self._log_callback_started(room, event, callback_name="media")
         async with self.deps.resolver.turn_lookup_scope():
             return await self._handle_media_message_inner(room, event, receipt_time=receipt_time)
 
@@ -864,10 +932,14 @@ class TurnIngress:
         room: nio.MatrixRoom,
         event: MatrixMediaEvent,
         *,
-        receipt_time: float | None = None,
+        receipt_time: float,
     ) -> TurnDispatchOutcome:
         """Handle one media event inside the per-turn conversation lookup scope."""
-        prechecked_event = await self._precheck_dispatch_event(room, event, source_kind=_media_source_kind(event))
+        prechecked_event = await self._precheck_dispatch_event(
+            room,
+            event,
+            self.deps.ingress.classify(event, source_kind=_media_source_kind(event)),
+        )
         if prechecked_event is None:
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         dispatch_timing = create_dispatch_pipeline_timing(

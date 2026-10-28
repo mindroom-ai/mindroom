@@ -568,6 +568,7 @@ visibility = [
     "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.follow_ups",
     "mindroom.turn_store",
+    "mindroom.turns.ingress",
     "mindroom.visible_response_reconciliation",
     "mindroom.voice.visible_voice_echo",
 ]
@@ -1477,6 +1478,7 @@ visibility = [
     "mindroom.bot",
     "mindroom.commands.auto_approve_commands",
     "mindroom.reaction_dispatch",
+    "mindroom.turns.ingress",
 ]
 
 [[modules]]
@@ -1495,7 +1497,6 @@ visibility = [
     "mindroom.approval.inbound",
     "mindroom.approval.response",
     "mindroom.approval.transport",
-    "mindroom.bot",
     "mindroom.commands.auto_approve_commands",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.agent_cli.minimal_mode_preflight",
@@ -1510,6 +1511,7 @@ visibility = [
     "mindroom.skill_learning.reviewer",
     "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.approvals",
+    "mindroom.turns.ingress",
 ]
 
 [[modules]]
@@ -4816,7 +4818,6 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.event_journal",
     "mindroom.event_journal.opening",
-    "mindroom.turn_record",
     "mindroom.hooks",
     "mindroom.hooks.ingress",
     "mindroom.inbound_turn_normalizer",
@@ -4827,7 +4828,6 @@ depends_on = [
     "mindroom.matrix.conversation_hydration",
     "mindroom.matrix.conversation_reads",
     "mindroom.matrix.decrypt_failure",
-    "mindroom.matrix.event_info",
     "mindroom.matrix.journal_ingress",
     "mindroom.matrix.personal_rooms",
     "mindroom.matrix.room_cleanup",
@@ -4849,7 +4849,6 @@ depends_on = [
     "mindroom.scheduling.tasks",
     "mindroom.teams",
     "mindroom.timestamp_formatting",
-    "mindroom.approval.tool_approval",
     "mindroom.tool_jobs.conversation",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.dynamic_toolkits",
@@ -6012,10 +6011,13 @@ visibility = ["mindroom.bot"]
 [[modules]]
 path = "mindroom.turns.ingress"
 depends_on = [
+    "mindroom.approval.inbound",
+    "mindroom.approval.tool_approval",
     "mindroom.coalescing.ingress_ticket",
     "mindroom.constants",
     "mindroom.dispatch_callback_outcome",
     "mindroom.dispatch_recovery_context",
+    "mindroom.event_journal",
     "mindroom.hooks",
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.client_visible_messages",

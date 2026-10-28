@@ -15,12 +15,7 @@ import nio
 from nio import AuthenticatedToDeviceEvent
 from tenacity import retry, retry_if_exception_type, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
-from mindroom.approval.inbound import (
-    handle_tool_approval_action,
-    maybe_handle_tool_approval_reply,
-    parse_approval_response_event,
-)
-from mindroom.approval.tool_approval import is_process_active_approval_card
+from mindroom.approval.inbound import handle_tool_approval_action, parse_approval_response_event
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_live_bot
@@ -49,7 +44,6 @@ from mindroom.hooks.ingress import IngressHookRunner
 from mindroom.matrix.decrypt_diagnostics import DecryptionDiagnostics
 from mindroom.matrix.durable_ingestion import run_ingestion_pump
 from mindroom.matrix.durable_membership import change_local_membership
-from mindroom.matrix.event_info import EventInfo, origin_server_ts_from_event_source
 from mindroom.matrix.health import (
     clear_matrix_sync_state,
     mark_matrix_sync_loop_started,
@@ -83,7 +77,6 @@ from mindroom.teams.formation import TeamOutcome, resolve_configured_team
 from mindroom.teams.spec import TeamMode
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
-from mindroom.turn_record import TurnRecord
 
 from . import constants
 from .background_tasks import create_background_task, wait_for_background_tasks
@@ -100,7 +93,6 @@ from .delivery_gateway import (
     ResponseHookService,
     SendTextRequest,
 )
-from .dispatch_callback_outcome import TurnDispatchOutcome
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .entity_rooms import get_rooms_for_entity
 from .event_journal import (
@@ -108,7 +100,6 @@ from .event_journal import (
     EventKind,
     HistoryRecoveryState,
     PrincipalStore,
-    SemanticConsumer,
 )
 from .event_journal.opening import OpenEventJournal, open_event_journal
 from .inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
@@ -190,6 +181,8 @@ if TYPE_CHECKING:
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.tool_jobs.conversation import ConversationKey
+
+    from .dispatch_callback_outcome import TurnDispatchOutcome
 
 
 class _ProcessShutdownMatrixClient(Protocol):
@@ -516,7 +509,6 @@ class AgentBot:
             self.runtime_paths,
             self.personal_rooms,
             self._lookup_personal_room_target,
-            lambda event: self._ingress_validator.classify(event).lane_requester_id,
             self._provision_personal_agent,
         )
         self._room_lifecycle = BotRoomLifecycle(
@@ -958,6 +950,9 @@ class AgentBot:
                 dispatcher=self._turn_dispatcher,
                 selections=self._interactive_selections,
                 voice=self._voice_ingress,
+                semantic_consumer=self._journal_dispatcher.semantic_consumer,
+                claim_semantic_consumer=self._journal_dispatcher.claim_semantic_consumer,
+                personal_room_command=self._personal_room_lifecycle.handle_command,
             ),
         )
         self._reaction_dispatcher = ReactionDispatcher(
@@ -2527,28 +2522,6 @@ class AgentBot:
             (source_event_id,),
         )
 
-    def _log_matrix_event_callback_started(
-        self,
-        room: nio.MatrixRoom,
-        event: nio.RoomMessageFormatted | MatrixMediaEvent,
-        *,
-        callback_name: str,
-    ) -> None:
-        """Log Matrix ingress timing without message content."""
-        receive_timestamp_ms = int(time.time() * 1000)
-        origin_server_ts = origin_server_ts_from_event_source(event.source)
-        log_context: dict[str, object] = {
-            "callback": callback_name,
-            "event_id": event.event_id,
-            "room_id": room.room_id,
-            "agent_name": self.agent_name,
-            "receive_timestamp_ms": receive_timestamp_ms,
-        }
-        if origin_server_ts is not None:
-            log_context["origin_server_ts_ms"] = origin_server_ts
-            log_context["matrix_event_receive_lag_ms"] = round(receive_timestamp_ms - float(origin_server_ts), 1)
-        self.logger.info("matrix_event_callback_started", **log_context)
-
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
         """Delegate one inbound text event to the turn engine.
 
@@ -2558,53 +2531,7 @@ class AgentBot:
         mentions, commands, and routing apply to `/me asks the bot to X` as to
         the sentence typed without the `/me`.
         """
-        receipt_time = time.monotonic()
-        if await self._personal_room_lifecycle.handle_command(room, event):
-            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-        self._log_matrix_event_callback_started(room, event, callback_name="message")
-        semantic_consumer = self._journal_dispatcher.semantic_consumer()
-        approval_reply_claimed = semantic_consumer is SemanticConsumer.APPROVAL_REPLY
-
-        async def claim_approval_reply() -> None:
-            nonlocal approval_reply_claimed
-            await self._journal_dispatcher.claim_semantic_consumer(
-                SemanticConsumer.APPROVAL_REPLY,
-            )
-            approval_reply_claimed = True
-
-        early_ticket = None
-        approval_reply_to_event_id = EventInfo.from_event(event.source).reply_to_event_id
-        if approval_reply_to_event_id is not None and is_process_active_approval_card(approval_reply_to_event_id):
-            requester_user_id = self._ingress_validator.classify(event).lane_requester_id
-            early_ticket = self._turn_ingress.reserve_prompt_ingress_order(
-                room,
-                requester_user_id,
-                receipt_time=receipt_time,
-            )
-        try:
-            approval_reply_handled = await maybe_handle_tool_approval_reply(
-                room=room,
-                event=event,
-                config=self.config,
-                runtime_paths=self.runtime_paths,
-                orchestrator=self.orchestrator,
-                logger=self.logger,
-                before_consume=None if approval_reply_claimed else claim_approval_reply,
-                membership_index=self._runtime_view.agent_reply_memberships,
-            )
-            if approval_reply_claimed or approval_reply_handled:
-                # Its card answers it, so a message that waited for the approval is not skipped as older than it.
-                await self._turn_store.record_turn(TurnRecord.create([event.event_id]), room_id=room.room_id)
-                return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-            return await self._turn_ingress.handle_text_event(
-                room,
-                event,
-                receipt_time=receipt_time,
-                ticket=early_ticket,
-            )
-        finally:
-            if early_ticket is not None:
-                early_ticket.close()
+        return await self._turn_ingress.handle_text_event(room, event)
 
     async def _on_redaction(self, room: nio.MatrixRoom, event: nio.Event) -> None:  # noqa: ARG002
         """Run what the redaction's admission left for the bot.
@@ -2802,9 +2729,7 @@ class AgentBot:
         event: MatrixMediaEvent,
     ) -> TurnDispatchOutcome:
         """Delegate one inbound media event to the turn engine."""
-        receipt_time = time.monotonic()
-        self._log_matrix_event_callback_started(room, event, callback_name="media")
-        return await self._turn_ingress.handle_media_event(room, event, receipt_time=receipt_time)
+        return await self._turn_ingress.handle_media_event(room, event)
 
     async def _run_regenerated_response(self, request: ResponseRequest) -> str | None:
         """Run one edit-regenerated turn through this bot's response path."""
