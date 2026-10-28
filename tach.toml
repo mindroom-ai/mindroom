@@ -9729,6 +9729,10 @@ path = "mindroom.slack.app"
 depends_on = ["mindroom.slack.api"]
 
 [[modules]]
+path = "mindroom.slack.events"
+depends_on = []
+
+[[modules]]
 path = "mindroom.slack.identity"
 depends_on = ["mindroom.matrix.identity", "mindroom.slack.api", "mindroom.slack.render"]
 

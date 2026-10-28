@@ -467,6 +467,7 @@ Matrix sync callback
 | `slack/` | Native Slack: the minimal Web API client, personal and project tools, events, and agent reply mirroring |
 | `slack/api.py` | Minimal async Slack Web API client over `httpx`, with Slack error and rate-limit mapping, parsing of conversation, message, permalink, and user targets, and message permalinks |
 | `slack/app.py` | The Slack app's workspace-wide credentials from the shared credential store, and the bot identity `auth.test` reports for them, cached per bot token |
+| `slack/events.py` | Pure Slack event handling: the signing-secret check, which Events API messages may wake anyone, the thread keys, which project agent answers an event, and which personal watches an event may be for |
 | `slack/identity.py` | Maps a Slack author to a MindRoom account: the Slack display name and, for full workspace members whose profile email is in `slack.email_domain`, the Matrix user ID from `slack.matrix_user_id_template`; cached for ten minutes per team and user |
 | `slack/oauth.py` | The built-in `slack` OAuth provider: each requester's own Slack user token requested as `user_scope`, accepted only from the workspace the bot token belongs to |
 | `slack/render.py` | Plain dictionaries for agents from Slack answers: messages with author names and permalinks, people, conversations, and the display-name rule |
