@@ -51,6 +51,7 @@ from mindroom.hooks import (
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
+from mindroom.scheduling import scheduled_tool_calls
 from mindroom.scheduling.executor import ScheduledWorkflowOutcome
 from mindroom.scheduling.scheduled_tool_calls import bind_live_tools, prepare_scheduled_call
 from mindroom.scheduling.tasks import (
@@ -72,7 +73,7 @@ from mindroom.tool_system.runtime_context import (
     build_scheduling_runtime_from_tool_runtime_context,
     tool_runtime_context,
 )
-from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.tool_function import ToolFunction, ToolOutcome
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import (
@@ -2775,3 +2776,38 @@ def test_outside_an_agent_run_no_call_can_be_stored() -> None:
 
     assert isinstance(result, str)
     assert "not one of this agent's tools" in result
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_scheduled_call_returns_only_after_its_synchronous_body() -> None:
+    """The scheduled call owns the body it starts, so its thread never outlives the call."""
+    started, release = threading.Event(), threading.Event()
+
+    def blocking() -> str:
+        started.set()
+        assert release.wait(5)
+        return "done"
+
+    function = ToolFunction(
+        name="blocking",
+        description=None,
+        parameters={"type": "object", "properties": {}, "required": []},
+        entrypoint=blocking,
+    )
+    live = scheduled_tool_calls._LiveTools(
+        functions={},
+        middleware=(),
+        context=ToolCallContext(run_id="run-1", session_id="session-1", user_id=None),
+    )
+    call = asyncio.create_task(scheduled_tool_calls._execute(live, function, {}, call_id="scheduled-1"))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        call.cancel()
+        await asyncio.sleep(0.2)
+        waited_for_body = not call.done()
+    finally:
+        release.set()
+        await asyncio.gather(call, return_exceptions=True)
+
+    assert waited_for_body
+    assert call.cancelled()

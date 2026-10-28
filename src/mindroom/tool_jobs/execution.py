@@ -52,6 +52,7 @@ from mindroom.tool_jobs.settings import toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import cli_dispatch_active
 from mindroom.tool_system.call_record import record_call
 from mindroom.tool_system.construction import get_toolkit_construction
+from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.invocation import run_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
@@ -311,7 +312,7 @@ async def _run_here(call_next: ToolNext, arguments: dict[str, Any], *, unassembl
     if not job_owns_execution():
         return await call_next(arguments)
     with enclosing_grant() if unassembled else nullcontext():
-        return await run_as_completion_owner(lambda: call_next(arguments))
+        return await run_as_completion_owner(lambda: call_next(arguments), executor=JOB_CALL_EXECUTOR)
 
 
 def _detached(call: JobCall) -> JobCall:
@@ -486,6 +487,7 @@ async def _run_job_call(
     try:
         returned = await run_as_completion_owner(
             lambda: run_tool_call(function, call.arguments, call.context, middleware=inner),
+            executor=JOB_CALL_EXECUTOR,
         )
     except Exception as error:
         return None, failure_text(error)

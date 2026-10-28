@@ -321,7 +321,8 @@ async def test_a_nested_worker_call_keeps_capacity_on_the_gateway_pool_until_its
 ) -> None:
     """A gateway tool that calls a worker-routed sibling through ``toolkit_functions`` keeps the gateway's executor.
 
-    The nested request runs on the gateway pool, and a cancelled call holds its slot until that request returns.
+    The nested request runs on the gateway pool, and a cancelled call is answered at once while its slot stays held
+    until that request returns.
     """
     started, release, finished = threading.Event(), threading.Event(), threading.Event()
     threads: list[str] = []
@@ -376,10 +377,10 @@ async def test_a_nested_worker_call_keeps_capacity_on_the_gateway_pool_until_its
         try:
             await _wait(started)
             await client.post("/mcp", json=_cancel(1))
+            assert _code(await asyncio.wait_for(first, 2)) == "cancelled"
             assert _code(await client.post("/mcp", json=_call(2, arguments={"query": "probe"}))) == "busy"
             assert [name.startswith("mindroom-mcp-gateway-tool") for name in threads] == [True]
             release.set()
-            assert _code(await asyncio.wait_for(first, 5)) == "cancelled"
             await _wait(finished)
             await gateway_toolkits.drain_gateway_tool_cleanup()
             assert _code(await client.post("/mcp", json=_call(3, arguments={"query": "probe"}))) is None

@@ -57,10 +57,10 @@ from mindroom.hooks import HookRegistry
 from mindroom.llm.media import Image
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_env_policy import VENDOR_TELEMETRY_ENV_VALUES
-from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.authoring import toolkit_functions
 from mindroom.tool_system.declarations import ToolExecutionTarget, ToolFileAccess
+from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.media_transport import encode_media_result
 from mindroom.tool_system.metadata import (
@@ -89,6 +89,7 @@ from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.tool_hooks import (
     SyncToolCompletionTracker,
     build_tool_hook_middleware,
+    run_as_completion_owner,
     track_sync_tool_completion,
 )
 from mindroom.tool_system.worker_proxy_client import WorkerProxyClientConfig, execute_worker_proxy_request
@@ -1063,11 +1064,28 @@ def _routed_ping_toolkit(
     return toolkit, lambda: restore_tool_registry_snapshot(snapshot)
 
 
+def _blocking_requests(count: int) -> tuple[list[threading.Event], list[threading.Event], Callable[..., object]]:
+    """Return per-request start and release events, and a responder that blocks each request until its release."""
+    starts = [threading.Event() for _ in range(count)]
+    releases = [threading.Event() for _ in range(count)]
+    order = iter(range(count))
+    lock = threading.Lock()
+
+    def respond(_url: str, _payload: dict[str, Any]) -> object:
+        with lock:
+            index = next(order)
+        starts[index].set()
+        releases[index].wait(timeout=30)
+        return {"ok": True, "result": "sandbox-result"}
+
+    return starts, releases, respond
+
+
 @pytest.mark.asyncio
 async def test_a_worker_routed_toolkit_function_runs_more_than_once_inside_one_tool_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A tool calling a sibling's function twice, and twice at once, leaves its own call's synchronous slot alone."""
+    """A tool may call a sibling's function twice, and twice at once; the call's owner holds every request."""
     toolkit, restore = _routed_ping_toolkit(monkeypatch, "test_routed_ping_twice")
     try:
         ping = toolkit_functions(toolkit)["ping"]
@@ -1078,14 +1096,14 @@ async def test_a_worker_routed_toolkit_function_runs_more_than_once_inside_one_t
         restore()
 
     assert results == ["sandbox-result"] * 4
-    assert tracker.started_task() is None
+    assert [task.done() for task in tracker.started_tasks()] == [True] * 4
 
 
 @pytest.mark.asyncio
-async def test_a_toolkit_function_called_inside_a_job_runs_on_the_jobs_own_threads(
+async def test_a_toolkit_function_runs_its_request_on_the_threads_of_the_call_that_makes_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A job's calls have no time limit, so the request a nested call starts takes no shared pool's thread."""
+    """A nested request takes the capacity its caller's owner set aside, such as a job's own threads."""
     threads: list[str] = []
 
     def record_thread(_url: str, _payload: dict[str, Any]) -> object:
@@ -1095,8 +1113,7 @@ async def test_a_toolkit_function_called_inside_a_job_runs_on_the_jobs_own_threa
     toolkit, restore = _routed_ping_toolkit(monkeypatch, "test_routed_ping_in_job", record_thread)
     try:
         ping = toolkit_functions(toolkit)["ping"]
-        with job_control_context(JobControl()):
-            result = await ping()
+        result = await run_as_completion_owner(ping, executor=JOB_CALL_EXECUTOR)
     finally:
         restore()
 
@@ -1105,35 +1122,89 @@ async def test_a_toolkit_function_called_inside_a_job_runs_on_the_jobs_own_threa
 
 
 @pytest.mark.asyncio
-async def test_a_cancelled_toolkit_function_call_waits_for_the_worker_request_it_started(
+async def test_a_cancelled_toolkit_function_call_returns_at_once_and_leaves_its_request_to_the_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cancelling the tool that made the call does not leave the call's blocking request running behind it."""
-    started = threading.Event()
-    release = threading.Event()
-
-    def blocking(_url: str, _payload: dict[str, Any]) -> object:
-        started.set()
-        release.wait(timeout=30)
-        return {"ok": True, "result": "sandbox-result"}
-
-    toolkit, restore = _routed_ping_toolkit(monkeypatch, "test_routed_ping_cancelled", blocking)
+    """The tool that made the call unwinds promptly, while its call's owner still holds the running request."""
+    starts, releases, respond = _blocking_requests(1)
+    toolkit, restore = _routed_ping_toolkit(monkeypatch, "test_routed_ping_cancelled", respond)
+    tracker = SyncToolCompletionTracker(executor=ThreadPoolExecutor(max_workers=1))
     try:
         ping = toolkit_functions(toolkit)["ping"]
-        with track_sync_tool_completion(SyncToolCompletionTracker(executor=ThreadPoolExecutor(max_workers=1))):
+        with track_sync_tool_completion(tracker):
             call = asyncio.create_task(ping())
-            await asyncio.to_thread(started.wait, 30)
+            await asyncio.to_thread(starts[0].wait, 30)
             call.cancel()
-            for _ in range(10):
-                await asyncio.sleep(0)
-            settled_early = call.done()
-            release.set()
             with contextlib.suppress(asyncio.CancelledError):
-                await call
+                async with asyncio.timeout(2):
+                    await call
+            [leaf] = tracker.started_tasks()
+            held = not leaf.done()
+            releases[0].set()
+            assert await leaf == "sandbox-result"
     finally:
+        releases[0].set()
         restore()
 
-    assert not settled_early
+    assert call.cancelled()
+    assert held
+
+
+@pytest.mark.asyncio
+async def test_the_owner_of_a_cancelled_call_waits_for_every_request_its_nested_calls_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A waiting owner, such as a job's, returns from a cancelled call only after each nested request has returned."""
+    starts, releases, respond = _blocking_requests(2)
+    toolkit, restore = _routed_ping_toolkit(monkeypatch, "test_routed_ping_owner_waits", respond)
+    try:
+        ping = toolkit_functions(toolkit)["ping"]
+
+        async def tool() -> list[object]:
+            return await asyncio.gather(ping(), ping())
+
+        owner = asyncio.create_task(run_as_completion_owner(tool, executor=ThreadPoolExecutor(max_workers=2)))
+        for started in starts:
+            await asyncio.to_thread(started.wait, 30)
+        owner.cancel()
+        releases[0].set()
+        await asyncio.sleep(0.2)
+        waiting_on_second = not owner.done()
+        releases[1].set()
+        with contextlib.suppress(asyncio.CancelledError):
+            async with asyncio.timeout(5):
+                await owner
+    finally:
+        for release in releases:
+            release.set()
+        restore()
+
+    assert waiting_on_second
+    assert owner.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_a_plugins_timeout_around_a_toolkit_function_call_fires_on_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tool's own timeout around a nested call ends it when the timeout says, not when the request returns."""
+    _starts, releases, respond = _blocking_requests(1)
+    toolkit, restore = _routed_ping_toolkit(monkeypatch, "test_routed_ping_timeout", respond)
+    tracker = SyncToolCompletionTracker()
+    try:
+        ping = toolkit_functions(toolkit)["ping"]
+        with track_sync_tool_completion(tracker):
+            began = time.monotonic()
+            with pytest.raises(TimeoutError):
+                async with asyncio.timeout(0.3):
+                    await ping()
+            elapsed = time.monotonic() - began
+    finally:
+        releases[0].set()
+        await asyncio.gather(*tracker.started_tasks(), return_exceptions=True)
+        restore()
+
+    assert elapsed < 5
 
 
 @pytest.mark.asyncio

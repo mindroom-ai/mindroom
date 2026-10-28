@@ -336,8 +336,7 @@ async def test_synchronous_leaf_is_owned_by_the_completion_tracker() -> None:
         outcome = await _run(function, "{}")
 
     assert outcome.content == "done"
-    started = tracker.started_task()
-    assert started is not None
+    [started] = tracker.started_tasks()
     assert started.done()
 
 
@@ -475,7 +474,7 @@ async def test_custom_iterator_closes_once(*, async_tool: bool, stream: Callable
 
     assert outcome == ToolOutcome(content="ab")
     assert closed == ["async" if stream is _AsyncStream else "sync"]
-    assert (tracker.started_task() is None) is (stream is _AsyncStream)
+    assert (tracker.started_tasks() == []) is (stream is _AsyncStream)
 
 
 @pytest.mark.asyncio

@@ -9,10 +9,9 @@ The module imports no Agno code, so plugin code that authors tools through ``min
 
 from __future__ import annotations
 
-import functools
 import inspect
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, cast, overload
+from typing import TYPE_CHECKING, Any, Protocol, overload
 
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -208,37 +207,16 @@ def toolkit_functions(toolkit: Toolkit | _AgnoToolkit) -> dict[str, Callable[...
     """Return the callables of ``toolkit``'s functions by name, one per name, to call directly.
 
     For an Agno toolkit, such as one ``get_tool_by_name`` returns, a function's async variant wins where it has one,
-    as an agent runs it. A call through an async callable is a tool call of its own, so a tool may call one any number
-    of times, at once too. The synchronous work it starts belongs to it, not to the call of the tool that makes it, and
-    runs where that call's owner runs such work: on a job's own threads, or on the MCP gateway's pool. A cancelled call
-    returns once its synchronous body has finished; a worker request of an async function holds it only under an owner
-    with its own threads, and otherwise the cancelled call returns at once.
+    as an agent runs it. A call through one inside a tool call shares that call's ownership of the synchronous work it
+    starts, so a tool may call them any number of times, at once too.
     """
     if isinstance(toolkit, Toolkit):
-        functions = dict(toolkit.functions)
-    else:
-        functions = {
-            name: function.entrypoint
-            for name, function in toolkit.get_async_functions().items()
-            if function.entrypoint is not None
-        }
-    return {name: _own_call(function) for name, function in functions.items()}
-
-
-def _own_call[F: Callable[..., Any]](function: F) -> F:
-    """Return ``function``, an async one run as a tool call of its own, which owns the synchronous work it starts."""
-    if not inspect.iscoroutinefunction(function):
-        return function
-
-    @functools.wraps(function)
-    async def own_call(*args: object, **kwargs: object) -> object:
-        # Deferred: it loads the tool-call policy and the job runtime, which plugin code importing this module must
-        # not; any code running a tool has loaded them already.
-        from mindroom.tool_system.tool_hooks import run_as_completion_owner  # noqa: PLC0415
-
-        return await run_as_completion_owner(lambda: function(*args, **kwargs))
-
-    return cast("F", own_call)
+        return dict(toolkit.functions)
+    return {
+        name: function.entrypoint
+        for name, function in toolkit.get_async_functions().items()
+        if function.entrypoint is not None
+    }
 
 
 __all__ = ["CurrentCall", "Toolkit", "authored_description", "current_call", "tool", "toolkit_functions"]

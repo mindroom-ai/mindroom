@@ -34,10 +34,9 @@ from mindroom.llm.runs import denial_note_for
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 from mindroom.timing import elapsed_ms_since, emit_timing_event
-from mindroom.tool_jobs.control import job_checkpoint, job_owns_execution
+from mindroom.tool_jobs.control import job_checkpoint
 from mindroom.tool_jobs.execution_authority import check_current_execution_authority
 from mindroom.tool_system.call_record import tool_call_recorder
-from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolDispatchContext,
@@ -93,28 +92,14 @@ logger = get_logger(__name__)
 
 
 @dataclass(slots=True)
-class SyncToolCompletionTracker:
-    """Expose one context-bound synchronous leaf task to its resource owner.
+class _StartClaim:
+    """Decide, once, whether a leaf's real work began before its call was cancelled."""
 
-    ``executor`` runs the entrypoint; ``None`` uses the event loop's default executor.
-    An owner that supplies an executor also runs and retains the blocking call an async
-    entrypoint offloads, such as a worker proxy request, so its capacity covers that thread.
-    """
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _started: bool = False
+    _cancelled_before_start: bool = False
 
-    executor: Executor | None = None
-    task: asyncio.Task[_ToolHookResult] | None = None
-    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
-    _started: bool = field(default=False, init=False, repr=False)
-    _cancelled_before_start: bool = field(default=False, init=False, repr=False)
-
-    def track(self, task: asyncio.Task[_ToolHookResult]) -> None:
-        """Record the one real synchronous entrypoint started in this call."""
-        if self.task is not None:
-            msg = "A tool call cannot start more than one synchronous entrypoint."
-            raise RuntimeError(msg)
-        self.task = task
-
-    def _claim_start(self) -> bool:
+    def claim_start(self) -> bool:
         """Atomically claim actual entrypoint start against request cancellation."""
         with self._lock:
             if self._cancelled_before_start:
@@ -122,7 +107,7 @@ class SyncToolCompletionTracker:
             self._started = True
             return True
 
-    def _cancel_before_start(self) -> bool:
+    def cancel_before_start(self) -> bool:
         """Return whether cancellation won before the entrypoint began."""
         with self._lock:
             if self._started:
@@ -130,10 +115,34 @@ class SyncToolCompletionTracker:
             self._cancelled_before_start = True
             return True
 
-    def started_task(self) -> asyncio.Task[_ToolHookResult] | None:
-        """Return the completion task only after the real entrypoint has begun."""
+    def started(self) -> bool:
+        """Return whether the real entrypoint has begun."""
         with self._lock:
-            return self.task if self._started else None
+            return self._started
+
+
+@dataclass(slots=True)
+class SyncToolCompletionTracker:
+    """Expose the context-bound synchronous leaf tasks of one tool call to its resource owner.
+
+    The call's own synchronous entrypoint is a leaf, and so is each synchronous body or worker request that its code
+    starts through other tools' callables, such as a plugin calling ``toolkit_functions``; they all share the call's
+    executor and its owner.
+    ``executor`` runs the entrypoint; ``None`` uses the event loop's default executor.
+    An owner that supplies an executor also runs and retains the blocking call an async
+    entrypoint offloads, such as a worker proxy request, so its capacity covers that thread.
+    """
+
+    executor: Executor | None = None
+    _leaves: list[tuple[_StartClaim, asyncio.Task[_ToolHookResult]]] = field(
+        default_factory=list,
+        init=False,
+        repr=False,
+    )
+
+    def started_tasks(self) -> list[asyncio.Task[_ToolHookResult]]:
+        """Return the completion task of each leaf whose real entrypoint has begun."""
+        return [task for claim, task in self._leaves if claim.started()]
 
 
 _SYNC_TOOL_COMPLETION_TRACKER: ContextVar[SyncToolCompletionTracker | None] = ContextVar(
@@ -152,23 +161,23 @@ def track_sync_tool_completion(tracker: SyncToolCompletionTracker | None) -> Ite
         _SYNC_TOOL_COMPLETION_TRACKER.reset(token)
 
 
-async def run_as_completion_owner[Result](run: Callable[[], Awaitable[Result]]) -> Result:
-    """Run one call as the owner of the synchronous leaf it starts, and wait for that leaf before returning.
+async def run_as_completion_owner[Result](
+    run: Callable[[], Awaitable[Result]],
+    *,
+    executor: Executor | None = None,
+) -> Result:
+    """Run one tool call as the owner of the synchronous leaves it starts, and wait for them before returning.
 
-    The leaf runs on a job's own threads inside a job, else on the executor of the call that encloses this one, such
-    as the MCP gateway's pool, else on the event loop's default executor. A call that is cancelled returns only after
-    its leaf has finished, so whoever owns the call holds its resources until then.
+    ``executor`` runs the leaves, as ``SyncToolCompletionTracker`` describes. A cancelled call returns only after its
+    leaves have finished, so whoever owns the call holds its resources until then.
     """
-    enclosing = _SYNC_TOOL_COMPLETION_TRACKER.get()
-    enclosing_executor = None if enclosing is None else enclosing.executor
-    tracker = SyncToolCompletionTracker(executor=JOB_CALL_EXECUTOR if job_owns_execution() else enclosing_executor)
+    tracker = SyncToolCompletionTracker(executor=executor)
     try:
         with track_sync_tool_completion(tracker):
             return await run()
     finally:
-        started = tracker.started_task()
-        if started is not None:
-            await wait_for_future_until_complete(asyncio.gather(started, return_exceptions=True))
+        if started := tracker.started_tasks():
+            await wait_for_future_until_complete(asyncio.gather(*started, return_exceptions=True))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -329,9 +338,10 @@ def _resolve_tool_context(
 async def run_sync_tool_entrypoint(call: Callable[[], _ToolHookResult]) -> _ToolHookResult:
     """Run one synchronous tool call off the event loop, retained by any completion owner."""
     tracker = _SYNC_TOOL_COMPLETION_TRACKER.get()
+    claim = _StartClaim()
 
     def invoke() -> _ToolHookResult:
-        if tracker is not None and not tracker._claim_start():
+        if not claim.claim_start():
             raise asyncio.CancelledError
         return call()
 
@@ -342,11 +352,11 @@ async def run_sync_tool_entrypoint(call: Callable[[], _ToolHookResult]) -> _Tool
     task = asyncio.create_task(offload(), name="sync-tool-entrypoint")
     if tracker is None:
         return await task
-    tracker.track(task)
+    tracker._leaves.append((claim, task))
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
-        if tracker._cancel_before_start():
+        if claim.cancel_before_start():
             task.cancel()
         raise
 

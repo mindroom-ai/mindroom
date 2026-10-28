@@ -80,7 +80,7 @@ async def drain_gateway_tool_cleanup() -> None:
         await asyncio.gather(*(asyncio.shield(task) for task in tuple(_CLEANUP_TASKS)), return_exceptions=True)
 
 
-async def _close_after(pending: asyncio.Task[Any], toolkit: Toolkit | None = None) -> None:
+async def _close_after(pending: asyncio.Future[Any], toolkit: Toolkit | None = None) -> None:
     with suppress(BaseException):
         result = await pending
         if toolkit is None:
@@ -224,8 +224,9 @@ async def run_toolkit_operation[T](
         cancelled = True
         raise
     finally:
-        pending = pending or tracker.started_task()
-        cleanup = _close_after(pending, toolkit) if pending is not None else _close(toolkit)
+        leaves = [pending] if pending is not None else tracker.started_tasks()
+        waiting = asyncio.gather(*leaves, return_exceptions=True) if leaves else None
+        cleanup = _close_after(waiting, toolkit) if waiting is not None else _close(toolkit)
         close_task = _retain(cleanup)
-        if not cancelled and (pending is None or pending.done()):
+        if not cancelled and all(leaf.done() for leaf in leaves):
             await asyncio.shield(close_task)

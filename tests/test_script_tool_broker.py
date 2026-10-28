@@ -58,6 +58,7 @@ from mindroom.script_runs.models import (
 )
 from mindroom.script_runs.store import ScriptCallConflictError, ScriptRunStore, mint_script_capability
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
+from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     WorkerScope,
@@ -1438,6 +1439,66 @@ async def test_cancelled_sync_tool_retains_cleanup_until_body_and_close_finish(
     assert close_finished_before_release is False
     receipt = broker.get_call(request.run_id, request.call_id)
     assert receipt.state is ScriptCallState.INDETERMINATE
+    assert cleanup_drained is True
+    await _assert_cleanup_forgotten(broker)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_call_keeps_its_toolkit_until_every_nested_body_returns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tool that runs two synchronous bodies at once, as two calls through ``toolkit_functions`` do, keeps both."""
+    entered = [threading.Event(), threading.Event()]
+    releases = [threading.Event(), threading.Event()]
+    close_started = threading.Event()
+
+    def body(index: int) -> int:
+        entered[index].set()
+        releases[index].wait()
+        return index
+
+    class NestedBodiesToolkit(Toolkit):
+        _requires_connect = True
+
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        def connect(self) -> None:
+            return None
+
+        def close(self) -> None:
+            close_started.set()
+
+        async def add(self, a: int, b: int) -> int:
+            first, second = await asyncio.gather(
+                run_sync_tool_entrypoint(lambda: body(0)),
+                run_sync_tool_entrypoint(lambda: body(1)),
+            )
+            return a + b + first + second
+
+    _replace_calculator_toolkit(monkeypatch, NestedBodiesToolkit)
+    broker, token = _broker(tmp_path, events=[])
+    request = _request(call_id="cancelled-nested-bodies")
+    accepted = await broker.accept_authenticated(request, f"Bearer {token}")
+    assert accepted.state is ScriptCallState.PENDING
+    for started in entered:
+        assert await asyncio.to_thread(started.wait, SETTLE_TIMEOUT_SECONDS)
+    broker.store.request_cancel(request.run_id)
+
+    try:
+        await asyncio.wait_for(broker.cancel_run(request.run_id), timeout=SETTLE_TIMEOUT_SECONDS)
+        releases[0].set()
+        close_started_before_second_returned = await asyncio.to_thread(close_started.wait, 0.2)
+        releases[1].set()
+        close_did_start = await asyncio.to_thread(close_started.wait, SETTLE_TIMEOUT_SECONDS)
+    finally:
+        for release in releases:
+            release.set()
+    cleanup_drained = await drain_script_tool_cleanup(broker, timeout_seconds=SETTLE_TIMEOUT_SECONDS)
+
+    assert close_started_before_second_returned is False
+    assert close_did_start is True
     assert cleanup_drained is True
     await _assert_cleanup_forgotten(broker)
 

@@ -10,7 +10,6 @@ approved. An agent build that offers the scheduler binds its run's functions to 
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from contextvars import ContextVar
@@ -24,14 +23,13 @@ from mindroom.approval.tool_approval import (
     resolve_tool_approval_approver,
     scheduled_call,
 )
-from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.failure_text import failure_text
 from mindroom.json_utils import has_only_finite_numbers, object_with_unique_keys
 from mindroom.tool_approval_grants import ANY_ARGUMENTS, canonical_arguments
 from mindroom.tool_system.invocation import run_tool_call
 from mindroom.tool_system.tool_access import validate_tool_arguments
 from mindroom.tool_system.tool_function import ToolOutcome
-from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
+from mindroom.tool_system.tool_hooks import run_as_completion_owner
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -277,23 +275,9 @@ def _invalid_arguments(function: ToolFunction, arguments: dict[str, object]) -> 
 
 async def _execute(live: _LiveTools, function: ToolFunction, arguments: dict[str, object], *, call_id: str) -> object:
     """Run one live function under the run's tool-call policy, owning a synchronous body until it finishes."""
-    tracker = SyncToolCompletionTracker()
-
-    async def settle() -> None:
-        pending = tracker.started_task()
-        if pending is not None:
-            await pending
-
-    try:
-        with track_sync_tool_completion(tracker):
-            return await run_tool_call(
-                function,
-                arguments,
-                replace(live.context, call_id=call_id),
-                middleware=live.middleware,
-            )
-    finally:
-        await wait_for_future_until_complete(asyncio.create_task(settle(), name="scheduled-tool-call-cleanup"))
+    return await run_as_completion_owner(
+        lambda: run_tool_call(function, arguments, replace(live.context, call_id=call_id), middleware=live.middleware),
+    )
 
 
 def _refused(task_id: str, reason: str, *, advice: str = "") -> ToolOutcome:
