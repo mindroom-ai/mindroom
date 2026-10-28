@@ -310,9 +310,13 @@ class PostgresBackend:
         return self._hold is not None
 
     async def still_held(self) -> bool:
-        """Return whether the session holding the journal's lock is still alive."""
+        """Return whether the session holding the journal's lock is alive and the writer's connection is not lost.
+
+        The writer never reconnects, so a runtime whose writer lost its connection can never write again and stops
+        as it does when it loses the lock's session, for its supervisor to restart it.
+        """
         session = self._hold
-        if session is None:
+        if session is None or self._writer.broken:
             return False
 
         def probe() -> bool:

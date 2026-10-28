@@ -66,7 +66,7 @@ class Backend(Protocol):
         ...
 
     async def still_held(self) -> bool:
-        """Return whether the claim ``hold_exclusively`` took still holds."""
+        """Return whether the claim ``hold_exclusively`` took still holds and the journal can still be written."""
         ...
 
     async def close(self) -> None:

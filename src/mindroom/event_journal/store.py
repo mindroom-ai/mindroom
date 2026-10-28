@@ -1616,7 +1616,7 @@ class EventJournalStore:
         return await self.backend.hold_exclusively(identity)
 
     async def still_held(self) -> bool:
-        """Return whether this runtime's claim on the journal still holds."""
+        """Return whether this runtime's claim on the journal still holds and the journal can still be written."""
         return await self.backend.still_held()
 
     async def end_entity_replies(self, ends: Callable[[str], bool], *, now_ns: int) -> int:

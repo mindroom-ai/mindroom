@@ -10568,3 +10568,29 @@ async def test_a_postgres_journal_hold_lets_the_server_drop_a_vanished_holder(po
         assert shown == {"tcp_keepalives_idle": "30", "tcp_keepalives_interval": "10", "tcp_keepalives_count": "3"}
     finally:
         await store.close()
+
+
+async def test_a_postgres_journal_whose_writer_lost_its_connection_is_no_longer_held(postgres_journal_url: str) -> None:
+    """The writer never reconnects, so a lost writer connection stops the runtime as a lost lock session does."""
+    import psycopg  # noqa: PLC0415 - psycopg ships in the optional postgres extra
+
+    from mindroom.event_journal.postgres_backend import PostgresBackend  # noqa: PLC0415 - keeps psycopg optional
+
+    database_url = postgres_journal_schema_url(postgres_journal_url)
+    store = EventJournalStore.open_postgres(database_url)
+    try:
+        assert await store.hold_exclusively("writer-identity")
+        assert await admit(store.principal(ALICE), "$before") is AdmissionResult.ADMITTED
+        backend = store.backend
+        assert isinstance(backend, PostgresBackend)
+        with psycopg.connect(database_url, autocommit=True) as admin:
+            admin.execute("SELECT pg_terminate_backend(%s)", (backend._writer.info.backend_pid,))
+
+        with pytest.raises(psycopg.OperationalError):
+            await admit(store.principal(ALICE), "$after")
+
+        assert backend._hold is not None
+        assert backend._hold.execute("SELECT 1").fetchone() == (1,)
+        assert not await store.still_held()
+    finally:
+        await store.close()
