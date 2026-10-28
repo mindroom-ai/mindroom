@@ -535,7 +535,7 @@ def _build_harness(
     runtime_paths = runtime_paths_for(config)
     registry = entity_identity_registry(config, runtime_paths)
     matrix_id = registry.current_id(agent_name)
-    logger = get_logger("test_turn_controller_focused")
+    logger = get_logger("test_turns_focused")
     runtime = BotRuntimeState(
         client=make_matrix_client_mock(user_id=matrix_id.full_id),
         config=config,

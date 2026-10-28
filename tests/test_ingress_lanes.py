@@ -587,7 +587,7 @@ def _unplaceable_event(event_id: str, msgtype: str, *, server_timestamp: int) ->
     )
 
 
-def _turn_controller_dispatcher(
+def _turn_ingress_journal_dispatcher(
     bot: AgentBot,
     room: nio.MatrixRoom,
     journal_store: EventJournalStore,
@@ -642,7 +642,7 @@ async def test_unplaceable_event_settles_and_its_room_moves_on(
         msg = "Related event $fabricated:localhost is unavailable"
         raise RelatedEventUnavailableError(msg)
 
-    dispatcher = _turn_controller_dispatcher(bot, room, journal_store)
+    dispatcher = _turn_ingress_journal_dispatcher(bot, room, journal_store)
     poison = _unplaceable_event("$poison", msgtype, server_timestamp=1_000)
     later = _unplaceable_event("$later", "m.text", server_timestamp=2_000)
 
@@ -668,7 +668,7 @@ async def test_transient_relation_lookup_failure_keeps_the_event_pending(
     """A lookup that may answer next time leaves the event at the head of its lane for retry."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    dispatcher = _turn_controller_dispatcher(bot, room, journal_store)
+    dispatcher = _turn_ingress_journal_dispatcher(bot, room, journal_store)
     event = _unplaceable_event("$message", "m.text", server_timestamp=1_000)
 
     with (

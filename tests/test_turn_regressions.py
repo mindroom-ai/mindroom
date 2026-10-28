@@ -1,4 +1,4 @@
-"""Targeted turn-controller regressions."""
+"""Targeted turn ingress, dispatch, and selection regressions."""
 
 from __future__ import annotations
 

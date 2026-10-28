@@ -2661,7 +2661,7 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
 
 @pytest.mark.asyncio
 async def test_on_message_routes_interactive_text_selection_through_turn_ingress(tmp_path: Path) -> None:
-    """Numeric interactive replies should run the controller-owned selection workflow."""
+    """Numeric interactive replies should run the interactive selection workflow."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@mindroom_test_agent:example.com",

@@ -27,7 +27,7 @@ from mindroom.voice.visible_voice_echo import (
 )
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.journal_helpers import admit_dispatch_event
-from tests.test_turn_controller_focused import (
+from tests.test_turns_focused import (
     _ROOM_ID,
     _SENDER,
     _THREAD_ROOT,
@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 
     from mindroom.hooks import MessageEnvelope
     from mindroom.journal_dispatch import JournalDispatcher
-    from tests.test_turn_controller_focused import _Harness
+    from tests.test_turns_focused import _Harness
 
 
 @pytest.fixture(autouse=True)

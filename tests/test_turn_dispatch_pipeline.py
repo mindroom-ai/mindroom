@@ -2232,7 +2232,7 @@ class TestAgentBot(AgentBotTestBase):
         team_request = mock_generate_team_response.await_args.args[0]
         assert team_request.existing_event_id is None
         mock_send_response.assert_not_awaited()
-        # The reply's records record the turn answered; the controller writes nothing.
+        # The reply's records record the turn answered; turn dispatch writes nothing.
         await assert_no_turn_answered(bot)
 
     @pytest.mark.asyncio
@@ -2475,7 +2475,7 @@ class TestAgentBot(AgentBotTestBase):
 
         mock_send_response.assert_not_awaited()
         assert mock_generate_response.await_args.kwargs["existing_event_id"] is None
-        # The reply's records record the turn answered; the controller writes nothing.
+        # The reply's records record the turn answered; turn dispatch writes nothing.
         await assert_no_turn_answered(bot)
 
     @pytest.mark.asyncio
@@ -2741,7 +2741,7 @@ class TestAgentBot(AgentBotTestBase):
             "Thinking...",
             "[calculator] ⚠️ Error: setup failed",
         ]
-        # The reply's records record the turn answered; the controller writes nothing.
+        # The reply's records record the turn answered; turn dispatch writes nothing.
         await assert_no_turn_answered(bot)
 
     @pytest.mark.asyncio

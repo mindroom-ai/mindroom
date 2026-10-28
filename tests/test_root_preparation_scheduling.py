@@ -12,7 +12,7 @@ from mindroom.coalescing.batch import CoalescingKey, PreparedTurn, RequesterCoal
 from mindroom.coalescing.gate import CoalescingGate, ReadyPendingEvent
 from mindroom.matrix.conversation_reads import ThreadReadMode
 from tests.conftest import live_turn_claim, make_pending_event, turn_claim_is_live
-from tests.test_turn_controller_focused import _build_harness, _room_with_members, _single_agent_config, _text_event
+from tests.test_turns_focused import _build_harness, _room_with_members, _single_agent_config, _text_event
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -32,7 +32,7 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import ClaimContended, ClaimRefused, TurnClaim
 from tests.conftest import bind_runtime_paths, make_visible_message, test_runtime_paths
-from tests.test_turn_controller_focused import (
+from tests.test_turns_focused import (
     _ROOM_ID,
     _SENDER,
     _THREAD_ROOT,
@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from mindroom.dispatch_handoff import PreparedIngress
     from mindroom.inbound_turn_normalizer import InboundTurnNormalizer, TextNormalizationRequest
     from mindroom.turn_store import TurnStore
-    from tests.test_turn_controller_focused import _Harness
+    from tests.test_turns_focused import _Harness
 
 
 @dataclass
@@ -218,7 +218,7 @@ def _mention_text_event(body: str, mentioned_user_id: str, *, event_id: str) -> 
 
 
 def _install_normalizer(harness: _Harness, normalizer: object) -> None:
-    """Swap the controller's normalizer for a typed test double."""
+    """Swap the turn owners' normalizer for a typed test double."""
     _replace_harness_deps(
         harness,
         normalizer=cast("InboundTurnNormalizer", normalizer),

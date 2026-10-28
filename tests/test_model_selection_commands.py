@@ -27,7 +27,7 @@ from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import make_test_command_handler_context
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, runtime_paths_for, test_runtime_paths
 from tests.test_model_selection_scope import ROOM, USER, joined_response, picker_client, picker_setup, root_event
-from tests.test_turn_controller_focused import _build_harness, _in_room
+from tests.test_turns_focused import _build_harness, _in_room
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
