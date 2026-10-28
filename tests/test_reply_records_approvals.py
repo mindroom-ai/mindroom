@@ -82,7 +82,13 @@ def _paused(run_id: str = "run-1", text: str = "Reading document") -> PausedAtte
 
 
 @asynccontextmanager
-async def _approval_bot(tmp_path: Path, *, requires_human: bool) -> AsyncIterator[AgentBot]:
+async def _approval_bot(
+    tmp_path: Path,
+    *,
+    requires_human: bool,
+    cards: list[MatrixDelivery] | None = None,
+) -> AsyncIterator[AgentBot]:
+    """Start a bot whose approval cards the router posts; ``cards`` collects every card delivery it sends."""
     bot = await _streaming_bot(tmp_path)
     # Tool markers are not what these tests are about.
     bot.config.defaults.show_tool_calls = False
@@ -90,7 +96,9 @@ async def _approval_bot(tmp_path: Path, *, requires_human: bool) -> AsyncIterato
     async def prepare_event(_room: str, _thread: str | None, content: dict) -> dict:
         return content
 
-    async def send_card(_delivery: MatrixDelivery) -> str:
+    async def send_card(delivery: MatrixDelivery) -> str:
+        if cards is not None:
+            cards.append(delivery)
         return "$approval-card"
 
     initialize_approval_store_for_test(
@@ -225,8 +233,12 @@ async def test_a_handoff_that_fails_after_its_pause_committed_writes_nothing_beh
 
 
 async def test_stop_on_a_paused_reply_cancels_it_through_its_approval(tmp_path: Path) -> None:
-    """A Stop fences the approval with the turn's durable Stop; the settlement shows the note and ends the reply."""
-    async with _approval_bot(tmp_path, requires_human=True) as bot:
+    """A Stop fences the approval with the turn's durable Stop; the settlement shows the note and ends the reply.
+
+    Its card ends saying the reply was stopped.
+    """
+    cards: list[MatrixDelivery] = []
+    async with _approval_bot(tmp_path, requires_human=True, cards=cards) as bot:
         await _respond(bot)
         with _journal_wakes(bot) as wakes:
             stop = await _stop(bot, "$sent1", 5)
@@ -241,6 +253,9 @@ async def test_stop_on_a_paused_reply_cancels_it_through_its_approval(tmp_path: 
         assert await bot.journal_principal().approvals.approval_continuation_for_source("$event") is None
         # The Stop keeps what the reply showed and adds its note, as on any reply.
         assert _sent_bodies(bot)[-1] == "Reading document\n\n**[Response cancelled by user]**"
+    [ended] = [card for card in cards if card.stage is DeliveryStage.FINAL]
+    assert ended.payload["status"] == "expired"
+    assert ended.payload["resolution_reason"] == "Tool approval request ended because the reply was stopped."
 
 
 async def test_a_pending_approval_keeps_its_conversation_busy_until_it_ends(tmp_path: Path) -> None:

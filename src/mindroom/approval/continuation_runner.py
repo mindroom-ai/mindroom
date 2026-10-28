@@ -1144,7 +1144,7 @@ class ApprovalContinuationRunner:
     ) -> str | None:
         """Finalize an acknowledged FINAL the resume froze, as its response lifecycle would have, then finish."""
         delivery = await self._final_delivery(continuation)
-        if delivery is None or delivery.acknowledged_event_id is None:
+        if delivery is None:
             return None
         recovered_outcome = await self._approval_outcome_from_delivery(delivery)
         request = self._approval_response_request(continuation, target=target)

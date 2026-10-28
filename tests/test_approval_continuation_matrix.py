@@ -59,6 +59,7 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.asyncio
 
 _PUBLICATION_INTERRUPTED = "Tool approval card publication was interrupted and denied safely."
+_PUBLICATION_FAILED = ApprovalFailure(ApprovalFailureKind.ERROR, _PUBLICATION_INTERRUPTED)
 _UNAUTHORIZED = "Current authorization no longer permits this tool approval continuation."
 _CLI_ENDED = "CLI approval response ended before final delivery."
 # The bot instance a restart replaced, which published or claimed the paused reply before it.
@@ -832,7 +833,10 @@ async def test_resumed_cancelled_outside_its_run_fences_its_kind_and_reraises(
     before_run: bool,
     failure: ApprovalFailure,
 ) -> None:
-    """A resume cancelled outside its run, or by a shutdown, fences the observed claim and re-raises; dispatch settles."""
+    """A resume cancelled outside its run, or by a shutdown, fences the observed claim and re-raises; dispatch settles.
+
+    Its resume span ends failed, except after a shutdown, which leaves it as a crash would for the next runtime.
+    """
     bot = _new_bot(tmp_path)
     with _observed(bot) as observer, pytest.raises(asyncio.CancelledError):
         await _cancelled_resume(
@@ -842,6 +846,12 @@ async def test_resumed_cancelled_outside_its_run_fences_its_kind_and_reraises(
             before_run=before_run,
         )
     assert await _outcome(bot, observer) == Outcome(continuation="failing", failure=failure, reply=ReplyState.ACTIVE)
+    failing = await _store(bot).approvals.approval_continuation("approval")
+    assert failing is not None
+    assert failing.claim_span_id is not None
+    resume = await _store(bot).replies.span(failing.claim_span_id)
+    assert resume is not None
+    assert resume.outcome is (None if process_shutdown else rl.SpanOutcome.FAILED)
 
 
 async def test_resumed_cancelled_after_a_queued_answer_waits_for_it(tmp_path: Path) -> None:
@@ -898,6 +908,40 @@ async def test_resumed_advanced_to_a_ready_generation_resumes_it(tmp_path: Path)
         source_pending=False,
         reply=ReplyState.COMPLETED,
     )
+
+
+async def test_resumed_leaves_another_paused_reply_of_its_source_alone(tmp_path: Path) -> None:
+    """A resume that paused again continues only its own paused reply, never another that owns its source."""
+    bot = _new_bot(tmp_path)
+    runner = _runner(bot)
+    store = _store(bot)
+    owned = await _paused(bot)
+    await bot._reply_runtime.start()
+    claim = AsyncMock(wraps=runner._approvals._claim_owned_approval)
+    read_source = type(store.approvals).approval_continuation_for_source
+
+    async def other_owner(approvals: object, source_event_id: str) -> ApprovalContinuation | None:
+        current = await read_source(approvals, source_event_id)
+        return None if current is None else replace(current, approval_id="other")
+
+    async def advance(claimed: ApprovalContinuation, **_kwargs: object) -> object:
+        advanced = await _advance(store, claimed, decided=True)
+        return (
+            FinalDeliveryOutcome(terminal_status="suspended", event_id="$waiting", is_visible_response=True),
+            advanced,
+        )
+
+    with (
+        _observed(bot),
+        patch.object(runner._approvals, "_execute_claimed_approval", side_effect=advance),
+        patch.object(runner._approvals, "_claim_owned_approval", new=claim),
+    ):
+        request = runner._approvals._approval_response_request(owned, target=_recovery_target())
+        with patch.object(type(store.approvals), "approval_continuation_for_source", new=other_owner):
+            assert (
+                await runner._approvals.run_owned_approvals(owned, request=request, target=_recovery_target()) is None
+            )
+    claim.assert_awaited_once()
 
 
 async def test_resumed_advanced_to_a_waiting_generation_waits(tmp_path: Path) -> None:
@@ -1226,9 +1270,61 @@ async def test_owner_unavailable_final_recovery(
 
 
 async def test_settle_leaves_a_reply_whose_answer_stands(tmp_path: Path) -> None:
-    """A settlement does nothing to a paused reply whose resume already froze a successful answer."""
+    """A settlement does nothing to a failing paused reply whose resume already froze a successful answer."""
     bot = _new_bot(tmp_path)
-    continuation = await _claimed_with_final(bot, "answered")
+    continuation = await _failing_with_final(bot, "answered")
     with _observed(bot) as observer:
         assert not await _runner(bot)._approvals._settle(continuation, _HTTP_502)
-    assert await _outcome(bot, observer) == Outcome(continuation="claimed", reply=ReplyState.COMPLETED)
+    # Its answer is finalized when its source worker finishes it.
+    assert await _outcome(bot, observer) == Outcome(
+        continuation="failing",
+        failure=_HTTP_502,
+        reply=ReplyState.COMPLETED,
+    )
+
+
+async def test_settle_counts_a_gone_paused_reply_settled(tmp_path: Path) -> None:
+    """A paused reply that already ended needs no settlement, so its owner's recovery stops retrying it."""
+    bot = _new_bot(tmp_path)
+    continuation = await _failing_waiting(bot, _STOP)
+    approvals = _runner(bot)._approvals
+    with _observed(bot):
+        assert await approvals._settle(continuation, _STOP)
+        assert await approvals._settle(continuation, _STOP)
+
+
+async def test_settle_fences_only_the_state_its_decider_observed(tmp_path: Path) -> None:
+    """A paused reply whose state changed since its decider read it is not fenced in its new state."""
+    bot = _new_bot(tmp_path)
+    observed = await _waiting(bot, _PREVIOUS)
+    # Its publication finished after all: it became ready.
+    assert await _store(bot).approvals.activate_approval_continuation("approval", expected_generation=0) is not None
+    with _observed(bot) as observer:
+        assert not await _runner(bot)._approvals._settle(observed, _PUBLICATION_FAILED)
+    assert await _outcome(bot, observer) == Outcome(continuation="ready")
+
+
+async def test_settle_expires_cards_with_the_failure_the_paused_reply_holds(tmp_path: Path) -> None:
+    """A settlement asked for with another failure still ends the cards with the failure the reply already holds."""
+    bot = _new_bot(tmp_path)
+    continuation = await _failing_waiting(bot, _STOP)
+    with _observed(bot) as observer:
+        assert await _runner(bot)._approvals._settle(continuation, _HTTP_502)
+    assert await _outcome(bot, observer) == Outcome(
+        continuation=None,
+        notes=((NoteKind.ERROR, _HTTP_502.reason),),
+        cards=_STOP.reason,
+        source_pending=False,
+        reply=ReplyState.FAILED,
+    )
+
+
+async def test_cli_exit_of_a_paused_reply_already_ended_does_nothing(tmp_path: Path) -> None:
+    """A minimal-mode scope that ends after its paused reply ended has nothing left to decide."""
+    bot = _new_bot(tmp_path)
+    await _admit_source(_store(bot))
+    with _observed(bot) as observer:
+        await _cli_exit(bot, _CliCase("gone", _cli, Outcome(continuation=None)))
+    assert observer.notes == []
+    assert observer.expire.await_count == 0
+    assert observer.wakes == []
