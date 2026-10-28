@@ -1253,12 +1253,14 @@ async def ai_response(
     eager_deferred_tools: bool = False,
     supports_native_tool_approval: bool = False,
     reusable_build: AgentBuild | None = None,
+    on_completed: Callable[[CompletedAttempt], None] | None = None,
 ) -> str:
     """Generate one agent response and return its text: ``stream_agent_response``'s turn, collected into one body.
 
-    Takes the arguments ``stream_agent_response`` documents, without its resume inputs and completion sink, plus
-    ``tool_trace_collector``, an optional list that receives the reply's tool-trace entries. The body is the text a
-    streamed reply shows, a failure's message after any partial answer included.
+    Takes the arguments ``stream_agent_response`` documents, without its resume inputs, plus ``tool_trace_collector``,
+    an optional list that receives the reply's tool-trace entries. The body is the text a streamed reply shows, a
+    failure's message after any partial answer included; ``on_completed`` receives the turn's completed attempt, which
+    a failed turn never reports.
     """
     return await _collect_response_body_with_trace(
         stream_agent_response(
@@ -1287,6 +1289,7 @@ async def ai_response(
             eager_deferred_tools=eager_deferred_tools,
             supports_native_tool_approval=supports_native_tool_approval,
             reusable_build=reusable_build,
+            on_completed=on_completed,
         ),
         show_tool_calls=show_tool_calls,
         tool_trace_collector=tool_trace_collector,

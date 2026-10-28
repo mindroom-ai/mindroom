@@ -70,7 +70,7 @@ from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 from mindroom.response_activity import ResponseIdentity  # noqa: TC001 - FastAPI evaluates dependency annotations.
-from mindroom.response_turn import build_llm_request_log_context, stream_with_llm_request_log_context
+from mindroom.response_turn import CompletedAttempt, build_llm_request_log_context, stream_with_llm_request_log_context
 from mindroom.routing import suggest_responder
 from mindroom.run_storage import TerminalRecord
 from mindroom.teams.envelope import prepare_materialized_team_execution, run_prepared_team
@@ -805,8 +805,9 @@ async def _non_stream_completion(
     execution_identity: ToolExecutionIdentity,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
 ) -> JSONResponse:
-    """Handle non-streaming chat completion."""
+    """Handle non-streaming chat completion: the streamed turn, collected into one answer."""
     run_metadata: dict[str, Any] = {}
+    completed: list[CompletedAttempt] = []
     response_text = await ai_response(
         _openai_turn_context(
             agent_name,
@@ -825,10 +826,11 @@ async def _non_stream_completion(
         run_metadata_collector=run_metadata,
         execution_identity=execution_identity,
         refresh_scheduler=refresh_scheduler,
+        on_completed=completed.append,
     )
 
-    # Detect error responses from ai_response()
-    if is_error_response(response_text):
+    # A failed turn completes no attempt, also when it failed after part of its answer, which its text then holds.
+    if not completed:
         logger.warning("AI response returned error", model=agent_name, session_id=session_id, error=response_text)
         return error_response(500, "Agent execution failed", error_type="server_error")
 
