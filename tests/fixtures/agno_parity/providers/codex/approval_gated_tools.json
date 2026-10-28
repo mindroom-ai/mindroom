@@ -98,6 +98,16 @@
         },
         "mindroom_native_compaction": null,
         "mindroom_portable_replay": false,
+        "mindroom_response_output": [
+          {
+            "arguments": "{\"order_id\": \"A-1001\"}",
+            "call_id": "call_parity_invoice",
+            "id": "fc_parity_invoice",
+            "name": "send_invoice",
+            "status": "completed",
+            "type": "function_call"
+          }
+        ],
         "mindroom_response_stored": false,
         "response_id": "resp_parity"
       },
