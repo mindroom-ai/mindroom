@@ -7151,6 +7151,7 @@ expose = [
     "resolve_current_session_id",
     "resolve_tool_runtime_hook_bindings",
     "runtime_context_from_dispatch_context",
+    "scope_hook_context_kwargs",
     "tool_runtime_context",
     "tool_runtime_model_context",
     "worker_progress_pump_scope",

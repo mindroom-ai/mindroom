@@ -6,7 +6,7 @@ import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 from uuid import uuid4
 
 from mindroom.attachments.ids import unique_attachment_ids
@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.delegation.state import SubagentPersona
     from mindroom.event_journal import PrincipalStore
+    from mindroom.history.types import HistoryScope
     from mindroom.hooks import (
         HookMatrixAdmin,
         HookMessageSender,
@@ -511,6 +512,62 @@ def resolve_tool_runtime_hook_bindings(context: ToolRuntimeContext) -> ToolRunti
     )
 
 
+def _hook_context_base_kwargs(
+    context: ToolRuntimeContext,
+    *,
+    event_name: str,
+    correlation_id: str,
+    logger: BoundLogger,
+) -> dict[str, Any]:
+    """Return the base fields of a hook context MindRoom emits from one tool runtime context.
+
+    ``logger`` is the logger the hooks write through, already bound by the caller.
+    """
+    bindings = resolve_tool_runtime_hook_bindings(context)
+    return {
+        "event_name": event_name,
+        "plugin_name": "",
+        "settings": {},
+        "config": context.config,
+        "runtime_paths": context.runtime_paths,
+        "logger": logger,
+        "correlation_id": correlation_id,
+        "message_sender": bindings.message_sender,
+        "matrix_admin": bindings.matrix_admin,
+        "room_state_querier": bindings.room_state_querier,
+        "room_state_putter": bindings.room_state_putter,
+        "_hook_registry_state": context.hook_registry_state,
+    }
+
+
+def scope_hook_context_kwargs(
+    context: ToolRuntimeContext,
+    *,
+    event_name: str,
+    correlation_id: str,
+    logger: BoundLogger,
+    scope: HistoryScope,
+    session_id: str,
+) -> dict[str, Any]:
+    """Return the fields of a session or compaction hook context about ``scope``, emitted from ``context``.
+
+    A team scope's hooks name the team as ``agent_name``; an agent scope's name the agent ``context`` runs.
+    """
+    return {
+        **_hook_context_base_kwargs(
+            context,
+            event_name=event_name,
+            correlation_id=correlation_id,
+            logger=logger.bind(event_name=event_name, session_id=session_id),
+        ),
+        "agent_name": scope.scope_id if scope.kind == "team" else context.agent_name,
+        "scope": scope,
+        "session_id": session_id,
+        "room_id": context.room_id,
+        "thread_id": context.resolved_thread_id,
+    }
+
+
 def resolve_current_session_id(
     *,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -688,27 +745,19 @@ async def emit_custom_event(
     if not context.hook_registry.has_hooks(event_name):
         return
 
-    correlation_id = context.correlation_id or f"{event_name}:{uuid4().hex}"
-    bindings = resolve_tool_runtime_hook_bindings(context)
     hook_context = CustomEventContext(
-        event_name=event_name,
-        plugin_name="",
-        settings={},
-        config=context.config,
-        runtime_paths=context.runtime_paths,
-        logger=get_logger("mindroom.hooks.tools").bind(event_name=event_name),
-        correlation_id=correlation_id,
-        message_sender=bindings.message_sender,
-        matrix_admin=bindings.matrix_admin,
-        room_state_querier=bindings.room_state_querier,
-        room_state_putter=bindings.room_state_putter,
+        **_hook_context_base_kwargs(
+            context,
+            event_name=event_name,
+            correlation_id=context.correlation_id or f"{event_name}:{uuid4().hex}",
+            logger=get_logger("mindroom.hooks.tools").bind(event_name=event_name),
+        ),
         payload=payload,
         source_plugin=plugin_name,
         room_id=context.room_id,
         thread_id=context.resolved_thread_id,
         sender_id=context.requester_id,
-        message_received_depth=bindings.message_received_depth,
-        _hook_registry_state=context.hook_registry_state,
+        message_received_depth=context.message_received_depth,
     )
     await emit(context.hook_registry, event_name, hook_context)
 
