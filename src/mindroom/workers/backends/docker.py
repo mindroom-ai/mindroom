@@ -23,8 +23,6 @@ from mindroom.constants import (
     runtime_paths_with_config_path,
     runtime_paths_with_storage_root,
     sandbox_startup_manifest_path,
-    startup_manifest_sha256,
-    write_startup_manifest,
 )
 from mindroom.credentials.manager import (
     CredentialsManager,
@@ -72,7 +70,9 @@ from mindroom.workers.backends._metadata_store import (
 from mindroom.workers.backends.dedicated_launch import (
     DedicatedWorkerLayout,
     dedicated_worker_runner_env,
+    dedicated_worker_startup_manifest_hash,
     dedicated_worker_startup_runtime_paths,
+    write_dedicated_worker_startup_manifest,
 )
 from mindroom.workers.backends.docker_config import (
     DEFAULT_WORKER_PORT,
@@ -1326,26 +1326,17 @@ class DockerWorkerBackend:
         launch: WorkerLaunchConfig,
     ) -> str:
         """Persist primary validation state before creating one Docker worker, and return the manifest's hash."""
-        runtime_paths = self._worker_runtime_paths(spec.worker_key)
-        tool_validation_snapshot = launch.tool_validation_snapshot
-        write_startup_manifest(
+        return write_dedicated_worker_startup_manifest(
             paths.state.root,
-            runtime_paths,
-            tool_validation_snapshot=tool_validation_snapshot,
-            public_runtime=True,
-        )
-        return startup_manifest_sha256(
-            runtime_paths,
-            tool_validation_snapshot=tool_validation_snapshot,
-            public_runtime=True,
+            self._worker_runtime_paths(spec.worker_key),
+            tool_validation_snapshot=launch.tool_validation_snapshot,
         )
 
     def _startup_manifest_hash(self, spec: WorkerSpec, launch: WorkerLaunchConfig) -> str:
         """Return the hash of the startup manifest a worker created now for ``spec`` would boot from."""
-        return startup_manifest_sha256(
+        return dedicated_worker_startup_manifest_hash(
             self._worker_runtime_paths(spec.worker_key),
             tool_validation_snapshot=launch.tool_validation_snapshot,
-            public_runtime=True,
         )
 
     def _container_env_matches(

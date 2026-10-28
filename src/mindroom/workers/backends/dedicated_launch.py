@@ -11,7 +11,12 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from mindroom.constants import RuntimePaths, sandbox_startup_manifest_path
+from mindroom.constants import (
+    RuntimePaths,
+    sandbox_startup_manifest_path,
+    startup_manifest_sha256,
+    write_startup_manifest,
+)
 from mindroom.runtime_env_policy import (
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SANDBOX_STARTUP_MANIFEST_PATH_ENV,
@@ -77,3 +82,32 @@ def dedicated_worker_startup_runtime_paths(
         process_env=MappingProxyType(public_worker_startup_env({**process_env, **runner_env})),
         env_file_values=MappingProxyType(public_worker_startup_env(env_file_values)),
     )
+
+
+def dedicated_worker_startup_manifest_hash(
+    runtime_paths: RuntimePaths,
+    *,
+    tool_validation_snapshot: Mapping[str, object],
+) -> str:
+    """Return the content hash of the startup manifest a dedicated worker launched now would boot from."""
+    return startup_manifest_sha256(
+        runtime_paths,
+        tool_validation_snapshot=tool_validation_snapshot,
+        public_runtime=True,
+    )
+
+
+def write_dedicated_worker_startup_manifest(
+    state_root: Path,
+    runtime_paths: RuntimePaths,
+    *,
+    tool_validation_snapshot: Mapping[str, object],
+) -> str:
+    """Write a dedicated worker's startup manifest into its state root and return the manifest's content hash."""
+    write_startup_manifest(
+        state_root,
+        runtime_paths,
+        tool_validation_snapshot=tool_validation_snapshot,
+        public_runtime=True,
+    )
+    return dedicated_worker_startup_manifest_hash(runtime_paths, tool_validation_snapshot=tool_validation_snapshot)

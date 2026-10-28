@@ -60,7 +60,9 @@ from mindroom.workers.backends._lifecycle import WorkerLifecycleState
 from mindroom.workers.backends.dedicated_launch import (
     DedicatedWorkerLayout,
     dedicated_worker_runner_env,
+    dedicated_worker_startup_manifest_hash,
     dedicated_worker_startup_runtime_paths,
+    write_dedicated_worker_startup_manifest,
 )
 from mindroom.workers.backends.kubernetes_config import resolve_kubeconfig_paths
 from mindroom.workers.backends.kubernetes_pod_names import (
@@ -1570,10 +1572,9 @@ class KubernetesResourceManager:
         tool_validation_snapshot: Mapping[str, object],
     ) -> str:
         """Return the content hash of one worker's startup manifest without writing it."""
-        return constants.startup_manifest_sha256(
+        return dedicated_worker_startup_manifest_hash(
             self._worker_runtime_paths(worker_key=worker_key, state_subpath=state_subpath),
             tool_validation_snapshot=tool_validation_snapshot,
-            public_runtime=True,
         )
 
     def _write_startup_manifest(
@@ -1584,17 +1585,10 @@ class KubernetesResourceManager:
         tool_validation_snapshot: Mapping[str, object],
     ) -> str:
         """Write one worker's startup manifest into its state directory and return the manifest's hash."""
-        runtime_paths = self._worker_runtime_paths(worker_key=worker_key, state_subpath=state_subpath)
-        constants.write_startup_manifest(
+        return write_dedicated_worker_startup_manifest(
             (self.storage_root / state_subpath).resolve(),
-            runtime_paths,
+            self._worker_runtime_paths(worker_key=worker_key, state_subpath=state_subpath),
             tool_validation_snapshot=tool_validation_snapshot,
-            public_runtime=True,
-        )
-        return constants.startup_manifest_sha256(
-            runtime_paths,
-            tool_validation_snapshot=tool_validation_snapshot,
-            public_runtime=True,
         )
 
     def _worker_layout(self, state_subpath: str) -> DedicatedWorkerLayout:
