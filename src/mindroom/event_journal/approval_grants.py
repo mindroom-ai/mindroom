@@ -171,21 +171,19 @@ def _row_current(transaction: Transaction, principal_id: str, row: Row) -> bool:
     )
 
 
-# A grant with its originating card's scope, room, thread, and event.
-_GRANT_SELECT = """
+def _grant_select(extra_columns: str = "") -> str:
+    """Return the SELECT of a grant with its originating card's scope, room, thread, and event, plus ``extra_columns``."""
+    return f"""
     SELECT grants.grant_id, grants.delivery_id, grants.expires_at_ns, grants.revoked_at_ns, grants.resolution_json,
            scope.scope_key, scope.operation, scope.requester_id, scope.entity_name, scope.invoking_agent,
            scope.responder_principal_id, scope.responder_epoch, scope.consent_epoch,
-           origin.room_id, origin.thread_id,
-           (SELECT MIN(events.card_event_id) FROM approval_card_events AS events
-            WHERE events.principal_id = grants.principal_id AND events.delivery_id = grants.delivery_id
-           ) AS card_event_id
+           origin.room_id, origin.thread_id, {approval_cards.card_event_of("grants")} AS card_event_id{extra_columns}
     FROM approval_grants AS grants
     JOIN approval_card_scopes AS scope
       ON scope.principal_id = grants.principal_id AND scope.delivery_id = grants.delivery_id
     JOIN approval_cards AS origin
       ON origin.principal_id = grants.principal_id AND origin.delivery_id = grants.delivery_id
-"""
+"""  # noqa: S608 - fixed SQL fragments, not input
 
 
 def _grant(row: Row) -> ApprovalGrant:
@@ -205,7 +203,7 @@ def _grant(row: Row) -> ApprovalGrant:
 
 def _for_event(transaction: Transaction, principal_id: str, *, room_id: str, card_event_id: str) -> Row | None:
     return transaction.fetchone(
-        _GRANT_SELECT
+        _grant_select()
         + """
         JOIN approval_card_events AS clicked
           ON clicked.principal_id = grants.principal_id AND clicked.delivery_id = grants.delivery_id
@@ -244,7 +242,7 @@ def apply_active(
         return False
     now = time.time_ns()
     grant_row = transaction.fetchone(
-        _GRANT_SELECT
+        _grant_select()
         + """
         WHERE grants.principal_id = ? AND scope.scope_key = ? AND grants.revoked_at_ns IS NULL AND grants.expires_at_ns > ?
         ORDER BY grants.expires_at_ns DESC LIMIT 1
@@ -470,12 +468,10 @@ def maintain(transaction: Transaction, principal_id: str, *, grant_id: str | Non
     """
     lock(transaction, principal_id)
     rows = transaction.fetchall(
-        _GRANT_SELECT.replace(
-            "FROM approval_grants AS grants",
-            """, original.delivery_id AS original_id, original.acknowledged_event_id AS original_event_id,
-               acknowledgement.delivery_id AS revocation_id,
-               acknowledgement.acknowledged_event_id AS revocation_event_id
-    FROM approval_grants AS grants""",
+        _grant_select(
+            """,
+           original.delivery_id AS original_id, original.acknowledged_event_id AS original_event_id,
+           acknowledgement.delivery_id AS revocation_id, acknowledgement.acknowledged_event_id AS revocation_event_id""",
         )
         + """
         LEFT JOIN matrix_delivery_outbox AS original

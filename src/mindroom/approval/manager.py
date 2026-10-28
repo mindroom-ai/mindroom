@@ -753,14 +753,14 @@ class ApprovalManager:
             status=status,
             reason=reason,
         )
-        if auto_approve_seconds is not None:
+        # A timed approval that normalizes to an expiry or a denial is recorded as that decision, like any other click.
+        if auto_approve_seconds is not None and resolved_status == "approved":
             return await self._approve_with_grant(
                 card,
                 room_id=room_id,
                 card_event_id=card_event_id,
                 sender_id=sender_id,
                 seconds=auto_approve_seconds,
-                status=resolved_status,
                 reason=reason,
                 current_binding=current_binding,
             )
@@ -789,12 +789,11 @@ class ApprovalManager:
         card_event_id: str,
         sender_id: str,
         seconds: int,
-        status: _ApprovalStatus,
         reason: str | None,
         current_binding: str | None,
     ) -> ApprovalActionResult:
         """Commit the grant batch and wake every newly executable continuation."""
-        if status != "approved" or self.cards is None:
+        if self.cards is None:
             return ApprovalActionResult(consumed=True, card_event_id=card_event_id)
         decisions = await self.cards.approvals.create_approval_grant(
             room_id=room_id,

@@ -1092,7 +1092,6 @@ class ApprovalContinuationRunner:
         failure = response_failure(
             cancel_source=None if outcome.suppressed else outcome.resolved_cancel_source,
             reason=outcome.failure_reason,
-            default="Tool approval continuation failed safely.",
         )
         step = next_step(await self._facts(continuation, recover=True), Resumed("failed", failure))
         await self._run_step(continuation, step, target=continuation_target(continuation))
@@ -1443,7 +1442,7 @@ class ApprovalContinuationRunner:
                 raise
             return event_id, False
         except Exception as error:
-            failure = _error(str(error) or "Tool approval continuation failed safely.")
+            failure = ApprovalFailure(ApprovalFailureKind.ERROR, str(error) or None)
             if not current_task_is_process_shutdown():
                 await self._end_live_resume_span()
             step, event_id = await self._end_resume(claimed, Resumed("raised", failure), target=target)

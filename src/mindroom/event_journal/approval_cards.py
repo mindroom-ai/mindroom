@@ -455,12 +455,10 @@ def reserve_detached_card(
 def request_card(transaction: Transaction, call: CallKey) -> _RequestCard | None:
     """Return the live request card that shows one call, if it has one."""
     row = transaction.fetchone(
-        """
+        f"""
         SELECT cards.principal_id, cards.delivery_id, initial.event_type, initial.room_id, initial.thread_id,
                initial.membership_epoch, initial.payload_json,
-               (SELECT MIN(events.card_event_id) FROM approval_card_events AS events
-                WHERE events.principal_id = cards.principal_id AND events.delivery_id = cards.delivery_id
-               ) AS card_event_id
+               {card_event_of("cards")} AS card_event_id
         FROM approval_cards AS cards
         JOIN matrix_delivery_outbox AS initial
           ON initial.principal_id = cards.principal_id
@@ -468,7 +466,7 @@ def request_card(transaction: Transaction, call: CallKey) -> _RequestCard | None
          AND initial.stage = 'initial'
         WHERE cards.owner_id = ? AND cards.generation = ? AND cards.tool_call_id = ?
           AND cards.kind = 'request' AND cards.retired = 0
-        """,
+        """,  # noqa: S608 - a fixed SQL fragment, not input
         (call.owner_id, call.generation, call.tool_call_id),
     )
     if row is None:
@@ -638,14 +636,27 @@ def retire_receipts(transaction: Transaction, principal_id: str) -> None:
         _retire(transaction, principal_id, str(row["delivery_id"]))
 
 
-_VIEW_COLUMNS = """
+# A card's outbox rows belong to the card principal's current, unfenced membership of the room.
+_CURRENT_MEMBERSHIP = """(
+    initial.membership_epoch = COALESCE(membership.membership_epoch, 0) AND COALESCE(membership.departure_fenced, 0) = 0
+)"""
+
+
+def card_event_of(alias: str) -> str:
+    """Return the SQL that reads the first Matrix event showing the card ``alias``'s principal and delivery name."""
+    return f"""(
+        SELECT MIN(events.card_event_id) FROM approval_card_events AS events
+        WHERE events.principal_id = {alias}.principal_id AND events.delivery_id = {alias}.delivery_id
+    )"""  # noqa: S608 - a table alias the module chooses, not input
+
+
+_VIEW_COLUMNS = f"""
     cards.delivery_id AS delivery_id, cards.kind AS kind,
     cards.owner_id AS owner_id, cards.generation AS generation, cards.tool_call_id AS tool_call_id,
     cards.room_id AS room_id, cards.thread_id AS thread_id,
     cards.approvable AS approvable, cards.retired AS retired,
     COALESCE(initial.created_at_ns, 0) AS created_at_ns,
-    initial.membership_epoch = COALESCE(membership.membership_epoch, 0)
-        AND COALESCE(membership.departure_fenced, 0) = 0 AS current_membership,
+    {_CURRENT_MEMBERSHIP} AS current_membership,
     calls.owner_kind AS owner_kind, calls.approver_user_id AS approver_user_id,
     calls.expires_at_ns AS expires_at_ns, calls.decision AS decision, calls.invoking_agent AS invoking_agent,
     paused_reply.entity_name AS responder_entity_name,
@@ -728,10 +739,8 @@ def card_for_event(
     return None if row is None else _view(row, card_event_id)
 
 
-_LIVE_REQUESTS = """
-    cards.principal_id = ? AND cards.kind = 'request' AND cards.retired = 0
-    AND initial.membership_epoch = COALESCE(membership.membership_epoch, 0)
-    AND COALESCE(membership.departure_fenced, 0) = 0
+_LIVE_REQUESTS = f"""
+    cards.principal_id = ? AND cards.kind = 'request' AND cards.retired = 0 AND {_CURRENT_MEMBERSHIP}
 """
 
 
@@ -781,10 +790,7 @@ def pending_cards(
     cursor_params: tuple[object, ...] = () if after is None else after
     rows = transaction.fetchall(
         f"""
-        SELECT {_VIEW_COLUMNS},
-               (SELECT MIN(events.card_event_id) FROM approval_card_events AS events
-                WHERE events.principal_id = cards.principal_id AND events.delivery_id = cards.delivery_id
-               ) AS card_event_id
+        SELECT {_VIEW_COLUMNS}, {card_event_of("cards")} AS card_event_id
         FROM matrix_delivery_outbox AS initial
         JOIN approval_cards AS cards
           ON cards.principal_id = initial.principal_id
