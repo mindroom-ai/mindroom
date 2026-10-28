@@ -21,6 +21,8 @@ from mindroom.tool_system.agno_toolkits import (
     injected_parameters,
     with_offered_instructions,
 )
+from mindroom.tool_system.authoring import Toolkit as OwnedToolkit
+from mindroom.tool_system.authoring import tool
 from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA
 from tests.agno_parity import tool_argument_probes as probes
 from tests.agno_parity.golden_files import render
@@ -403,3 +405,22 @@ def test_unresolvable_annotations_leave_only_the_reserved_names_injected() -> No
 
     # ``Config`` is imported only for type checking here, so no annotation resolves and ``ctx`` is not recognized.
     assert injected_parameters(tool) == {"run_context": "run_context", "fc": "default"}
+
+
+class _RunContextByTypeTools(OwnedToolkit):
+    @tool
+    def whoami(self, query: str, ctx: RunContext | None = None) -> str:
+        return f"{query}{ctx}"
+
+
+class _RunContextBareTypeTools(OwnedToolkit):
+    @tool
+    def whoami(self, query: str, ctx: RunContext) -> str:
+        return f"{query}{ctx}"
+
+
+@pytest.mark.parametrize("toolkit_class", [_RunContextByTypeTools, _RunContextBareTypeTools])
+def test_an_owned_function_that_takes_the_run_context_by_type_is_refused(toolkit_class: type[OwnedToolkit]) -> None:
+    """A parameter Agno would fill with its run context by type is refused, so the model cannot send one."""
+    with pytest.raises(ValueError, match=r"'whoami' takes ctx.*current_call\(\)"):
+        adapt_toolkit(toolkit_class())
