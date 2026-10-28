@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import nio
 
+from mindroom.config.resolution import entity_model_name
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 
@@ -69,7 +70,7 @@ def build_agent_status_message(
     status_parts = []
 
     agent = config.resolve_agent(agent_name) if agent_name in config.agents else None
-    model_name = agent.model_name if agent is not None else config.resolve_entity(agent_name).model_name
+    model_name = agent.model_name if agent is not None else entity_model_name(config, agent_name)
 
     # Format model info
     if model_name in config.models:

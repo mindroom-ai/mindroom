@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.config.knowledge import KnowledgeBaseConfig
+from mindroom.config.resolution import memory_backend, memory_search
 from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.runtime_resolution import resolve_agent_runtime
 
@@ -94,8 +95,8 @@ def resolve_agent_file_memory_knowledge(
     if agent_name not in config.agents:
         return None
 
-    entity = config.resolve_entity(agent_name)
-    if entity.memory_backend != "file" or entity.memory_search.mode != "semantic":
+    search_config = memory_search(config, agent_name)
+    if memory_backend(config, agent_name) != "file" or search_config.mode != "semantic":
         return None
 
     runtime = resolve_agent_runtime(
@@ -111,5 +112,5 @@ def resolve_agent_file_memory_knowledge(
         scope_user_id=agent_scope_user_id(agent_name),
         root=runtime.workspace.file_memory_path,
         config=config,
-        search_config=entity.memory_search,
+        search_config=search_config,
     )

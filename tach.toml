@@ -85,6 +85,7 @@ depends_on = [
     "mindroom.embeddings.factory",
     "mindroom.logging_config",
     "mindroom.embeddings.openai_embedder",
+    "mindroom.config.resolution",
 ]
 
 [[modules]]
@@ -799,6 +800,7 @@ depends_on = [
     "mindroom.agent_cli.lifetime",
     "mindroom.agent_cli.minimal_agent",
     "mindroom.turn_model",
+    "mindroom.config.resolution",
 ]
 
 [[modules]]
@@ -889,6 +891,7 @@ depends_on = [
     "mindroom.config.knowledge",
     "mindroom.memory_scope_ids",
     "mindroom.runtime_resolution",
+    "mindroom.config.resolution",
 ]
 visibility = [
     "mindroom.knowledge.utils",
@@ -3672,6 +3675,7 @@ depends_on = [
     "mindroom.requester_identity",
     "mindroom.runtime_resolution",
     "mindroom.tool_system.worker_routing",
+    "mindroom.config.resolution",
 ]
 
 [[modules]]
@@ -5015,6 +5019,7 @@ depends_on = [
     "mindroom.memory.config",
     "mindroom.providers.ollama.adapter",
     "mindroom.providers.registry",
+    "mindroom.config.resolution",
 ]
 
 [[modules]]
@@ -5791,6 +5796,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.room_model_overrides",
     "mindroom.thread_models",
+    "mindroom.config.resolution",
 ]
 
 [[modules]]
@@ -6554,8 +6560,6 @@ expose = [
     "create_agent",
     "describe_agent",
     "ensure_default_agent_workspaces",
-    "resolve_runtime_worker_tools",
-    "show_tool_calls_for_agent",
     "team_background_jobs",
 ]
 from = ["mindroom.agents"]
@@ -6627,7 +6631,6 @@ expose = [
     "get_unsupported_team_agents",
     "unsupported_team_agent_message",
     "resolve_agent_policy_index",
-    "resolve_private_knowledge_base_agent",
 ]
 from = ["mindroom.agent_policy"]
 
@@ -7717,9 +7720,7 @@ from = ["mindroom.tool_system.skills"]
 expose = [
     "DeferredToolkit",
     "ToolDeferral",
-    "VisibleToolSurface",
     "defer_toolkit",
-    "visible_tool_surface",
 ]
 from = ["mindroom.tool_system.dynamic_toolkits"]
 
@@ -9517,6 +9518,7 @@ depends_on = [
     "mindroom.runtime_resolution",
     "mindroom.thread_tags",
     "mindroom.tool_system.worker_routing",
+    "mindroom.config.resolution",
 ]
 visibility = ["mindroom.orchestrator"]
 

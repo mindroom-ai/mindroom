@@ -219,11 +219,8 @@ def list_profiles(workspace_root: Path) -> list[_PersonaProfile | _InvalidPerson
     return entries
 
 
-def load_profile(workspace_root: Path | None, name: str) -> _PersonaProfile:
+def load_profile(workspace_root: Path, name: str) -> _PersonaProfile:
     """Read one named profile, raising ``PersonaError`` with the user-facing reason."""
-    if workspace_root is None:
-        msg = "Cannot delegate: subagent profiles need an agent workspace."
-        raise PersonaError(msg)
     if not _PROFILE_NAME.fullmatch(name):
         msg = f"Cannot delegate: {_NAME_RULE}."
         raise PersonaError(msg)
@@ -414,7 +411,7 @@ def resolve_persona_request(  # noqa: PLR0911
     profile: object,
     model: str | None,
     minimal: bool,
-    workspace_root: Path | None,
+    workspace_root: Callable[[], Path],
     available_toolkits: Callable[[], Sequence[str]],
     available_skills: Callable[[], Sequence[str]],
     available_knowledge: Callable[[], Sequence[str]],
@@ -424,6 +421,7 @@ def resolve_persona_request(  # noqa: PLR0911
 
     ``cap`` is the persona of the authored subagent making this call, if any: copies it authors stay
     within its tools, skills, and knowledge bases, and while it lists any, it cannot start an unauthored copy.
+    ``workspace_root`` returns the caller's workspace, which is resolved only to read a profile.
     """
     mode: AgentMode = "minimal" if minimal else "standard"
     # Some models fill every optional argument; empty values author nothing.
@@ -450,7 +448,7 @@ def resolve_persona_request(  # noqa: PLR0911
         elif not isinstance(profile, str):
             return "Cannot delegate: profile must be a profile name."
         else:
-            loaded = load_profile(workspace_root, profile)
+            loaded = load_profile(workspace_root(), profile)
             persona, model = loaded.persona, model or loaded.model
             mode = "minimal" if minimal else loaded.mode or "standard"
         persona = _capped_persona(persona, available_toolkits(), available_skills, available_knowledge, cap)

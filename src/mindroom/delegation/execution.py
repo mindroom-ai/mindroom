@@ -952,7 +952,7 @@ def _resolve_fresh_target(
         profile=args.get("profile"),
         model=model,
         minimal=bool(minimal),
-        workspace_root=caller_workspace_root() if args.get("profile") is not None else None,
+        workspace_root=caller_workspace_root,
         # The copy runs one level deeper, where delegate may no longer be offered.
         available_toolkits=lambda: caller_toolkit_names(
             caller_identity.agent_name,

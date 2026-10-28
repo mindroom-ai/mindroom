@@ -8,7 +8,7 @@ Each per-entity fact has one function here, in dependency order, so the config v
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, TypedDict
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.agent_policy import PolicyInputs, ResolvedAgentPolicy, resolve_agent_policy
 from mindroom.config.automations import Automation, ExplorationAutomation
@@ -164,7 +164,9 @@ def show_tool_calls(config: Config, name: str | None) -> bool:
     return config.defaults.show_tool_calls
 
 
-def _memory_search(config: Config, agent: AgentConfig | None) -> MemorySearchConfig:
+def memory_search(config: Config, name: str | None) -> MemorySearchConfig:
+    """Return an agent's effective file-memory search settings; every other scope uses the global ones."""
+    agent = config.agents.get(name) if name is not None else None
     override = agent.memory_search if agent is not None else None
     # exclude_none keeps the "None inherits" tri-state; the deep copy keeps the record from aliasing memory.search.
     update = override.model_dump(exclude_none=True) if override is not None else {}
@@ -396,22 +398,12 @@ class ResolvedAgent(ResolvedEntity):
     knowledge_graph_edits: bool
 
 
-class _ScopeFields(TypedDict):
-    name: str | None
-    history_settings: ResolvedHistorySettings
-    max_tool_calls_per_turn: int
-    file_access: FileAccess
-    memory_backend: MemoryBackend
-    memory_search: MemorySearchConfig
-    timezone: str
-    show_tool_calls: bool
-
-
-def _scope_fields(config: Config, name: str | None) -> _ScopeFields:
+def resolve_scope(config: Config, name: str | None) -> ResolvedScope:
+    """Return what one agent, team, or the router gets in common with every scope; None is the defaults scope."""
     entity = configured_entity(config, name) if name is not None and name != ROUTER_AGENT_NAME else None
     agent = config.agents.get(name) if name is not None else None
     own_calls = entity.max_tool_calls_per_turn if entity is not None else None
-    return _ScopeFields(
+    return ResolvedScope(
         name=name,
         history_settings=_history_settings(config, entity, name),
         max_tool_calls_per_turn=own_calls if own_calls is not None else config.defaults.max_tool_calls_per_turn,
@@ -419,18 +411,13 @@ def _scope_fields(config: Config, name: str | None) -> _ScopeFields:
         if agent is not None and agent.file_access is not None
         else config.defaults.file_access,
         memory_backend=memory_backend(config, name),
-        memory_search=_memory_search(config, agent),
+        memory_search=memory_search(config, name),
         timezone=entity_timezone(config, name),
         show_tool_calls=show_tool_calls(config, name),
     )
 
 
-def resolve_scope(config: Config, name: str | None) -> ResolvedScope:
-    """Return what one agent, team, or the router gets in common with every scope; None is the defaults scope."""
-    return ResolvedScope(**_scope_fields(config, name))
-
-
-def _entity_model_name(config: Config, name: str) -> str:
+def entity_model_name(config: Config, name: str) -> str:
     """Return the authored model of an agent, team, or the router; an unknown name raises."""
     if name == ROUTER_AGENT_NAME:
         return config.router.model
@@ -445,10 +432,10 @@ def _entity_model_name(config: Config, name: str) -> str:
 
 def resolve_entity(config: Config, name: str) -> ResolvedEntity:
     """Return what one configured agent, team, or the router gets."""
-    model_name = _entity_model_name(config, name)
+    model_name = entity_model_name(config, name)
     if name in config.agents:
         return resolve_agent(config, name)
-    return ResolvedEntity(**_scope_fields(config, name), model_name=model_name)
+    return ResolvedEntity(**vars(resolve_scope(config, name)), model_name=model_name)
 
 
 def agent_knowledge_base_ids(config: Config, agent_name: str) -> tuple[str, ...]:
@@ -462,7 +449,7 @@ def resolve_agent(config: Config, name: str) -> ResolvedAgent:
     agent = config.get_agent(name)
     policy = agent_policy(config, name)
     return ResolvedAgent(
-        **_scope_fields(config, name),
+        **vars(resolve_scope(config, name)),
         model_name=agent.model,
         cheap_model=cheap_model(config, name),
         policy=policy,

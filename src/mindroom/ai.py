@@ -22,6 +22,7 @@ from mindroom.agents import agent_build_can_overlap_file_memory, create_agent
 from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepared_history_metadata_content
 from mindroom.approval.resume import resume_from_session
 from mindroom.budgets.pricing import model_prices
+from mindroom.config.resolution import memory_backend as agent_memory_backend
 from mindroom.delegation.execution import drive_delegation_stream
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
@@ -878,7 +879,7 @@ async def _prepare_agent_and_prompt(
             )
         return runtime_model, build
 
-    memory_backend = config.resolve_entity(agent_name).memory_backend
+    memory_backend = agent_memory_backend(config, agent_name)
     memory_conversation = _memory_conversation(ctx, config, scope_context)
     parallel_branches = memory_backend == "mem0"
     serial_reason: str | None = None

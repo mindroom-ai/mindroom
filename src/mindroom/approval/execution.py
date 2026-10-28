@@ -195,13 +195,13 @@ async def _continue_persisted_agent(
     tool_trace_collector: list[ToolTraceEntry],
     tool_dispatch: ToolDispatchContext,
     progress: ProgressPublisher | None,
+    model_name: str,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Resume a persisted agent with event streaming so presentation order is retained.
 
     A run the delegation driver owns resumes through it with the decisions on its children's calls; any other run
     resumes with the decisions on its own calls, and the driver continues it if it pauses on a delegation.
     """
-    model_name = _continuation_model(config, runtime_paths, continuation).model_name
     runner = ResumeRunner(
         build=build,
         config=config,
@@ -469,6 +469,8 @@ class AgentApprovalExecution:
             execution_identity=execution_identity,
             delegation_depth=cli_call.delegation_depth if cli_call is not None else 0,
         )
+        # The build and the resumed run use one model, even if a room or thread override changes meanwhile.
+        model = _continuation_model(config, self.runtime_paths, continuation)
         build = await asyncio.to_thread(
             create_agent,
             continuation.entity_name,
@@ -476,7 +478,7 @@ class AgentApprovalExecution:
             self.runtime_paths,
             execution_identity,
             history_storage=store,
-            model=_continuation_model(config, self.runtime_paths, continuation),
+            model=model,
             knowledge=knowledge,
             refresh_scheduler=self.refresh_scheduler(),
             supports_native_tool_approval=True,
@@ -574,6 +576,7 @@ class AgentApprovalExecution:
                             tool_trace_collector=tool_trace_collector,
                             tool_dispatch=tool_dispatch,
                             progress=progress,
+                            model_name=model.model_name,
                         )
                     result = await self.tool_runtime.run_in_context(
                         tool_context=runtime_context,

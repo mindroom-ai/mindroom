@@ -31,7 +31,7 @@ from mindroom.approval.response import (
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_entity_replies_in_room
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
-from mindroom.config.resolution import entity_timezone, show_tool_calls
+from mindroom.config.resolution import entity_timezone, memory_backend, show_tool_calls
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     HOOK_SOURCE_RUN_METADATA_KEY,
@@ -2549,7 +2549,7 @@ class ResponseRunner:
             return None
         # A file-memory agent's conversation is saved by auto-flush from stored sessions; a team's goes to its shared
         # memory.
-        if isinstance(agent_name, str) and self.deps.runtime.config.resolve_entity(agent_name).memory_backend != "mem0":
+        if isinstance(agent_name, str) and memory_backend(self.deps.runtime.config, agent_name) != "mem0":
             return None
 
         def queue() -> None:

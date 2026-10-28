@@ -15,6 +15,7 @@ from threading import Lock
 from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import create_background_task
+from mindroom.config.resolution import memory_backend, memory_search
 from mindroom.embeddings.errors import EMBEDDER_EMPTY_VECTOR_DETAIL, describe_embedder_error
 from mindroom.logging_config import get_logger
 
@@ -115,8 +116,7 @@ def semantic_embedder_configured(config: Config) -> bool:
     if _memory_backend_uses_embedder(config.memory.backend, config.memory.search.mode):
         return True
     for agent_name in config.agents:
-        entity = config.resolve_entity(agent_name)
-        if _memory_backend_uses_embedder(entity.memory_backend, entity.memory_search.mode):
+        if _memory_backend_uses_embedder(memory_backend(config, agent_name), memory_search(config, agent_name).mode):
             return True
     return False
 

@@ -47,6 +47,7 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.cold_cache import ColdCacheConfig
+from mindroom.config.main import Config
 from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
@@ -9094,7 +9095,9 @@ async def test_only_a_completed_response_counts_toward_its_skill_review(succeede
 def test_an_automation_turn_is_not_queued_for_memory(hook_source: str | None, flushed: bool) -> None:
     """A maintenance turn, such as an unreviewed memory proposal, never reaches Mem0; other turns do."""
     runner = ResponseRunner(deps=MagicMock())
-    runner.deps.runtime.config.resolve_entity.return_value.memory_backend = "mem0"
+    runner.deps.runtime.config = Config(
+        agents={"mind": AgentConfig(display_name="Mind", memory_backend="mem0")},
+    )
 
     queue = runner._memory_persistence(
         agent_name="mind",

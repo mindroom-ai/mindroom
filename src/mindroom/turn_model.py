@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.budgets.monitor import budget_model
+from mindroom.config.resolution import entity_model_name
 from mindroom.entity_resolution import resolve_room_scoped_model_override
 from mindroom.room_model_overrides import resolve_room_model_override
 from mindroom.thread_models import resolve_thread_model_override
@@ -71,7 +72,7 @@ def _requested_model(config: Config, runtime_paths: RuntimePaths, scope: ModelSc
     if scope.entity is None:
         return _AD_HOC_MODEL_NAME, False
     # The authored model also checks that the entity exists, so an unknown name never runs any model.
-    authored = config.resolve_entity(scope.entity).model_name
+    authored = entity_model_name(config, scope.entity)
     if scope.thread_id is not None:
         thread_model = resolve_thread_model_override(runtime_paths, scope.thread_id, config=config).active.get(
             scope.entity,

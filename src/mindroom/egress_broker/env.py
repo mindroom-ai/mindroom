@@ -14,6 +14,7 @@ from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.config.resolution import AgentToolFacts
 
 __all__ = [
     "BROKER_CA_PEM_ENV",
@@ -88,7 +89,7 @@ def egress_agent_scope(config: Config, agent_name: str, runtime_paths: RuntimePa
     resolved = config.resolve_agent(agent_name)
     if _EGRESS_TOOL_NAME not in resolved.tools.tool_names or not _runs_commands_in_a_worker(
         config,
-        agent_name,
+        resolved.tools,
         runtime_paths,
     ):
         return None
@@ -104,21 +105,21 @@ def egress_tool_without_worker_commands(config: Config, agent_name: str, runtime
     """
     if agent_name not in config.agents:
         return False
-    tools = config.resolve_agent(agent_name).tools.tool_names
+    facts = config.resolve_agent(agent_name).tools
     return (
-        _EGRESS_TOOL_NAME in tools
-        and not EXECUTION_ENV_TOOL_NAMES.isdisjoint(tools)
-        and not _runs_commands_in_a_worker(config, agent_name, runtime_paths)
+        _EGRESS_TOOL_NAME in facts.tool_names
+        and not EXECUTION_ENV_TOOL_NAMES.isdisjoint(facts.tool_names)
+        and not _runs_commands_in_a_worker(config, facts, runtime_paths)
     )
 
 
-def _runs_commands_in_a_worker(config: Config, agent_name: str, runtime_paths: RuntimePaths) -> bool:
+def _runs_commands_in_a_worker(config: Config, facts: AgentToolFacts, runtime_paths: RuntimePaths) -> bool:
     """Return whether any of the agent's own `EXECUTION_ENV_TOOL_NAMES` runs in a worker."""
     # Deferred: the sandbox proxy imports this module.
-    from mindroom.tool_system.agent_tools import resolve_agent_tools  # noqa: PLC0415
+    from mindroom.tool_system.agent_tools import AgentTools  # noqa: PLC0415
     from mindroom.tool_system.sandbox_proxy import tool_placement  # noqa: PLC0415
 
-    agent_tools = resolve_agent_tools(config, agent_name)
+    agent_tools = AgentTools(config=config, facts=facts)
     try:
         placement = tool_placement(runtime_paths)
         return any(

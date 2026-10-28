@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from mindroom.egress_broker.env import egress_broker_enabled, egress_tool_without_worker_commands
 from mindroom.logging_config import get_logger
 from mindroom.orchestration.rooms import warn_about_foreign_homeserver_authorities
-from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.agent_tools import AgentTools
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.sandbox_proxy import tool_placement
@@ -43,15 +43,15 @@ def _warn_about_unconfined_primary_tools_next_to_worker_code_tools(config: Confi
     ensure_tool_registry_loaded(runtime_paths)
     placement = tool_placement(runtime_paths)
     for agent_name in config.agents:
-        entity = config.resolve_entity(agent_name)
-        agent_tools = resolve_agent_tools(config, agent_name)
+        agent = config.resolve_agent(agent_name)
+        agent_tools = AgentTools(config=config, facts=agent.tools)
         tool_names = [name for name in agent_tools.tool_names if name in TOOL_METADATA]
         worker_tools = {name for name in tool_names if agent_tools.runs_in_worker(name, placement)}
         worker_code_tools = sorted(name for name in worker_tools if TOOL_METADATA[name].executes_code)
         unconfined_primary_tools = sorted(
             name
             for name in tool_names
-            if name not in worker_tools and _primary_tool_is_unconfined(name, entity.file_access)
+            if name not in worker_tools and _primary_tool_is_unconfined(name, agent.file_access)
         )
         if worker_code_tools and unconfined_primary_tools:
             logger.warning(

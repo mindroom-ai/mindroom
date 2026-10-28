@@ -232,7 +232,7 @@ class DelegateTools(Toolkit):
             profile=profile,
             model=model,
             minimal=minimal,
-            workspace_root=self._workspace_root,
+            workspace_root=lambda: self._workspace_root,
             # The copy runs one level deeper, where delegate may no longer be offered.
             available_toolkits=lambda: caller_toolkit_names(
                 self._agent_name,

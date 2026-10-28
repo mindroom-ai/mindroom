@@ -28,6 +28,7 @@ from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, Ask, AutomationCo
 from mindroom.automations.threads import automations_tracking_root, record_automation_thread
 from mindroom.background_tasks import create_background_task
 from mindroom.config.automations import PluginAutomation
+from mindroom.config.resolution import memory_backend
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
@@ -151,7 +152,7 @@ def _check(
 ) -> Ask | None:
     """Run one automation's check; raises ``OSError`` or ``ValueError`` when it cannot read what it checks."""
     agent_name, automation = chain.agent_name, chain.settings
-    if definition.requires_file_memory and config.resolve_entity(agent_name).memory_backend != "file":
+    if definition.requires_file_memory and memory_backend(config, agent_name) != "file":
         logger.warning(
             "Automation needs file memory; skipped",
             agent=agent_name,

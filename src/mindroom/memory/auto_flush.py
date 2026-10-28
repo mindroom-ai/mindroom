@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, TypedDict
 from uuid import uuid4
 
 from mindroom.agent_loop.helper import complete_prompt
+from mindroom.config.resolution import entity_model_name, memory_backend
 from mindroom.constants import tracking_dir
 from mindroom.durable_write import write_json_file_durable
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
@@ -106,7 +107,7 @@ def auto_flush_enabled(config: Config) -> bool:
 
 
 def _file_memory_agents(config: Config) -> list[str]:
-    return [name for name in config.agents if config.resolve_entity(name).memory_backend == "file"]
+    return [name for name in config.agents if memory_backend(config, name) == "file"]
 
 
 def _flush_scopes(config: Config, runtime_paths: RuntimePaths, agent_names: list[str]) -> list[_FlushScope]:
@@ -308,7 +309,7 @@ async def _extract_memory_summary(
         excerpt=excerpt,
     )
 
-    model_name = extractor.model or config.resolve_entity(agent_name).model_name
+    model_name = extractor.model or entity_model_name(config, agent_name)
     response = await complete_prompt(
         provider_registry.build_model_provider(config, runtime_paths, model_name),
         prompt,
