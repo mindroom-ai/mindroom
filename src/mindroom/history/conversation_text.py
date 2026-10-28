@@ -1,8 +1,9 @@
-"""What people and agents said in stored turns, for background model calls.
+"""What people and agents said in stored turns, for background model calls and compaction hooks.
 
-Skill reviews, the knowledge graph, and file-memory auto-flush each send stored turns to a model. This module owns the
-decisions they share: which turns and messages are conversation and who said each message, so a prompt MindRoom wrote
-is never read as someone's words. Each reader renders and redacts the text itself.
+Skill reviews, the knowledge graph, and file-memory auto-flush each send stored turns to a model, and compaction hands
+the turns it folds to plugins. This module owns the decisions they share: which turns and messages are conversation and
+who said each message, so a prompt MindRoom wrote is never read as someone's words. Each reader renders and redacts the
+text itself.
 """
 
 from __future__ import annotations
