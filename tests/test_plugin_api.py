@@ -113,13 +113,17 @@ _EXPORTS = [
     "write_file_within_root",
 ]
 
-# Every hook context has the base parameters; all but the three tool contexts put them first and end with the helpers.
-_HOOK = "event_name, plugin_name, settings, config, runtime_paths, logger, correlation_id"
+# Every hook context but the three tool contexts puts the base parameters first and ends with the keyword-only ones,
+# which start with the three `emit` fills for each hook.
+_HOOK = "event_name, config, runtime_paths, correlation_id"
 _HOOK_HELPERS = (
-    "runtime_started_at, message_sender, agent_message_snapshot_reader, matrix_admin, room_state_querier, "
-    "room_state_putter"
+    "plugin_name, settings, logger, runtime_started_at, message_sender, agent_message_snapshot_reader, matrix_admin, "
+    "room_state_querier, room_state_putter"
 )
-_TOOL_HOOK = f"{_HOOK}, message_received_depth, *, message_sender, matrix_admin, room_state_querier, room_state_putter"
+_TOOL_HOOK = (
+    "event_name, plugin_name, settings, config, runtime_paths, logger, correlation_id, message_received_depth, *, "
+    "message_sender, matrix_admin, room_state_querier, room_state_putter"
+)
 
 # Each callable's parameter names and kinds, written as a signature without annotations or defaults.
 # A class lists its constructor parameters; underscore-prefixed ones are MindRoom's own wiring and are left out.
@@ -137,8 +141,8 @@ _SIGNATURES = {
     "BeforeResponseContext": f"({_HOOK}, draft, *, {_HOOK_HELPERS})",
     "CancelledResponseContext": f"({_HOOK}, info, *, {_HOOK_HELPERS})",
     "CompactionHookContext": (
-        f"({_HOOK}, agent_name, scope, room_id, thread_id, messages, session_id, token_count_before, "
-        f"token_count_after, compaction_summary, *, {_HOOK_HELPERS}, transcript)"
+        f"({_HOOK}, agent_name, scope, room_id, thread_id, transcript, session_id, token_count_before, "
+        f"token_count_after, compaction_summary, *, {_HOOK_HELPERS})"
     ),
     "ConfigField": (
         "(name, label, type, required, default, placeholder, description, options, validation, authored_override)"
@@ -206,8 +210,8 @@ _SIGNATURES = {
         f"{_TOOL_HOOK})"
     ),
     "ToolEnvironmentContext": (
-        f"(function_name, registered_toolkit, arguments, agent_name, room_id, requester_id, declined, decline_reason, "
-        f"{_HOOK})"
+        "(function_name, registered_toolkit, arguments, agent_name, room_id, requester_id, declined, decline_reason, "
+        "event_name, plugin_name, settings, config, runtime_paths, logger, correlation_id)"
     ),
     "ToolRuntimeContext": (
         "(agent_name, target, requester_id, client, config, runtime_paths, conversation_reader, relations, "

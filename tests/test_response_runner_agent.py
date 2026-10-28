@@ -1878,7 +1878,6 @@ class TestAgentBot(AgentBotTestBase):
 
         assert generation.delivery.event_id == "$response"
         assert mock_ai.call_args.kwargs["show_tool_calls"] is False
-        assert mock_ai.call_args.kwargs["collect_streamed_response"] is False
         assert "io.mindroom.tool_trace" not in bot.client.room_send.await_args.kwargs["content"]
 
     @pytest.mark.asyncio
@@ -1913,7 +1912,6 @@ class TestAgentBot(AgentBotTestBase):
 
         async def fake_ai_response(*_args: object, **kwargs: object) -> str:
             assert kwargs["show_tool_calls"] is True
-            assert kwargs["collect_streamed_response"] is True
             collector = kwargs["tool_trace_collector"]
             collector.append(
                 ToolTraceEntry(

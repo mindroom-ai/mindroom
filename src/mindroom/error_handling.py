@@ -81,17 +81,26 @@ def get_user_friendly_error_message(
             f"{agent_prefix}⚠️ This model's safeguards blocked the request. "
             "Choose a different model (`!model list`) or revise the prompt, then try again."
         )
+    if needs_provider_key(error):
+        return f"{agent_prefix}{_missing_provider_key_message(runtime_paths)}"
     if isinstance(error, ProviderError):
-        return f"{agent_prefix}{_provider_error_message(error, safe_error, runtime_paths)}"
+        return f"{agent_prefix}{_provider_error_message(error, safe_error)}"
     if isinstance(error, TimeoutError):
         return f"{agent_prefix}⏰ Request timed out. Please try again."
     return f"{agent_prefix}⚠️ Error: {safe_error}"
 
 
-def _provider_error_message(error: ProviderError, safe_error: str, runtime_paths: RuntimePaths | None) -> str:
+def needs_provider_key(error: Exception) -> bool:
+    """Return whether ``error`` means no AI provider key is set up, which its reply tells the user how to fix.
+
+    That reply is setup guidance the user reads, unlike the other failure replies, which report an error. Only the
+    typed missing-key error an adapter raises at its boundary means it.
+    """
+    return isinstance(error, AuthenticationFailed) and error.code == MISSING_API_KEY
+
+
+def _provider_error_message(error: ProviderError, safe_error: str) -> str:
     if isinstance(error, AuthenticationFailed):
-        if error.code == MISSING_API_KEY:
-            return _missing_provider_key_message(runtime_paths)
         provider_hint = f" ({error.provider})" if error.provider else ""
         return f"❌ Authentication failed{provider_hint}: {safe_error}"
     if isinstance(error, ContextWindowExceeded):

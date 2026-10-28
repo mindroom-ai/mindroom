@@ -26,23 +26,17 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.failure_text import failure_text
-from mindroom.tool_system.agno_toolkits import (
-    StreamCollector,
-    framework_arguments,
-    model_arguments,
-    read_tool_value,
-    tool_value,
-)
+from mindroom.tool_system.agno_toolkits import StreamCollector, framework_arguments, model_arguments, read_tool_value
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.runtime_context import tool_runtime_model_context
-from mindroom.tool_system.tool_function import ToolOutcome, media_reference
+from mindroom.tool_system.tool_function import ToolOutcome, ToolValue, media_reference
 from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from mindroom.history.types import HistoryScope
-    from mindroom.tool_system.tool_function import ToolFunction, ToolValue
+    from mindroom.tool_system.tool_function import ToolFunction
 
 # What the loop sends the model for a call that names no function it offered.
 MISSING_TOOL_ERROR_TEXT = "Error: The requested tool does not exist or is not available."
@@ -253,8 +247,9 @@ async def run_tool_call(
 ) -> object:
     """Run one tool call through ``middleware``, then the function's own, to its entrypoint; return what it returned.
 
-    Runners outside the model loop that need the tool's own value use this; one that hands the value to a client reads
-    it through ``client_tool_result``. An exception the call raises propagates.
+    A vendor tool's Agno ``ToolResult`` comes back, and reaches the middleware, as its ``ToolValue``, and a stream as
+    its drained value. Runners outside the model loop that need the tool's own value use this; one that hands the
+    value to a client reads it through ``client_tool_result``. An exception the call raises propagates.
     Values for framework-injected parameters are dropped before middleware sees the arguments, so a resumed call
     running from its stored arguments is as clean as a freshly parsed one.
     """
@@ -270,17 +265,16 @@ async def run_tool_call(
 def client_tool_result(result: object) -> object:
     """Return what a runner outside the model loop hands its client for a tool's own return value.
 
-    A ``ToolResult`` or ``ToolValue`` gives its text. When the tool produced media, the text goes under ``content``
-    beside ``attachments``, one reference per medium with its kind, its MIME type, and its URL when it has one, so
-    the media's bytes never reach the client. Any other value passes unchanged, for the runner to encode as JSON.
+    A ``ToolValue`` gives its text. When the tool produced media, the text goes under ``content`` beside
+    ``attachments``, one reference per medium with its kind, its MIME type, and its URL when it has one, so the
+    media's bytes never reach the client. Any other value passes unchanged, for the runner to encode as JSON.
     """
-    value = read_tool_value(result)
-    if value is None:
+    if not isinstance(result, ToolValue):
         return result
-    attachments = [media_reference(kind, item) for kind, item in value.media()]
+    attachments = [media_reference(kind, item) for kind, item in result.media()]
     if not attachments:
-        return value.content
-    return {"content": value.content, "attachments": attachments}
+        return result.content
+    return {"content": result.content, "attachments": attachments}
 
 
 async def execute_tool_call(
@@ -298,9 +292,10 @@ async def execute_tool_call(
     stops it, or when this call returned an outcome that does, as minimal mode's Bash does after a control tool it ran.
     """
     try:
-        value = tool_value(await run_tool_call(function, arguments, context, middleware=middleware))
+        result = await run_tool_call(function, arguments, context, middleware=middleware)
     except Exception as error:
         return ToolOutcome(content=failure_text(error), stop_after_call=function.stop_after_call, is_error=True)
+    value = result if isinstance(result, ToolValue) else ToolValue(content=str(result))
     return tool_outcome(
         value,
         stop_after_call=function.stop_after_call or (isinstance(value, ToolOutcome) and value.stop_after_call),
@@ -339,7 +334,10 @@ def _link(step: ToolMiddleware, call: ToolCall, call_next: ToolNext) -> ToolNext
 
 
 async def _run_entrypoint(function: ToolFunction, arguments: dict[str, Any], context: ToolCallContext) -> object:
-    """Call the entrypoint with the framework's and the model's arguments; drain and close an iterator it returns."""
+    """Call the entrypoint with the framework's and the model's arguments; drain and close an iterator it returns.
+
+    What it returned or yielded comes back with an Agno ``ToolResult`` read as its ``ToolValue``.
+    """
     entrypoint = function.entrypoint
     # Arguments skip ``parse_tool_arguments`` when a paused call resumes from its stored arguments or middleware
     # rewrites them, so values for injected names are dropped here as well.
@@ -356,7 +354,8 @@ async def _run_entrypoint(function: ToolFunction, arguments: dict[str, Any], con
     if isinstance(result, Iterator):
         # An async tool returned a synchronous iterator, which may block between items.
         return await run_sync_tool_entrypoint(partial(_drain_sync, result))
-    return result
+    value = read_tool_value(result)
+    return result if value is None else value
 
 
 def _invoke_and_drain_sync(entrypoint: Callable[..., Any], kwargs: dict[str, Any]) -> object:
