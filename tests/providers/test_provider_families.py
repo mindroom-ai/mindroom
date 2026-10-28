@@ -35,6 +35,7 @@ from tests.providers.family_support import (
     CLAUDE_DEPRECATION_FILTER,
     FAMILIES,
     Family,
+    chat_chunk,
     claude_events,
     gemini_chunk,
     ollama_chunk,
@@ -532,13 +533,14 @@ def _chat_weather_call() -> httpx.Response:
     """A Chat stream that opens the call, streams its arguments as a second piece, then finishes."""
     opened = {"index": 0, "id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": ""}}
     arguments = {"index": 0, "function": {"arguments": _WEATHER_ARGUMENTS}}
-    choices = [
-        {"index": 0, "delta": {"tool_calls": [opened]}, "finish_reason": None},
-        {"index": 0, "delta": {"tool_calls": [arguments]}, "finish_reason": None},
-        {"index": 0, "delta": {}, "finish_reason": "tool_calls"},
-    ]
-    base = {"id": "c", "object": "chat.completion.chunk", "created": 1, "model": "m"}
-    return sse_response([*({**base, "choices": [choice]} for choice in choices), "[DONE]"])
+    return sse_response(
+        [
+            chat_chunk({"tool_calls": [opened]}),
+            chat_chunk({"tool_calls": [arguments]}),
+            chat_chunk({}, finish_reason="tool_calls"),
+            "[DONE]",
+        ],
+    )
 
 
 def _ollama_weather_call() -> httpx.Response:
