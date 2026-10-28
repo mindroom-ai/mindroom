@@ -492,9 +492,9 @@ describe("connected accounts", () => {
       },
     );
     fireEvent.click(
-      screen.getByRole("button", { name: "Let agents use GitHub" }),
+      screen.getByRole("button", { name: "Let commands use GitHub" }),
     );
-    await pressInDialog("Let agents use it");
+    await pressInDialog("Let commands use it");
     await waitFor(() =>
       expect(vi.mocked(fetch).mock.calls[0][0]).toBe(
         "/custom/github/oauth-reuse?agent_name=a",
@@ -643,7 +643,7 @@ describe("connected accounts", () => {
           { connected: true, account_label: "octocat", reuse_enabled: false },
           { separate_account: true },
         ),
-        "Let agents use GitHub",
+        "Let commands use GitHub",
       ],
       [
         withAccount({ reuse_enabled: false, reuse_access: null }),
@@ -900,12 +900,14 @@ describe("connected accounts", () => {
       const onChanged = vi.fn();
       renderRows([toolsOnly], { onChanged });
       const github = row("GitHub");
-      expect(within(github).getByText("Not used by agents yet")).toBeVisible();
+      expect(
+        within(github).getByText("Connected for tools only"),
+      ).toBeVisible();
       expect(within(github).getByText("octocat")).toBeVisible();
       const use = within(github).getByRole("button", {
-        name: "Let agents use GitHub",
+        name: "Let commands use GitHub",
       });
-      expect(use).toHaveTextContent("Let agents use it");
+      expect(use).toHaveTextContent("Let commands use it");
 
       fireEvent.click(use);
       const dialog = await screen.findByRole("dialog");
@@ -916,7 +918,7 @@ describe("connected accounts", () => {
         `${approvalBypass} This covers each of your agents whose GitHub service uses this account.`,
       );
       expect(fetch).not.toHaveBeenCalled();
-      await pressInDialog("Let agents use it");
+      await pressInDialog("Let commands use it");
 
       await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
       expect(fetch).toHaveBeenCalledWith(
@@ -945,7 +947,7 @@ describe("connected accounts", () => {
           },
         });
         fireEvent.click(
-          screen.getByRole("button", { name: "Let agents use GitHub" }),
+          screen.getByRole("button", { name: "Let commands use GitHub" }),
         );
         const dialog = await screen.findByRole("dialog");
         expect(dialog).toHaveTextContent(approvalBypass);
@@ -956,14 +958,15 @@ describe("connected accounts", () => {
       },
     );
 
-    it("says a service's own account is not used by agents yet, as the tools' account row does", () => {
+    it("says a service's own account is not used by the agent's commands yet, never that the tools use it", () => {
       renderRows([{ ...toolsOnly, separate_account: true }]);
       expect(
-        within(row("GitHub")).getByText("Not used by agents yet"),
+        within(row("GitHub")).getByText("Not used by commands yet"),
       ).toBeVisible();
+      expect(screen.queryByText("Connected for tools only")).toBeNull();
       expect(
         within(row("GitHub")).getByRole("button", {
-          name: "Let agents use GitHub",
+          name: "Let commands use GitHub",
         }),
       ).toBeVisible();
     });
@@ -985,7 +988,7 @@ describe("connected accounts", () => {
       renderRows([toolsOnly]);
       fireEvent.click(
         screen.getByRole("button", {
-          name: "Let agents use GitHub",
+          name: "Let commands use GitHub",
         }),
       );
       await pressInDialog("Cancel");
@@ -1046,7 +1049,7 @@ describe("connected accounts", () => {
       );
       fireEvent.click(
         screen.getByRole("button", {
-          name: "Let agents use Drive",
+          name: "Let commands use Drive",
         }),
       );
       expect(await screen.findByRole("dialog")).toHaveTextContent(
@@ -1075,7 +1078,7 @@ describe("connected accounts", () => {
       });
       fireEvent.click(
         screen.getByRole("button", {
-          name: "Let agents use Drive",
+          name: "Let commands use Drive",
         }),
       );
       const dialog = await screen.findByRole("dialog");
@@ -1096,7 +1099,7 @@ describe("connected accounts", () => {
         { agentName: "shared_dev" },
       );
       expect(
-        within(row("GitHub")).getByText("Not used by agents yet"),
+        within(row("GitHub")).getByText("Connected for tools only"),
       ).toBeVisible();
       expect(screen.queryByRole("button")).toBeNull();
     });
@@ -1136,7 +1139,7 @@ describe("connected accounts", () => {
       const onChanged = vi.fn();
       renderRows([toolsOnlyDrive], { onChanged });
       fireEvent.click(
-        screen.getByRole("button", { name: "Let agents use Drive" }),
+        screen.getByRole("button", { name: "Let commands use Drive" }),
       );
       const dialog = await screen.findByRole("dialog");
       expect(dialog).toHaveAccessibleName(
@@ -1155,7 +1158,7 @@ describe("connected accounts", () => {
       expect(dialog).toHaveTextContent(
         "will act as me@example.com with read-only access, without the approval prompts",
       );
-      await pressInDialog("Let agents use it");
+      await pressInDialog("Let commands use it");
 
       await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
       expect(reuseBodies()).toEqual([
@@ -1169,7 +1172,7 @@ describe("connected accounts", () => {
     it("sends read and write when the user picks it", async () => {
       renderRows([toolsOnlyDrive]);
       fireEvent.click(
-        screen.getByRole("button", { name: "Let agents use Drive" }),
+        screen.getByRole("button", { name: "Let commands use Drive" }),
       );
       const dialog = await screen.findByRole("dialog");
       fireEvent.click(
@@ -1178,7 +1181,7 @@ describe("connected accounts", () => {
       expect(dialog).toHaveTextContent(
         "will act as me@example.com with its full access",
       );
-      await pressInDialog("Let agents use it");
+      await pressInDialog("Let commands use it");
 
       await waitFor(() =>
         expect(reuseBodies()).toEqual([
@@ -1201,11 +1204,11 @@ describe("connected accounts", () => {
         ),
       ]);
       fireEvent.click(
-        screen.getByRole("button", { name: "Let agents use GitHub" }),
+        screen.getByRole("button", { name: "Let commands use GitHub" }),
       );
       const dialog = await screen.findByRole("dialog");
       expect(within(dialog).queryByRole("radio")).toBeNull();
-      await pressInDialog("Let agents use it");
+      await pressInDialog("Let commands use it");
 
       await waitFor(() =>
         expect(reuseBodies()).toEqual([
@@ -2392,7 +2395,7 @@ describe("what a row says about how the key is sent", () => {
     [
       "a connected account only its tools use",
       toolsOnly,
-      "Agents' requests are refused until you let them use this account.",
+      "The agent's commands are refused until you let them use this account.",
     ],
     [
       "a connected account while connecting another is unavailable",
@@ -2400,7 +2403,7 @@ describe("what a row says about how the key is sent", () => {
         ...toolsOnly,
         can_connect: false,
       },
-      "Agents' requests are refused until you let them use this account.",
+      "The agent's commands are refused until you let them use this account.",
     ],
     [
       "a connection that needs a reset",
@@ -2433,7 +2436,7 @@ describe("what a row says about how the key is sent", () => {
         service_account: true,
         can_connect: false,
       },
-      "Agents' requests are refused until you let them use this account.",
+      "The agent's commands are refused until you let them use this account.",
     ],
     [
       "a service account beside a personal connection that needs a reset",
@@ -2463,7 +2466,7 @@ describe("what a row says about how the key is sent", () => {
     [
       "its own account, connected but not used yet",
       toolsOnly,
-      "Agents' requests are refused until you let them use this account.",
+      "The agent's commands are refused until you let them use this account.",
     ],
     [
       "its own account that cannot be connected here",

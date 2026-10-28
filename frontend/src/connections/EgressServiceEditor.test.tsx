@@ -642,7 +642,7 @@ describe("the editor form", () => {
     ).toHaveLength(1);
   });
 
-  it("says once that requests naming no service may use its own account, only beside another service of the user's", async () => {
+  it("warns about no overlap for a service with its own account, and says nothing about routing", async () => {
     const gmail = credentialService({
       name: "google_gmail",
       display_name: "Gmail",
@@ -655,49 +655,14 @@ describe("the editor form", () => {
         },
       ],
     });
-    const mine = {
-      ...gmail,
-      name: "mine",
-      display_name: "Mine",
-      source: "user" as const,
-    };
-    const line = "Requests that name no service may use this account too.";
-    const own = { preset: "google_gmail", oauth_separate_account: true };
     await renderEditor({
-      service: own,
+      service: { preset: "google_gmail", oauth_separate_account: true },
       name: "google_gmail-2",
-      agentServices: [gmail, mine, { ...mine, name: "other" }],
+      agentServices: [gmail, { ...gmail, name: "mine", source: "user" }],
     });
     expect(screen.queryByText(/already handles/)).toBeNull();
-    expect(screen.getAllByText(line)).toHaveLength(1);
-    expect(screen.getByText(line)).toHaveAttribute("role", "status");
-    expect(screen.getByText(line)).toHaveClass("text-muted-foreground");
-    cleanup();
-    // The administrator's services win every tie, so they take those requests.
-    await renderEditor({
-      service: own,
-      name: "google_gmail-2",
-      agentServices: [gmail],
-    });
-    expect(screen.queryByText(line)).toBeNull();
-    cleanup();
-    await renderEditor({
-      service: own,
-      name: "google_gmail-2",
-      agentServices: [
-        {
-          ...mine,
-          rules: [
-            {
-              ...mine.rules[0],
-              host: "www.googleapis.com",
-              path_prefix: "/drive/",
-            },
-          ],
-        },
-      ],
-    });
-    expect(screen.queryByText(line)).toBeNull();
+    expect(screen.queryByText(/name no service|routing order/)).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
   });
 
   it("drops the API key from a custom service's login hint while the form asks which account", async () => {
@@ -3560,6 +3525,59 @@ describe("the Account choice", () => {
     expect(another()).toBeChecked();
     expect(toolsAccount()).toHaveAccessibleName("The account your tools use");
     expect(screen.queryByText(/already uses this account/)).toBeNull();
+  });
+
+  it("says when saving disconnects the service's own account", async () => {
+    const own = credentialService({
+      name: "mail",
+      display_name: "Gmail",
+      source: "user",
+      separate_account: true,
+      configured: true,
+      active_source: "oauth",
+      oauth: oauthStatus({
+        provider: "google_gmail",
+        display_name: "Gmail",
+        connected: true,
+        account_label: "team@example.com",
+      }),
+    });
+    const line = "Saving disconnects team@example.com.";
+    await renderEditor({
+      ...withGmail,
+      agentServices: [gmail, own],
+      name: "mail",
+      service: { preset: "google_gmail", oauth_separate_account: true },
+    });
+    // An unchanged save keeps the account.
+    expect(screen.queryByText(line)).toBeNull();
+    fireEvent.click(toolsAccount());
+    expect(screen.getByText(line)).toBeVisible();
+    fireEvent.click(another());
+    expect(screen.queryByText(line)).toBeNull();
+    // Another login has an account of its own to sign in to; this one goes.
+    type("Preset", "google_calendar");
+    expect(screen.getByText(line)).toBeVisible();
+    type("Preset", "google_gmail");
+    expect(screen.queryByText(line)).toBeNull();
+    cleanup();
+    // Without a connected account there is nothing to disconnect.
+    await renderEditor({
+      ...withGmail,
+      agentServices: [
+        gmail,
+        {
+          ...own,
+          configured: false,
+          active_source: null,
+          oauth: { ...own.oauth!, connected: false, account_label: null },
+        },
+      ],
+      name: "mail",
+      service: { preset: "google_gmail", oauth_separate_account: true },
+    });
+    fireEvent.click(toolsAccount());
+    expect(screen.queryByText(/Saving disconnects/)).toBeNull();
   });
 
   it("says <name> in the header while the name is empty", async () => {

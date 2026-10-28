@@ -13,6 +13,7 @@ export function EgressAccountChoice({
   separateAccount,
   toolsAddress,
   usedBy,
+  disconnects,
   signsIn,
   disabled,
   onChange,
@@ -27,6 +28,8 @@ export function EgressAccountChoice({
   toolsAddress: string | null;
   /** The display name of another service of the agent that uses the tools' account. */
   usedBy: string | null;
+  /** The address of the service's own connected account that saving as chosen removes. */
+  disconnects: string | null;
   /** Saving with another account signs in to it next: the service has none of its own yet. */
   signsIn: boolean;
   disabled: boolean;
@@ -76,6 +79,11 @@ export function EgressAccountChoice({
           {signsIn ? "You sign in right after saving. " : ""}Agents choose it
           with <Code>X-Agent-Keys-Service: {name || "<name>"}</Code>
         </>,
+      )}
+      {disconnects && (
+        <p className="text-xs text-muted-foreground">
+          Saving disconnects {disconnects}.
+        </p>
       )}
     </div>
   );

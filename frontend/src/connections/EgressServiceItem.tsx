@@ -580,10 +580,10 @@ export function EgressServiceItem({
               size="sm"
               variant="outline"
               disabled={busy !== null}
-              aria-label={`Let agents use ${name}`}
+              aria-label={`Let commands use ${name}`}
               onClick={() => askReuse("read")}
             >
-              Let agents use it
+              Let commands use it
             </Button>
           ) : (
             setKeyFirst && (
@@ -721,7 +721,7 @@ export function EgressServiceItem({
               reuseEnabled
                 ? "Change"
                 : oauth.connected
-                  ? "Let agents use it"
+                  ? "Let commands use it"
                   : "Continue"
             }
             access={access}

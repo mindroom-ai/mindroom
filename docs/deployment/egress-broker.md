@@ -370,7 +370,7 @@ When more than one user can sign in through a trusted upstream gateway, set `MIN
 ### Using a connected account
 
 An account connected for the provider's tools, on the Connections portal or here, serves only those tools until someone allows Agent Keys to use it for the service.
-Its row then shows "Not used by agents yet" and offers **Let agents use it**, and brokered requests that need it are refused with `oauth_reuse: "off"` (see [Error responses](#error-responses)).
+Its row then shows "Connected for tools only" and offers **Let commands use it**, and brokered requests that need it are refused with `oauth_reuse: "off"` (see [Error responses](#error-responses)).
 The provider's tools ask for approval before they write, but an allowed account lets the agent's shell and python commands act as it with its full access and without those prompts, so allowing it asks for confirmation first.
 Whoever may connect the account may allow it (see **Who may connect and set keys** above).
 Allowing a GitHub or Atlassian account covers every agent of that requester with a service of the same name, because the account is the requester's own; allowing any other account covers the scope of the service's keys (see [Secret management](#secret-management)), so on a shared agent everyone using it gets it.
@@ -435,7 +435,7 @@ A user service that signs in with a connected account on a `user` or `user_agent
 A GitHub or Atlassian login cannot, because those accounts belong to each user rather than to one agent.
 A row on the tools' account with a connected account offers **Add another <provider> account** under its status, which adds such a service with the row's preset and the next free name (`google_gmail-2`) at once.
 After that link, or **Save and sign in** in the editor, the new row asks what agents may do with the account and then opens the provider's sign-in, where Google always shows its account picker; cancelled, the row keeps its **Connect** button.
-That service's row then connects, allows, and disconnects an account of its own, which shows as "Not used by agents yet" until it is allowed, and the agent's tools and every other service keep the account they use.
+That service's row then connects, allows, and disconnects an account of its own, which shows as "Not used by commands yet" until it is allowed, and the agent's tools and every other service keep the account they use.
 It uses only that account, so it takes no key and its row offers none: until the account is connected the service has none, and it never uses the tools' account instead.
 Deleting the service, switching it back to the tools' account, or changing its account login also removes its own account and its opt-in.
 

@@ -377,6 +377,15 @@ export function EgressServiceEditor({
   const takesKey = !limiting && !choosesAccount;
   const toolsAccount = toolsAccountUse(login, agentServices, name);
   const signsIn = signsInAfterSave(form, initial, presets);
+  // The service's own connected account, which a save to the tools' account
+  // or to another login removes.
+  const ownAddress = agentServices.find(
+    (other) => other.name === name && other.separate_account,
+  )?.oauth?.account_label;
+  const disconnects =
+    editing && ownAddress && (!form.separateAccount || signsIn)
+      ? ownAddress
+      : null;
   const accountChoice = choosesAccount && (
     <EgressAccountChoice
       id={`${id}-account`}
@@ -388,6 +397,7 @@ export function EgressServiceEditor({
       separateAccount={form.separateAccount}
       toolsAddress={toolsAccount.address}
       usedBy={toolsAccount.usedBy}
+      disconnects={disconnects}
       signsIn={signsInAfterSave(
         { ...form, separateAccount: true },
         initial,
@@ -435,20 +445,12 @@ export function EgressServiceEditor({
         )
       : null;
   // The services that already send a credential where this form would, for
-  // this agent. A request picks a service with its own account by its header,
-  // so it is warned about none of them, but one that names no service follows
-  // the usual order, which may pick it over another of the user's services;
-  // the administrator's win every tie.
-  const overlaps = limiting
-    ? []
-    : overlapWarnings(
-        form,
-        preset,
-        form.separateAccount
-          ? agentServices.filter((other) => other.source !== "config")
-          : agentServices,
-        name,
-      );
+  // this agent. A request picks a service with its own account by its
+  // header, so it is warned about none of them.
+  const overlaps =
+    limiting || form.separateAccount
+      ? []
+      : overlapWarnings(form, preset, agentServices, name);
   // Another service of the user's with rules on the hosts a limit, or the
   // repositories applied to this service, cover.
   const overlapHosts = !limiting
@@ -628,17 +630,11 @@ export function EgressServiceEditor({
               <RuleSendFields {...ruleEditing(0, primaryRule)} />
             </div>
           )}
-          {form.separateAccount
-            ? overlaps.length > 0 && (
-                <p role="status" className="text-xs text-muted-foreground">
-                  Requests that name no service may use this account too.
-                </p>
-              )
-            : overlaps.map((warning) => (
-                <p key={warning} role="status" className={warningClass}>
-                  {warning}
-                </p>
-              ))}
+          {overlaps.map((warning) => (
+            <p key={warning} role="status" className={warningClass}>
+              {warning}
+            </p>
+          ))}
         </>
       )}
       <Field
