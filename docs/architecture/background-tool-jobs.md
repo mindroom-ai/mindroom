@@ -37,7 +37,7 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 - Each outcome has one active result claim, and only the parent run's saved tool call acknowledges it, so a result is read once and a reply that fails before saving leaves it to be reported again; a cancellation, which has no result to read, is acknowledged when a notice names it.
 - Cancellation is saved before cleanup and stays pending until owned work settles, so a crash during cleanup still reports the job cancelled.
   Only work that a shutdown, restart, or event-loop teardown cut short is interrupted, and a child settlement saved before a crash stands.
-- Cancelling or restarting a job that waits for approval denies its open cards, so no card outlives the call it would approve.
+- A job's end denies its open approval cards in the commit that saves that end, so no card of an ended job stays answerable, even while the router cannot post the denial yet.
 - A job-gated call never runs inline: one that cannot become a job fails, and the agent CLI never offers it, because such a function asks for no confirmation of its own and its job's approval phase is its only approval gate.
 - A gated job durably leaves `awaiting_approval` before its call runs, so a stop says a call did not run only when it never started.
 - Revocation stops execution through internal ownership although discovery and control are no longer authorized, so losing access never leaves work running unseen.
@@ -69,7 +69,6 @@ A follow-up also gives way to a waiting message the agent then leaves unanswered
 Another person's waiting message does not hold a follow-up back, because that person's reply lists only their own jobs, so the message still waits for the follow-up and stops it as a newer message would.
 A message is waiting only from its arrival during a busy turn until its own turn's dispatch starts, so a follow-up that takes an idle conversation while a message is still being prepared stops for it as for a newer message.
 A bot that left a room cannot clear its jobs state there, so clients ignore jobs state from users who are not joined.
-When denying an ended job's approval cards fails and the process then stops before a retry succeeds, those cards stay answerable until their own deadline; answering one runs nothing, though a timed approval chosen on it still covers later calls.
 A restart interrupts a job that waits for its own call's approval, so that call never runs, and the model is told it did not run.
 Only functions of toolkits MindRoom assembles become jobs; the knowledge search, skill access, and team delegation functions MindRoom adds beside those toolkits execute inline.
 A wait that ends while the mid-turn judge is still deciding cancels that judgment, so the post-batch check judges the same queue again.

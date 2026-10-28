@@ -769,20 +769,11 @@ class _MultiAgentOrchestrator:
 
     def _configure_approval_store_transport(self) -> None:
         """Bind approval transport hooks to the current shared runtime services."""
-        transport = self._approval_transport
         initialize_approval_store(
             self.runtime_paths,
-            prepare_event=transport.prepare_approval_event,
-            send_delivery=transport.send_approval_delivery,
-            resolve_delivery=transport.resolve_approval_delivery,
-            resolve_action_delivery=transport.resolve_approval_action_delivery,
+            transport=self._approval_transport,
             cards=self._approval_cards(),
-            transport_sender=transport.transport_sender_id,
-            sending_device=transport.transport_device_id,
-            continuation_ready=transport.wake_continuation_sources,
             recovery=self._approval_recovery,
-            responder_principal=transport.responder_principal_id,
-            router_missing=transport.router_missing,
         )
 
     async def _ensure_user_account(self, config: Config) -> None:

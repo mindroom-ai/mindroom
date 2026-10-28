@@ -2956,12 +2956,12 @@ async def _approving_team_bot(
 
     initialize_approval_store_for_test(
         bot.runtime_paths,
-        prepare_event=prepare_event,
-        send_delivery=send_card,
-        resolve_delivery=AsyncMock(return_value=None),
+        prepare_approval_event=prepare_event,
+        send_approval_delivery=send_card,
+        resolve_approval_delivery=AsyncMock(return_value=None),
         cards=bot._journal_store.principal("router@shared"),
-        transport_sender=lambda: "@router:localhost",
-        sending_device=lambda: "DEVICE",
+        transport_sender_id=lambda: "@router:localhost",
+        transport_device_id=lambda: "DEVICE",
     )
     try:
         with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=streaming)):

@@ -32,6 +32,7 @@ type _DecisionStatus = Literal["approved", "denied", "expired"]
 
 # What a job's pending cards say once the job ends without a decision, whether it was stopped or a restart ended it.
 JOB_ENDED_REASON = "The background job asking for this approval ended before a decision."
+_JOB_RUN_PREFIX = "tool-job:"
 
 
 class ApprovalDecision(StrEnum):
@@ -81,6 +82,11 @@ class BackgroundApprovalDecision:
 
     status: _DecisionStatus
     reason: str | None
+
+
+def tool_job_run_id(job_id: str) -> str:
+    """Return the detached run that owns the calls one background job asks about."""
+    return _JOB_RUN_PREFIX + job_id
 
 
 def approval_arguments_digest(tool_args: Mapping[str, object] | None) -> str:
@@ -280,26 +286,27 @@ def detached_decision(transaction: Transaction, principal_id: str, call: CallKey
     return BackgroundApprovalDecision(status=cast("_DecisionStatus", str(row["decision"])), reason=row["reason"])
 
 
-def deny_pending(transaction: Transaction, principal_id: str, *, owner_id: str, reason: str) -> int:
-    """Deny every pending call of one detached run, returning how many this decided."""
+def deny_pending(transaction: Transaction, *, owner_id: str, reason: str) -> tuple[RecordedApprovalDecision, ...]:
+    """Deny every pending call of one detached run, returning the decisions this recorded."""
     rows = transaction.fetchall(
         """
         SELECT tool_call_id FROM approval_calls
-        WHERE principal_id = ? AND owner_id = ? AND generation = 0 AND decision IS NULL
+        WHERE owner_id = ? AND generation = 0 AND decision IS NULL
         ORDER BY tool_call_id/*bytes*/
         """,
-        (principal_id, owner_id),
+        (owner_id,),
     )
-    return sum(
+    decisions = [
         resolve_call(
             transaction,
             CallKey.detached(owner_id, str(row["tool_call_id"])),
             requested="denied",
             reason=reason,
             metadata=None,
-        ).recorded
+        )
         for row in rows
-    )
+    ]
+    return tuple(decision for decision in decisions if decision.recorded)
 
 
 def prune(transaction: Transaction, principal_id: str, *, owner_id: str) -> bool:

@@ -1534,12 +1534,12 @@ class TestAgentBot(AgentBotTestBase):
 
             initialize_approval_store_for_test(
                 runtime_paths,
-                prepare_event=prepare_event,
-                send_delivery=send_delivery,
-                resolve_delivery=AsyncMock(return_value=None),
+                prepare_approval_event=prepare_event,
+                send_approval_delivery=send_delivery,
+                resolve_approval_delivery=AsyncMock(return_value=None),
                 cards=first._journal_store.principal(router_principal_id),
-                transport_sender=lambda: "@mindroom_router:localhost",
-                sending_device=lambda: "DEVICE",
+                transport_sender_id=lambda: "@mindroom_router:localhost",
+                transport_device_id=lambda: "DEVICE",
             )
         source = InboundEvent(
             event_id="$source",
@@ -1610,15 +1610,17 @@ class TestAgentBot(AgentBotTestBase):
         if requires_human:
             manager = initialize_approval_store_for_test(
                 runtime_paths,
-                prepare_event=prepare_event,
-                send_delivery=send_delivery,
-                resolve_delivery=AsyncMock(return_value=None),
+                prepare_approval_event=prepare_event,
+                send_approval_delivery=send_delivery,
+                resolve_approval_delivery=AsyncMock(return_value=None),
                 cards=restarted._journal_store.principal(router_principal_id),
-                transport_sender=lambda: "@mindroom_router:localhost",
-                sending_device=lambda: "DEVICE",
-                continuation_ready=lambda _entity_name, room_id, source_ids: restarted.retry_approval_sources(
-                    room_id,
-                    source_ids,
+                transport_sender_id=lambda: "@mindroom_router:localhost",
+                transport_device_id=lambda: "DEVICE",
+                wake_continuation_sources=AsyncMock(
+                    side_effect=lambda _entity_name, room_id, source_ids: restarted.retry_approval_sources(
+                        room_id,
+                        source_ids,
+                    ),
                 ),
             )
             restarted._journal_dispatcher.release_turn_replay()
@@ -2124,7 +2126,7 @@ class TestAgentBot(AgentBotTestBase):
             initialize_approval_store_for_test(
                 runtime_paths,
                 cards=cards,
-                resolve_action_delivery=transport.resolve_approval_action_delivery,
+                resolve_approval_action_delivery=transport.resolve_approval_action_delivery,
             )
             on_approval = bot._journal_dispatcher.callbacks.on_approval
 

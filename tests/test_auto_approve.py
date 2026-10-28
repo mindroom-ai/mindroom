@@ -32,7 +32,7 @@ from mindroom.llm.runs import ToolExecution
 from mindroom.message_target import MessageTarget
 from tests.approval_card_helpers import card_view
 from tests.authorization_helpers import make_test_command_handler_context
-from tests.conftest import make_conversation_reader_mock, test_runtime_paths
+from tests.conftest import approval_manager_for_test, make_conversation_reader_mock, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -442,7 +442,7 @@ async def test_pending_card_listing_keeps_only_the_approvers_open_cards_in_one_t
     ]
     cards = MagicMock()
     cards.approvals.pending_approval_cards = AsyncMock(side_effect=pages)
-    manager = ApprovalManager(test_runtime_paths(tmp_path), send_delivery=AsyncMock(), cards=cards)
+    manager = approval_manager_for_test(test_runtime_paths(tmp_path), send_approval_delivery=AsyncMock(), cards=cards)
 
     try:
         event_ids = await manager.pending_card_event_ids(room_id=ROOM_ID, thread_id=THREAD_ID, approver_user_id=HUMAN)

@@ -10,7 +10,6 @@ import nio
 import pytest
 
 from mindroom.approval.inbound import parse_approval_response_event
-from mindroom.approval.manager import ApprovalActionResult, ApprovalManager
 from mindroom.approval.receipt import build_approval_receipt
 from mindroom.approval.response import plan_approval_calls, publish_generation
 from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
@@ -40,13 +39,15 @@ from mindroom.response_sources import ResponseSources
 from mindroom.tool_approval_grants import AUTO_APPROVE_OPTIONS, ApprovalOperation, grant_operation
 from tests.approval_card_helpers import card_content, card_is_terminal, pending_card, resolve_card_event
 from tests.approval_continuation_helpers import approval_continuation
-from tests.conftest import handle_card_response_for_test, test_runtime_paths
+from tests.conftest import approval_manager_for_test, handle_card_response_for_test, test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from mindroom.approval.manager import ApprovalActionResult, ApprovalManager
 
 
 @pytest.mark.asyncio
@@ -68,7 +69,7 @@ async def test_terminal_wire_edits_preserve_thread_scope_for_grant_and_revocatio
                 revoked.set()
         return "$" + delivery.delivery_id
 
-    manager.send_delivery = send
+    manager.transport.send_approval_delivery = send
     try:
         card = await _card(journal, manager, "first")
         await _approve(manager, card)
@@ -113,7 +114,7 @@ async def test_origin_expiring_during_decision_does_not_advertise_a_nonexistent_
         sent.append(delivery)
         return "$" + delivery.delivery_id
 
-    manager.send_delivery = send
+    manager.transport.send_approval_delivery = send
     try:
         card = await _card(journal, manager, "first")
         monkeypatch.setattr("time.time_ns", lambda: 9_000_000_000_000_000_000)
@@ -246,7 +247,7 @@ async def test_policy_pause_receipt_accepts_timed_authorization_without_claiming
         sent.append(delivery)
         return "$" + delivery.delivery_id
 
-    manager.send_delivery = send
+    manager.transport.send_approval_delivery = send
     try:
         for name in ("origin", "reuse"):
             tool = ToolExecution(
@@ -345,7 +346,7 @@ async def test_grant_batch_terminal_edits_fit_after_large_inline_argument_cards(
         sent.append(delivery)
         return "$" + delivery.delivery_id
 
-    manager.send_delivery = send
+    manager.transport.send_approval_delivery = send
     try:
         first = await _card(journal, manager, "first", command="x" * 40_000)
         await _card(journal, manager, "sibling", command="y" * 40_000)
@@ -383,7 +384,7 @@ async def test_subsequent_granted_call_publishes_exact_terminal_receipt(
         sent.append(delivery)
         return "$" + delivery.delivery_id
 
-    manager.send_delivery = send
+    manager.transport.send_approval_delivery = send
     try:
         first = await _card(journal, manager, "first")
         await _approve(manager, first)
@@ -450,13 +451,13 @@ async def test_automatic_receipt_reply_is_consumed_before_maintenance(
                 msg = "Matrix accepted the receipt but its response was lost"
                 raise TimeoutError(msg)
 
-            manager.send_delivery = lose_acknowledgement
+            manager.transport.send_approval_delivery = lose_acknowledgement
         receipt_event_id = await _card(journal, manager, "subsequent")
 
         async def resolve_receipt(room_id: str, event_id: str) -> str | None:
             return "card-subsequent" if (room_id, event_id) == ("!room:test", receipt_event_id) else None
 
-        manager.resolve_action_delivery = resolve_receipt
+        manager.transport.resolve_approval_action_delivery = resolve_receipt
         delivery = await owner.load_matrix_delivery(delivery_id="card-subsequent", stage=DeliveryStage.INITIAL)
         assert delivery is not None
         assert delivery.acknowledged_event_id == (None if lost_acknowledgement else receipt_event_id)
@@ -501,7 +502,7 @@ async def test_republished_receipt_aliases_remain_terminal(
     journal = journal_database()
     manager = _manager(journal, tmp_path)
     monkeypatch.setattr(manager, "_ensure_deadline_sweep", lambda: None)
-    manager.sending_device = lambda: "original-device"
+    manager.transport.transport_device_id = lambda: "original-device"
     owner = journal.principal("router@shared")
     try:
         first = await _card(journal, manager, "first")
@@ -511,11 +512,11 @@ async def test_republished_receipt_aliases_remain_terminal(
             msg = "Matrix accepted the receipt but its response was lost"
             raise TimeoutError(msg)
 
-        manager.send_delivery = lose_acknowledgement
+        manager.transport.send_approval_delivery = lose_acknowledgement
         old_event_id = await _card(journal, manager, "subsequent")
-        manager.sending_device = lambda: "replacement-device"
-        manager.resolve_delivery = AsyncMock(return_value=None)
-        manager.send_delivery = AsyncMock(return_value="$replacement-receipt")
+        manager.transport.transport_device_id = lambda: "replacement-device"
+        manager.transport.resolve_approval_delivery = AsyncMock(return_value=None)
+        manager.transport.send_approval_delivery = AsyncMock(return_value="$replacement-receipt")
         assert (
             await manager._worker().flush(delivery_id="card-subsequent", stage=DeliveryStage.INITIAL)
             == "$replacement-receipt"
@@ -546,7 +547,7 @@ async def test_republished_receipt_aliases_remain_terminal(
             client=MagicMock(user_id="@router:test", room_get_event=AsyncMock(side_effect=get_event)),
         )
         transport = ApprovalMatrixTransport(bot_provider=lambda name: router if name == "router" else None)
-        manager.resolve_action_delivery = transport.resolve_approval_action_delivery
+        manager.transport.resolve_approval_action_delivery = transport.resolve_approval_action_delivery
         for event_id in ("$untrusted-receipt", "$unknown-delivery"):
             result = await handle_card_response_for_test(
                 manager,
@@ -601,7 +602,7 @@ async def test_approval_receipts_preserve_scope_and_original_timed_decision(
         sent.append(delivery)
         return "$" + delivery.delivery_id
 
-    manager.send_delivery = send
+    manager.transport.send_approval_delivery = send
     try:
         first = await _card(journal, manager, "first")
         await _card(journal, manager, "sibling")
@@ -653,7 +654,7 @@ async def test_automatic_receipt_recovery_retires_only_acknowledged_payload(
     """A failed receipt send survives recovery and leaves an approval-only tombstone."""
     journal = journal_database()
     manager = _manager(journal, tmp_path)
-    manager.sending_device = lambda: "test-device"
+    manager.transport.transport_device_id = lambda: "test-device"
     delivered: list[MatrixDelivery] = []
     try:
         first = await _card(journal, manager, "first")
@@ -663,7 +664,7 @@ async def test_automatic_receipt_recovery_retires_only_acknowledged_payload(
             msg = "Matrix is temporarily unavailable"
             raise TimeoutError(msg)
 
-        manager.send_delivery = fail_send
+        manager.transport.send_approval_delivery = fail_send
         await _card(journal, manager, "deferred", command="original command")
         await manager.cards.approvals.maintain_automatic_approvals()
         pending = await manager.cards.load_matrix_delivery(delivery_id="card-deferred", stage=DeliveryStage.INITIAL)
@@ -678,13 +679,13 @@ async def test_automatic_receipt_recovery_retires_only_acknowledged_payload(
         delivered.append(delivery)
         return "$receipt-deferred"
 
-    manager.send_delivery = recover_send
-    manager.sending_device = lambda: recovery_device
+    manager.transport.send_approval_delivery = recover_send
+    manager.transport.transport_device_id = lambda: recovery_device
 
     async def no_receipt_in_history(_delivery: MatrixDelivery) -> str | None:
         return None
 
-    manager.resolve_delivery = no_receipt_in_history
+    manager.transport.resolve_approval_delivery = no_receipt_in_history
     try:
         await manager.recover_cards_on_startup()
         assert len(delivered) == 1
@@ -721,7 +722,7 @@ async def test_transport_refused_arguments_cannot_receive_automatic_approval(
         async def refuse_arguments(_room: str, _thread: str | None, content: dict) -> dict:
             return {**content, "approvable": False}
 
-        manager.prepare_event = refuse_arguments
+        manager.transport.prepare_approval_event = refuse_arguments
         await _card(journal, manager, "refused")
         continuation = await journal.principal("agent@code").approvals.approval_continuation("refused")
         assert continuation is not None
@@ -1029,7 +1030,7 @@ async def test_revocation_ack_waits_for_original_edit_and_recovers_after_restart
         delivered.append(delivery)
         return "$" + delivery.delivery_id
 
-    manager.send_delivery = send
+    manager.transport.send_approval_delivery = send
     try:
         card = await _card(journal, manager, "first")
         await _approve(manager, card)
@@ -1055,7 +1056,7 @@ async def test_revocation_ack_waits_for_original_edit_and_recovers_after_restart
         delivered.append(delivery)
         return "$recovered-" + delivery.delivery_id
 
-    manager.send_delivery = recovered_send
+    manager.transport.send_approval_delivery = recovered_send
     try:
         await manager.recover_cards_on_startup()
         assert len(delivered) == 2
@@ -1078,7 +1079,7 @@ async def test_matching_card_does_not_advertise_a_revoke_target_it_does_not_own(
         sent.append(delivery)
         return "$" + delivery.delivery_id
 
-    manager.send_delivery = send
+    manager.transport.send_approval_delivery = send
     try:
         first = await _card(journal, manager, "first")
         await _card(journal, manager, "second")
@@ -1211,7 +1212,7 @@ async def test_grant_maintenance_preserves_revocation_debt_until_acknowledged(
         delivered.append(delivery)
         return "$" + delivery.delivery_id
 
-    manager.send_delivery = send
+    manager.transport.send_approval_delivery = send
     try:
         card = await _card(journal, manager, "first")
         await _approve(manager, card)
@@ -1286,7 +1287,7 @@ async def test_a_second_delivery_pass_waits_for_an_in_flight_send_instead_of_rep
             second_pass_listed.set()
         return batch
 
-    manager.send_delivery = send
+    manager.transport.send_approval_delivery = send
     try:
         card = await _card(journal, manager, "first")
         await _approve(manager, card)
@@ -1402,13 +1403,13 @@ def _manager(journal: EventJournalStore, tmp_path: Path) -> ApprovalManager:
     async def send(delivery: MatrixDelivery) -> str:
         return "$" + delivery.delivery_id + ("-edit" if delivery.stage is DeliveryStage.FINAL else "")
 
-    return ApprovalManager(
+    return approval_manager_for_test(
         test_runtime_paths(tmp_path),
         cards=journal.principal("router@shared"),
-        prepare_event=prepare,
-        send_delivery=send,
-        transport_sender=lambda: "@router:test",
-        responder_principal=lambda entity_name: "agent@" + entity_name,
+        prepare_approval_event=prepare,
+        send_approval_delivery=send,
+        transport_sender_id=lambda: "@router:test",
+        responder_principal_id=lambda entity_name: "agent@" + entity_name,
     )
 
 
@@ -1606,7 +1607,7 @@ async def test_timed_action_delivers_its_scope_without_startup_recovery(
             sent.append(delivery)
             return "$" + delivery.delivery_id
 
-        manager.send_delivery = send
+        manager.transport.send_approval_delivery = send
         await _approve(manager, first)
         recover.assert_not_awaited()
         assert {item.delivery_id for item in sent} == {"card-selected", "card-matching"}
@@ -1710,7 +1711,7 @@ async def test_job_card_offers_timed_approval_when_a_paused_reply_card_would(
     journal = journal_database()
     manager = _manager(journal, tmp_path)
     if ineligible == "unknown responder":
-        manager.responder_principal = lambda _entity_name: None
+        manager.transport.responder_principal_id = lambda _entity_name: None
     call = {
         "room-level conversation": {"thread": None},
         "tool's own confirmation": {"operation": None},
@@ -1756,7 +1757,7 @@ async def test_timed_approval_on_a_job_card_covers_later_job_and_reply_calls(
         sent.append(delivery)
         return "$" + delivery.delivery_id
 
-    manager.send_delivery = send
+    manager.transport.send_approval_delivery = send
     first = _job_call(manager, "first")
     try:
         await _posted_job_card(journal, "first")

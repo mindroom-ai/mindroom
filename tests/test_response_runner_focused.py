@@ -40,7 +40,7 @@ from mindroom.approval.auto_approve_windows import start_auto_approve
 from mindroom.approval.receipt import build_approval_receipt
 from mindroom.approval.receipt_readers import take_unsent_receipt
 from mindroom.approval.response import plan_approval_calls, require_ordered_pause_presentation
-from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE
+from mindroom.approval.tool_approval import NO_APPROVER_REASON, POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
@@ -178,6 +178,7 @@ from tests.approval_continuation_helpers import (
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
+    FakeApprovalTransport,
     initialize_approval_store_for_test,
     install_model_providers,
     live_turn_tools_for_test,
@@ -2888,7 +2889,7 @@ async def test_missing_approver_records_explicit_fail_closed_reason(tmp_path: Pa
         )
 
     assert plan.calls[0].decision is ApprovalDecision.DENIED
-    assert plan.calls[0].reason == "No approval recipient is configured; the tool was denied safely."
+    assert plan.calls[0].reason == NO_APPROVER_REASON
     assert plan.calls[0].human_approval_required is True
 
 
@@ -3002,7 +3003,7 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
     approval_store = MagicMock(
         prepare_detached_approval=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
-        router_missing=None,
+        transport=FakeApprovalTransport(),
     )
     with patch(
         "mindroom.approval.response.approval_manager.get_approval_store",
@@ -3064,7 +3065,7 @@ async def test_all_human_gated_pause_plan_keeps_waiting_text_and_cards(tmp_path:
     approval_store = MagicMock(
         prepare_detached_approval=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
-        router_missing=None,
+        transport=FakeApprovalTransport(),
     )
     with patch(
         "mindroom.approval.response.approval_manager.get_approval_store",
@@ -3194,7 +3195,7 @@ async def test_first_pause_skips_the_card_inside_the_requesters_auto_approve_win
     approval_store = MagicMock(
         prepare_detached_approval=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
-        router_missing=None,
+        transport=FakeApprovalTransport(),
     )
 
     with (
@@ -4078,7 +4079,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     approval_store = MagicMock(
         prepare_detached_approval=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
-        router_missing=None,
+        transport=FakeApprovalTransport(),
     )
     retry_sources = Mock()
     runner.deps = replace(runner.deps, retry_approval_sources=retry_sources)

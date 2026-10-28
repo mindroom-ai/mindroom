@@ -1294,6 +1294,7 @@ visibility = [
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.approval.tool_approval",
     "mindroom.commands.auto_approve_commands",
+    "mindroom.scheduling.tasks",
     "mindroom.tool_jobs.approvals",
 ]
 
@@ -1450,7 +1451,6 @@ depends_on = [
     "mindroom.event_journal",
     "mindroom.message_target",
     "mindroom.approval.tool_approval",
-    "mindroom.approval.auto_approve_windows",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_jobs.settings",
     "mindroom.tool_system.events",
@@ -1495,9 +1495,8 @@ depends_on = [
     "mindroom.durable_write",
 ]
 visibility = [
-    "mindroom.approval.response",
+    "mindroom.approval.tool_approval",
     "mindroom.commands.auto_approve_commands",
-    "mindroom.orchestration.script_runtime",
 ]
 
 [[modules]]
@@ -1517,6 +1516,7 @@ visibility = [
 [[modules]]
 path = "mindroom.approval.tool_approval"
 depends_on = [
+    "mindroom.approval.auto_approve_windows",
     "mindroom.approval.manager",
     "mindroom.constants",
     "mindroom.entity_resolution",
@@ -3205,7 +3205,6 @@ depends_on = [
     "mindroom.script_runs.store",
     "mindroom.script_runs.worker_client",
     "mindroom.approval.tool_approval",
-    "mindroom.approval.auto_approve_windows",
     "mindroom.tool_system.worker_routing",
 ]
 visibility = ["mindroom.orchestrator"]
@@ -5292,6 +5291,7 @@ depends_on = [
     "mindroom.scheduling.executor",
     "mindroom.scheduling.recurring_schedule",
     "mindroom.requester_identity",
+    "mindroom.approval.manager",
     "mindroom.approval.tool_approval",
     "mindroom.failure_text",
 ]
@@ -7578,6 +7578,7 @@ from = ["mindroom.approval.transport"]
 expose = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
     "JOB_APPROVAL_TYPE",
+    "NO_APPROVER_REASON",
     "POLICY_CONFIRMATION_APPROVAL_TYPE",
     "ApprovalActionResult",
     "AutomationToolOrigin",
@@ -7588,19 +7589,14 @@ expose = [
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
     "approval_gated",
-    "arm_scheduled_call_approval",
-    "claim_scheduled_call",
     "evaluate_tool_approval",
     "handle_matrix_approval_action",
+    "human_gate",
     "is_process_active_approval_card",
-    "record_scheduled_call_outcome",
-    "request_scheduled_call_approval",
     "resolve_tool_approval_approver",
-    "scheduled_call",
     "scheduled_call_offers_any_arguments",
     "shutdown_approval_runtime",
     "tool_may_require_approval",
-    "withdraw_scheduled_call_approval",
 ]
 from = ["mindroom.approval.tool_approval"]
 

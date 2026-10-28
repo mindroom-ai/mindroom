@@ -24,9 +24,8 @@ from mindroom.config.models import DefaultsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_child, reconcile_delegation
 from mindroom.delegation.recovery import interrupt_stopped_child, read_child_run
-from mindroom.event_journal import BackgroundApprovalDecision
+from mindroom.event_journal import BackgroundApprovalDecision, EventJournalStore, tool_job_run_id
 from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.tool_jobs.approvals import _approval_run_id, settle_job_approvals
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, register_background_runtime
 from mindroom.tool_system.agno_toolkits import Toolkit
@@ -37,9 +36,18 @@ from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, 
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
+from tests.conftest import FakeApprovalTransport
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call
-from tests.tool_job_helpers import DelegatingLeader, lookup, run_journal_statements_inline, tool_job_runtime
+from tests.tool_job_helpers import (
+    DelegatingLeader,
+    job_card_decision,
+    lookup,
+    reserve_job_card,
+    run_journal_statements_inline,
+    tool_job_journal,
+    tool_job_runtime,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Sequence
@@ -94,33 +102,34 @@ class _Card:
 
 @dataclass
 class _Cards:
-    """The approval store a job posts its child's cards to: each card stays answerable until decided or settled."""
+    """The approval store a job posts its child's cards to: each card stays answerable until decided or its job ends.
 
+    Each card's call is reserved in the journal, as the router reserves it, so the save of its job's end denies it.
+    """
+
+    journal: EventJournalStore
     cards: list[_Card] = field(default_factory=list)
-    send_delivery: object = field(default_factory=object)
-    router_missing: None = None
+    transport: FakeApprovalTransport = field(default_factory=FakeApprovalTransport)
 
     async def request_background_approval(
         self,
         *,
         origin: BackgroundScriptToolOrigin,
+        tool_name: str,
         **_kwargs: object,
     ) -> BackgroundApprovalDecision:
+        await reserve_job_card(self.journal, origin.run_id, origin.call_id, tool_name=tool_name)
         card = _Card(origin.run_id, origin.call_id, asyncio.get_running_loop().create_future())
         self.cards.append(card)
-        # A cancelled job leaves its card answerable; only a decision or settlement retires it.
+        # A cancelled wait leaves its card answerable; only a decision or its job's end decides it.
         return await asyncio.shield(card.decision)
 
-    async def settle_pending_background_approvals(self, run_id: str, *, reason: str) -> int:
-        settled = 0
-        for card in self.pending():
-            if card.run_id == run_id:
-                card.decision.set_result(BackgroundApprovalDecision("denied", reason))
-                settled += 1
-        return settled
-
-    def pending(self) -> list[_Card]:
-        return [card for card in self.cards if not card.decision.done()]
+    async def pending(self) -> list[_Card]:
+        return [
+            card
+            for card in self.cards
+            if not card.decision.done() and await job_card_decision(self.journal, card.run_id, card.call_id) is None
+        ]
 
 
 @dataclass
@@ -190,7 +199,7 @@ class DelegationFuzzRunner:
         self._turn_count = 0
         self.gate = asyncio.Event()
         self.children: list[_Child] = []
-        self.approvals = _Cards()
+        self.approvals = _Cards(tool_job_journal(self.paths.storage_root))
         self.turns: list[_Turn] = []
         self.closed_turns: list[_Turn] = []
         self.executed: Counter[str] = Counter()
@@ -223,15 +232,12 @@ class DelegationFuzzRunner:
         return runtime
 
     async def _interrupt_child(self, job: BackgroundJob) -> BackgroundOutcome | None:
-        """Settle a recovered child as the job coordinator does: a restart interrupts it and denies its cards."""
-        outcome = await reconcile_delegation(
+        """Settle a recovered child as the job coordinator does: a restart interrupts it, and its end denies its cards."""
+        return await reconcile_delegation(
             job,
             cleanup=partial(interrupt_stopped_child, config=self.config, runtime_paths=self.paths),
             runtime_paths=self.paths,
         )
-        await settle_job_approvals(self.runtime, job.job_id)
-        assert not self.runtime.unsettled_approvals
-        return outcome
 
     async def run(self, steps: list[Step]) -> None:
         """Apply each step, then release everything and check the settled state."""
@@ -250,7 +256,7 @@ class DelegationFuzzRunner:
         self.gate.set()
         await self._idle()
         for _ in range(_MAX_CARDS):
-            if not self.approvals.pending():
+            if not await self.approvals.pending():
                 break
             await self._approve(Step("approve"))
             await self._idle()
@@ -264,6 +270,7 @@ class DelegationFuzzRunner:
         self.gate.set()
         await self._end_tasks()
         await self.runtime.close_journal()
+        await self.approvals.journal.close()
         restore_tool_registry_snapshot(self._registry)
 
     def _register_notes(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -335,7 +342,7 @@ class DelegationFuzzRunner:
 
     async def _approve(self, step: Step) -> None:
         """Answer one card a job is still waiting on."""
-        if not (pending := self.approvals.pending()):
+        if not (pending := await self.approvals.pending()):
             return
         card = pending[step.index % len(pending)]
         if step.approve:
@@ -449,8 +456,8 @@ class DelegationFuzzRunner:
             result = turn.task.result()
             # A child's approvals never pause its parent; the job asks for them.
             assert not (isinstance(result, RunRecord) and result.status is RunStatus.paused), turn.name
-        waiting = {_approval_run_id(job.job_id) for job in await self._jobs() if job.status == "awaiting_approval"}
-        answerable = {card.run_id for card in self.approvals.pending()}
+        waiting = {tool_job_run_id(job.job_id) for job in await self._jobs() if job.status == "awaiting_approval"}
+        answerable = {card.run_id for card in await self.approvals.pending()}
         assert answerable <= waiting, (answerable, waiting)
 
     async def _jobs(self) -> list[BackgroundJob]:
@@ -462,7 +469,7 @@ class DelegationFuzzRunner:
 
     async def _check_settled(self) -> None:
         """Compare each job with its child's saved run, and each approved effect with that run's tools."""
-        assert not self.approvals.pending()
+        assert not await self.approvals.pending()
         for job in await self._jobs():
             assert job.status in TERMINAL_STATUSES, (job.job_id, job.status)
             run = await read_child_run(delegation_child(job), self.config, self.paths)

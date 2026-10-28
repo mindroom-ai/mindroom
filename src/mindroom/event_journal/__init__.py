@@ -21,8 +21,10 @@ from .approval_calls import (
     BackgroundApprovalDecision,
     CallKey,
     approval_arguments_digest,
+    tool_job_run_id,
 )
 from .approval_cards import (
+    TIMEOUT_REASON,
     ApprovalCardReservation,
     ApprovalCardView,
     ApprovalDecisionMetadata,
@@ -100,6 +102,7 @@ from .views import (
 __all__ = [
     "JOB_ENDED_REASON",
     "SCHEDULED_APPROVAL_WINDOW_NS",
+    "TIMEOUT_REASON",
     "TURN_BACKED_KINDS",
     "AdmissionFacts",
     "AdmissionResult",
@@ -180,6 +183,7 @@ __all__ = [
     "replacement_target",
     "scheduled_call_run_id",
     "thread_root",
+    "tool_job_run_id",
     "validate_ingestion_batch_admission",
     "visible_content",
 ]

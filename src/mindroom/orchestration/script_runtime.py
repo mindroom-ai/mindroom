@@ -14,10 +14,10 @@ from urllib.parse import urlsplit
 
 from mindroom.access_policy import resolve_responder_access
 from mindroom.approval import manager as approval_manager
-from mindroom.approval.auto_approve_windows import auto_approve_expires_at
 from mindroom.approval.tool_approval import (
     BackgroundScriptToolOrigin,
     ToolApprovalDecision,
+    human_gate,
     resolve_tool_approval_approver,
 )
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
@@ -314,30 +314,24 @@ class _LiveScriptRuntimeResolver:
         arguments: dict[str, object],
         timeout_seconds: float,
     ) -> ToolApprovalDecision:
-        """Await one exact-call decision in the existing Matrix approval domain."""
+        """Await one exact-call decision in the existing Matrix approval domain, after the broker's policy gated it."""
         approver_user_id = resolve_tool_approval_approver(
             context.current_config,
             context.runtime_paths,
             context.requester_id,
         )
-        if approver_user_id is None:
-            return ToolApprovalDecision(
-                approved=False,
-                reason="Background script approval requires a human Matrix requester.",
-            )
-        if (
-            auto_approve_expires_at(
-                context.runtime_paths,
-                room_id=context.room_id,
-                thread_id=context.resolved_thread_id,
-                requester_id=approver_user_id,
-            )
-            is not None
-        ):
-            return ToolApprovalDecision(approved=True)
+        gate = human_gate(
+            context.runtime_paths,
+            approver_id=approver_user_id,
+            room_id=context.room_id,
+            thread_id=context.resolved_thread_id,
+        )
+        if gate is not None:
+            return gate
+        assert approver_user_id is not None, "the gate denies a call no one may approve"
         approvals = self.approval_provider()
         if approvals is None:
-            return ToolApprovalDecision(approved=False, reason="Tool approval runtime is not ready.")
+            return ToolApprovalDecision(approved=False, reason=approval_manager.RUNTIME_NOT_READY_REASON)
         decision = await approvals.request_background_approval(
             origin=origin,
             owner_kind="script",
@@ -359,7 +353,7 @@ class _LiveScriptRuntimeResolver:
         """Retire an exact card when broker ownership becomes indeterminate."""
         approvals = self.approval_provider()
         if approvals is None:
-            msg = "Tool approval runtime is not ready."
+            msg = approval_manager.RUNTIME_NOT_READY_REASON
             raise _ScriptRuntimeUnavailableError(msg)
         await approvals.settle_background_approval(origin, reason=reason)
 
@@ -367,7 +361,7 @@ class _LiveScriptRuntimeResolver:
         """Retire every pending approval whose broker run ownership ended."""
         approvals = self.approval_provider()
         if approvals is None:
-            msg = "Tool approval runtime is not ready."
+            msg = approval_manager.RUNTIME_NOT_READY_REASON
             raise _ScriptRuntimeUnavailableError(msg)
         await approvals.settle_pending_background_approvals(run_id, reason=reason)
 
