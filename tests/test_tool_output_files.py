@@ -253,6 +253,33 @@ def test_schema_adds_optional_output_path_for_normal_function(tmp_path: Path) ->
     _assert_output_path_schema_is_optional(function)
 
 
+def test_wrapped_function_keeps_its_documented_parameter_descriptions(tmp_path: Path) -> None:
+    """The output path joins a function's documented arguments without displacing their descriptions."""
+
+    def greet(name: str, greeting: str = "Hello") -> str:
+        """Greet someone.
+
+        Args:
+            name: Who to greet.
+            greeting: The word to greet them with.
+
+        Returns:
+            The greeting.
+
+        """
+        return f"{greeting} {name}"
+
+    function = Function(name="greet", entrypoint=greet)
+    wrap_function_for_output_files(function, _policy(tmp_path))
+
+    adapted = adapt_function(function)
+
+    assert adapted.description == "Greet someone."
+    assert adapted.parameters["properties"]["name"]["description"] == "Who to greet."
+    assert adapted.parameters["properties"]["greeting"]["description"] == "The word to greet them with."
+    _assert_output_path_schema_is_optional(adapted)
+
+
 def test_strict_function_is_offered_non_strict_with_an_optional_output_path(tmp_path: Path) -> None:
     """A strict schema would require the output path, so a wrapped function is offered non-strict."""
     toolkit = _EchoToolkit()

@@ -346,7 +346,6 @@ async def _compact_scope(
         basis=basis,
         fold=fold,
         snapshots=_snapshots(record, layout, inputs),
-        folded_messages=layout.folded,
         # The size that triggered this compaction, so the history budget sees what the request needs.
         before_tokens=request_tokens,
         config=compaction.config,

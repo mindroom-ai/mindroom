@@ -213,7 +213,14 @@ Custom events default to 1000 ms.
 - **`agent:started` with `required=True`**: use a short, separate required hook for initialization the bot must not run without, and keep optional work such as backfill or welcome messages in ordinary hooks.
   A failure or timeout stops the remaining startup hooks and fails that bot's startup like any other startup error.
 - **Sessions and compaction**: `ctx.scope.key` identifies the history scope, and `ctx.session_id` identifies the persisted session within it.
-  In compaction hooks, `ctx.messages` holds the raw `mindroom.llm.messages.Message` objects being compacted, unsanitized, including attachments, media, tool calls and arguments, provider metadata, reasoning, and metrics.
+  In compaction hooks, `ctx.transcript` holds what was said in the compacted conversation, oldest first, as `mindroom.plugin_api.TranscriptLine` values with `role`, `sender`, `display_name`, and `text`.
+  `role` is `"user"` for a message the agent was sent and `"assistant"` for the agent's or team's own reply.
+  `sender` is `None` for a reply; for a user line it is the sender's Matrix ID, or a placeholder such as `"unknown"` when MindRoom recorded no sender, and `display_name` is the name the message carried, or `None`.
+  `text` is the message's text without the context `message:enrich` hooks attached, and is not redacted.
+  Tool calls, tool results, automation turns, queued-message notices, compaction summaries, job and media follow-up prompts, and the reply of a stopped turn are left out.
+  A few notes MindRoom adds to a thread's context still appear as user lines: the note that earlier thread messages were omitted, the note that the agent's previous reply is still being delivered, and that reply's unfinished text under the agent's own Matrix ID.
+  A compaction during a reply also covers what the reply wrote so far, but not the message it answers, which stays uncompacted.
+  `ctx.messages` holds the raw `mindroom.llm.messages.Message` objects being compacted, unsanitized, including attachments, media, tool calls and arguments, provider metadata, reasoning, and metrics; it will be removed in a later release, so new hooks should read `ctx.transcript`.
 - **`schedule:fired`**: `ctx.thread_id` is the thread the message will be delivered to, which can differ from `ctx.workflow.thread_id` when the task starts a new thread or posts at room level.
   The event fires for visible and silent schedules.
   Set `ctx.suppress = True` to cancel the fire; an empty or whitespace-only `ctx.message_text` produces a visible scheduled-task failure notice instead.
@@ -428,7 +435,7 @@ All contexts except the three tool contexts include these fields:
 | `CancelledResponseContext` | `info` with `envelope`, `visible_response_event_id`, `response_kind`, `failure_reason` |
 | `AgentLifecycleContext` | `entity_name`, `entity_type` (`"agent"`, `"team"`, or `"router"`), `rooms` (configured), `matrix_user_id`, `joined_room_ids`, `stop_reason` (`"restart"`, `"entity_removed"`, or `"shutdown"` on `agent:stopped`) |
 | `SessionHookContext` | `agent_name`, `scope`, `session_id`, `room_id`, `thread_id` |
-| `CompactionHookContext` | `agent_name`, `scope`, `session_id`, `room_id`, `thread_id`, `messages`, `token_count_before`, `token_count_after`, `compaction_summary` |
+| `CompactionHookContext` | `agent_name`, `scope`, `session_id`, `room_id`, `thread_id`, `transcript`, `messages`, `token_count_before`, `token_count_after`, `compaction_summary` |
 | `ScheduleFiredContext` | `task_id`, `workflow`, `room_id`, `thread_id`, `created_by`, `message_text`, `suppress` |
 | `ReactionReceivedContext` | `room_id`, `event_id`, `sender_id`, `reaction_key`, `target_event_id`, `thread_id` |
 | `RoomMemberJoinedContext`, `RoomMemberLeftContext` | `agent_name`, `room_id`, `event_id`, `user_id`, `sender_id`, `display_name`, `avatar_url`, `membership`, `prev_membership` |
