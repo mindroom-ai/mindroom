@@ -334,6 +334,40 @@ async def test_removed_agent_fails_its_tasks_and_says_so_where_they_post(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_removal_settles_every_task_within_one_bound_however_many_the_agent_owns(tmp_path: Path) -> None:
+    """Ordinary homeserver latency per task must not leave a removed agent's later tasks pending without a notice."""
+    config, runtime_paths, _ids = _config_and_ids(tmp_path)
+    removed_bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
+    runtime = _runtime(runtime_paths, config, _Bots(general=removed_bot))
+    workflow = _workflow(due=False)
+    task_ids = [f"task_{index}" for index in range(4)]
+
+    async def wait_forever(*_args: object, **_kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    with patch.object(scheduling_runtime._TaskRunner, "run_once", wait_forever):
+        for task_id in task_ids:
+            assert runtime._start_runner("general", task_id, workflow)
+
+    async def slow_read(_client: object, _room_id: str, task_id: str, _paths: object) -> object:
+        # Each settlement takes well over a quarter of the bound, so settling one after another would overrun it.
+        await asyncio.sleep(0.15)
+        return ScheduledTaskRecord(task_id, ROOM_ID, "pending", None, workflow)
+
+    with (
+        patch.object(scheduling_runtime, "SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.4),
+        patch("mindroom.scheduling.runtime._get_pending_task_record", new=slow_read),
+        patch("mindroom.scheduling.runtime._save_task_status", new=AsyncMock()) as save_status,
+        patch("mindroom.scheduling.executor.send_scheduled_failure_notice", new=AsyncMock()) as notice,
+    ):
+        await asyncio.wait_for(runtime.fail_removed({"general"}), timeout=5)
+
+    assert save_status.await_count == len(task_ids)
+    assert notice.await_count == len(task_ids)
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
 async def test_removal_stops_waiting_for_a_stalled_homeserver_and_leaves_the_task_pending(tmp_path: Path) -> None:
     """A removal that cannot settle its tasks in time lets the reload go on; the next restore fails them."""
     config, runtime_paths, _ids = _config_and_ids(tmp_path)

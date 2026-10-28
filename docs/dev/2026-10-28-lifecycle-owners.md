@@ -47,7 +47,9 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 - A one-time trigger still sending when its owner's stop budget expires is marked failed instead of resent, because a one-time trigger carries no transaction ID that Matrix could deduplicate.
 - A task whose owner is no longer configured stays pending, and is logged, when no bot restoring its room may write the room's schedule state.
 - A task keeps the owner it was saved with even when its room changes: if that owner later leaves the room or loses the power to send the trigger, the task stops running instead of moving to another bot.
-- An edit made while MindRoom starts is loaded twice: once for the dashboard right away and once when startup applies it, because keeping the first load for later would need its own check that nothing superseded it.
+- An edit made while MindRoom starts is loaded once for the dashboard after the reload debounce and again when startup applies it, because keeping the first load for later would need its own check that nothing superseded it.
+- A homeserver that does not answer within the stop budget while an agent is removed leaves that agent's unsettled schedules pending, or failed without their notice.
+  A pending one fails only when a bot that may write schedule state restores its room later, which never happens in the removed agent's own DMs.
 - A removed entity that leaves no room, because its frozen FINAL recovery is still unresolved or it never started, is removed from its rooms by the next router start's orphan cleanup.
 - A file edit made while another reload applies, or a second file edit made while an MCP catalog restart drains responses, reaches the dashboard only after that step; a dashboard save in that window overwrites it.
   The drain lasts at most 600 seconds, but an apply that creates Matrix accounts waits for an unreachable homeserver for as long as it is down.

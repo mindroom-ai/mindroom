@@ -210,7 +210,9 @@ class ScheduledTaskRuntime:
 
         A removed entity's tasks are never handed to another bot: each runner
         ends, its task is marked failed, and the removed bot says so where the
-        task posts.
+        task posts. The reload waits here with response admission closed, so
+        all tasks settle concurrently within the stop budget; a homeserver that
+        stalls past it leaves the rest pending or failed without their notice.
         """
         removed = {
             task_id: runner for task_id, (runner, _task) in self._runners.items() if runner.owner in entity_names
@@ -220,34 +222,26 @@ class ScheduledTaskRuntime:
             task.cancel()
         await asyncio.gather(*cancelled, return_exceptions=True)
         bots = self.bots()
-        unsettled = sorted(removed.items())
+        settled: set[str] = set()
+
+        async def settle(task_id: str, runner: _TaskRunner) -> None:
+            bot = bots.get(runner.owner)
+            if bot is None or bot.client is None:
+                logger.warning("scheduled_task_of_removed_owner_left_pending", task_id=task_id, owner=runner.owner)
+            else:
+                try:
+                    await self._fail_owner_removed_task(bot, runner.room_id, task_id, runner.owner)
+                except Exception:
+                    logger.exception("scheduled_task_owner_removal_failure_failed", task_id=task_id, owner=runner.owner)
+            settled.add(task_id)
+
         try:
-            # The reload waits here with response admission closed, so a homeserver that stalls
-            # must not hold every agent; a task left pending fails at the next restore of its room.
             async with asyncio.timeout(SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS):
-                while unsettled:
-                    task_id, runner = unsettled[0]
-                    bot = bots.get(runner.owner)
-                    if bot is None or bot.client is None:
-                        logger.warning(
-                            "scheduled_task_of_removed_owner_left_pending",
-                            task_id=task_id,
-                            owner=runner.owner,
-                        )
-                    else:
-                        try:
-                            await self._fail_owner_removed_task(bot, runner.room_id, task_id, runner.owner)
-                        except Exception:
-                            logger.exception(
-                                "scheduled_task_owner_removal_failure_failed",
-                                task_id=task_id,
-                                owner=runner.owner,
-                            )
-                    unsettled.pop(0)
+                await asyncio.gather(*(settle(task_id, runner) for task_id, runner in sorted(removed.items())))
         except TimeoutError:
             logger.warning(
-                "scheduled_tasks_of_removed_owner_left_pending",
-                task_ids=[task_id for task_id, _runner in unsettled],
+                "scheduled_tasks_of_removed_owner_unsettled",
+                task_ids=sorted(removed.keys() - settled),
                 timeout_seconds=SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS,
             )
 
