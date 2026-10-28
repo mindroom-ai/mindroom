@@ -7,11 +7,12 @@ of them added.
 
 from __future__ import annotations
 
+from dataclasses import fields
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001 - pydantic resolves it at runtime
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
 # 2: workers mount only agent workspaces and never write private-instance identity records.
 # 3: /execute streams progress and keep-alive lines before its result line, and job calls have no time limit.
@@ -27,6 +28,9 @@ FailureKind = Literal["tool", "worker"]
 
 class _WireModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+_EXECUTION_IDENTITY_FIELDS = frozenset(field.name for field in fields(ToolExecutionIdentity))
 
 
 class WorkerRoute(_WireModel):
@@ -46,6 +50,15 @@ class WorkerRoute(_WireModel):
     private_agent_names: list[str] | None = None
     config_snapshot: dict[str, Any] | None = None
     base_dir: str | None = None
+
+    @field_validator("execution_identity")
+    @classmethod
+    def _refuse_unknown_identity_fields(cls, identity: dict[str, Any] | None) -> dict[str, Any] | None:
+        # The identity crosses as its serialized dict, so a field this release does not know is refused here too.
+        if identity is not None and (unknown := sorted(set(identity) - _EXECUTION_IDENTITY_FIELDS)):
+            msg = f"unknown execution identity fields: {', '.join(unknown)}"
+            raise ValueError(msg)
+        return identity
 
 
 class CallEnvironment(_WireModel):
