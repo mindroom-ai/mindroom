@@ -9,7 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.model_defaults import claude_max_output_tokens
 from mindroom.providers.extra_kwargs import SECRET, reject_unsupported_extra_kwargs, settings_from_extra_kwargs
 
 if TYPE_CHECKING:
@@ -25,6 +24,10 @@ ENDPOINT_VARIABLES: dict[ClaudeRouteKind, str] = {
     "vertexai_claude": "ANTHROPIC_VERTEX_BASE_URL",
 }
 
+# TODO(simplify): a Claude reply whose model config sets no ``max_tokens`` stops at this fixed cap, and a reply that
+# reaches it is answered as cut off instead of run (the loop's policy). Default to the model's maximum or a documented
+# per-model default (#3113). Users would notice longer Claude replies.
+_DEFAULT_MAX_TOKENS = 8192
 
 _COMMON_KEYS = frozenset(
     {
@@ -64,7 +67,7 @@ class ClaudeSettings:
     value there (or inside its ``extra_body``) wins over the top-level field.
     """
 
-    max_tokens: int | None = None
+    max_tokens: int | None = _DEFAULT_MAX_TOKENS
     thinking: Mapping[str, Any] | None = None
     output_config: Mapping[str, Any] | None = None
     temperature: float | None = None
@@ -116,20 +119,13 @@ class ClaudeSettings:
         return (request_params.get("extra_body") or {}).get(name, request_params.get(name, authored))
 
 
-def parse_claude_settings(
-    route: ClaudeRouteKind,
-    extra_kwargs: Mapping[str, Any] | None,
-    *,
-    model_id: str,
-) -> ClaudeSettings:
+def parse_claude_settings(route: ClaudeRouteKind, extra_kwargs: Mapping[str, Any] | None) -> ClaudeSettings:
     """Parse one route's resolved ``extra_kwargs``, rejecting keys the route does not accept.
 
-    Bedrock resolves ``aws_profile`` into ``session`` first, so the profile reaches no settings field. A model that
-    authors no ``max_tokens`` gets its documented maximum output.
+    Bedrock resolves ``aws_profile`` into ``session`` first, so the profile reaches no settings field.
     """
     reject_unsupported_extra_kwargs(extra_kwargs, ACCEPTED_KEYS[route], provider=route)
-    values = {"max_tokens": claude_max_output_tokens(model_id), **(extra_kwargs or {})}
-    return settings_from_extra_kwargs(ClaudeSettings, values, provider=route)
+    return settings_from_extra_kwargs(ClaudeSettings, extra_kwargs, provider=route)
 
 
 __all__ = [

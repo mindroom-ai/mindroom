@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING
@@ -69,7 +68,6 @@ __all__ = (
     "TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES",
     "ZAI_BASE_URL_DEFAULT",
     "ModelPreset",
-    "claude_max_output_tokens",
     "claude_rejects_sampling_controls",
     "llama_cpp_server_command",
     "openai_rejects_sampling_controls",
@@ -191,42 +189,6 @@ CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODELS = (
 # before it (https://platform.claude.com/docs/en/build-with-claude/preserved-thinking); newer generations join them.
 # Literal ids, because a model keeps the check after the preferred defaults move on from it.
 CLAUDE_PREFIX_CHECKED_THINKING_MODELS = ("claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5")
-
-
-# The maximum output tokens Anthropic documents for each Claude model on the Messages API, by the model's name
-# (https://platform.claude.com/docs/en/about-claude/models/overview and each model's page, checked 2026-10-27).
-_CLAUDE_MAX_OUTPUT_TOKENS: Mapping[str, int] = MappingProxyType(
-    {
-        "claude-fable-5-1": 128_000,
-        "claude-fable-5": 128_000,
-        "claude-opus-5-5": 128_000,
-        "claude-opus-5": 128_000,
-        "claude-sonnet-5-5": 128_000,
-        "claude-sonnet-5": 128_000,
-        "claude-haiku-5-5": 128_000,
-        "claude-opus-4-8": 128_000,
-        "claude-opus-4-7": 128_000,
-        "claude-opus-4-6": 128_000,
-        "claude-sonnet-4-6": 128_000,
-        "claude-opus-4-5": 64_000,
-        "claude-haiku-4-5": 64_000,
-    },
-)
-# The output cap of a Claude model the table does not list, such as a retired model or a release not yet checked.
-_CLAUDE_UNLISTED_MAX_OUTPUT_TOKENS = 8192
-# A Claude id's model name between its decorations: a gateway path, or a Bedrock region and ``anthropic.`` prefix,
-# before it, and a snapshot date, a Bedrock version, or a Vertex AI ``@`` snapshot after it.
-_CLAUDE_MODEL_NAME = re.compile(r"(?:.*[/.])?(claude-[a-z0-9-]+?)(?:-\d{8})?(?:-v\d+(?::\d+)?)?(?:@.*)?")
-
-
-def claude_max_output_tokens(model_id: str) -> int:
-    """Return the output cap a Claude model gets when its config sets no ``max_tokens``: its documented maximum.
-
-    The model's name is read out of every spelling of its id: direct, dated, Vertex ``@`` snapshot, and Bedrock region
-    and version. A model the table does not list, a newer point release included, keeps 8192.
-    """
-    name = _CLAUDE_MODEL_NAME.fullmatch(model_id.casefold())
-    return _CLAUDE_MAX_OUTPUT_TOKENS.get(name[1] if name else model_id, _CLAUDE_UNLISTED_MAX_OUTPUT_TOKENS)
 
 
 def claude_rejects_sampling_controls(model_id: str) -> bool:

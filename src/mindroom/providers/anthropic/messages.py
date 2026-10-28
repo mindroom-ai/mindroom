@@ -814,7 +814,7 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Cl
         authored = _vertex_kwargs(authored, runtime_paths)
     else:
         authored = _bedrock_kwargs(authored, runtime_paths)
-    settings = parse_claude_settings(route, authored, model_id=model_config.id)
+    settings = parse_claude_settings(route, authored)
     provider_name = _PROVIDER_NAMES[route]
     endpoint = _route_endpoint(route, settings)
     identity = ModelIdentity(

@@ -751,7 +751,7 @@ def test_bedrock_claude_records_none_of_the_aws_keys_it_reads_from_the_runtime_e
         "env-session",
     )
     assert provider.model_params == {
-        "max_tokens": 128_000,
+        "max_tokens": 8192,
         "cache_system_prompt": True,
         "extended_cache_time": True,
         "aws_region": "us-east-1",
