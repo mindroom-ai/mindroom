@@ -107,6 +107,18 @@ def test_authentication_error_maps_to_fixed_401_detail() -> None:
     assert describe_embedder_error(exc) == "embedder authentication failed (HTTP 401)"
 
 
+def test_a_key_rejected_with_another_client_status_reads_as_a_credential_rejection() -> None:
+    """Some OpenAI-compatible endpoints reject a key with HTTP 400, which still needs credential advice, not a retry."""
+    error = embedding_errors.openai_embedder_error(
+        _status_error(400, message="API key not valid. Please pass a valid API key."),
+    )
+
+    assert (str(error), error.retryable) == ("embedder authentication failed (HTTP 400)", False)
+    assert is_embedder_auth_failure_detail(str(error))
+    assert embedding_errors.extract_classified_embedder_detail(f"Last error: {error}") == str(error)
+    assert SECRET not in str(error)
+
+
 def test_permission_denied_maps_to_distinct_403_detail() -> None:
     """403 stays distinct from 401 so operators repair the right thing."""
     exc = _status_error(403)

@@ -5,13 +5,15 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from mindroom.llm.errors import ProviderUnavailable
+from mindroom.llm.errors import AuthenticationFailed, ProviderUnavailable
 from mindroom.providers.openai.errors import provider_error
 
 if TYPE_CHECKING:
     from mindroom.llm.errors import ProviderError
 
-_EMBEDDER_AUTH_FAILED_DETAIL = "embedder authentication failed (HTTP 401)"
+# A credential rejection names the status it came with: a 401, or another client error whose wording names the
+# credentials, such as Gemini's 400 "API key not valid" on an OpenAI-compatible endpoint.
+_EMBEDDER_AUTH_FAILED_DETAIL = re.compile(r"embedder authentication failed \(HTTP \d{3}\)")
 _EMBEDDER_PERMISSION_DENIED_DETAIL = "embedder permission denied (HTTP 403)"
 EMBEDDER_UNREACHABLE_DETAIL = "embedder endpoint unreachable"
 EMBEDDER_EMPTY_VECTOR_DETAIL = "embedder returned an empty vector"
@@ -35,13 +37,15 @@ class EmbedderRequestError(RuntimeError):
 
 def is_embedder_auth_failure_detail(detail: str | None) -> bool:
     """Return whether a failure detail describes a credential rejection."""
-    return detail in {_EMBEDDER_AUTH_FAILED_DETAIL, _EMBEDDER_PERMISSION_DENIED_DETAIL}
+    if detail is None:
+        return False
+    return detail == _EMBEDDER_PERMISSION_DENIED_DETAIL or _EMBEDDER_AUTH_FAILED_DETAIL.fullmatch(detail) is not None
 
 
 # Fully-fixed classified forms only: the type-name fallback is excluded because
 # identifier-shaped text extracted from operator free text could be a secret.
 _CLASSIFIED_DETAIL_PATTERN = re.compile(
-    r"embedder authentication failed \(HTTP 401\)"
+    r"embedder authentication failed \(HTTP \d{3}\)"
     r"|embedder permission denied \(HTTP 403\)"
     r"|embedder request failed \(HTTP \d{3}\)"
     r"|embedder endpoint unreachable"
@@ -75,7 +79,6 @@ def classified_embedder_error(exc: BaseException) -> str | None:
     return None if error is None else str(error)
 
 
-_UNAUTHORIZED_STATUS = 401
 _FORBIDDEN_STATUS = 403
 
 
@@ -90,10 +93,10 @@ def embedder_request_error(error: BaseException, failure: ProviderError | None) 
     follow, after the ``Retry-After`` hint it carries.
     """
     status_code = failure.status_code if failure is not None else None
-    if status_code == _UNAUTHORIZED_STATUS:
-        detail = _EMBEDDER_AUTH_FAILED_DETAIL
-    elif status_code == _FORBIDDEN_STATUS:
+    if status_code == _FORBIDDEN_STATUS:
         detail = _EMBEDDER_PERMISSION_DENIED_DETAIL
+    elif isinstance(failure, AuthenticationFailed) and status_code is not None:
+        detail = f"embedder authentication failed (HTTP {status_code})"
     elif status_code is not None:
         detail = f"embedder request failed (HTTP {status_code})"
     elif isinstance(failure, ProviderUnavailable):
