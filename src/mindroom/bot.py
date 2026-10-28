@@ -23,6 +23,7 @@ from mindroom.approval.inbound import (
 from mindroom.approval.tool_approval import is_process_active_approval_card
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_live_bot
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
 from mindroom.entity_resolution import entity_identity_registry, persisted_bot_user_ids
@@ -80,6 +81,8 @@ from mindroom.runtime_shutdown import (
     ShutdownBudget,
     restart_reason_category_for,
 )
+from mindroom.slack.api import slack_http_client
+from mindroom.slack.reply_mirror import mirror_reply_to_slack
 from mindroom.teams.formation import TeamOutcome, resolve_configured_team
 from mindroom.teams.spec import TeamMode
 from mindroom.timestamp_formatting import format_timestamp_ms
@@ -674,6 +677,15 @@ class AgentBot:
                 redact_message_event=self._redact_message_event,
                 response_hooks=ResponseHookService(
                     hook_context=self._hook_context_support,
+                    # Reads the live config, which a reload replaces.
+                    reply_mirror=lambda envelope, response_text: mirror_reply_to_slack(
+                        envelope,
+                        response_text,
+                        config=self.config,
+                        runtime_paths=self.runtime_paths,
+                        credentials_manager=get_runtime_credentials_manager(self.runtime_paths),
+                        client_factory=slack_http_client,
+                    ),
                 ),
                 outbox=self._journal_store.principal(self._journal_principal_id),
                 turn_handoff=TurnHandoff(

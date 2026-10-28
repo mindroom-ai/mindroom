@@ -4880,6 +4880,8 @@ depends_on = [
     "mindroom.response_payload_preparation",
     "mindroom.response_runner",
     "mindroom.scheduling.tasks",
+    "mindroom.slack.api",
+    "mindroom.slack.reply_mirror",
     "mindroom.teams",
     "mindroom.timestamp_formatting",
     "mindroom.approval.tool_approval",
@@ -9771,6 +9773,17 @@ depends_on = ["mindroom.slack.api", "mindroom.slack.app"]
 [[modules]]
 path = "mindroom.slack.render"
 depends_on = ["mindroom.slack.api"]
+
+[[modules]]
+path = "mindroom.slack.reply_mirror"
+depends_on = [
+    "mindroom.delivery_replay",
+    "mindroom.matrix.state",
+    "mindroom.slack.api",
+    "mindroom.slack.app",
+    "mindroom.tool_system.events",
+]
+visibility = ["mindroom.bot"]
 
 [[modules]]
 path = "mindroom.slack.turns"
