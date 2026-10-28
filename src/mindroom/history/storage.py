@@ -183,17 +183,14 @@ def read_scope_seen_event_ids(
     return seen
 
 
-def _read_scope_history_event_ids(
-    storage: ConversationStore,
-    session: ConversationSession,
-    scope: HistoryScope,
-) -> set[str]:
-    """Return every Matrix event id one scope's stored history derives from.
+def _read_scope_history_event_ids(storage: ConversationStore, session: ConversationSession) -> set[str]:
+    """Return every Matrix event id the stored history of the scope owning ``session`` derives from.
 
     These are the ids redaction cleanup matches: what each loaded top-level run consumed,
     answered, or wrote, including a run paused for approval, and what compacted
     history represents.
     """
+    scope = _owner_scope(session)
     event_ids = summary_rows.history_event_ids(storage, session_id=session.session_id, scope_key=scope.key, kind="all")
     for run in session.runs:
         if run_in_scope(run, scope) and run.parent_run_id is None:
@@ -231,11 +228,10 @@ def _remove_redacted_event_from_history(
     storage: ConversationStore,
     *,
     session: ConversationSession,
-    scope: HistoryScope,
     event_id: str,
     legacy_source_event_id: str | None = None,
 ) -> bool:
-    """Remove the part of one scope's history that derives from a redacted Matrix event.
+    """Remove the part of the history of the scope owning ``session`` that derives from a redacted Matrix event.
 
     The first element that answered, read, or wrote the event goes with everything
     after it, and the runs a removed summary covered replay again. Afterwards the
@@ -243,7 +239,7 @@ def _remove_redacted_event_from_history(
     return as unseen thread context. ``session`` is synced to the stored result.
     Returns whether the scope's history changed.
     """
-    session_id = session.session_id
+    session_id, scope = session.session_id, _owner_scope(session)
     legacy_event_ids = summary_rows.legacy_event_ids(storage, session_id=session_id, scope_key=scope.key)
     if legacy_event_ids is not None and _legacy_summary_may_contain(event_id, legacy_source_event_id, legacy_event_ids):
         summary_rows.cut_at_legacy_row(storage, session=session, scope_key=scope.key)
@@ -266,10 +262,9 @@ def _remove_redacted_event_from_history(
 async def remove_history_of_redacted_events(
     storage: ConversationStore,
     session: ConversationSession,
-    scope: HistoryScope,
     redacted_history_events: Callable[[tuple[str, ...]], Awaitable[Mapping[str, str | None]]],
 ) -> list[str]:
-    """Remove the part of one scope's history derived from events since redacted, and return those events.
+    """Remove the history of the scope owning ``session`` derived from events since redacted, and return those events.
 
     ``redacted_history_events`` maps each redacted event to the source a legacy summary
     consumed it through, or None. A cut can bring older runs back to replay that read
@@ -278,7 +273,7 @@ async def remove_history_of_redacted_events(
     """
     removed_event_ids: list[str] = []
     while True:
-        event_ids = await run_blocking_until_complete(_read_scope_history_event_ids, storage, session, scope)
+        event_ids = await run_blocking_until_complete(_read_scope_history_event_ids, storage, session)
         if not event_ids:
             return removed_event_ids
         redacted = await redacted_history_events(tuple(sorted(event_ids)))
@@ -287,7 +282,6 @@ async def remove_history_of_redacted_events(
             removal = partial(
                 _remove_redacted_event_from_history,
                 session=session,
-                scope=scope,
                 event_id=event_id,
                 legacy_source_event_id=redacted[event_id],
             )
@@ -498,6 +492,11 @@ def run_folded_tool_call_ids(storage: ConversationStore, *, session_id: str, run
 def first_scope_session(scope: HistoryScope, session_id: str) -> ConversationSession:
     """Return the empty session row the first run of ``session_id`` in ``scope`` starts from."""
     return new_scope_session(session_id=session_id, scope_id=scope.scope_id, is_team=scope.kind == "team")
+
+
+def _owner_scope(session: ConversationSession) -> HistoryScope:
+    """Return the history scope that owns ``session``: its kind and owner, which an agent's store open makes the agent."""
+    return HistoryScope(kind=session.kind, scope_id=session.owner_id)
 
 
 def _read_preserved_scope_seen_event_ids(metadata: dict[str, Any] | None, scope: HistoryScope) -> set[str]:

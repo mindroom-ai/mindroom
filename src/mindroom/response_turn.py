@@ -945,7 +945,6 @@ async def _remove_history_of_redacted_events(
     removed_event_ids = await remove_history_of_redacted_events(
         scope_context.storage,
         scope_context.session,
-        scope_context.scope,
         ctx.redacted_history_events,
     )
     if removed_event_ids:
