@@ -341,7 +341,8 @@ export const MAX_NAME_LENGTH = 63;
 /**
  * `text` as a service name: accents folded (`é` gives `e`), lowercase, spaces
  * as `_`, what a name cannot hold dropped, and each run of `-` and `_` cut to
- * its first, with none at either end.
+ * its first, with none at either end. Letters that NFKD does not decompose,
+ * such as `ß`, `ø`, `æ`, and `ł`, are dropped, and the user can edit the name.
  */
 function asName(text: string): string {
   return text
