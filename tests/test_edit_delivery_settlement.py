@@ -115,7 +115,7 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
     runner.deps = replace(
         runner.deps,
         delivery_gateway=gateway,
-        approval_store=principal,
+        approval_store=principal.approvals,
         replies=replace(runner.deps.replies, store=principal, complete_turn=store.publish_completed_turn),
     )
     regenerator = unwrap_extracted_collaborator(bot._edit_regenerator)

@@ -44,6 +44,7 @@ from tests.journal_membership_helpers import admit_room_membership
 
 if TYPE_CHECKING:
     from mindroom.event_journal import JournalEvent, MatrixDelivery, MatrixDeliveryView, PrincipalStore
+    from mindroom.event_journal.approval_signals import ApprovalSignals
 
 pytestmark = pytest.mark.asyncio
 
@@ -136,6 +137,7 @@ class TurnRuntime:
 
     store: PrincipalStore
     crashing_backend: DiesAfterNextWriteCommit
+    approval_signals: ApprovalSignals
     homeserver: FakeHomeserver
     model_runs: int = 0
     crash_after_model: bool = False
@@ -167,7 +169,10 @@ class TurnRuntime:
         that ran two of them.
         """
         self.crashing_backend.armed = self.crash_after_enqueue
-        principal = EventJournalStore(backend=cast("Any", self.crashing_backend)).principal(PRINCIPAL)
+        principal = EventJournalStore(
+            backend=cast("Any", self.crashing_backend),
+            approval_signals=self.approval_signals,
+        ).principal(PRINCIPAL)
         if not self.crash_after_acknowledgement:
             return principal
         return cast("MatrixDeliveryView", DiesAfterAcknowledgement(principal))
@@ -214,6 +219,7 @@ def runtime(journal_store: EventJournalStore) -> TurnRuntime:
     return TurnRuntime(
         store=journal_store.principal(PRINCIPAL),
         crashing_backend=DiesAfterNextWriteCommit(inner=journal_store.backend),
+        approval_signals=journal_store.approval_signals,
         homeserver=FakeHomeserver(),
     )
 

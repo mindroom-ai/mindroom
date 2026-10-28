@@ -18,8 +18,8 @@ from agno.tools import Toolkit
 
 from mindroom.agent_loop.tools import offered_toolkits
 from mindroom.agents import create_agent
+from mindroom.approval import manager as approval_manager
 from mindroom.approval.inbound import parse_approval_response_event
-from mindroom.approval.manager import ApprovalManager
 from mindroom.approval.tool_approval import ToolApprovalTransportError, scheduled_call_offers_any_arguments
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
@@ -30,6 +30,7 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import (
     ApprovalCall,
     ApprovalContinuation,
+    CallKey,
     DeliveryStage,
     EventClass,
     EventJournalStore,
@@ -74,9 +75,12 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
+from tests.approval_card_helpers import card_is_terminal, pending_card
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import (
+    approval_manager_for_test,
     handle_card_response_for_test,
+    initialize_approval_store_for_test,
     install_model_providers,
     make_matrix_client_mock,
     runtime_paths_for,
@@ -89,14 +93,14 @@ from tests.scheduling_helpers import joined_member_state
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.test_scheduler_tool import _bind_runtime_paths, _make_context
 from tests.test_tool_hooks import _plugin
-from tests.tool_approval_helpers import gated_functions
+from tests.tool_approval_helpers import gated_functions, scheduled_call_approvals
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from contextlib import AbstractContextManager
 
     from mindroom.agent_loop.build import AgentBuild
-    from mindroom.approval.manager import ApprovalActionResult
+    from mindroom.approval.manager import ApprovalActionResult, ApprovalManager
     from mindroom.event_journal import ScheduledCallRefusal
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
 
@@ -121,12 +125,12 @@ def _manager(journal: EventJournalStore, tmp_path: Path, sent: list[MatrixDelive
         sent.append(delivery)
         return "$" + delivery.delivery_id + ("-edit" if delivery.stage is DeliveryStage.FINAL else "")
 
-    return ApprovalManager(
+    return approval_manager_for_test(
         test_runtime_paths(tmp_path),
         cards=journal.principal("router@shared"),
-        prepare_event=prepare,
-        send_delivery=send,
-        transport_sender=lambda: "@router:test",
+        prepare_approval_event=prepare,
+        send_approval_delivery=send,
+        transport_sender_id=lambda: "@router:test",
     )
 
 
@@ -253,7 +257,7 @@ async def _ordinary_card(journal: EventJournalStore, manager: ApprovalManager, n
         runtime_generation="runtime",
     )
     assert await paused_for_approval(responder, continuation) is not None
-    card = await manager.prepare_detached_approval(
+    card = await manager.prepare_reply_card(
         approval_id="card-" + name,
         continuation_id=name,
         continuation_generation=0,
@@ -277,7 +281,7 @@ async def _ordinary_card(journal: EventJournalStore, manager: ApprovalManager, n
         continuation_generation=0,
         cards=(card,),
     )
-    stored = await responder.approval_continuation(name)
+    stored = await responder.approvals.approval_continuation(name)
     assert stored is not None
     return stored
 
@@ -315,12 +319,13 @@ async def test_scheduling_card_shows_the_stored_call_and_send_time(
         assert card.payload["expires_at"] == "2030-01-02T14:00:00+00:00"
         assert card.payload["body"] == "🔒 Approval required: post_slack_message (scheduled for 9:00 AM EDT)"
         assert "auto_approve_options" not in card.payload
-        stored = await journal.principal("router@shared").pending_approval_card(
+        stored = await pending_card(
+            journal.principal("router@shared").approvals,
             room_id=_ROOM,
             card_event_id=_SCHEDULED_CARD,
         )
         assert stored is not None
-        assert stored.target_kind == "scheduled_call"
+        assert stored.owner_kind == "scheduled"
         call = await manager.scheduled_call(_TASK)
         assert call is not None
         assert call.toolkit_name == _TOOLKIT
@@ -367,7 +372,7 @@ async def test_armed_approval_is_spent_once_with_its_receipt(
         assert provenance["scope"] == "exact_arguments"
         assert provenance["arguments_digest"] == approval_arguments_digest(_ARGUMENTS)
         cards = journal.principal("router@shared")
-        assert await cards.is_terminal_approval_card(room_id=_ROOM, card_event_id="$" + _RECEIPT)
+        assert await card_is_terminal(cards.approvals, room_id=_ROOM, card_event_id="$" + _RECEIPT)
 
         assert await _claim(manager) == "used"
     finally:
@@ -429,7 +434,7 @@ async def test_consumed_receipt_retires_into_a_terminal_tombstone(
         assert isinstance(await _claim(manager), ScheduledCallClaim)
         cards = journal.principal("router@shared")
 
-        await cards.maintain_automatic_approvals()
+        await cards.approvals.maintain_automatic_approvals()
 
         remaining = await journal.backend.read(
             lambda transaction: transaction.fetchone(
@@ -438,7 +443,7 @@ async def test_consumed_receipt_retires_into_a_terminal_tombstone(
             ),
         )
         assert remaining is None
-        assert await cards.is_terminal_approval_card(room_id=_ROOM, card_event_id="$" + _RECEIPT)
+        assert await card_is_terminal(cards.approvals, room_id=_ROOM, card_event_id="$" + _RECEIPT)
     finally:
         await manager.shutdown()
 
@@ -613,7 +618,7 @@ async def test_cancelling_the_task_denies_its_pending_card(
         await manager.withdraw_scheduled_call_approval(_TASK, reason="Schedule cancelled.")
 
         cards = journal.principal("router@shared")
-        decision = await cards.background_approval_decision(run_id=scheduled_call_run_id(_TASK), call_id=_TASK)
+        decision = await cards.approvals.detached_decision(CallKey.detached(scheduled_call_run_id(_TASK), _TASK))
         assert decision is not None
         assert decision.status == "denied"
         assert decision.reason == "Schedule cancelled."
@@ -658,7 +663,11 @@ async def test_direct_call_to_the_tool_still_asks_for_approval(
 
         assert direct.calls[0].decision is None
         assert (
-            await journal.principal("router@shared").pending_approval_card(room_id=_ROOM, card_event_id="$card-direct")
+            await pending_card(
+                journal.principal("router@shared").approvals,
+                room_id=_ROOM,
+                card_event_id="$card-direct",
+            )
             is not None
         )
         assert isinstance(await _claim(manager), ScheduledCallClaim)
@@ -879,7 +888,7 @@ async def test_approval_maintenance_prunes_old_bindings_after_their_receipts_ret
             ),
         )
 
-        await cards.maintain_automatic_approvals()
+        await cards.approvals.maintain_automatic_approvals()
         assert await _binding_column(journal, "task_id") == _TASK
 
         await journal.backend.write(
@@ -891,7 +900,7 @@ async def test_approval_maintenance_prunes_old_bindings_after_their_receipts_ret
         await manager.recover_cards_on_startup()
 
         assert await _binding_column(journal, "task_id") is None
-        assert await cards.is_terminal_approval_card(room_id=_ROOM, card_event_id="$" + _RECEIPT)
+        assert await card_is_terminal(cards.approvals, room_id=_ROOM, card_event_id="$" + _RECEIPT)
     finally:
         await manager.shutdown()
 
@@ -1005,13 +1014,13 @@ async def test_republished_scheduled_receipt_alias_stays_terminal(
         assert isinstance(await _claim(manager), ScheduledCallClaim)
         cards = journal.principal("router@shared")
 
-        await cards.remember_terminal_approval_alias(
+        await cards.approvals.remember_terminal_approval_alias(
             room_id=_ROOM,
             card_event_id="$receipt-copy",
             delivery_id=_RECEIPT,
         )
 
-        assert await cards.is_terminal_approval_card(room_id=_ROOM, card_event_id="$receipt-copy")
+        assert await card_is_terminal(cards.approvals, room_id=_ROOM, card_event_id="$receipt-copy")
     finally:
         await manager.shutdown()
 
@@ -1175,7 +1184,7 @@ async def test_schedule_tool_call_stores_the_call_and_keeps_its_arguments_out_of
     request = AsyncMock(return_value=True)
 
     with (
-        patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
+        scheduled_call_approvals(request_scheduled_call_approval=request),
         patch("mindroom.scheduling.tasks._start_new_scheduled_task") as start,
         tool_runtime_context(context),
         _responders(context.config, "general"),
@@ -1231,7 +1240,7 @@ async def test_schedule_tool_call_stores_and_shows_the_agents_timezone() -> None
     request = AsyncMock(return_value=True)
 
     with (
-        patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
+        scheduled_call_approvals(request_scheduled_call_approval=request),
         patch("mindroom.scheduling.tasks._start_new_scheduled_task"),
         tool_runtime_context(context),
         _responders(context.config, "general"),
@@ -1261,7 +1270,7 @@ async def test_schedule_tool_call_offers_only_exact_approval_where_any_arguments
     request = AsyncMock(return_value=True)
 
     with (
-        patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
+        scheduled_call_approvals(request_scheduled_call_approval=request),
         patch("mindroom.scheduling.tasks.resolve_tool_approval_approver", return_value=approver),
         patch("mindroom.scheduling.tasks._start_new_scheduled_task"),
         tool_runtime_context(context),
@@ -1290,7 +1299,7 @@ async def test_schedule_tool_call_refuses_a_team() -> None:
     request = AsyncMock(return_value=True)
 
     with (
-        patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
+        scheduled_call_approvals(request_scheduled_call_approval=request),
         tool_runtime_context(context),
         _responders(context.config, "crew"),
         pytest.raises(RuntimeError, match="Only an agent"),
@@ -1307,7 +1316,7 @@ async def test_schedule_tool_call_requires_the_agent_to_be_able_to_reply_in_the_
     request = AsyncMock(return_value=True)
 
     with (
-        patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
+        scheduled_call_approvals(request_scheduled_call_approval=request),
         tool_runtime_context(context),
         _responders(context.config),
         pytest.raises(RuntimeError, match="cannot receive"),
@@ -1325,7 +1334,7 @@ async def test_schedule_tool_call_stores_arguments_exactly_as_given() -> None:
     request = AsyncMock(return_value=True)
 
     with (
-        patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
+        scheduled_call_approvals(request_scheduled_call_approval=request),
         patch("mindroom.scheduling.tasks._start_new_scheduled_task"),
         tool_runtime_context(context),
         _responders(context.config, "general"),
@@ -1387,7 +1396,7 @@ async def test_schedule_tool_call_rejects_what_it_cannot_store(
     live_agent = {None: _live_agent(), "elsewhere": _LiveRun(())}[agent]
 
     with (
-        patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
+        scheduled_call_approvals(request_scheduled_call_approval=request),
         tool_runtime_context(context),
         _responders(context.config, "general"),
         pytest.raises(RuntimeError, match=error),
@@ -1422,8 +1431,7 @@ async def test_no_task_is_published_when_its_card_cannot_be_posted(
     withdraw = AsyncMock()
 
     with (
-        patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
-        patch("mindroom.scheduling.tasks.withdraw_scheduled_call_approval", new=withdraw),
+        scheduled_call_approvals(request_scheduled_call_approval=request, withdraw_scheduled_call_approval=withdraw),
         patch("mindroom.scheduling.tasks._start_new_scheduled_task") as start,
         tool_runtime_context(context),
         _responders(context.config, "general"),
@@ -1449,8 +1457,7 @@ async def test_card_is_withdrawn_when_its_task_cannot_be_published() -> None:
     withdraw = AsyncMock()
 
     with (
-        patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
-        patch("mindroom.scheduling.tasks.withdraw_scheduled_call_approval", new=withdraw),
+        scheduled_call_approvals(request_scheduled_call_approval=request, withdraw_scheduled_call_approval=withdraw),
         patch("mindroom.scheduling.tasks._start_new_scheduled_task") as start,
         tool_runtime_context(context),
         _responders(context.config, "general"),
@@ -1537,7 +1544,7 @@ async def test_firing_task_arms_its_approval_and_skips_a_denied_send(
 
     with (
         patch("mindroom.scheduling.tasks.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
-        patch("mindroom.scheduling.tasks.arm_scheduled_call_approval", new=arm),
+        scheduled_call_approvals(arm_scheduled_call_approval=arm),
         patch(
             "mindroom.scheduling.executor.execute_scheduled_workflow",
             new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
@@ -1601,8 +1608,10 @@ async def test_a_trigger_that_never_went_out_leaves_no_armed_approval(
 
     with (
         patch("mindroom.scheduling.tasks.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
-        patch("mindroom.scheduling.tasks.arm_scheduled_call_approval", new=AsyncMock(return_value=approval_state)),
-        patch("mindroom.scheduling.tasks.withdraw_scheduled_call_approval", new=withdraw),
+        scheduled_call_approvals(
+            arm_scheduled_call_approval=AsyncMock(return_value=approval_state),
+            withdraw_scheduled_call_approval=withdraw,
+        ),
         patch(
             "mindroom.scheduling.executor.execute_scheduled_workflow",
             new=AsyncMock(return_value=ScheduledWorkflowOutcome(status=outcome, failure_reason="no")),
@@ -1632,9 +1641,8 @@ async def test_failed_withdrawal_reports_a_failed_cancel_without_publishing_it()
             "mindroom.scheduling.tasks._read_scheduled_task_state",
             new=AsyncMock(return_value={"status": "pending", "workflow": "{}"}),
         ),
-        patch(
-            "mindroom.scheduling.tasks.withdraw_scheduled_call_approval",
-            new=AsyncMock(side_effect=RuntimeError("journal unavailable")),
+        scheduled_call_approvals(
+            withdraw_scheduled_call_approval=AsyncMock(side_effect=RuntimeError("journal unavailable")),
         ),
     ):
         result = await cancel_scheduled_task(
@@ -1646,6 +1654,38 @@ async def test_failed_withdrawal_reports_a_failed_cancel_without_publishing_it()
 
     assert result.startswith("❌ Failed to cancel task `task1234`: ")
     assert "journal unavailable" in result
+    client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runtime", ["missing", "unbound"])
+async def test_cancelling_fails_closed_while_the_approval_runtime_is_not_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime: str,
+) -> None:
+    """A task whose approval cannot be withdrawn yet stays uncancelled, rather than keeping a usable approval."""
+    client = AsyncMock()
+    if runtime == "missing":
+        monkeypatch.setattr(approval_manager, "get_approval_store", lambda: None)
+    else:
+        initialize_approval_store_for_test(test_runtime_paths(tmp_path))
+
+    with patch(
+        "mindroom.scheduling.tasks._read_scheduled_task_state",
+        new=AsyncMock(return_value={"status": "pending", "workflow": "{}"}),
+    ):
+        result = await cancel_scheduled_task(
+            client=client,
+            room_id="!test:server",
+            task_id="task1234",
+            runtime_paths=resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
+        )
+
+    assert result == (
+        "❌ Failed to cancel task `task1234`: could not withdraw the approval for its scheduled call "
+        f"({approval_manager.RUNTIME_NOT_READY_REASON})"
+    )
     client.room_put_state.assert_not_awaited()
 
 
@@ -1672,7 +1712,7 @@ async def test_pre_approved_task_cannot_be_edited() -> None:
     withdraw = AsyncMock()
 
     with (
-        patch("mindroom.scheduling.tasks.withdraw_scheduled_call_approval", new=withdraw),
+        scheduled_call_approvals(withdraw_scheduled_call_approval=withdraw),
         pytest.raises(ValueError, match="cannot be edited; cancel it and schedule the call again"),
     ):
         await save_edited_scheduled_task(
@@ -1725,7 +1765,7 @@ async def test_tasks_fire_without_an_armed_approval(
 
     with (
         patch("mindroom.scheduling.tasks.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
-        patch("mindroom.scheduling.tasks.arm_scheduled_call_approval", new=arm),
+        scheduled_call_approvals(arm_scheduled_call_approval=arm),
         patch(
             "mindroom.scheduling.executor.execute_scheduled_workflow",
             new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
@@ -1761,7 +1801,7 @@ async def test_cancelling_a_task_settles_its_scheduled_call_card() -> None:
 
     with (
         patch("mindroom.scheduling.tasks._read_scheduled_task_state", new=AsyncMock(return_value=existing)),
-        patch("mindroom.scheduling.tasks.withdraw_scheduled_call_approval", new=cancel),
+        scheduled_call_approvals(withdraw_scheduled_call_approval=cancel),
     ):
         result = await cancel_scheduled_task(
             client=client,
@@ -1796,7 +1836,7 @@ async def test_cancelling_a_pre_approved_task_says_its_approval_is_withdrawn() -
 
     with (
         patch("mindroom.scheduling.tasks._read_scheduled_task_state", new=AsyncMock(return_value=existing)),
-        patch("mindroom.scheduling.tasks.withdraw_scheduled_call_approval", new=AsyncMock()),
+        scheduled_call_approvals(withdraw_scheduled_call_approval=AsyncMock()),
     ):
         result = await cancel_scheduled_task(
             client=client,
@@ -1943,7 +1983,7 @@ async def test_cancelling_a_plain_reminder_leaves_call_approvals_alone() -> None
             "mindroom.scheduling.tasks._read_scheduled_task_state",
             new=AsyncMock(return_value={"status": "pending", "workflow": plain.model_dump_json()}),
         ),
-        patch("mindroom.scheduling.tasks.withdraw_scheduled_call_approval", new=withdraw),
+        scheduled_call_approvals(withdraw_scheduled_call_approval=withdraw),
     ):
         result = await cancel_scheduled_task(
             client=client,
@@ -1999,6 +2039,17 @@ def _failed_answer(result: object) -> str:
     assert isinstance(result, ToolOutcome)
     assert result.is_error
     return result.content
+
+
+@pytest.mark.asyncio
+async def test_a_stored_call_runs_nothing_before_the_approval_runtime_is_ready() -> None:
+    """Without an approval runtime the stored call is refused as not ready, not as missing, and nothing runs."""
+    runs: list[dict[str, object]] = []
+
+    result = await _run(None, _live_agent(runs))
+
+    assert "the approval runtime is not ready" in _failed_answer(result)
+    assert runs == []
 
 
 @pytest.mark.asyncio
@@ -2245,7 +2296,7 @@ async def test_scheduling_a_name_two_toolkits_share_stores_the_toolkit_the_run_o
     request = AsyncMock(return_value=True)
 
     with (
-        patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
+        scheduled_call_approvals(request_scheduled_call_approval=request),
         patch("mindroom.scheduling.tasks._start_new_scheduled_task"),
         tool_runtime_context(context),
         _responders(config, "general"),
@@ -2594,7 +2645,7 @@ async def test_misspelled_argument_is_refused_when_scheduling() -> None:
     request = AsyncMock(return_value=True)
 
     with (
-        patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
+        scheduled_call_approvals(request_scheduled_call_approval=request),
         tool_runtime_context(context),
         _responders(context.config, "general"),
         pytest.raises(RuntimeError, match="current parameters"),

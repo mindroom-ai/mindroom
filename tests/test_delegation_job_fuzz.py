@@ -6,13 +6,13 @@ import asyncio
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
 
 import pytest
 from hypothesis import HealthCheck, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, precondition, rule, run_state_machine_as_test
 
+from mindroom.event_journal import ToolJobStore
 from tests.delegation_job_fuzz import ChildScript, DelegationFuzzRunner, Step
 
 if TYPE_CHECKING:
@@ -183,7 +183,20 @@ async def test_subagent_fuzz_oracle_detects_corruption(
             await runner.step(Step("approve"))
             runner.executed["w0-0"] += 1
         else:
-            monkeypatch.setattr(runner.approvals, "settle_pending_background_approvals", AsyncMock(return_value=0))
+            save = ToolJobStore.save
+
+            async def save_without_denial(
+                store: ToolJobStore,
+                job_id: str,
+                job_json: str,
+                result_payload_json: str | None = None,
+                *,
+                ends_approvals: bool,
+            ) -> None:
+                del ends_approvals
+                await save(store, job_id, job_json, result_payload_json, ends_approvals=False)
+
+            monkeypatch.setattr(ToolJobStore, "save", save_without_denial)
             with pytest.raises(AssertionError):
                 await runner.step(Step("cancel"))
             return

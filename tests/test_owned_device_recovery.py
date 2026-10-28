@@ -61,6 +61,11 @@ def _credential_http(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     monkeypatch.setattr(_owned_session, "create_matrix_http_client", client)
     monkeypatch.setattr(users, "ensure_agent_cross_signing", AsyncMock())
     monkeypatch.setattr(MindRoomAsyncClient, "set_displayname", AsyncMock())
+    monkeypatch.setattr(
+        MindRoomAsyncClient,
+        "get_displayname",
+        AsyncMock(return_value=nio.ProfileGetDisplayNameResponse("Agent")),
+    )
 
     async def appservice_login(*_args: object, payload: dict[str, object], **_kwargs: object) -> httpx.Response:
         requested_devices.append(str(payload.get("device_id", "")))

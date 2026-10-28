@@ -333,8 +333,6 @@ class ToolJobRuntime:
         self._closed = False
         self._shutdown_task: asyncio.Task[None] | None = None
         self.changed = asyncio.Event()
-        # Jobs that ended while their approval cards could not be denied yet; the coordinator retries them every pass.
-        self.unsettled_approvals: set[str] = set()
 
     @staticmethod
     def _canonical_owner(owner: ToolExecutionIdentity) -> ToolExecutionIdentity:
@@ -427,7 +425,13 @@ class ToolJobRuntime:
             if accepted:
                 await self._store.accept(job.job_id, job_json)
             else:
-                await self._store.save(job.job_id, job_json, payload_json)
+                # A cancel request ends the job's approvals as its end does, so its save denies the pending cards.
+                await self._store.save(
+                    job.job_id,
+                    job_json,
+                    payload_json,
+                    ends_approvals=job.status in TERMINAL_STATUSES or job.status == "cancel_requested",
+                )
             entry.job, entry.saved, entry.unsaved_payload = job, True, None
             if job.status in TERMINAL_STATUSES:
                 # A durable terminal outcome ends execution; drop what only running work needed.
