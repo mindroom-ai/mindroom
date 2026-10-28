@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import inspect
 import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -27,7 +26,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.agno_toolkits import ToolCallActor
-from mindroom.tool_system.declarations import tool_schema_source
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
@@ -80,8 +78,8 @@ def worker_requests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[dic
         assert request.url.path.endswith("/execute")
         payload = json.loads(request.content)
         requests.append(payload)
-        prepared = sandbox_runner.PreparedSandboxRunnerExecuteRequest.model_validate(payload)
-        response = asyncio.run(sandbox_runner._execute_prepared_request_inprocess(prepared, runtime_paths, config))
+        call = sandbox_runner.SandboxRunnerExecuteRequest.model_validate(payload)
+        response = asyncio.run(sandbox_runner._execute_request_inprocess(call, runtime_paths, config))
         return httpx.Response(200, json=response.model_dump(mode="json"))
 
     monkeypatch.setattr(
@@ -589,9 +587,7 @@ async def test_browser_host_override_keeps_worker_transport_schema_and_hooks(
         require_approval=True,
     )
     function = offered_function(agent, "browser_control")
-    toolkit = source_toolkit(function)
-    assert isinstance(toolkit, BrowserTools)
-    assert inspect.unwrap(tool_schema_source(function.entrypoint)) == toolkit.browser
+    assert isinstance(source_toolkit(function), BrowserTools)
     schema = json.loads(json.dumps(function.parameters))
     assert function.requires_confirmation is True
     assert function.approval_type == "mindroom_policy"

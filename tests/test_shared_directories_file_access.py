@@ -143,7 +143,7 @@ _RUN_DIRECTORY_TEXT = "run directory secret\n"
 
 
 def _run_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, share_below: bool) -> tuple[Path, Path]:
-    """Make the working directory of an agent without a workspace, holding a secret, and a share it owns.
+    """Make the working directory of toolkits built without a workspace, holding a secret, and a share they reach.
 
     Starting MindRoom beside its config puts the default shared directories below the working directory.
     """
@@ -278,12 +278,12 @@ def test_refusal_says_shares_stay_reachable_only_when_the_agent_has_some(
 
     assert with_share.read_file("secret.md") == (
         "Error: Path 'secret.md' requires an agent workspace; file_access is 'workspace'. "
-        "Without one, only the agent's shared directories are reachable; "
-        "give it a workspace with memory_backend: file or a private configuration."
+        "This toolkit was built without an agent or a base_dir, so only its shared directories are reachable; "
+        "use it as an agent's tool or build it with a base_dir."
     )
     assert without_shares.read_file("secret.md") == (
         "Error: Path 'secret.md' requires an agent workspace; file_access is 'workspace'. "
-        "Give it a workspace with memory_backend: file or a private configuration."
+        "This toolkit was built without an agent or a base_dir; use it as an agent's tool or build it with a base_dir."
     )
 
 

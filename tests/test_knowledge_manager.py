@@ -463,15 +463,15 @@ async def test_file_memory_knowledge_is_cross_agent_isolated(tmp_path: Path) -> 
     runtime_paths = runtime_paths_for(config)
     alpha_runtime = resolve_agent_runtime("alpha", config, runtime_paths, execution_identity=None)
     beta_runtime = resolve_agent_runtime("beta", config, runtime_paths, execution_identity=None)
-    assert alpha_runtime.file_memory_root is not None
-    assert beta_runtime.file_memory_root is not None
-    assert alpha_runtime.file_memory_root != beta_runtime.file_memory_root
-    assert not alpha_runtime.file_memory_root.is_symlink()
-    assert not beta_runtime.file_memory_root.is_symlink()
+    assert alpha_runtime.workspace.file_memory_path is not None
+    assert beta_runtime.workspace.file_memory_path is not None
+    assert alpha_runtime.workspace.file_memory_path != beta_runtime.workspace.file_memory_path
+    assert not alpha_runtime.workspace.file_memory_path.is_symlink()
+    assert not beta_runtime.workspace.file_memory_path.is_symlink()
     alpha_marker = "issue256-alpha-only-marker"
     beta_marker = "issue256-beta-only-marker"
-    alpha_file = alpha_runtime.file_memory_root / "memory" / "notes.md"
-    beta_file = beta_runtime.file_memory_root / "memory" / "notes.md"
+    alpha_file = alpha_runtime.workspace.file_memory_path / "memory" / "notes.md"
+    beta_file = beta_runtime.workspace.file_memory_path / "memory" / "notes.md"
     alpha_file.parent.mkdir(parents=True)
     beta_file.parent.mkdir(parents=True)
     alpha_file.write_text(f"{alpha_marker}\n", encoding="utf-8")

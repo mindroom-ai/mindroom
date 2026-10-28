@@ -102,7 +102,7 @@ A new thread may not appear in `matrix_room(action="threads")` until it has a re
 | `idempotency_key` | `str \| None` | `None` | Nonblank key of at most 256 characters for [safe send retries](#safe-send-retries); text-only sends. |
 | `limit` | `int \| None` | `None` | Messages to read, clamped to 1–50; default 20. |
 
-Agents with a workspace also see the standard [`mindroom_output_path`](execution-and-coding.md#workspace-and-tool-output-files) argument, which saves the tool result to a file; it does not change where the message goes.
+The tool also takes the standard [`mindroom_output_path`](execution-and-coding.md#workspace-and-tool-output-files) argument, which saves the tool result to a file; it does not change where the message goes.
 
 `send` requires text, attachments, or both.
 `edit` requires non-empty text and can only edit messages the agent's own account sent.

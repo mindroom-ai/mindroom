@@ -275,7 +275,7 @@ def caller_skill_names(
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    workspace_root: Path | None,
+    workspace_root: Path,
 ) -> list[str]:
     """Return every skill this agent may use: its configured skills and the skills in its workspace."""
     if agent_name not in config.agents:

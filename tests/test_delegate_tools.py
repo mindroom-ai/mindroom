@@ -28,7 +28,7 @@ from mindroom.thread_models import set_thread_model_override
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.access_schema_support import with_responder_access
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -133,6 +133,7 @@ class TestDelegateTools:
                 delegate_to=["code", "research"],
                 runtime_paths=runtime_paths,
                 config=config,
+                workspace_root=agent_workspace_root_path(runtime_paths.storage_root, "leader"),
                 delegation_depth=0,
             )
 
@@ -232,6 +233,7 @@ class TestDelegateTools:
                 storage_path=storage_path,
             ),
             config=config,
+            workspace_root=agent_workspace_root_path(storage_path, "leader"),
             delegation_depth=0,
         )
 
@@ -258,6 +260,7 @@ class TestDelegateTools:
             delegate_to=["code"],
             runtime_paths=runtime_paths,
             config=config,
+            workspace_root=agent_workspace_root_path(runtime_paths.storage_root, "leader"),
             delegation_depth=0,
         )
         replacement_config = config.model_copy(deep=True)
@@ -359,6 +362,7 @@ class TestDelegateTools:
             delegate_to=["worker"],
             runtime_paths=runtime_paths,
             config=config,
+            workspace_root=agent_workspace_root_path(runtime_paths.storage_root, "leader"),
             delegation_depth=0,
         )
         runtime_context = make_test_tool_runtime_context(
@@ -426,6 +430,7 @@ class TestDelegateTools:
             delegate_to=["code"],
             runtime_paths=runtime_paths,
             config=config,
+            workspace_root=agent_workspace_root_path(runtime_paths.storage_root, "leader"),
             delegation_depth=1,
         )
 
@@ -456,6 +461,7 @@ class TestDelegateTools:
             delegate_to=["code"],
             runtime_paths=runtime_paths,
             config=config,
+            workspace_root=agent_workspace_root_path(runtime_paths.storage_root, "leader"),
             delegation_depth=0,
         )
 
@@ -500,6 +506,7 @@ class TestDelegateKnowledge:
             delegate_to=["researcher"],
             runtime_paths=runtime_paths,
             config=config,
+            workspace_root=agent_workspace_root_path(runtime_paths.storage_root, "leader"),
             delegation_depth=0,
         )
 
@@ -637,6 +644,7 @@ class TestDelegateKnowledge:
             delegate_to=["worker"],
             runtime_paths=runtime_paths,
             config=config,
+            workspace_root=agent_workspace_root_path(runtime_paths.storage_root, "leader"),
             delegation_depth=0,
         )
 
@@ -685,6 +693,7 @@ class TestDelegateKnowledge:
             delegate_to=["worker"],
             runtime_paths=runtime_paths,
             config=config,
+            workspace_root=agent_workspace_root_path(runtime_paths.storage_root, "leader"),
             execution_identity=execution_identity,
             delegation_depth=0,
         )
@@ -754,6 +763,7 @@ class TestDelegateKnowledge:
             delegate_to=["worker"],
             runtime_paths=runtime_paths,
             config=config,
+            workspace_root=agent_workspace_root_path(runtime_paths.storage_root, "leader"),
             execution_identity=execution_identity,
             delegation_depth=0,
         )
@@ -864,6 +874,7 @@ class TestDelegateKnowledge:
             delegate_to=["worker"],
             runtime_paths=runtime_paths,
             config=config,
+            workspace_root=agent_workspace_root_path(runtime_paths.storage_root, "leader"),
             execution_identity=execution_identity,
             delegation_depth=0,
         )

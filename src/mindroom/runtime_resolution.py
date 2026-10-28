@@ -68,9 +68,7 @@ class ResolvedAgentRuntime:
     execution: ResolvedAgentExecution
     state_root: Path
     session_state_root: Path
-    workspace: ResolvedAgentWorkspace | None
-    tool_base_dir: Path | None
-    file_memory_root: Path | None
+    workspace: ResolvedAgentWorkspace
 
 
 @dataclass(frozen=True)
@@ -251,7 +249,7 @@ def resolve_agent_runtime(
         use_state_storage_path=resolved_execution.policy.private_workspace_enabled,
         create=create,
     )
-    if workspace is not None and (create or workspace.root.exists()):
+    if create or workspace.root.exists():
         workspace_knowledge_root = resolve_workspace_relative_path(
             workspace.root,
             "knowledge",
@@ -280,15 +278,11 @@ def resolve_agent_runtime(
             knowledge_paths=knowledge_paths,
             protected_paths=protected_knowledge_paths,
         )
-    tool_base_dir = workspace.root if workspace is not None else None
-    file_memory_root = workspace.file_memory_path if workspace is not None else None
     return ResolvedAgentRuntime(
         execution=resolved_execution,
         state_root=state_root,
         session_state_root=resolved_storage.session_state_root,
         workspace=workspace,
-        tool_base_dir=tool_base_dir,
-        file_memory_root=file_memory_root,
     )
 
 
@@ -390,10 +384,6 @@ def resolve_knowledge_binding(
         execution_identity=execution_identity,
         create=create,
     )
-    if agent_runtime.workspace is None:
-        msg = f"Knowledge base '{base_id}' requires agent '{effective_agent_name}' to define a private root"
-        raise ValueError(msg)
-
     return ResolvedKnowledgeBinding(
         base_id=base_id,
         storage_root=_private_knowledge_index_root(runtime_paths, agent_runtime.state_root),

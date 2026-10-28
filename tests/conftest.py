@@ -660,13 +660,12 @@ def live_turn_tools_for_test(
     authorize: "Callable[[ToolKey, dict[str, object]], Awaitable[None]]",
     **options: Any,  # noqa: ANN401
 ) -> LiveTurnTools:
-    """Build one CLI turn's live tools with the options a test names.
+    """Build one CLI turn's live tools with the options a test names, which include its output-file policy.
 
-    The others take a top-level turn's values: no context documents, output-file policy, or knowledge refresh.
+    The others take a top-level turn's values: no context documents or knowledge refresh.
     """
     turn_options: dict[str, Any] = {
         "context": {},
-        "output_file_policy": None,
         "delegation_depth": 0,
         "refresh_scheduler": None,
     }

@@ -25,6 +25,7 @@ from mindroom.tool_jobs.runtime import (
     get_background_runtime,
 )
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, pending_background_tool_jobs_restart
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import make_turn_context, test_runtime_paths
 from tests.delegation_helpers import ScriptedAgents
 from tests.fakes.scripted_model import ScriptedModel, answer
@@ -146,7 +147,8 @@ async def test_recreated_coordinator_pins_its_own_setting(tmp_path: Path) -> Non
 def test_disabled_delegation_describes_only_available_tools(tmp_path: Path) -> None:
     """Default delegation must not promise a job API or reserved wait argument."""
     config = Config(agents={"lead": AgentConfig(display_name="Lead", delegate_to=["lead"])})
-    toolkit = DelegateTools("lead", ["lead"], test_runtime_paths(tmp_path), config)
+    paths = test_runtime_paths(tmp_path)
+    toolkit = DelegateTools("lead", ["lead"], paths, config, agent_workspace_root_path(paths.storage_root, "lead"))
     instructions = toolkit.instructions or ""
     description = toolkit.async_functions["run_subagent"].description or ""
     assert "background_after" not in instructions + description

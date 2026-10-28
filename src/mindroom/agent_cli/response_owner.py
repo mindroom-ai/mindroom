@@ -64,7 +64,7 @@ def bind_response_owner(
     lifetime: CliTurnLifetime,
     response_context: ResponseTurnContext,
     context_documents: Mapping[str, str],
-    output_file_policy: ToolOutputFilePolicy | None,
+    output_file_policy: ToolOutputFilePolicy,
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     failure_message: Callable[[str], str],

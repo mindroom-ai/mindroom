@@ -800,7 +800,7 @@ from mindroom.plugin_api import Ask, AutomationContext, Done, automation, read_r
 # The digest lives in the agent's file memory, so skip agents without it.
 @automation("weekly_digest", requires_file_memory=True)
 def check(ctx: AutomationContext) -> Ask | None:
-    if ctx.workspace is None or not ctx.workspace.is_dir():
+    if not ctx.workspace.is_dir():
         return None
     target = ctx.options.get("target", "digest.md")
     # A stamp only this run asks for tells its result apart from last week's file.
@@ -828,7 +828,7 @@ plugins:
 agents:
   mind:
     display_name: Mind
-    memory_backend: file   # gives the agent a workspace
+    memory_backend: file   # weekly_digest requires file memory
     tools: [file]          # the agent writes the digest
     automations:
       - {name: weekly_digest, cron: "0 9 * * 1", options: {target: digest.md}}
@@ -856,7 +856,7 @@ agents:
 | `settings` | The plugin's `settings`, set once per plugin, read-only |
 | `requester_id` | For a [private agent](scheduling.md#automations), the requester whose instance this run maintains; `None` for a shared agent |
 | `execution_identity` | The identity that resolves that requester's instance, for helpers that take one; `None` for a shared agent |
-| `workspace` | The workspace root, which may not exist yet: a private agent's is the requester's private root; `None` for a shared agent without `memory_backend: file`, which has no workspace |
+| `workspace` | The workspace root, which may not exist yet: a shared agent's own workspace, or for a private agent the requester's private root |
 | `state_dir` | The automation state directory of the agent, or of the requester's instance, in MindRoom storage outside the workspace; name your files after your automation and create the directory when you first write |
 
 ### What MindRoom guarantees

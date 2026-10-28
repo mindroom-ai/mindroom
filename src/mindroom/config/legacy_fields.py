@@ -45,13 +45,15 @@ def reject_legacy_agent_fields(value: object) -> object:
             msg = "Agent field 'knowledge_base' was removed. Use 'knowledge_bases' (list) instead."
             raise ValueError(msg)
         if "memory_dir" in value:
-            msg = "Agent field 'memory_dir' was removed. Use 'context_files' and memory.backend=file instead."
+            msg = (
+                "Agent field 'memory_dir' was removed. Every agent works in its own workspace: list the files it "
+                "always loads in 'context_files', and set memory_backend=file to keep its memory files there."
+            )
             raise ValueError(msg)
         if "memory_file_path" in value:
             msg = (
-                "Agent field 'memory_file_path' was removed. File-backed agent memory now lives in the "
-                "canonical agent workspace root; keep memory_backend=file and configure context_files "
-                "relative to that workspace."
+                "Agent field 'memory_file_path' was removed. With memory_backend=file, an agent's memory files "
+                "live in its workspace root; configure context_files relative to that workspace."
             )
             raise ValueError(msg)
         if "sandbox_tools" in value:

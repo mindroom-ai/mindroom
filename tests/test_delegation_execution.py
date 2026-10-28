@@ -40,7 +40,7 @@ from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.tool_system.progress import tool_progress_reporter
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from mindroom.usage.storage import quote_identifier
 from tests.access_schema_support import with_responder_access
 from tests.approval_continuation_helpers import approval_continuation, repeats_each_request
@@ -1281,7 +1281,14 @@ def test_adapted_delegate_functions_carry_the_external_execution_flags(tmp_path:
     """The adapted delegate functions carry the external-execution flags the approval capability sets."""
     paths = _runtime_paths(tmp_path)
     config = _config(paths, child_tools=())
-    toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=_leader_identity())
+    toolkit = DelegateTools(
+        "leader",
+        ["code"],
+        paths,
+        config,
+        agent_workspace_root_path(paths.storage_root, "leader"),
+        execution_identity=_leader_identity(),
+    )
 
     flags = {
         function.name: (function.external_execution, function.external_execution_silent)

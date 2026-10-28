@@ -67,9 +67,6 @@ def _call_transcript_roots(
     )
     if agent_memory_backend(config, agent_name) == "file":
         workspace = agent_runtime.workspace
-        if workspace is None:
-            msg = f"File-memory agent '{agent_name}' has no resolved workspace"
-            raise ValueError(msg)
         return workspace.root / _TRANSCRIPT_DIRNAME, workspace.root
     if agent_runtime.execution.is_private:
         return agent_runtime.state_root / _TRANSCRIPT_DIRNAME, agent_runtime.state_root

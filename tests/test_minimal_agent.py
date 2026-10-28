@@ -289,16 +289,15 @@ def test_context_files_remain_complete_and_notes_untouched(
     turn = _turn(minimal)
     system = system_text(turn.system_messages)
     policy = minimal.surface.output_file_policy
+    # Every agent works in its own workspace, so Bash can read its context files there whatever its memory backend.
+    assert "context/notes.md" in system
+    assert policy.workspace_root / "context/notes.md" == notes
     if memory_backend == "file":
-        assert policy is not None
-        assert "context/notes.md" in system
-        assert policy.workspace_root / "context/notes.md" == notes
         memory_line = next(line for line in system.splitlines() if line.startswith("File memory: "))
         entrypoint, directory = [policy.workspace_root / path for path in memory_line.split("`")[1::2]]
         assert entrypoint.read_text() == "Remember the existing memory entrypoint."
         assert (directory / "2026-09-22.md").read_text() == "Remember the existing daily memory."
     else:
-        assert "context/notes.md" not in system
         assert "File memory:" not in system
     assert "missing.md" not in system
     assert str(tmp_path) not in system

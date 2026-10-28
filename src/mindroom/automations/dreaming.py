@@ -377,7 +377,7 @@ def check_dreaming(ctx: AutomationContext) -> Ask | None:
     # The workspace of an agent with file memory, which this automation requires, is its file-memory root.
     root = ctx.workspace
     # A workspace appears with the agent's first turn.
-    if root is None or not root.is_dir():
+    if not root.is_dir():
         return None
     now = datetime.now(UTC)
     today = now.astimezone(ZoneInfo(entity_timezone(config, agent_name))).date().isoformat()

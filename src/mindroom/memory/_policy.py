@@ -217,7 +217,7 @@ def resolve_file_memory_resolution(
             create=private_agent,
         )
         resolved_storage_path = agent_runtime.state_root
-        agent_memory_scope_path = agent_runtime.file_memory_root
+        agent_memory_scope_path = agent_runtime.workspace.file_memory_path
     resolution = _file_memory_resolution_from_paths(
         original_storage_path=base_storage_path,
         resolved_storage_path=resolved_storage_path,

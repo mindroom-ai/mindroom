@@ -3622,13 +3622,12 @@ agents:
   assistant:
     display_name: Assistant
     role: A helpful assistant with direct file access to source docs
-    memory_backend: file
     tools: [file, shell]
     knowledge_bases: [source_docs]
 ```
 
 A files-mode base has no vector index, does not use the embedder, and does not provide `search_knowledge_base`.
-The agent needs a workspace, which `memory_backend: file` creates at `${MINDROOM_STORAGE_PATH}/agents/<agent>/workspace` (private agents use their private root).
+The agent's workspace is `${MINDROOM_STORAGE_PATH}/agents/<agent>/workspace` (private agents use their private root).
 When the base's path is inside that workspace and the folder exists, MindRoom exposes it as `knowledge/<base_id>` and tells the agent to use file tools on it.
 Bases outside the workspace are not linked, and with the default [`file_access: workspace`](https://docs.mindroom.chat/configuration/agents/#configuration-options) the agent's file tools cannot reach them.
 
@@ -3649,7 +3648,7 @@ knowledge_bases:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `description` | string | `""` | What the base contains; shown to agents in the `search_knowledge_base` tool description and in files-mode instructions so they know when to use it |
-| `mode` | `semantic` or `files` | `semantic` | `semantic` builds an embedding-backed search index; `files` skips embeddings and exposes the files to workspace-aware agents |
+| `mode` | `semantic` or `files` | `semantic` | `semantic` builds an embedding-backed search index; `files` skips embeddings and exposes the files to agents' file tools |
 | `path` | string | `./knowledge_docs` | Folder path, relative to the config file directory or absolute |
 | `watch` | bool | `true` | Watch the local folder and refresh in the background when files change. When `false`, direct external edits require an explicit reindex unless `poll_interval_seconds` is set; dashboard/API uploads and deletes still trigger a refresh |
 | `poll_interval_seconds` | int | `null` | Schedule a background refresh of the local folder this often (minimum `5`), for folders that another host writes to; see [Folders Written by Another Host](#folders-written-by-another-host). Unset means no polling. Semantic mode only, so `mode: files` bases reject it. Git-backed bases use `git.poll_interval_seconds` instead, and setting both is rejected |
@@ -4054,7 +4053,6 @@ agents:
   analyst:
     display_name: Analyst
     role: Answers questions from the team's knowledge bundles
-    memory_backend: file
     tools: [file]
     knowledge_bases: [acme_okf]
     skills: [open-knowledge-format]
@@ -4344,7 +4342,7 @@ They do not appear in the dashboard Skills page or the skills API, because those
 Hidden entries such as `.usage.json`, `.history/`, and `.archive/` are never loaded as skills.
 
 Agents never need write access to a global skill root to create skills, so the bundled, plugin, and user roots can stay read-only, for example in container or Kubernetes deployments.
-An agent with a workspace and workspace-rooted file or shell tools can write a skill to `<workspace>/skills/<skill-name>/SKILL.md`, which its file tools address as `skills/<skill-name>/SKILL.md`.
+An agent with workspace-rooted file or shell tools can write a skill to `<workspace>/skills/<skill-name>/SKILL.md`, which its file tools address as `skills/<skill-name>/SKILL.md`.
 Such agents are told how in their system prompt through the `WORKSPACE_SKILL_AUTHORING_PROMPT` built-in prompt, which you can change through [Built-In Prompt Overrides](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides).
 A new or edited workspace skill is picked up on the agent's next run without a config change.
 
@@ -5746,7 +5744,6 @@ Paths, including the targets of symbolic links, follow the agent's [`file_access
 
 - With the default `workspace`, paths resolve from the agent workspace and must stay inside it, so pass workspace-relative paths such as `incoming/file.txt`.
   `~` expands to the MindRoom process home, not the worker workspace, so `~/incoming/file.txt` is rejected.
-  Without a configured workspace, path registration is refused.
 - With `unrestricted`, any file the MindRoom process can read is accepted, including absolute paths.
 
 ## Retention
@@ -7352,7 +7349,6 @@ agents:
     display_name: Assistant
     role: A helpful assistant with file and web access
     model: sonnet
-    memory_backend: file  # gives the agent a workspace for file paths
     tools:
       - file
       - shell
@@ -7380,7 +7376,6 @@ defaults:
 
 agents:
   code:
-    memory_backend: file                 # gives the agent a workspace for file paths
     tools:
       - file                               # no inline settings
       - shell:                             # this agent only
@@ -7905,7 +7900,6 @@ agents:
   assistant:
     display_name: Assistant
     role: Help in chat
-    memory_backend: file  # gives the agent a workspace for file paths
     tools:
       - shell
       - coding: {defer: true, initial: true}
@@ -8016,7 +8010,7 @@ A caller with the [`delegate`](https://docs.mindroom.chat/tools/agent-orchestrat
 Use it for self-contained tasks where the child does not need its role, instructions, and tool guidance up front; it can still read them with `mindroom-agent context`.
 The option is offered only in Matrix conversations, only for allowed subagents that have the `shell` tool and meet the [deployment requirements](#deployment-requirements), and never while shell commands require approval.
 A minimal subagent cannot pause for approval, so approval-gated tools are hidden from it.
-A listed child whose shell permissions or workspace still rule out minimal mode fails with the reason and a hint to start a new subagent without minimal.
+A listed child whose shell permissions still rule out minimal mode fails with the reason and a hint to start a new subagent without minimal.
 A minimal [authored subagent](https://docs.mindroom.chat/tools/agent-orchestration/#authored-subagents) uses its authored prompt in place of the minimal prompt's identity line, keeps its workspace and `mindroom-agent` lines, and an explicit `tools` list for it must include `shell` or `shell.run_shell_command`.
 Its `mindroom-agent context` documents hold its own prompt, runtime guidance, and the skills it keeps, not the caller's configured role or instructions.
 
@@ -8072,7 +8066,7 @@ Use `--call-id UUID` to fix the call ID before submission; reusing an ID with th
 
 `context read` accepts only names returned by `context list` or by other commands, not filesystem paths.
 Large schemas return a context name for paged reading.
-Large tool results return a preview and a workspace file path holding the full output; for an agent without a workspace, they are shortened instead.
+Large tool results return a preview and a workspace file path holding the full output.
 Images, audio, and files are handled like ordinary response attachments.
 
 ## Exit codes
@@ -8108,10 +8102,7 @@ A pending approval still resumes after a restart once it is decided, but MindRoo
 
 Minimal Bash runs where the agent's ordinary shell runs.
 Every mode that uses `mindroom-agent` needs the `shell` tool on the agent and MindRoom running with its API server, not `--no-api`.
-Minimal mode and minimal subagents also need:
-
-- the shell's `run_shell_command` allowed;
-- an agent workspace, which `memory_backend: file` or a `private` agent provides.
+Minimal mode and minimal subagents also need the shell's `run_shell_command` allowed.
 
 `!mode <agent> minimal` lists every missing requirement at once.
 Set environment settings in the runtime's `.env` and restart MindRoom.
@@ -9089,7 +9080,7 @@ Standard error is merged into standard output; redirect it with `2>file` to keep
 
 The bridge captures up to 10 MiB of output per command and reports `output_truncated: true` when more was dropped.
 Large output arrives as an encrypted Matrix attachment that the cloud tool downloads within its `timeout_seconds`.
-For agents with a workspace, MindRoom's normal [tool output files](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files) apply to large results.
+MindRoom's normal [tool output files](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files) apply to large results.
 
 ## Uncertain Outcomes
 
@@ -9215,12 +9206,12 @@ Only a worker isolates `shell`, `python`, and `docker`, because they execute cod
 
 ### Workspace and tool output files
 
-When an agent has a workspace, it is the working directory (`base_dir`) of `file`, `shell`, `coding`, and worker-routed `python`, and generated files and charts are saved inside it.
+Every agent has a workspace: `agents/<agent>/workspace/` in the storage directory, or the requester's private root for a [`private`](https://docs.mindroom.chat/configuration/agents/#private-instances) agent.
+It is the working directory (`base_dir`) of `file`, `shell`, `coding`, and worker-routed `python`, and generated files and charts are saved inside it.
 `python` in the primary process resolves its file functions against the workspace, but the code it runs uses the process's current directory, so relative paths such as `open("data.csv")` may miss workspace files.
-`base_dir` is managed by MindRoom and cannot be set inline in `config.yaml`; without a workspace, `shell` and `python` use the process's current directory, and so do `file` and `coding` under `file_access: unrestricted`.
-Under the default `file_access: workspace`, `file` and `coding` of an agent without a workspace refuse every path outside its shared directories, except in a worker with worker-specific storage (Docker and Kubernetes workers, and `static_runner` calls of agents with a [`worker_scope`](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes)), where they use that worker's own directory; give the agent a workspace with `memory_backend: file` or a `private` configuration.
+`base_dir` is managed by MindRoom and cannot be set inline in `config.yaml`.
 
-Agents with a workspace also get an optional `mindroom_output_path` argument on supported tools.
+Supported tools also take an optional `mindroom_output_path` argument.
 Set it to a workspace-relative file path to save the tool's full output to that file and return a short receipt to the model instead.
 The path must name a file inside the workspace; absolute paths, `..`, paths that start with `~` or contain `$` or `%`, symlinks, and paths inside a `.git` directory are refused.
 Without `mindroom_output_path`, outputs larger than `defaults.tool_output_auto_save_threshold_bytes` (integer, at least 1, default `51200`, which is 50 KiB) are saved under `mindroom_tool_outputs/` in the workspace, and the model receives the path, size, format, a preview, and a note to read the file in parts, because reading it whole would only save it again.
@@ -9235,7 +9226,6 @@ agents:
     display_name: Code
     role: Edit code, run local checks, and export artifacts
     model: sonnet
-    memory_backend: file
     tools:
       - coding
       - shell:
@@ -9284,7 +9274,6 @@ Prefer [`coding`](#coding) for code-editing agents.
 ```yaml
 agents:
   editor:
-    memory_backend: file  # gives the agent a workspace for file paths
     tools:
       - file:
           enable_delete_file: true
@@ -9407,7 +9396,6 @@ Paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture
 ```yaml
 agents:
   code:
-    memory_backend: file  # gives the agent a workspace for file paths
     tools:
       - coding
 ```
@@ -9564,7 +9552,6 @@ PDF and DOCX generation are disabled when `reportlab` or `python-docx` is unavai
 Files are also saved to disk when `output_directory` is set or `save_files` is `true`.
 Saved files go into `output_directory` inside the agent workspace, or the workspace root when only `save_files` is set, and overwrite files of the same name.
 `output_directory` must be a relative path that stays inside the workspace.
-Agents without a workspace cannot save generated files; the files exist only in the tool result.
 
 ### Configuration
 
@@ -9604,7 +9591,6 @@ Bar, line, and pie charts accept a dict, a list of dicts, or a JSON string; scat
 Each function saves a PNG in `output_dir` inside the agent workspace and returns the file path.
 A chart's `filename` must be a plain file name; when omitted, the chart is named after its type and numbered, such as `bar_chart_3.png`.
 Charts overwrite files of the same name, and `output_dir` is created when missing.
-Agents without a workspace cannot save charts.
 Because charts are in the workspace, `attachments` and `matrix_message` can send them under the default `file_access: workspace`.
 
 ### Configuration
@@ -9915,7 +9901,6 @@ agents:
 Non-Workspace files over `max_read_size` return an error suggesting `google_drive_download_file` instead.
 Downloads larger than `max_download_size` are refused without leaving a partial file.
 Uploads and content replacement read local files according to the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
-Downloads need an agent workspace; for an agent without one, `download_file` is ignored and a warning is logged.
 To change the content of a native Google Doc, use [`google_docs`](#google_docs).
 If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link; see [Google Services OAuth For Local Installs](https://docs.mindroom.chat/deployment/google-services-user-oauth/#connect).
 A connection that granted only read-only Drive access keeps working for reads, while writes ask the user to reconnect; see [Scope Rationale](https://docs.mindroom.chat/deployment/google-services-oauth/#scope-rationale).
@@ -11785,7 +11770,7 @@ A new thread may not appear in `matrix_room(action="threads")` until it has a re
 | `idempotency_key` | `str \| None` | `None` | Nonblank key of at most 256 characters for [safe send retries](#safe-send-retries); text-only sends. |
 | `limit` | `int \| None` | `None` | Messages to read, clamped to 1–50; default 20. |
 
-Agents with a workspace also see the standard [`mindroom_output_path`](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files) argument, which saves the tool result to a file; it does not change where the message goes.
+The tool also takes the standard [`mindroom_output_path`](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files) argument, which saves the tool result to a file; it does not change where the message goes.
 
 `send` requires text, attachments, or both.
 `edit` requires non-empty text and can only edit messages the agent's own account sent.
@@ -11995,9 +11980,9 @@ Archiving, trashing, attachment downloads, and sending existing drafts are not a
 `send_email_to_self(subject, body)` always sends to the connected account's own address, so an approval rule can allow it while still requiring approval for `send_email`; see [Tool Approval](https://docs.mindroom.chat/tool-approval/).
 
 Draft and send functions accept attachment file paths, not Matrix attachment IDs.
-Allowed paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting: with the default `workspace`, attachments must be files inside the agent workspace, and an agent without a workspace cannot attach files.
+Allowed paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting: with the default `workspace`, attachments must be files inside the agent workspace.
 With `unrestricted`, any file MindRoom can read is allowed.
-Relative paths resolve from the workspace root, or from the MindRoom working directory when an `unrestricted` agent has no workspace.
+Relative paths resolve from the workspace root.
 Attachments may total at most 25 MiB per message; larger sets fail with `Gmail attachments exceed the 25 MiB limit`.
 
 Each option below defaults to `true`, and setting it to `false` removes the matching function.
@@ -13644,7 +13629,6 @@ agents:
     display_name: Code
     role: Implement and debug code changes
     model: sonnet
-    memory_backend: file  # gives the agent a workspace for file paths
     tools: [coding, shell]
     delegate_to: [research]  # can delegate further
 
@@ -13682,7 +13666,7 @@ Delegated runs do not create a Matrix thread and cannot ask the user interactive
 When a child in a Matrix conversation calls a tool that needs approval, the approval card appears in the source room and thread, and the delegation continues after the decision.
 In Matrix conversations, a parent runs its subagents one at a time.
 Delegated runs through the OpenAI-compatible API have fewer tools available; see [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/).
-When the caller has a workspace, both calls accept the standard `mindroom_output_path` argument described in [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files).
+Both calls accept the standard `mindroom_output_path` argument described in [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files).
 
 Use `continue_subagent` with the returned ID to send a follow-up into the same child session after its previous turn returns.
 The ID works across parent turns and restarts, but only for the same caller, requester, and originating conversation.
@@ -13742,7 +13726,7 @@ run_subagent(
 #### Subagent Profiles
 
 Save a reusable persona as `subagents/<name>.md` in the agent's workspace and run it with `run_subagent(profile="<name>", task=...)`.
-The agent creates and edits profiles with its own file or shell tools, so profiles need an agent workspace, which exists with `memory_backend: file` or a `private:` configuration.
+The agent creates and edits profiles with its own file or shell tools.
 
 ```markdown
 ---
@@ -13769,7 +13753,6 @@ Authoring errors:
 - `Cannot delegate: unknown knowledge base '<id>'. Your knowledge bases: ...` - `knowledge` names something other than one of the caller's `semantic` knowledge bases, such as a `files`-mode base or the caller's file memory.
 - `Cannot delegate: subagent profile '<name>' was not found in subagents/.` - no such file in the caller's workspace.
 - `Cannot delegate: subagent profile '<name>' is invalid: <reason>.` - fix the file as the reason says.
-- `Cannot delegate: subagent profiles need an agent workspace.` - give the agent a workspace as described above.
 - `Subagent tool '<entry>' is no longer available to you; start a new subagent.` - the caller lost a tool the subagent uses.
 - `Cannot delegate: tool '<entry>' is not available to you.` - the caller's tool configuration excludes that function, or the tool is unavailable in this conversation, for example because it failed to load or the conversation is a voice call; fix the configuration or name a tool the caller can use here.
 
@@ -13884,7 +13867,7 @@ Changing a tool's authored settings, other than for MCP tools, cancels its still
 Include/exclude filters remain checked per function.
 Output redirection and automatic output saving apply to the completed child result, while released waits return the job handle directly.
 `job(action="list")` rediscovers handles after compaction, later turns, and a restart.
-For workspace-backed agents, `job` also accepts `mindroom_output_path`: `wait` saves the returned result.
+An agent's `job` tool also accepts `mindroom_output_path`: `wait` saves the returned result.
 Large supported results use the same configured automatic file-saving policy as other tools.
 Redirecting a stored result does not rerun the original tool or change its saved output.
 Removing a toolkit, changing its execution scope, the agent's `file_access`, or its provenance, or excluding a function revokes access.
@@ -14075,7 +14058,6 @@ The tool never accepts arbitrary filesystem paths; it publishes only these sourc
 - **`dynamic_workflow_run`**: `source` takes `workflow_id`, `run_id`, and optional `scope` (default `agent`), and the run must be completed.
 - **`static_site`**: `source` takes a workspace-relative `path` and a required `title`.
   The path is a directory containing `index.html` plus optional CSS, JavaScript, images, fonts, or JSON, or a single HTML file served as `index.html`.
-  The agent needs a workspace, which exists when it uses `memory_backend: file` or a `private:` configuration.
   Publishing copies the site, so later workspace edits need a new `publish_report()` call.
   A site may contain at most 200 files, 200 directories nested at most 32 levels deep, and 10 MiB in total, and it may contain only regular files, not symlinks.
   Static sites are served at `/reports/public/<slug>/` with a trailing slash so relative asset URLs resolve.
@@ -14399,7 +14381,7 @@ It provides:
 `upload_file()` follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) and refuses local files larger than 64 MiB, so fetch larger data from inside the sandbox instead.
 `download_file_from_sandbox()` and `read_file_content()` refuse sandbox files larger than 64 MiB, and a refused download leaves no partial file.
 `run_python_code()` and `run_command()` refuse output larger than 64 MiB with a tool error, and `stream_command()` returns only its first 64 MiB, so write larger output to a sandbox file instead.
-Downloads always land inside the agent workspace at workspace-relative paths; absolute paths, `..`, and links leaving the workspace are refused, and agents without a workspace cannot download.
+Downloads always land inside the agent workspace at workspace-relative paths; absolute paths, `..`, and links leaving the workspace are refused.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -16805,7 +16787,7 @@ from mindroom.plugin_api import Ask, AutomationContext, Done, automation, read_r
 # The digest lives in the agent's file memory, so skip agents without it.
 @automation("weekly_digest", requires_file_memory=True)
 def check(ctx: AutomationContext) -> Ask | None:
-    if ctx.workspace is None or not ctx.workspace.is_dir():
+    if not ctx.workspace.is_dir():
         return None
     target = ctx.options.get("target", "digest.md")
     # A stamp only this run asks for tells its result apart from last week's file.
@@ -16833,7 +16815,7 @@ plugins:
 agents:
   mind:
     display_name: Mind
-    memory_backend: file   # gives the agent a workspace
+    memory_backend: file   # weekly_digest requires file memory
     tools: [file]          # the agent writes the digest
     automations:
       - {name: weekly_digest, cron: "0 9 * * 1", options: {target: digest.md}}
@@ -16861,7 +16843,7 @@ agents:
 | `settings` | The plugin's `settings`, set once per plugin, read-only |
 | `requester_id` | For a [private agent](https://docs.mindroom.chat/scheduling/#automations), the requester whose instance this run maintains; `None` for a shared agent |
 | `execution_identity` | The identity that resolves that requester's instance, for helpers that take one; `None` for a shared agent |
-| `workspace` | The workspace root, which may not exist yet: a private agent's is the requester's private root; `None` for a shared agent without `memory_backend: file`, which has no workspace |
+| `workspace` | The workspace root, which may not exist yet: a shared agent's own workspace, or for a private agent the requester's private root |
 | `state_dir` | The automation state directory of the agent, or of the requester's instance, in MindRoom storage outside the workspace; name your files after your automation and create the directory when you first write |
 
 ### What MindRoom guarantees
@@ -19301,7 +19283,7 @@ What a worker can see depends on the backend:
 - **Dedicated Docker and Kubernetes workers** mount only the workspaces listed in the [scope table](#worker-scopes), the shared directories of the agents they serve, their own scratch space, and read-only assigned knowledge, never the sessions or memory beside the workspaces.
   For private agents they mount only the private root (`private.root`), never the state root around it.
 
-When an agent has a workspace (the `file` memory backend or `private`), `shell`, `file`, `python`, and `coding` use it as their default working directory (`base_dir`); this is a convenience, not a boundary.
+`shell`, `file`, `python`, and `coding` use the agent's workspace as their default working directory (`base_dir`); this is a convenience, not a boundary.
 
 A missing or linked workspace is not mounted.
 Assigned knowledge that is missing, reached through a link, or inside another agent's workspace, a private instance, a shared directory the worker does not mount, or a worker root is not mounted either, and the worker sees an empty knowledge folder.

@@ -53,10 +53,12 @@ async def run_offered(
 
 def source_toolkit(function: ToolFunction) -> object:
     """Return the toolkit object whose bound method an adapted function finally calls."""
-    source = tool_schema_source(inspect.unwrap(function.entrypoint))
-    owner = getattr(source, "__self__", None)
-    if owner is None:
-        pytest.fail(f"{function.name} does not call a toolkit method")
+    entrypoint = function.entrypoint
+    while (owner := getattr(entrypoint, "__self__", None)) is None:
+        source = tool_schema_source(inspect.unwrap(entrypoint))
+        if source is entrypoint:
+            pytest.fail(f"{function.name} does not call a toolkit method")
+        entrypoint = source
     return owner
 
 

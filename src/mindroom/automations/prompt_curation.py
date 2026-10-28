@@ -237,8 +237,6 @@ def check_curation(ctx: AutomationContext) -> Ask | None:
         raise ValueError(msg)  # noqa: TRY004 - the runner turns ValueError into a visible notice
     config, agent_name = ctx.config, ctx.agent_name
     # The workspace of an agent with file memory, which this automation requires, is its file-memory root.
-    if ctx.workspace is None:
-        return None
     plan = _plan_curation(config, ctx.workspace, agent_name, ctx.entry)
     if plan is None:
         return None

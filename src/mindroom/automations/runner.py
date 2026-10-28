@@ -180,7 +180,7 @@ def _check(
         settings=MappingProxyType(deepcopy(dict(definition.settings))),
         requester_id=chain.requester_id,
         execution_identity=identity,
-        workspace=runtime.workspace.root if runtime.workspace is not None else None,
+        workspace=runtime.workspace.root,
         state_dir=_state_dir(runtime_paths, chain, runtime.state_root),
     )
     return definition.check(context)

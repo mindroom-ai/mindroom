@@ -2705,28 +2705,24 @@ class _AsyncStreamingSlackTools(Toolkit):
     [_StreamingSlackTools, _AsyncStreamingSlackTools],
     ids=["generator", "async-generator"],
 )
-@pytest.mark.parametrize("workspace", [False, True], ids=["no-workspace", "workspace"])
 async def test_a_streaming_tool_runs_to_the_end_of_its_stream(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     toolkit_class: type[Toolkit],
-    workspace: bool,
 ) -> None:
     """A tool that streams its result runs as a scheduled call through the agent's build and returns the whole stream.
 
-    An agent with a workspace runs it behind the output-file wrapper, which hands the stream on undrained.
+    The agent runs it behind the output-file wrapper, which hands the stream on undrained.
     """
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     config = _code_config()
     config.agents[_AGENT].tools = [_TOOLKIT]
-    if workspace:
-        config.agents[_AGENT].memory_backend = "file"
     with registered_toolkit(_TOOLKIT, toolkit_class):
         build = _agent_build(config, monkeypatch)
         parameters = build.spec.functions["post_slack_message"].parameters
-        assert ("mindroom_output_path" in parameters["properties"]) is workspace
+        assert "mindroom_output_path" in parameters["properties"]
         try:
             await _armed(manager)
 

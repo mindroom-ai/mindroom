@@ -729,14 +729,13 @@ def _participant_available_toolkits(context: ToolRuntimeContext) -> list[str]:
     ]
 
 
-def _caller_workspace_root(context: ToolRuntimeContext) -> Path | None:
-    workspace = resolve_agent_runtime(
+def _caller_workspace_root(context: ToolRuntimeContext) -> Path:
+    return resolve_agent_runtime(
         context.agent_name,
         context.config,
         context.runtime_paths,
         execution_identity=build_execution_identity_from_runtime_context(context),
-    ).workspace
-    return workspace.root if workspace is not None else None
+    ).workspace.root
 
 
 def _participant_request(

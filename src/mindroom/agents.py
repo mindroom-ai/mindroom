@@ -52,7 +52,6 @@ from mindroom.scheduling.scheduled_tool_calls import bind_live_tools
 from mindroom.session_storage import agent_storage
 from mindroom.shared_directories.paths import (
     describe_agent_shared_directories,
-    primary_tools_reach_shared_directories,
 )
 from mindroom.system_prompt import render_session_context
 from mindroom.timing import timed, timed_block
@@ -237,10 +236,8 @@ class _AgentRoleContext:
     role: str
     context_documents: tuple[_PreloadChunk, ...]
 
-    def workspace_context_files(self, workspace_root: Path | None) -> list[str]:
+    def workspace_context_files(self, workspace_root: Path) -> list[str]:
         """List loaded context files that Bash can read relative to its workspace."""
-        if workspace_root is None:
-            return []
         paths = (Path(document.title) for document in self.context_documents)
         return [path.relative_to(workspace_root).as_posix() for path in paths if path.is_relative_to(workspace_root)]
 
@@ -558,9 +555,6 @@ def _file_mode_knowledge_instruction_block(
 ) -> str | None:
     """Describe workspace-accessible file-only knowledge bases to the model."""
     workspace = agent_runtime.workspace
-    if workspace is None:
-        return None
-
     lines = [
         "File-only knowledge bases are available in the workspace.",
         "Use file or coding tools such as grep, list, and read instead of search_knowledge_base for these sources.",
@@ -582,11 +576,11 @@ def _file_mode_knowledge_instruction_block(
     return "\n".join([*lines, *source_lines])
 
 
-def _tool_base_dir_override(tool_name: str, *, workspace_path: Path | None) -> dict[str, object] | None:
+def _tool_base_dir_override(tool_name: str, *, workspace_path: Path) -> dict[str, object] | None:
     """Point a registered tool that exposes a ``base_dir`` config field at the agent's workspace."""
     metadata = TOOL_METADATA.get(tool_name)
     config_fields = (metadata.config_fields if metadata is not None else None) or ()
-    if workspace_path is None or not any(field.name == "base_dir" for field in config_fields):
+    if not any(field.name == "base_dir" for field in config_fields):
         return None
     return {"base_dir": str(workspace_path)}
 
@@ -666,12 +660,10 @@ def _agent_tool_output_file_policy(
     agent_runtime: ResolvedAgentRuntime,
     runtime_paths: constants.RuntimePaths,
     tool_output_auto_save_threshold_bytes: int,
-) -> ToolOutputFilePolicy | None:
+) -> ToolOutputFilePolicy:
     """Resolve the shared output-file policy for one agent's in-process tools."""
-    if agent_runtime.tool_base_dir is None:
-        return None
     return ToolOutputFilePolicy.from_runtime(
-        agent_runtime.tool_base_dir,
+        agent_runtime.workspace.root,
         runtime_paths,
         auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
     )
@@ -777,7 +769,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
                 execution_identity=execution_identity,
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
-                workspace_root=agent_runtime.workspace.root if agent_runtime.workspace is not None else None,
+                workspace_root=agent_runtime.workspace.root,
                 persona=persona,
             ),
         )
@@ -798,11 +790,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
                 agent_name,
                 config,
                 runtime_paths,
-                agent_workspace_skills_root(
-                    runtime_paths,
-                    agent_name,
-                    workspace_root=agent_runtime.workspace.root if agent_runtime.workspace is not None else None,
-                ),
+                agent_workspace_skills_root(agent_runtime.workspace.root),
             ),
         )
 
@@ -847,11 +835,11 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
         credentials_manager=credentials_manager,
         runtime_config=config,
         tool_config_overrides=tool_config_overrides,
-        tool_init_overrides=_tool_base_dir_override(tool_name, workspace_path=agent_runtime.tool_base_dir),
+        tool_init_overrides=_tool_base_dir_override(tool_name, workspace_path=agent_runtime.workspace.root),
         runs_in_worker=agent_tools.runs_in_worker(tool_name, placement),
         shared_storage_root_path=shared_storage_path,
         allowed_shared_services=config.get_worker_grantable_credentials() if worker_scope is not None else None,
-        tool_output_workspace_root=agent_runtime.tool_base_dir,
+        tool_output_workspace_root=agent_runtime.workspace.root,
         agent_state_root=agent_runtime.state_root,
         tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         workspace_in_worker=workspace_in_worker,
@@ -872,7 +860,6 @@ def _render_tool_execution_environment(
     worker_routed_tool_names: tuple[str, ...],
     worker_scope: WorkerScope | None,
     file_access: FileAccess,
-    has_workspace: bool,
     unconfined_tool_names: tuple[str, ...],
     primary_only_unconfined_tool_names: tuple[str, ...],
     shared_directories: tuple[str, ...],
@@ -885,14 +872,8 @@ def _render_tool_execution_environment(
     if not worker_routed_tool_names and not local_tool_names:
         return "## Tool Execution Environment\n- No tools are available in this runtime."
 
-    primary_shares = shared_directories and primary_tools_reach_shared_directories(runtime_paths)
-    without_workspace = "attachments and the shared directories below" if primary_shares else "attachments"
     file_access_description = {
-        "workspace": (
-            "agent workspace and attachments only"
-            if has_workspace
-            else f"this agent has no workspace, so path tools in the primary runtime reach only {without_workspace}"
-        ),
+        "workspace": "agent workspace and attachments only",
         "unrestricted": "any path the tool's process can reach",
     }[file_access]
     file_access_lines = [f"- File access for path tools: `{file_access}` ({file_access_description})."]
@@ -1464,7 +1445,6 @@ def _build_agent_role_context(
                 worker_routed_tool_names=worker_routed_tool_names,
                 worker_scope=agent_runtime.execution.execution_scope,
                 file_access=config.resolve_entity(agent_name).file_access,
-                has_workspace=agent_runtime.tool_base_dir is not None,
                 unconfined_tool_names=_unconfined_tool_names(
                     (*local_tool_names, *worker_routed_tool_names),
                     requires_primary_runtime=False,
@@ -1505,8 +1485,8 @@ def _build_agent_role_context(
             personality_section_heading=config.get_prompt("PERSONALITY_CONTEXT_SECTION_HEADING"),
             truncation_marker_template=config.get_prompt("CONTEXT_TRUNCATION_MARKER_TEMPLATE"),
             chunk_marker_template=config.get_prompt("CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE"),
-            workspace_context_files=workspace.context_files if workspace is not None else (),
-            workspace_root=workspace.root if workspace is not None else None,
+            workspace_context_files=workspace.context_files,
+            workspace_root=workspace.root,
             context_documents=context_documents,
             storage_path=runtime_paths.storage_root,
             runtime_paths=runtime_paths,
@@ -1572,7 +1552,7 @@ def _build_agent_instructions(
     if dynamic_tooling_block is not None:
         instructions.append(dynamic_tooling_block)
 
-    if agent_runtime.tool_base_dir is not None and not disable_runtime_capabilities:
+    if not disable_runtime_capabilities:
         instructions.append(config.get_prompt("OUTPUT_REDIRECT_PROMPT"))
         # A conditional expression keeps this builder within the complexity limit.
         instructions.extend((config.get_prompt("WORKSPACE_SKILL_AUTHORING_PROMPT"),) if skill_authoring else ())
@@ -1821,7 +1801,7 @@ def create_agent(
             agent_name,
             config,
             runtime_paths,
-            workspace_root=workspace.root if workspace is not None else None,
+            workspace_root=workspace.root,
             output_file_policy=output_file_policy,
             only=persona.kept_skills if persona is not None else None,
             refused=refused_skills,
@@ -1958,7 +1938,7 @@ def create_agent(
         cli_shell=cli_shell,
         deferred=tool_assembly.cli_deferred,
         context_documents=tuple(document.body for document in role_context.context_documents),
-        context_files=tuple(role_context.workspace_context_files(agent_runtime.tool_base_dir)),
+        context_files=tuple(role_context.workspace_context_files(agent_runtime.workspace.root)),
         knowledge_sources=()
         if enabled_knowledge is None
         else tuple(source.description for source in enabled_knowledge.sources),
@@ -1977,8 +1957,8 @@ def create_agent(
             identity=persona_prompt,
             toolkit_names=(*roster, *(deferred.name for deferred in tool_assembly.cli_deferred)),
             memory_root=(
-                agent_runtime.file_memory_root.relative_to(agent_runtime.tool_base_dir)
-                if agent_runtime.file_memory_root is not None and agent_runtime.tool_base_dir is not None
+                agent_runtime.workspace.file_memory_path.relative_to(agent_runtime.workspace.root)
+                if agent_runtime.workspace.file_memory_path is not None
                 else None
             ),
             runtime_context=_get_mind_runtime_context(agent_name, runtime_paths),

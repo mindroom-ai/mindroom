@@ -118,7 +118,7 @@ class _Workspace:
                 requester_id=self.requester_id,
             )
         )
-        root = resolve_agent_runtime("mind", config, paths, identity, create=True).file_memory_root
+        root = resolve_agent_runtime("mind", config, paths, identity, create=True).workspace.file_memory_path
         assert root is not None
         return config, paths, identity, root
 

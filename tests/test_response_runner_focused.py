@@ -160,6 +160,7 @@ from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import follow_up_envelope
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
+from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import ToolDispatchContext, build_execution_identity_from_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_model import TurnModel
@@ -8258,6 +8259,7 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
                     ),
                     catalog=catalog,
                     authorize=AsyncMock(),
+                    output_file_policy=ToolOutputFilePolicy(tmp_path / "owner" / "workspace"),
                 )
                 registry = TurnToolRegistry()
                 lifetime.register(owner, registry)

@@ -23,6 +23,7 @@ from mindroom.response_turn import PausedAttempt
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.delegation_helpers import (
     ScriptedAgents,
     _delegate_runtime_context,
@@ -88,7 +89,14 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
     options = {"config": config, "runtime_paths": paths, "identity": identity}
 
     async def invoke(name: str, **args: object) -> str:
-        toolkit = DelegateTools("leader", ["leader"], paths, config, execution_identity=identity)
+        toolkit = DelegateTools(
+            "leader",
+            ["leader"],
+            paths,
+            config,
+            agent_workspace_root_path(paths.storage_root, "leader"),
+            execution_identity=identity,
+        )
         if not native:
             if name == "run_subagent":
                 return await toolkit.run_subagent(task=str(args["task"]), model=model)
@@ -187,12 +195,26 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
     assert sum(record["previous_delegation_id"] is not None for record in records) == 1
 
     foreign_identity = replace(identity, session_id="another-parent-session")
-    toolkit = DelegateTools("leader", ["leader"], paths, config, execution_identity=foreign_identity)
+    toolkit = DelegateTools(
+        "leader",
+        ["leader"],
+        paths,
+        config,
+        agent_workspace_root_path(paths.storage_root, "leader"),
+        execution_identity=foreign_identity,
+    )
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=foreign_identity)):
         assert "not available" in await toolkit.continue_subagent(subagent_id=subagent_id, message="Leak the word")
     config.agents["leader"].delegate_to = []
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
-        toolkit = DelegateTools("leader", ["leader"], paths, config, execution_identity=identity)
+        toolkit = DelegateTools(
+            "leader",
+            ["leader"],
+            paths,
+            config,
+            agent_workspace_root_path(paths.storage_root, "leader"),
+            execution_identity=identity,
+        )
         assert "no longer an allowed target" in await toolkit.continue_subagent(
             subagent_id=subagent_id,
             message="Again",
@@ -221,7 +243,14 @@ async def test_cancellation_during_direct_reservation_settles_claim(
         write(*args, **kwargs)
 
     monkeypatch.setattr(sessions, "write_json_file_durable", blocked_write)
-    toolkit = DelegateTools("leader", ["leader"], paths, config, execution_identity=_identity())
+    toolkit = DelegateTools(
+        "leader",
+        ["leader"],
+        paths,
+        config,
+        agent_workspace_root_path(paths.storage_root, "leader"),
+        execution_identity=_identity(),
+    )
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=_identity())):
         task = asyncio.create_task(toolkit.run_subagent(task="Cancelled before the child starts"))
         assert await asyncio.to_thread(started.wait, 5)

@@ -15,7 +15,6 @@ from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.catalog import ensure_tool_registry_loaded, get_tool_by_name
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
-from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -83,17 +82,10 @@ def minimal_mode_problems(
 ) -> list[str]:
     """Return every unmet agent and deployment requirement for one agent scope."""
     storage = resolve_agent_storage(agent_name, config, runtime_paths, execution_identity)
-    problems = _shell_problems(config, runtime_paths, agent_name, execution_identity, storage)
-    workspace = resolve_agent_workspace_from_state_path(
-        agent_name,
-        config,
-        runtime_paths=runtime_paths,
-        state_storage_path=storage.state_root,
-        use_state_storage_path=storage.execution.policy.private_workspace_enabled,
-    )
-    if workspace is None:
-        problems.append(f"Give `{agent_name}` an agent workspace, for example with `memory_backend: file`.")
-    return [*problems, *minimal_shell_problems(config, runtime_paths, agent_name)]
+    return [
+        *_shell_problems(config, runtime_paths, agent_name, execution_identity, storage),
+        *minimal_shell_problems(config, runtime_paths, agent_name),
+    ]
 
 
 def minimal_subagent_candidates(

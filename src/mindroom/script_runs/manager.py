@@ -56,7 +56,6 @@ from mindroom.shell.supervisor import (
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.sandbox_proxy import runner_config_snapshot, sandbox_proxy_config
 from mindroom.tool_system.worker_routing import (
-    agent_workspace_root_path,
     build_agent_toolkit_worker_target,
     serialize_tool_execution_identity,
 )
@@ -1191,20 +1190,13 @@ class ScriptRunManager:
 
 def _agent_workspace(context: ToolRuntimeContext) -> Path:
     execution_identity = build_execution_identity_from_runtime_context(context)
-    runtime = resolve_agent_runtime(
+    return resolve_agent_runtime(
         context.agent_name,
         context.config,
         context.runtime_paths,
         execution_identity=execution_identity,
         create=True,
-    )
-    workspace = (
-        runtime.workspace.root
-        if runtime.workspace is not None
-        else agent_workspace_root_path(context.runtime_paths.storage_root, context.agent_name)
-    )
-    workspace.mkdir(parents=True, exist_ok=True)
-    return workspace.resolve()
+    ).workspace.root
 
 
 def _resolve_and_read_workspace_source(context: ToolRuntimeContext, relative_path: str) -> bytes:

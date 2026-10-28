@@ -815,7 +815,7 @@ def _runner_tool_output_workspace_root(
             # A dedicated worker cannot create a workspace its pod does not mount; the next ensure mounts it.
             msg = f"Agent workspace is not mounted in this worker yet; retry the call: {exc}"
             raise sandbox_worker_prep.WorkerRequestPreparationError(msg) from exc
-        return agent_runtime.tool_base_dir
+        return agent_runtime.workspace.root
 
     base_dir = runtime_overrides.get("base_dir") if runtime_overrides is not None else None
     if isinstance(base_dir, Path):
@@ -984,7 +984,7 @@ def _workspace_env_hook_workspace_for_request(
             execution_identity=execution_identity,
             create=True,
         )
-        return agent_runtime.tool_base_dir
+        return agent_runtime.workspace.root
 
     if prepared_base_dir is not None:
         return prepared_base_dir

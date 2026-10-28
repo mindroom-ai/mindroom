@@ -182,8 +182,8 @@ def _resolve_static_site_source(
         context.runtime_paths,
         execution_identity=build_execution_identity_from_runtime_context(context),
     ).workspace
-    if workspace is None:
-        msg = "static_site publishing requires an agent workspace in this runtime path."
+    if not workspace.root.is_dir():
+        msg = "static_site publishing found no agent workspace yet; write the site into the workspace first."
         raise ReportPublishingError(msg)
     try:
         site_dir = resolve_workspace_relative_path(

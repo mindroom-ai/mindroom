@@ -32,7 +32,7 @@ from mindroom.history.types import PreparedHistoryState
 from mindroom.llm.messages import Message
 from mindroom.teams.envelope import PreparedTeamExecution
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from mindroom.turn_model import TeamTurnModelSelection
 from tests.budget_helpers import budget_monitor_with_spend
 from tests.conftest import (
@@ -305,7 +305,14 @@ def test_delegated_follow_up_of_a_child_saved_without_a_requested_model(tmp_path
 async def test_direct_delegation_reads_the_orchestrators_budget_monitor(tmp_path: Path) -> None:
     config = _delegation_config()
     runtime_paths = _runtime_paths(tmp_path)
-    tools = DelegateTools("leader", ["child"], runtime_paths, config, execution_identity=_owner())
+    tools = DelegateTools(
+        "leader",
+        ["child"],
+        runtime_paths,
+        config,
+        agent_workspace_root_path(runtime_paths.storage_root, "leader"),
+        execution_identity=_owner(),
+    )
     context = replace(
         _delegate_runtime_context(config, runtime_paths, execution_identity=_owner()),
         orchestrator=MagicMock(budgets=_spent(runtime_paths, 12.0)),

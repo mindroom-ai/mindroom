@@ -116,9 +116,7 @@ def _workspace_for_agent(
         execution_identity=execution_identity,
         create=True,
     )
-    if resolved.workspace is not None:
-        return resolved.workspace.root
-    return agent_workspace_root_path(runtime_paths.storage_root, agent_name)
+    return resolved.workspace.root
 
 
 def _parse_utc_timestamp(value: object) -> datetime | None:

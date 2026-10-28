@@ -104,12 +104,12 @@ def resolve_agent_file_memory_knowledge(
         runtime_paths,
         execution_identity=execution_identity,
     )
-    if runtime.file_memory_root is None:
+    if runtime.workspace.file_memory_path is None:
         msg = f"File-memory agent '{agent_name}' did not resolve a file-memory root"
         raise ValueError(msg)
     return resolve_file_memory_knowledge(
         scope_user_id=agent_scope_user_id(agent_name),
-        root=runtime.file_memory_root,
+        root=runtime.workspace.file_memory_path,
         config=config,
         search_config=entity.memory_search,
     )
