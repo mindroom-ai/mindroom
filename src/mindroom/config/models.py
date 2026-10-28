@@ -49,6 +49,8 @@ _TOOL_CONFIG_CONTROL_KEYS = frozenset({"defer", "initial"})
 class StreamingConfig(BaseModel):
     """Timing parameters for streaming response edits."""
 
+    model_config = ConfigDict(extra="forbid")
+
     update_interval: float = Field(
         default=5.0,
         gt=0,
@@ -109,6 +111,8 @@ class BackgroundToolJobsConfig(BaseModel):
 
 class DebugConfig(BaseModel):
     """Debug and diagnostic settings."""
+
+    model_config = ConfigDict(extra="forbid")
 
     log_llm_requests: bool = Field(
         default=False,
@@ -279,6 +283,8 @@ class CompactionOverrideConfig(BaseModel):
     An authored null clears the value inherited from defaults, except for ``enabled``, where it turns compaction off.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     enabled: bool | None = Field(
         default=None,
         description="Whether to allow automatic pre-reply text compaction for this history scope",
@@ -338,6 +344,8 @@ class CompactionOverrideConfig(BaseModel):
 
 class CompactionConfig(BaseModel):
     """Concrete text compaction configuration."""
+
+    model_config = ConfigDict(extra="forbid")
 
     enabled: bool = Field(
         default=True,
@@ -621,6 +629,8 @@ class DefaultsConfig(BaseModel):
 class EmbedderConfig(BaseModel):
     """Configuration for memory embedder."""
 
+    model_config = ConfigDict(extra="forbid")
+
     model: str = Field(default=OPENAI_EMBEDDING_SMALL, description="Model name for embeddings")
     credentials_service: str | None = Field(
         default=None,
@@ -724,6 +734,8 @@ class ModelPricing(BaseModel):
 
 class ModelConfig(BaseModel):
     """Configuration for an AI model."""
+
+    model_config = ConfigDict(extra="forbid")
 
     provider: str = Field(
         description="Model provider (openai, anthropic, vertexai_claude, ollama, etc)",
@@ -889,6 +901,8 @@ class ModelConfig(BaseModel):
 
 class RouterConfig(BaseModel):
     """Configuration for the router system."""
+
+    model_config = ConfigDict(extra="forbid")
 
     model: str = Field(
         default="default",

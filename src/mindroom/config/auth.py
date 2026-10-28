@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mindroom.config.validation import duplicate_items
 
 
 class AuthorizationConfig(BaseModel):
     """Authorization configuration with fine-grained permissions."""
+
+    model_config = ConfigDict(extra="forbid")
 
     config_command_enabled: bool = Field(
         default=False,

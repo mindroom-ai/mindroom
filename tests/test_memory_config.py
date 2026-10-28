@@ -24,7 +24,7 @@ from mem0.utils.factory import LlmFactory
 from pydantic import ValidationError
 
 from mindroom.config.agent import AgentConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, config_validation_issues
 from mindroom.config.memory import MemoryConfig, _MemoryEmbedderConfig, _MemoryLLMConfig
 from mindroom.config.models import EmbedderConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
@@ -1254,6 +1254,21 @@ class TestMemoryConfig:
         )
         assert memory.auto_flush.enabled is True
         assert memory.model_dump(exclude_unset=True) == {"backend": "file", "auto_flush": {"enabled": True}}
+
+        with pytest.raises(ValidationError) as exc_info:
+            MemoryConfig.model_validate({"auto_flush": {"max_dirty_age": 600}})
+        assert config_validation_issues(exc_info.value) == [
+            (("auto_flush", "max_dirty_age"), "Unknown key 'max_dirty_age': remove it or correct its spelling"),
+        ]
+
+    def test_misspelled_embedder_field_fails_config_load(self) -> None:
+        """An embedder field MindRoom does not define fails config load, naming its location, instead of doing nothing."""
+        with pytest.raises(ValidationError) as exc_info:
+            Config(memory={"embedder": {"provider": "openai", "config": {"base_url": "http://localhost:8080/v1"}}})
+
+        assert config_validation_issues(exc_info.value) == [
+            (("memory", "embedder", "config", "base_url"), "Unknown key 'base_url': remove it or correct its spelling"),
+        ]
 
     def test_memory_config_accepts_disabled_backend(self) -> None:
         """The memory config should accept disabled memory in object and shorthand form."""

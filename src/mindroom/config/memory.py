@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from mindroom.config.legacy_fields import drop_retired_auto_flush_fields
 from mindroom.config.models import EmbedderConfig, normalize_api_key_setting
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.path_globs import validate_safe_relative_pattern
@@ -38,6 +39,8 @@ def _validate_memory_search_includes(value: list[str]) -> list[str]:
 class MemorySearchConfig(BaseModel):
     """Search behavior for file-backed memory."""
 
+    model_config = ConfigDict(extra="forbid")
+
     mode: _MemorySearchMode = Field(
         default="keyword",
         description="Search mode for file-backed memory: keyword or semantic",
@@ -61,6 +64,8 @@ class MemorySearchConfig(BaseModel):
 class AgentMemorySearchConfig(BaseModel):
     """Optional per-agent override for file-backed memory search."""
 
+    model_config = ConfigDict(extra="forbid")
+
     mode: _MemorySearchMode | None = Field(default=None, description="Per-agent memory search mode override")
     include: list[str] | None = Field(default=None, description="Per-agent included memory-search glob patterns")
     include_entrypoint: bool | None = Field(default=None, description="Per-agent MEMORY.md indexing override")
@@ -74,6 +79,8 @@ class AgentMemorySearchConfig(BaseModel):
 
 class _MemoryEmbedderConfig(BaseModel):
     """Memory embedder configuration."""
+
+    model_config = ConfigDict(extra="forbid")
 
     provider: str = Field(
         default="openai",
@@ -109,6 +116,8 @@ class _MemoryEmbedderConfig(BaseModel):
 class _MemoryLLMConfig(BaseModel):
     """Memory LLM configuration."""
 
+    model_config = ConfigDict(extra="forbid")
+
     provider: str = Field(default="ollama", description="LLM provider (ollama, openai, openrouter, anthropic)")
     config: dict[str, Any] = Field(
         default_factory=dict,
@@ -131,6 +140,8 @@ class _MemoryLLMConfig(BaseModel):
 
 class _MemoryFileConfig(BaseModel):
     """File-backed memory configuration."""
+
+    model_config = ConfigDict(extra="forbid")
 
     path: str | None = Field(
         default=None,
@@ -155,6 +166,8 @@ class _MemoryFileConfig(BaseModel):
 class _MemoryAutoFlushBatchConfig(BaseModel):
     """Batching controls for background memory auto-flush."""
 
+    model_config = ConfigDict(extra="forbid")
+
     max_sessions_per_cycle: int = Field(
         default=10,
         ge=1,
@@ -170,6 +183,8 @@ class _MemoryAutoFlushBatchConfig(BaseModel):
 class _MemoryAutoFlushContextConfig(BaseModel):
     """Existing-memory context limits injected into extraction runs."""
 
+    model_config = ConfigDict(extra="forbid")
+
     memory_snippets: int = Field(
         default=5,
         ge=0,
@@ -184,6 +199,8 @@ class _MemoryAutoFlushContextConfig(BaseModel):
 
 class _MemoryAutoFlushExtractorConfig(BaseModel):
     """Extraction limits for one background memory flush job."""
+
+    model_config = ConfigDict(extra="forbid")
 
     model: str | None = Field(
         default=None,
@@ -214,13 +231,16 @@ class _MemoryAutoFlushExtractorConfig(BaseModel):
     )
 
 
-# LEGACY_COMPAT: Retired push-model auto-flush settings.
-# Legacy format: memory.auto_flush.max_dirty_age_seconds and memory.auto_flush.max_cross_session_reprioritize, which the dashboard wrote on every save.
-# Last legacy release: v2026.10.335; replacement: v2026.10.336 flushes quiet conversations from stored sessions and removes both fields.
-# Handling: this model ignores unknown fields, so a config that still sets them loads unchanged and the next dashboard save drops them.
-# Coverage: tests/test_memory_config.py::TestMemoryConfig::test_retired_auto_flush_fields_still_load.
 class MemoryAutoFlushConfig(BaseModel):
     """Background memory auto-flush configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def drop_retired_auto_flush_fields(cls, data: object) -> object:
+        """Drop the retired dirty-queue fields older dashboards saved, before unknown keys are rejected."""
+        return drop_retired_auto_flush_fields(data)
 
     enabled: bool = Field(default=False, description="Enable background file-memory auto-flush worker")
     flush_interval_seconds: int = Field(
@@ -260,6 +280,8 @@ class MemoryAutoFlushConfig(BaseModel):
 
 class MemoryConfig(BaseModel):
     """Memory system configuration."""
+
+    model_config = ConfigDict(extra="forbid")
 
     @model_validator(mode="before")
     @classmethod

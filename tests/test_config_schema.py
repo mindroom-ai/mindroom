@@ -167,6 +167,19 @@ def test_dashboard_schema_reports_default_factory_values() -> None:
     assert "default" not in schema["$defs"]["VoiceSTTConfig"]["properties"]["credentials_service"]
 
 
+def test_every_authored_config_section_rejects_unknown_keys() -> None:
+    """A misspelled key fails config load in every section instead of loading and doing nothing."""
+    schema = dashboard_config_schema()
+    open_sections = sorted(
+        name
+        for name, definition in schema["$defs"].items()
+        if "properties" in definition and definition.get("additionalProperties") is not False
+    )
+
+    assert schema["additionalProperties"] is False
+    assert open_sections == []
+
+
 def test_dashboard_schema_snapshot_is_current() -> None:
     """Frontend tests render the checked-in snapshot, so it must match the models."""
     snapshot_path = (

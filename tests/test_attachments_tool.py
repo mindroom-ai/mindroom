@@ -567,7 +567,6 @@ async def test_attachments_tool_get_attachment_selective_proxy_uses_worker_for_w
     }
     assert not any(workspace.rglob("*"))
     mocked_save.assert_called_once()
-    assert mocked_save.call_args.kwargs["worker_tools_override"] == worker_tools_override
 
 
 @pytest.mark.asyncio

@@ -28,6 +28,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_unscoped_worker_key,
     resolve_worker_target,
 )
+from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from tests.conftest import call_proxy_sync_for_test
 
 if TYPE_CHECKING:
@@ -156,13 +157,14 @@ _ROUTED_UNSCOPED_KEY = "v1:routed:unscoped:code"
 
 
 @pytest.fixture
-def payloads(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+def payloads(monkeypatch: pytest.MonkeyPatch, current_static_runner: None) -> list[dict[str, Any]]:
     """Record every execute payload the sandbox proxy sends; the default backend is the shared static runner."""
+    del current_static_runner
     recorded: list[dict[str, Any]] = []
 
     @contextmanager
-    def lease(*_args: object, **_kwargs: object) -> Iterator[object]:
-        yield object()
+    def lease(*_args: object, **_kwargs: object) -> Iterator[StaticSandboxRunnerBackend]:
+        yield StaticSandboxRunnerBackend(api_root="http://sandbox-runner:8765", auth_token="proxy-token")  # noqa: S106
 
     monkeypatch.setattr(sandbox_proxy_module, "lease_primary_worker_manager", lease)
     monkeypatch.setattr(_RecordingClient, "payloads", recorded, raising=False)
