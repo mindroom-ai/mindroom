@@ -174,6 +174,7 @@ async def test_model_params_mask_credentials_nested_in_request_params_and_extra_
             "default": ModelConfig(
                 provider="openrouter",
                 id="deepseek/deepseek-v4.1-flash",
+                api_key="openrouter-key",
                 extra_kwargs={
                     "temperature": 0.2,
                     "request_params": {
@@ -186,7 +187,7 @@ async def test_model_params_mask_credentials_nested_in_request_params_and_extra_
         },
         debug=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(log_dir)),
     )
-    provider = build_model_provider(config, _runtime_paths(tmp_path, OPENROUTER_API_KEY="openrouter-key"))
+    provider = build_model_provider(config, _runtime_paths(tmp_path))
 
     await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")]))
 
