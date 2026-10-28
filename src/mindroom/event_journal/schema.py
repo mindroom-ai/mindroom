@@ -97,7 +97,7 @@ OUTBOX_TABLE = """
 # payload; a call whose card had already retired has no payload left, and a reply call rebuilt from a live card's
 # payload has none when that payload lacked them. Selected by the approval records conversion in
 # legacy_approval_records.py; every call the current release inserts stores both.
-# Last legacy release: v2026.10.633; replacement: the next release stores both on every approval_calls row it writes.
+# Last legacy release: v2026.10.647; replacement: the next release stores both on every approval_calls row it writes.
 # Handling: approval_calls.tool_name and approval_calls.invoking_agent stay nullable and hold NULL only in those
 # converted rows. Each is decided, and nothing reads them: a paused reply's calls are read only while the reply exists,
 # and those were copied from approval_continuation_calls, which stored both; a card's invoking agent is read only to
