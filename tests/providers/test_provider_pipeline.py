@@ -173,6 +173,29 @@ async def test_transient_failure_before_output_is_retried_and_its_usage_carried(
 
 
 @pytest.mark.asyncio
+async def test_a_retried_turn_keeps_the_answering_attempt_s_context_usage() -> None:
+    """Counters sum across attempts, but the context the model saw is the answering attempt's, not the failed one's."""
+
+    def usage(input_tokens: int) -> MessageMetrics:
+        return MessageMetrics(
+            tokens=TokenCounts(input_tokens=input_tokens, total_tokens=input_tokens),
+            provider_metrics={"context_usage": {"input_tokens": input_tokens}, "server_tool_requests": 1},
+        )
+
+    inner = _ScriptedProvider([[UsageReported(usage(40)), _transient()], [TextDelta("done"), _turn(usage=usage(90))]])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
+
+    finished = (await _drain(provider, ModelRequest(messages=[_user()])))[-1]
+
+    assert isinstance(finished, TurnCompleted)
+    assert finished.message.metrics.provider_metrics == {
+        "context_usage": {"input_tokens": 90},
+        "server_tool_requests": 2,
+    }
+    assert finished.message.metrics.tokens.input_tokens == 130
+
+
+@pytest.mark.asyncio
 async def test_a_transient_failure_is_reissued_after_its_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.2)
     inner = _ScriptedProvider([[_transient()], [_turn()]])
