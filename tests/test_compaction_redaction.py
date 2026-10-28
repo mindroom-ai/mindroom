@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -15,6 +16,7 @@ from mindroom.history.storage import (
     _remove_redacted_event_from_history,
     _with_scope_seen_event_ids,
     read_scope_seen_event_ids,
+    remove_history_of_redacted_events,
     update_scope_seen_event_ids,
 )
 from mindroom.history.types import HistoryScope, ScopeSummary
@@ -37,7 +39,7 @@ from tests.history_helpers import (
 from tests.session_storage.agno_layout import write_agno_database
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Collection
     from pathlib import Path
 
 _SCOPE = HistoryScope(kind="agent", scope_id="code")
@@ -375,6 +377,28 @@ def test_a_late_save_after_a_legacy_clear_cannot_replay_the_cleared_run(
     assert storage.save_run(session, late_copy, record_usage=False) == "removed"
 
     assert _stored(storage).runs == []
+
+
+@pytest.mark.asyncio
+async def test_redaction_cleans_the_scope_runs_of_a_row_naming_an_older_owner(tmp_path: Path) -> None:
+    """Cleanup takes the scope from the turn, because a session row can name an owner other than its scope.
+
+    Releases before v2026.2.55 let Agno derive an agent's id from its display name, and a row keeps the owner its last
+    save wrote, so a conversation last saved then names ``code-agent`` while the runs it gets now belong to ``code``.
+    """
+    old_run = replace(_run("old"), agent_id="code-agent")
+    old_session = ConversationSession(session_id="session", kind="agent", owner_id="code-agent", runs=[old_run])
+    write_agno_database(AgnoTableNames("code").database_path(tmp_path), old_session, usage=False)
+    storage = _open(tmp_path)
+    storage.save_run(_stored(storage), _run("new"), record_usage=False)
+    session = _stored(storage)
+    assert session.owner_id == "code-agent"
+
+    async def redacted_history_events(event_ids: Collection[str]) -> dict[str, str | None]:
+        return dict.fromkeys(set(event_ids) & {"$new"})
+
+    assert await remove_history_of_redacted_events(storage, session, _SCOPE, redacted_history_events) == ["$new"]
+    assert [run.run_id for run in _stored(storage).runs] == ["old"]
 
 
 def test_team_redaction_without_compaction_keeps_unrelated_runs(storage: ConversationStore) -> None:
