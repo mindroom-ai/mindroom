@@ -1,10 +1,9 @@
 """Replay a stored assistant message on a Responses request: from its checkpoint, its recorded output, or a rebuild.
 
-A completed unstored or portable response that reasoned keeps its ordered output items under ``RESPONSE_OUTPUT_KEY``,
-and every response its hosted tool-search items under ``TOOL_SEARCH_ITEMS_KEY``, in the assistant message's
-``provider_data``; both keys are part of the stored run format. A reply with recorded output goes as recorded, so its
-reasoning stays attached to the items it produced; any other message, another provider's included, is rebuilt from
-its canonical text and calls.
+Every Responses reply keeps its response's ordered output items under ``RESPONSE_OUTPUT_KEY`` in its
+``provider_data``, which is part of the stored run format. A reply whose output carries encrypted reasoning goes as
+recorded, so the reasoning stays attached to the items it produced; any other message, another provider's included,
+is rebuilt from its canonical text and calls.
 """
 
 from __future__ import annotations
@@ -12,30 +11,38 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from mindroom.native_compaction import checkpoint_items
+from mindroom.providers.openai.legacy_response_replay import legacy_tool_search_items
 
 if TYPE_CHECKING:
     from mindroom.llm.messages import Message
 
-__all__ = ["RESPONSE_OUTPUT_KEY", "TOOL_SEARCH_ITEMS_KEY", "assistant_replay_items"]
+__all__ = ["RESPONSE_OUTPUT_KEY", "assistant_replay_items", "recorded_output"]
 
-TOOL_SEARCH_ITEMS_KEY = "tool_search_items"
 RESPONSE_OUTPUT_KEY = "mindroom_response_output"
+_TOOL_SEARCH_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
+
+
+def recorded_output(message: Message) -> list[dict[str, Any]] | None:
+    """Return the ordered output items the response behind ``message`` recorded, or None when it recorded none."""
+    items = (message.provider_data or {}).get(RESPONSE_OUTPUT_KEY)
+    return items if isinstance(items, list) else None
 
 
 def assistant_replay_items(message: Message, native_route: str | None) -> list[dict[str, Any]]:
     """Return the input items that replay one assistant message, whose calls carry the request's tool-call ids.
 
-    A checkpoint on ``native_route`` stands for the message, and a recorded output goes as recorded while canonical
-    history still holds what it records; any other message is rebuilt.
+    A checkpoint on ``native_route`` stands for the message, and a recorded output carrying encrypted reasoning goes
+    as recorded while canonical history still holds what it records; any other message is rebuilt.
     """
     if checkpoint := checkpoint_items(message, native_route):
         return checkpoint
     calls = _function_call_items(message)
-    data = message.provider_data or {}
-    output = data.get(RESPONSE_OUTPUT_KEY)
-    if isinstance(output, list) and (replayed := _as_recorded(message, output, calls)) is not None:
+    output = recorded_output(message)
+    if output is None:
+        return _rebuilt(message, legacy_tool_search_items(message), calls)
+    if (replayed := _as_recorded(message, output, calls)) is not None:
         return replayed
-    return _rebuilt(message, data.get(TOOL_SEARCH_ITEMS_KEY) or [], calls)
+    return _rebuilt(message, [item for item in output if item.get("type") in _TOOL_SEARCH_ITEM_TYPES], calls)
 
 
 def _function_call_items(message: Message) -> list[dict[str, Any]]:
@@ -59,9 +66,14 @@ def _as_recorded(
 ) -> list[dict[str, Any]] | None:
     """Return ``output`` with the turn's canonical calls in place of the recorded ones, or None when it cannot go.
 
-    Output whose text differs from the canonical text, or that lacks one of the canonical calls, no longer matches
-    the turn, so the turn is rebuilt. A recorded call canonical history no longer holds stays out.
+    It goes only when all its reasoning carries encrypted content: output without reasoning holds nothing a rebuild
+    loses, and a reasoning item without encrypted content, as a stored response returns it, cannot be resent. Output
+    whose text differs from the canonical text, or that lacks one of the canonical calls, no longer matches the turn,
+    so the turn is rebuilt. A recorded call canonical history no longer holds stays out.
     """
+    reasoning = [item for item in output if item.get("type") == "reasoning"]
+    if not reasoning or not all(item.get("encrypted_content") for item in reasoning):
+        return None
     text = "".join(
         part.get("text", "")
         for item in output

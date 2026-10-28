@@ -97,9 +97,7 @@
         },
         "mindroom_native_compaction": null,
         "mindroom_portable_replay": false,
-        "mindroom_response_stored": false,
-        "response_id": "resp_parity",
-        "tool_search_items": [
+        "mindroom_response_output": [
           {
             "arguments": {
               "queries": [
@@ -127,8 +125,18 @@
               }
             ],
             "type": "tool_search_output"
+          },
+          {
+            "arguments": "{\"order_id\": \"A-1001\"}",
+            "call_id": "call_parity_order",
+            "id": "fc_parity_order",
+            "name": "lookup_order",
+            "status": "completed",
+            "type": "function_call"
           }
-        ]
+        ],
+        "mindroom_response_stored": false,
+        "response_id": "resp_parity"
       },
       "role": "assistant",
       "tool_calls": [

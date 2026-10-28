@@ -19,8 +19,8 @@ from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.personal_agents import (
-    _activate_personal_agent_roster_entry,
     _append_personal_agent_roster_entry,
+    _settle_roster_entry,
     provision_personal_agent,
 )
 from tests.conftest import test_runtime_paths
@@ -225,7 +225,7 @@ async def test_unsupported_owner_id_gets_no_account_or_roster_entry(tmp_path: Pa
 
     with (
         patch("mindroom.personal_agents.create_agent_user", new=create_user),
-        pytest.raises(ValueError, match="cannot own a personal agent"),
+        pytest.raises(ValueError, match=r"cannot own (a personal|an) agent"),
     ):
         await _provision(config, paths, user_id)
 
@@ -410,11 +410,11 @@ async def test_cancelled_provisioning_finishes_its_roster_write_under_the_lock(t
     def slow_activate(*args: Any) -> None:  # noqa: ANN401
         writing.set()
         release.wait(5)
-        _activate_personal_agent_roster_entry(*args)
+        _settle_roster_entry(*args)
 
     with (
         patch("mindroom.personal_agents.create_agent_user", new=_create_agent_user()),
-        patch("mindroom.personal_agents._activate_personal_agent_roster_entry", new=slow_activate),
+        patch("mindroom.personal_agents._settle_roster_entry", new=slow_activate),
     ):
         task = asyncio.create_task(_provision(config, paths))
         try:
