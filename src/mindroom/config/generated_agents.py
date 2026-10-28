@@ -21,17 +21,9 @@ logger = get_logger(__name__)
 class GeneratedAgentInfo:
     """What the effective config remembers about one personal or created agent."""
 
-    base: str
-    owner: str
-    co_owners: tuple[str, ...]
     created: bool
     # The base's pass-one tool names, which the owner's tools edit may choose from.
     allowed_tools: tuple[str, ...]
-
-
-def tool_ceiling(config: Config, agent_name: str) -> tuple[str, ...]:
-    """Return the tool names a generated agent based on this agent may choose from."""
-    return tuple(entry.name for entry in config._get_agent_authored_tool_configs(agent_name))
 
 
 def _generated_agent_data(
@@ -109,7 +101,7 @@ def expand_generated_agents(
     for entry in roster.entries:
         name = entry.agent_name
         if base.personal_agent_instance(name) is not None:
-            infos[name] = GeneratedAgentInfo(name, entry.user_id, (), False, tool_ceiling(base, name))
+            infos[name] = GeneratedAgentInfo(created=False, allowed_tools=base.tool_ceiling(name))
             if entry.edits is not None:
                 builds.append((name, name, entry.edits, None))
 
@@ -128,8 +120,7 @@ def expand_generated_agents(
             logger.warning("created_agent_skipped", agent_name=name, creator=creator, reason=reason)
             continue
         taken.add(name)
-        co_owners = tuple(created.co_owners)
-        infos[name] = GeneratedAgentInfo(creator, created.owner, co_owners, True, tool_ceiling(base, creator))
+        infos[name] = GeneratedAgentInfo(created=True, allowed_tools=base.tool_ceiling(creator))
         builds.append((name, creator, created.edits, created))
 
     for name, base_agent, edits, created in builds:

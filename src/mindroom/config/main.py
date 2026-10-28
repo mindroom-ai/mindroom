@@ -43,7 +43,7 @@ from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProf
 from mindroom.config.egress_broker import EgressBrokerConfig
 from mindroom.config.entity_view import ResolvedEntityView
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
-from mindroom.config.generated_agents import GeneratedAgentInfo, expand_generated_agents, tool_ceiling
+from mindroom.config.generated_agents import GeneratedAgentInfo, expand_generated_agents
 from mindroom.config.judgment import LLMJudgmentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeRerankerConfig
 from mindroom.config.knowledge_graph import KnowledgeGraphConfig
@@ -1274,7 +1274,8 @@ class Config(BaseModel):
         # authored_model_dump drops created agents always and personal agents while they match these dumps.
         config._personal_agent_dumps = {
             agent_name: config.agents[agent_name].model_dump(exclude_unset=True)
-            for agent_name in config._generated_agents
+            for agent_name, info in config._generated_agents.items()
+            if not info.created
         }
         config._personal_agents_added_agents_section = (
             bool(config._generated_agents) and isinstance(data, dict) and "agents" not in data
@@ -1319,9 +1320,9 @@ class Config(BaseModel):
         payload = self.runtime_model_dump()
         agents = payload.get("agents")
         if isinstance(agents, dict):
-            for agent_name, generated in self._personal_agent_dumps.items():
+            for agent_name, info in self._generated_agents.items():
                 # A created agent lives only in the roster; an edited personal agent stays, so saving it collides.
-                if self._generated_agents[agent_name].created or agents.get(agent_name) == generated:
+                if info.created or agents.get(agent_name) == self._personal_agent_dumps[agent_name]:
                     agents.pop(agent_name, None)
             if not agents and self._personal_agents_added_agents_section:
                 payload.pop("agents")
@@ -1376,13 +1377,14 @@ class Config(BaseModel):
         return self._personal_agent_instances.get(agent_name)
 
     def generated_agent(self, agent_name: str) -> GeneratedAgentInfo | None:
-        """Return the base, owners and allowed tools of one personal or created agent, or None for an authored agent."""
+        """Return whether one personal or created agent was created and its allowed tools, or None for an authored one."""
         return self._generated_agents.get(agent_name)
 
     def tool_ceiling(self, agent_name: str) -> tuple[str, ...]:
         """Return the tools this agent's edits, or the agents it creates, may choose from; pass one's if generated."""
-        info = self._generated_agents.get(agent_name)
-        return tool_ceiling(self, agent_name) if info is None else info.allowed_tools
+        if (info := self._generated_agents.get(agent_name)) is not None:
+            return info.allowed_tools
+        return tuple(entry.name for entry in self._get_agent_authored_tool_configs(agent_name))
 
     def personal_agent_name(self, template: str, user_id: str) -> str | None:
         """Return the agent generated from one template for one user, or None before that user is onboarded."""

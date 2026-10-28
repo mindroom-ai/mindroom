@@ -17,7 +17,7 @@ from structlog.testing import capture_logs
 from mindroom import personal_agents
 from mindroom.config import generated_agents
 from mindroom.config.agent import AgentConfig
-from mindroom.config.generated_agents import GeneratedAgentInfo, _generated_agent_data, tool_ceiling
+from mindroom.config.generated_agents import GeneratedAgentInfo, _generated_agent_data
 from mindroom.config.main import _DEFER_PROHIBITED_CONTROL_TOOLS, Config
 from mindroom.config.personal_agents import (
     CreatedAgentEntry,
@@ -98,7 +98,7 @@ def _validated_child(data: dict[str, Any], tmp_path: Path) -> Config:
 
 def test_the_tool_ceiling_is_the_effective_tool_names(tmp_path: Path) -> None:
     """The ceiling lists the agent's own tools and the defaults, in effective order."""
-    assert tool_ceiling(_config(tmp_path), "creator") == ("calculator", "shell")
+    assert _config(tmp_path).tool_ceiling("creator") == ("calculator", "shell")
 
 
 def test_chosen_tools_are_copied_whole_from_the_effective_list(tmp_path: Path) -> None:
@@ -120,7 +120,7 @@ def test_chosen_tools_turn_defaults_off(tmp_path: Path) -> None:
     data, _ = _generated_agent_data(config, "creator", GeneratedAgentEdits(tools=["calculator"]))
     child = _validated_child(data, tmp_path)
     assert [entry.name for entry in child._get_agent_authored_tool_configs("child")] == ["calculator"]
-    assert tool_ceiling(child, "child") == ("calculator",)
+    assert child.tool_ceiling("child") == ("calculator",)
 
 
 def test_unknown_tool_names_are_dropped(tmp_path: Path) -> None:
@@ -286,9 +286,6 @@ def test_a_created_agent_loads_from_its_creator(tmp_path: Path) -> None:
     assert agent.access.users == [OWNER, CO_OWNER]
     assert [entry.name for entry in config._get_agent_authored_tool_configs("creator_research")] == ["shell"]
     assert config.generated_agent("creator_research") == GeneratedAgentInfo(
-        base="creator",
-        owner=OWNER,
-        co_owners=(CO_OWNER,),
         created=True,
         allowed_tools=("calculator", "shell"),
     )
@@ -307,9 +304,6 @@ def test_personal_agent_edits_apply_at_load(tmp_path: Path) -> None:
     # The owner may add back shell from defaults.tools, which the edit removed.
     assert config.tool_ceiling("mind_alice") == ("calculator", "shell")
     assert config.generated_agent("mind_alice") == GeneratedAgentInfo(
-        base="mind_alice",
-        owner=OWNER,
-        co_owners=(),
         created=False,
         allowed_tools=("calculator", "shell"),
     )
@@ -710,7 +704,7 @@ async def test_create_names_the_agent_after_its_creator_and_registers_it(tmp_pat
         ),
     ]
     reloaded = Config.validate_with_runtime(deepcopy(BASE), paths)
-    assert reloaded.generated_agent("creator_research").owner == OWNER
+    assert reloaded.generated_agent("creator_research") is not None
     assert [entry.name for entry in reloaded._get_agent_authored_tool_configs("creator_research")] == ["shell"]
 
 

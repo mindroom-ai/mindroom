@@ -12,7 +12,6 @@ from pydantic import ValidationError
 from mindroom.background_tasks import run_blocking_or_compensate, run_blocking_until_complete
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.config.agent import AgentConfig
-from mindroom.config.generated_agents import tool_ceiling
 from mindroom.config.personal_agents import (
     CreatedAgentEntry,
     GeneratedAgentEdits,
@@ -363,7 +362,7 @@ def generated_agent_settings(
     """Return the current values an owner may edit, the tools they may choose from and, if created, the owners."""
     entry, _ = _owned_entry(config, runtime_paths, agent_name, requester_id)
     current = config.agents[agent_name].model_dump(include={"display_name", "role", "instructions"})
-    current["tools"] = list(tool_ceiling(config, agent_name))  # An agent's own effective tools are those it has now.
+    current["tools"] = [entry.name for entry in config.resolve_entity(agent_name).authored_tool_configs]
     settings = {"agent_name": agent_name, "edits": current, "allowed_tools": list(config.tool_ceiling(agent_name))}
     if isinstance(entry, CreatedAgentEntry):
         settings |= {"owner": entry.owner, "co_owners": entry.co_owners}
