@@ -3672,6 +3672,106 @@ describe("the Account choice", () => {
     );
   });
 
+  it("drops the service's own account when an edit moves it to a login whose accounts are each user's", async () => {
+    const first = await renderEditor({
+      ...withGmail,
+      name: "mail",
+      service: { preset: "google_gmail", oauth_separate_account: true },
+    });
+    type("Preset", "github");
+    expect(accountChoice()).toBeNull();
+    save();
+    await waitFor(() =>
+      expect(first.onSave).toHaveBeenCalledWith("mail", { preset: "github" }),
+    );
+    cleanup();
+    const rules = [
+      { host: "api.example.com", auth: { type: "bearer" as const } },
+    ];
+    const second = await renderEditor({
+      ...withGmail,
+      name: "mine",
+      service: {
+        rules,
+        oauth_provider: "google_gmail",
+        oauth_separate_account: true,
+      },
+    });
+    type("Account login (optional)", "github");
+    expect(accountChoice()).toBeNull();
+    save();
+    await waitFor(() =>
+      expect(second.onSave).toHaveBeenCalledWith("mine", {
+        rules,
+        oauth_provider: "github",
+      }),
+    );
+  });
+
+  it("restores the saved choice when an edit comes back to the loaded preset", async () => {
+    const { onSave } = await renderEditor({
+      ...withGmail,
+      name: "mail",
+      service: { preset: "google_gmail", oauth_separate_account: true },
+    });
+    type("Preset", "openai");
+    type("Preset", "google_gmail");
+    expect(another()).toBeChecked();
+    save();
+    await waitFor(() =>
+      expect(onSave).toHaveBeenCalledWith("mail", {
+        preset: "google_gmail",
+        oauth_separate_account: true,
+      }),
+    );
+  });
+
+  it("says saving disconnects the own account where the form no longer asks which account", async () => {
+    const connected = credentialService({
+      name: "mail",
+      display_name: "Gmail",
+      source: "user",
+      separate_account: true,
+      configured: true,
+      active_source: "oauth",
+      oauth: oauthStatus({
+        provider: "google_gmail",
+        display_name: "Gmail",
+        connected: true,
+        account_label: "team@example.com",
+      }),
+    });
+    const line = "Saving disconnects team@example.com.";
+    await renderEditor({
+      ...withGmail,
+      agentServices: [gmail, connected],
+      name: "mail",
+      service: { preset: "google_gmail", oauth_separate_account: true },
+    });
+    expect(screen.queryByText(line)).toBeNull();
+    type("Preset", "openai");
+    expect(accountChoice()).toBeNull();
+    expect(screen.getByText(line)).toBeVisible();
+    cleanup();
+    const rules = [
+      { host: "api.example.com", auth: { type: "bearer" as const } },
+    ];
+    await renderEditor({
+      ...withGmail,
+      agentServices: [gmail, connected],
+      name: "mail",
+      service: {
+        rules,
+        oauth_provider: "google_gmail",
+        oauth_separate_account: true,
+      },
+    });
+    expect(screen.queryByText(line)).toBeNull();
+    type("Account login (optional)", "");
+    expect(accountChoice()).toBeNull();
+    expect(screen.getByText(line)).toBeVisible();
+  });
+
   it("says <name> in the header while the name is empty", async () => {
     await renderEditor(withGmail);
     type("Preset", "google_gmail");

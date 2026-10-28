@@ -340,7 +340,8 @@ export function EgressServiceEditor({
 
   // A new service starts on an account of its own where another service of
   // the agent already uses the tools' one, again each time its login can
-  // change; an edited one keeps its choice while it has a login at all.
+  // change; an edited one keeps its choice while its login can have an
+  // account of its own.
   const startsOnOwnAccount = (next: EgressServiceForm) => {
     const fresh = { ...next, separateAccount: false };
     const nextPreset = presetOf(presets, next.preset);
@@ -356,7 +357,13 @@ export function EgressServiceEditor({
       const next = { ...previous, ...changes };
       if ("preset" in changes || "oauthProvider" in changes) {
         if (!editing) next.separateAccount = startsOnOwnAccount(next);
-        else if (serviceLogin(next, presetOf(presets, next.preset)) === "")
+        else if (
+          !offersSeparateAccount(
+            { ...next, separateAccount: false },
+            options,
+            presetOf(presets, next.preset),
+          )
+        )
           next.separateAccount = false;
       }
       return nameLocked || nameTyped || "name" in changes
@@ -485,7 +492,8 @@ export function EgressServiceEditor({
 
   // Another preset has its own defaults, so what the loaded service emptied on
   // purpose no longer applies to it. Back on the loaded preset, its own login
-  // applies again, as the save writes it, whatever login was picked under Custom.
+  // and its account choice apply again, as the save writes them, whatever was
+  // picked on the way.
   const choosePreset = (value: string) => {
     // The rules the helper wrote are gone with the preset's own, so typed
     // repositories are to be applied again when the form is saved.
@@ -495,7 +503,10 @@ export function EgressServiceEditor({
       preset: value,
       replacePresetRules: false,
       rules: form.rules.length > 0 ? form.rules : [emptyRule()],
-      ...(loaded && { oauthProvider: service.oauth_provider ?? "" }),
+      ...(loaded && {
+        oauthProvider: service.oauth_provider ?? "",
+        separateAccount: service.oauth_separate_account === true,
+      }),
       explicitlyEmpty: {
         ...NOT_EXPLICITLY_EMPTY,
         presetLogin: loaded && service.oauth_provider !== undefined,
@@ -634,6 +645,12 @@ export function EgressServiceEditor({
             </p>
           ))}
           {preset && accountChoice}
+          {/* Without the Account field, the save still removes the own account. */}
+          {!choosesAccount && disconnects && (
+            <p className="text-xs text-muted-foreground">
+              Saving disconnects {disconnects}.
+            </p>
+          )}
           {usesOwnRules(form) && (
             <div className="grid gap-3 sm:grid-cols-2">
               <RuleHostField {...ruleEditing(0, primaryRule)} />
