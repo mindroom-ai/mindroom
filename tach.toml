@@ -8137,6 +8137,7 @@ depends_on = ["mindroom.bounded_bytes", "mindroom.llm", "mindroom.logging_config
 [[modules]]
 path = "mindroom.providers.gemini"
 depends_on = [
+    "mindroom.constants",
     "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.model_defaults",

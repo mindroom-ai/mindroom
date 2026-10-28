@@ -17,8 +17,11 @@ from google.oauth2.credentials import Credentials
 from pydantic import BaseModel
 
 from mindroom.config.models import ModelConfig
+from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.llm.errors import (
     MALFORMED_TOOL_CALL,
+    MISSING_API_KEY,
+    AuthenticationFailed,
     ContextWindowExceeded,
     InvalidRequest,
     ProviderError,
@@ -1354,6 +1357,24 @@ async def test_gemini_upload_transport_failure_is_retryable(
     assert raised.value.retryable
     assert raised.value.__cause__ is failure
     assert server.model_requests() == []
+
+
+@pytest.mark.asyncio
+async def test_a_gemini_api_model_without_any_key_fails_as_a_missing_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no key anywhere the SDK looks, the request fails unsent and the reply says how to connect one."""
+    for variable in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI"):
+        monkeypatch.delenv(variable, raising=False)
+    config = ModelConfig(provider="google", id="gemini-3.8-flash")
+    adapter = gemini_adapter.build_provider(config, runtime_paths_for(tmp_path))
+
+    with pytest.raises(AuthenticationFailed) as raised:
+        await anext(adapter.stream(_request()))
+
+    assert (raised.value.code, raised.value.provider) == (MISSING_API_KEY, "Google")
+    assert "Connect your AI provider" in get_user_friendly_error_message(raised.value)
 
 
 @pytest.mark.asyncio

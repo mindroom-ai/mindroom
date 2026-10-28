@@ -19,12 +19,13 @@ from google.genai.errors import APIError
 from google.genai.types import HttpOptions
 from pydantic import ValidationError
 
+from mindroom.constants import PROVIDER_ENV_KEYS
 from mindroom.llm.errors import InvalidRequest, ProviderError
 from mindroom.llm.provider import Capabilities, ModelIdentity
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
 from mindroom.providers.assistant_turn import TurnTimer, finished_turn
 from mindroom.providers.credentials import gemini_uses_vertexai, model_api_key
-from mindroom.providers.errors import classify_provider_error, provider_failure
+from mindroom.providers.errors import classify_provider_error, missing_api_key_error, provider_failure
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
 from mindroom.providers.gemini.files import uploaded_file_uri
 from mindroom.providers.gemini.settings import GeminiSettings
@@ -55,6 +56,8 @@ if TYPE_CHECKING:
 
 _PROVIDER = "Google"
 _SAMPLING_CONTROL_NAMES = frozenset({"temperature", "top_p", "top_k"})
+# How the SDK's ``ValueError`` begins when a Gemini API client has no API key at all.
+_NO_API_KEY_ERROR = "No API key was provided."
 
 
 @dataclass(slots=True, kw_only=True)
@@ -81,9 +84,15 @@ class GeminiProvider:
         """
         timer = TurnTimer()
         reply = GeminiReply()
-        # Client construction reads credentials from disk; its failures are configuration errors, not transient.
-        client = self._sdk_client()
         provider = self.identity.provider_name
+        # Client construction reads credentials from disk; its failures are configuration errors, not transient.
+        try:
+            client = self._sdk_client()
+        except ValueError as error:
+            # A Gemini API client finds no key in the config, the dashboard, or the variables the SDK reads.
+            if not str(error).startswith(_NO_API_KEY_ERROR):
+                raise
+            raise missing_api_key_error(PROVIDER_ENV_KEYS["google"], provider=provider) from error
         # The client, which ``client_params`` can switch to Vertex AI, names the route; Vertex AI has no Files API.
         upload = None if client.vertexai else partial(uploaded_file_uri, client, provider=provider)
         try:
