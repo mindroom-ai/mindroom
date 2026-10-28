@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, replace
 from functools import partial
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -24,6 +24,7 @@ from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.delegation import recovery as delegation_recovery
 from mindroom.delegation.background import delegation_child, start_delegation
 from mindroom.delegation.lifecycle import child_run_context, start_child_turn
+from mindroom.event_journal import JOB_ENDED_REASON, BackgroundApprovalDecision, tool_job_run_id
 from mindroom.matrix import state as matrix_state
 from mindroom.mcp.registry import sync_mcp_tool_registry
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
@@ -51,16 +52,19 @@ from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     awaiting_approval,
     completed_delegation_job,
+    job_card_decision,
     keep_child,
     lookup,
     managed_team_config,
     pending_outcomes,
+    reserve_job_card,
     start_delegation_job,
     team_coordinator,
     tool_job_journal,
     tool_job_runtime,
     toolkit_job_tools,
     wait_for_status,
+    write_saved_job,
 )
 
 if TYPE_CHECKING:
@@ -686,11 +690,11 @@ async def test_initialize_reads_the_journal_only_once_configured(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_interrupted_job_cards_are_denied_once_the_approval_runtime_can(
+async def test_a_delegation_a_restart_interrupted_denies_its_cards_without_an_approval_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A delegation a restart interrupted denies its approval cards, retrying until the approval runtime manages to."""
+    """A delegation a restart stopped while its card was pending leaves no answerable card, with no runtime to deny it."""
     coordinator = ToolJobRuntimeCoordinator(
         test_runtime_paths(tmp_path),
         lambda: managed_team_config(tmp_path),
@@ -698,41 +702,21 @@ async def test_interrupted_job_cards_are_denied_once_the_approval_runtime_can(
         AgentReplyMembershipIndex(),
         partial(tool_job_journal, test_runtime_paths(tmp_path).storage_root),
     )
-    coordinator._runtime = await tool_job_runtime(tmp_path)
     monkeypatch.setattr(delegation_recovery, "interrupt_child", AsyncMock())
-    settled: list[str] = []
-
-    @dataclass
-    class _Approvals:
-        cards: object = field(default_factory=object)
-        send_delivery: object = field(default_factory=object)
-        failures: int = 1
-
-        async def settle_pending_background_approvals(self, run_id: str, *, reason: str) -> int:
-            assert reason
-            settled.append(run_id)
-            if self.failures:
-                self.failures -= 1
-                msg = "approval store unavailable"
-                raise OSError(msg)
-            return 1
-
-    approvals: _Approvals | None = None
-    monkeypatch.setattr(approval_manager, "get_approval_store", lambda: approvals)
-    job = replace(completed_delegation_job(), status="running", result=None)
-    run_id = f"tool-job:{job.job_id}"
+    monkeypatch.setattr(approval_manager, "get_approval_store", lambda: None)
+    job = replace(completed_delegation_job(), status="awaiting_approval", result=None)
+    await write_saved_job(tmp_path, job.job_id, json.dumps(asdict(job)))
+    coordinator._runtime = await tool_job_runtime(tmp_path, cancel=coordinator._interrupt)
+    run_id = tool_job_run_id(job.job_id)
     try:
-        # No approval runtime yet, then one whose first settlement fails: both leave the job for the next pass.
-        await coordinator._interrupt(job)
-        approvals = _Approvals()
-        await coordinator._reconcile()
-        assert coordinator.runtime.unsettled_approvals == {job.job_id}
-        await coordinator._reconcile()
-        assert coordinator.runtime.unsettled_approvals == set()
-        await coordinator._reconcile()
+        await reserve_job_card(coordinator.runtime.journal, run_id, "call", tool_name="write_report")
+        await coordinator.runtime.recover()
+        assert await job_card_decision(coordinator.runtime.journal, run_id, "call") == BackgroundApprovalDecision(
+            "denied",
+            JOB_ENDED_REASON,
+        )
     finally:
         await coordinator.runtime.shutdown()
-    assert settled == [run_id, run_id]
 
 
 @pytest.mark.asyncio

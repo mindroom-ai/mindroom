@@ -1886,7 +1886,7 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
     orchestrator.config_reload.apply_update_plan = AsyncMock(return_value=True)
 
     response_task = asyncio.create_task(
-        runner._run_locked_response_lifecycle(
+        runner.run_locked_response_lifecycle(
             request,
             response_kind="ai",
             locked_operation=run_response,
@@ -3615,7 +3615,7 @@ async def test_in_flight_response_count_nonzero_during_send_response(
         return None
 
     task = asyncio.create_task(
-        runner._run_locked_response_lifecycle(
+        runner.run_locked_response_lifecycle(
             request,
             response_kind="ai",
             locked_operation=run_response,
@@ -3674,7 +3674,7 @@ async def test_in_flight_response_count_stays_per_entity_across_bots(
 
     busy_runner = unwrap_extracted_collaborator(busy._response_runner)
     task = asyncio.create_task(
-        busy_runner._run_locked_response_lifecycle(
+        busy_runner.run_locked_response_lifecycle(
             ResponseRequest(
                 sources=ResponseSources(
                     pending_event_ids=("$reply",),
@@ -3738,7 +3738,7 @@ async def test_closed_admission_defers_response_until_gate_reopens(
 
     assert admission_gate.close_if_idle()
     task = asyncio.create_task(
-        runner._run_locked_response_lifecycle(
+        runner.run_locked_response_lifecycle(
             ResponseRequest(
                 sources=ResponseSources(
                     pending_event_ids=("$reply",),

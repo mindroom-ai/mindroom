@@ -36,7 +36,6 @@ def _runtime(
         entity_name=entity_name,
         generation="gen-test",
         retry_sources=lambda _room_id, _sources: None,
-        hold_conversation=lambda _continuation: None,
         approval_ended=lambda _ended: None,
     )
 
@@ -331,7 +330,7 @@ async def pause_shown_reply(
         show_tool_calls=continuation.show_tool_calls,
     )
     stage = rl.WriteStage.EDIT if text else None
-    enqueued = await principal.pause_for_approval(
+    enqueued = await principal.approvals.pause_for_approval(
         continuation,
         ReplyRowRequest(
             reply_id=span.reply_id,
@@ -360,7 +359,7 @@ async def pause_shown_reply(
             event_id=f"{continuation.response_event_id}:paused",
             delivered_projections=(),
         )
-    return await principal.approval_continuation(continuation.approval_id)
+    return await principal.approvals.approval_continuation(continuation.approval_id)
 
 
 async def paused_for_approval(
@@ -372,7 +371,7 @@ async def paused_for_approval(
     """Pause a reply for ``continuation`` the way a response does, and return the continuation the pause created.
 
     ``None`` means the pause could not take the sources, as
-    ``PrincipalStore.pause_for_approval`` reports it. A claimed continuation
+    ``ApprovalStore.pause_for_approval`` reports it. A claimed continuation
     is paused ready and then claimed by its ``runtime_generation``'s resume.
     ``text`` is the partial answer the paused reply keeps.
     """

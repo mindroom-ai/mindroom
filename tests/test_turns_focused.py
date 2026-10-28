@@ -677,7 +677,6 @@ def _build_harness(
                 entity_name=agent_name,
                 generation="test-runtime",
                 retry_sources=lambda _room_id, _event_ids: None,
-                hold_conversation=lambda _continuation: None,
                 approval_ended=lambda _ended: None,
             ),
         ),

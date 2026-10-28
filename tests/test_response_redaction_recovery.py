@@ -50,7 +50,6 @@ def _redaction_callback_bot(journal_store: EventJournalStore) -> AgentBot:
         entity_name="agent",
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
-        hold_conversation=lambda _continuation: None,
         approval_ended=lambda _ended: None,
     )
     return bot

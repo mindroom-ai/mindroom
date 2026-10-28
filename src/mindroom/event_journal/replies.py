@@ -47,11 +47,10 @@ class WakeApproval:
 class ApprovalEnded:
     """After commit: the approval that held this reply ended.
 
-    The claims that waited for it retry, the reply's debt is due, and its
-    conversation stops waiting for it.
+    The claims that waited for it retry and the reply's debt is due; the
+    conversation it held learns of its end from the approval signals.
     """
 
-    approval_id: str
     reply_id: str
 
 
@@ -135,8 +134,9 @@ def _run(
                 turn_rows.deleted_events(transaction, reply.entity_name, reply.room_id, logical),
             ):
                 turn_rows.complete_turn_of(transaction, reply.entity_name, logical)
-        case FenceApproval(approval_id=approval_id, disposition=disposition):
-            approval_continuations.fence(transaction, principal_id, approval_id=approval_id, reason=disposition)
+        case FenceApproval(approval_id=approval_id, kind=kind, detail=detail):
+            failure = approval_continuations.ApprovalFailure(kind, detail)
+            approval_continuations.fence(transaction, principal_id, approval_id=approval_id, failure=failure)
             post_commit.append(WakeApproval(approval_id))
         case CancelSpan():
             post_commit.append(effect)
@@ -276,9 +276,6 @@ def approval_finished(
     reply = lock_paused_reply(transaction, principal_id, continuation)
     assert reply is not None, "a continuation's paused reply exists while the continuation does"
     assert continuation.span_id is not None
-    disposition: rl.FailureDisposition | None = None
-    if continuation.state == "failing":
-        disposition = "cancelled_by_user" if continuation.failure_reason == "cancelled_by_user" else "failed"
     return apply(
         transaction,
         principal_id,
@@ -287,7 +284,7 @@ def approval_finished(
             reply_spans.load(transaction, principal_id, reply.last_span_id),
             approval_id=continuation.approval_id,
             paused_span_id=continuation.span_id,
-            disposition=disposition,
+            failure_kind=None if continuation.failure is None else continuation.failure.kind,
             answers_turn=owner_available,
             now_ns=time.time_ns(),
         ),

@@ -68,7 +68,7 @@ def _runner_on(
         replace(
             deps,
             delivery_gateway=replace(gateway, deps=replace(gateway.deps, reply_effects=replies.run_effects)),
-            approval_store=principal,
+            approval_store=principal.approvals,
             replies=replies,
         ),
     )

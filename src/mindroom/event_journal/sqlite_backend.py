@@ -23,15 +23,9 @@ from typing import TYPE_CHECKING, Any
 from mindroom.file_locks import release_file_lock, try_exclusive_file_lock
 from mindroom.logging_config import get_logger
 
-from .legacy_response_attempts import upgrade_continuation_identity
-from .legacy_schema import (
-    upgrade_hydration_walk_version,
-    upgrade_legacy_journal,
-    upgrade_outbox_reply_rows,
-)
-from .legacy_turn_rows import upgrade_turn_records_to_rows
 from .offloading import ThreadOffload, settled
-from .schema import OUTBOX_TABLE, SQLITE_DIALECT, render, schema_statements
+from .schema import SQLITE_DIALECT, SchemaDialect, render, schema_statements
+from .upgrades import upgrade_schema
 from .write_queue import CLOSED_MESSAGE, WriteOutcome, WriteQueue
 
 if TYPE_CHECKING:
@@ -39,7 +33,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from typing import TextIO
 
-    from .backend import Operation, Row
+    from .backend import Operation, PublishSignals, Row
 
 
 logger = get_logger(__name__)
@@ -58,6 +52,7 @@ class _SqliteTransaction:
     """Statement execution against one open SQLite connection."""
 
     connection: sqlite3.Connection
+    signals: list[object] = field(default_factory=list)
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> None:
         """Run one statement."""
@@ -70,6 +65,30 @@ class _SqliteTransaction:
     def fetchall(self, sql: str, params: Sequence[Any] = ()) -> tuple[Row, ...]:
         """Run one query and return every row."""
         return tuple(self.connection.execute(render(sql, SQLITE_DIALECT), tuple(params)).fetchall())
+
+    def signal(self, value: object) -> None:
+        """Record what this operation's commit tells in-process listeners."""
+        self.signals.append(value)
+
+
+@dataclass(frozen=True, slots=True)
+class _SqliteSchemaInspector:
+    """What the SQLite schema transaction currently holds."""
+
+    connection: sqlite3.Connection
+    dialect: SchemaDialect = SQLITE_DIALECT
+
+    def tables(self) -> frozenset[str]:
+        """Return the names of every table."""
+        return frozenset(
+            str(row[0]) for row in self.connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        )
+
+    def columns(self, table: str) -> frozenset[str]:
+        """Return the column names of one table, empty when it does not exist."""
+        return frozenset(
+            str(row[0]) for row in self.connection.execute("SELECT name FROM pragma_table_info(?)", (table,))
+        )
 
 
 def _enter_wal(connection: sqlite3.Connection) -> None:
@@ -156,8 +175,8 @@ class SqliteBackend:
     )
 
     @classmethod
-    def open(cls, database_path: Path) -> SqliteBackend:
-        """Create the schema and connect.
+    def open(cls, database_path: Path, *, publish: PublishSignals) -> SqliteBackend:
+        """Create the schema and connect; ``publish`` receives what each committed write signalled.
 
         Synchronous, because a bot builds its collaborators before it has an
         event loop. The writer task is created on the first write instead, so
@@ -171,6 +190,7 @@ class SqliteBackend:
             apply=backend._apply,
             offload=backend._offload,
             task_name=f"event_journal_sqlite_writer_{database_path.name}",
+            publish=publish,
         )
         return backend
 
@@ -191,33 +211,7 @@ class SqliteBackend:
         _configure(connection, synchronous="FULL")
         connection.execute("BEGIN IMMEDIATE")
         try:
-            existing_tables = frozenset(
-                str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-            )
-            upgrade_legacy_journal(_SqliteTransaction(connection), existing_tables)
-            hydration_columns = frozenset(
-                str(row[1]) for row in connection.execute("PRAGMA table_info(conversation_hydration)")
-            )
-            upgrade_hydration_walk_version(_SqliteTransaction(connection), hydration_columns)
-            outbox_columns = frozenset(
-                str(row[1]) for row in connection.execute("PRAGMA table_info(matrix_delivery_outbox)")
-            )
-            upgrade_outbox_reply_rows(
-                _SqliteTransaction(connection),
-                outbox_columns,
-                outbox_table_ddl=OUTBOX_TABLE,
-                sqlite=True,
-            )
-            continuation_columns = frozenset(
-                str(row[1]) for row in connection.execute("PRAGMA table_info(approval_continuations)")
-            )
-            upgrade_continuation_identity(_SqliteTransaction(connection), existing_tables, continuation_columns)
-            upgrade_turn_records_to_rows(
-                _SqliteTransaction(connection),
-                existing_tables,
-                outbox_columns,
-                schema_ddl=schema_statements(SQLITE_DIALECT),
-            )
+            upgrade_schema(_SqliteTransaction(connection), _SqliteSchemaInspector(connection))
             for statement in schema_statements(SQLITE_DIALECT):
                 connection.execute(statement)
             connection.execute("COMMIT")
@@ -258,8 +252,9 @@ class SqliteBackend:
 
     def _apply_one(self, operation: Operation[Any]) -> WriteOutcome:
         self._writer.execute("SAVEPOINT journal_write")
+        transaction = _SqliteTransaction(self._writer)
         try:
-            result = operation(_SqliteTransaction(self._writer))
+            result = operation(transaction)
         except Exception as error:
             if not self._writer.in_transaction:
                 # The error took the whole transaction, and the batch with it.
@@ -268,7 +263,7 @@ class SqliteBackend:
             self._writer.execute("RELEASE journal_write")
             return WriteOutcome(error=error)
         self._writer.execute("RELEASE journal_write")
-        return WriteOutcome(result=result)
+        return WriteOutcome(result=result, signals=tuple(transaction.signals))
 
     async def write[T](self, operation: Operation[T]) -> T:
         """Queue one operation for the writer task and await its commit."""

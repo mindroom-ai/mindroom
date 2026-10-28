@@ -120,7 +120,7 @@ async def test_released_journal_upgrades_and_preserves_new_work(legacy_database:
         assert await store.existing_generation() == "original-journal-generation"
         principal = store.principal(_ACCOUNT)
         assert not await principal.pending()
-        assert await principal.approval_continuation("old-approval") is None
+        assert await principal.approvals.approval_continuation("old-approval") is None
         assert await store.backend.read(lambda tx: tx.fetchall("SELECT * FROM matrix_delivery_outbox")) == ()
         history = await store.backend.read(lambda tx: tx.fetchone("SELECT content_json FROM visible_messages"))
         assert history is not None

@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
 type _Params = Sequence[Any]
 type Row = Mapping[str, Any]
+# Receives, on the writer's loop, the signals of every operation in one committed batch, in batch order.
+type PublishSignals = Callable[[Sequence[object]], None]
 
 
 class Transaction(Protocol):
@@ -31,6 +33,13 @@ class Transaction(Protocol):
 
     def fetchall(self, sql: str, params: _Params = ()) -> tuple[Row, ...]:
         """Run one query and return every row."""
+        ...
+
+    def signal(self, value: object) -> None:
+        """Record what this operation's commit tells in-process listeners; an operation that rolls back tells nothing.
+
+        Only a write publishes what it records, once its batch commits; a read or the schema transaction drops it.
+        """
         ...
 
 

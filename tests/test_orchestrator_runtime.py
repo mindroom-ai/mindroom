@@ -535,6 +535,28 @@ async def test_a_runtime_refuses_a_journal_another_runtime_holds(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_binding_the_journal_loads_its_paused_replies_before_any_bot_follows_them(tmp_path: Path) -> None:
+    """The runtime that holds the journal loads its approval signals as it binds, before it creates a bot."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator.config = MagicMock()
+    journal = MagicMock()
+    journal.hold_exclusively = AsyncMock(return_value=True)
+    journal.load_approval_signals = AsyncMock()
+
+    with (
+        patch.object(orchestrator, "_shared_journal_store", return_value=journal),
+        patch("mindroom.orchestrator.bind_event_journal", new=AsyncMock(return_value="journal-identity")),
+    ):
+        await orchestrator._bind_event_journal()
+
+    journal.load_approval_signals.assert_awaited_once_with()
+    assert orchestrator.agent_bots == {}
+
+
+@pytest.mark.asyncio
 async def test_a_runtime_that_loses_its_journal_stops() -> None:
     """Once the journal's claim lapses, another runtime could take it over, so this one shuts down."""
     orchestrator = MagicMock()

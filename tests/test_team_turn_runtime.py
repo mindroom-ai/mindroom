@@ -3003,12 +3003,12 @@ async def _approving_team_bot(
 
     initialize_approval_store_for_test(
         bot.runtime_paths,
-        prepare_event=prepare_event,
-        send_delivery=send_card,
-        resolve_delivery=AsyncMock(return_value=None),
+        prepare_approval_event=prepare_event,
+        send_approval_delivery=send_card,
+        resolve_approval_delivery=AsyncMock(return_value=None),
         cards=bot._journal_store.principal("router@shared"),
-        transport_sender=lambda: "@router:localhost",
-        sending_device=lambda: "DEVICE",
+        transport_sender_id=lambda: "@router:localhost",
+        transport_device_id=lambda: "DEVICE",
     )
     try:
         with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=streaming)):
@@ -3075,7 +3075,7 @@ async def test_a_member_s_gated_delegation_posts_its_card_and_the_approved_reply
         assert _shown(bot) == (
             f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1] ⏳\n\n\n**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]"
         )
-        continuation = await bot.journal_principal().approval_continuation_for_source(EVENT_ID)
+        continuation = await bot.journal_principal().approvals.approval_continuation_for_source(EVENT_ID)
         assert continuation is not None
         assert (continuation.state, continuation.show_tool_calls) == ("waiting", True)
 
@@ -3085,7 +3085,7 @@ async def test_a_member_s_gated_delegation_posts_its_card_and_the_approved_reply
         f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1]\n\nWriter: dug.\n\n\n"
         "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]\n\nConsensus."
     )
-    assert await bot.journal_principal().approval_continuation_for_source(EVENT_ID) is None
+    assert await bot.journal_principal().approvals.approval_continuation_for_source(EVENT_ID) is None
     record, member, state = _delegation_state(team)
     assert (record.status, member.status) == (RunStatus.completed, RunStatus.completed)
     assert [child.status for child in state.children] == ["completed"]
@@ -3122,7 +3122,7 @@ async def test_a_member_s_next_gated_delegation_during_the_resume_posts_the_next
             f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1]\n\n\n\n🔧 `run_subagent` [2] ⏳\n\n\n"
             "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [3]"
         )
-        continuation = await bot.journal_principal().approval_continuation_for_source(EVENT_ID)
+        continuation = await bot.journal_principal().approvals.approval_continuation_for_source(EVENT_ID)
         assert continuation is not None
         assert continuation.state == "waiting"
 
@@ -3132,7 +3132,7 @@ async def test_a_member_s_next_gated_delegation_during_the_resume_posts_the_next
         f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1]\n\n\n\n🔧 `run_subagent` [2]\n\nWriter: dug twice.\n\n\n"
         "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [3]\n\nConsensus."
     )
-    assert await bot.journal_principal().approval_continuation_for_source(EVENT_ID) is None
+    assert await bot.journal_principal().approvals.approval_continuation_for_source(EVENT_ID) is None
     record, member, state = _delegation_state(team)
     assert (record.status, member.status) == (RunStatus.completed, RunStatus.completed)
     assert [child.status for child in state.children] == ["completed", "completed"]
@@ -3184,7 +3184,7 @@ async def test_a_member_s_child_s_gated_delegation_posts_its_card_in_the_team_sl
         f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1]\n\nWriter: dug.\n\n\n"
         "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]\n\n\n\n🔧 `run_subagent` [3]\n\nConsensus."
     )
-    assert await bot.journal_principal().approval_continuation_for_source(EVENT_ID) is None
+    assert await bot.journal_principal().approvals.approval_continuation_for_source(EVENT_ID) is None
     assert len(team.models["checker-model"].requests) == 1
     *_, helper_result = [m for m in team.models["writer-model"].requests[-1].messages if m.role == "tool"]
     assert "Helper: dug deeper." in str(helper_result.content)

@@ -1,7 +1,7 @@
 """The narrow slices of a principal's store that collaborators actually use.
 
-`PrincipalStore` is one object with twenty-eight methods covering admission,
-replay, membership, conversation reads, hydration, refetch, and delivery. That
+`PrincipalStore` is one object whose methods cover admission, replay,
+membership, conversation reads, hydration, refetch, and delivery. That
 is the shape of the universal cache dependency this design exists to remove:
 once every collaborator holds the whole surface, any of them can reach for any
 part of it, and the boundaries stop being real.
@@ -20,20 +20,13 @@ from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from typing import Literal
 
     from mindroom.event_journal.history_recovery import (
         HistoryRecoveryOutcome,
         RoomHistoryRecovery,
     )
-    from mindroom.tool_approval_grants import ApprovalGrant, ApprovalGrantRevocation, ApprovalGrantScope
 
-    from .approval_card_state import ApprovalCardReservation, ApprovalDecisionMetadata, RecordedApprovalDecision
-    from .approvals import (
-        StoredApprovalCard,
-        UnreadableApprovalCard,
-    )
-    from .background_approvals import BackgroundApprovalDecision
+    from .approval_store import ApprovalStore
     from .interactive_questions import InteractiveSelection
     from .models import (
         AdmissionFacts,
@@ -58,14 +51,6 @@ if TYPE_CHECKING:
     )
     from .projection import ProjectedEvent
     from .replies import PreparedReplyRow, ReplyRowEnqueue, ReplyRowRequest, ReplyStore
-    from .scheduled_approvals import (
-        ScheduledApprovalArmState,
-        ScheduledCall,
-        ScheduledCallBinding,
-        ScheduledCallClaim,
-        ScheduledCallOutcome,
-        ScheduledCallRefusal,
-    )
 
 
 class AdmissionView(Protocol):
@@ -462,155 +447,8 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
     @property
     def principal_id(self) -> str: ...  # noqa: D102
 
-    async def enqueue_unavailable_approval_notice(  # noqa: D102
-        self,
-        *,
-        approval_id: str,
-        room_id: str,
-        thread_id: str | None,
-        payload: Mapping[str, object],
-    ) -> str | None: ...
-
-    async def reserve_approval_card_deliveries(  # noqa: D102
-        self,
-        *,
-        continuation_principal_id: str,
-        continuation_id: str,
-        expected_generation: int,
-        cards: tuple[ApprovalCardReservation, ...],
-    ) -> bool: ...
-
-    async def reserve_background_approval_card(  # noqa: D102
-        self,
-        *,
-        room_id: str,
-        thread_id: str | None,
-        run_id: str,
-        call_id: str,
-        expires_at_ns: int,
-        card: ApprovalCardReservation,
-        grant_scope: ApprovalGrantScope | None = None,
-    ) -> bool: ...
-
-    async def background_approval_decision(  # noqa: D102
-        self,
-        *,
-        run_id: str,
-        call_id: str,
-    ) -> BackgroundApprovalDecision | None: ...
-
-    async def resolve_background_approval_call(  # noqa: D102
-        self,
-        *,
-        run_id: str,
-        call_id: str,
-        requested_status: Literal["denied", "expired"],
-        reason: str,
-    ) -> RecordedApprovalDecision: ...
-
-    async def resolve_pending_background_approval_calls(  # noqa: D102
-        self,
-        *,
-        run_id: str,
-        reason: str,
-    ) -> int: ...
-
-    async def prune_background_approvals(self, *, run_id: str) -> bool: ...  # noqa: D102
-
-    async def reserve_scheduled_call_approval(  # noqa: D102
-        self,
-        *,
-        binding: ScheduledCallBinding,
-        card: ApprovalCardReservation,
-    ) -> bool: ...
-
-    async def arm_scheduled_call_approval(  # noqa: D102
-        self,
-        *,
-        task_id: str,
-        workflow_digest: str,
-        any_arguments_allowed: bool,
-    ) -> ScheduledApprovalArmState: ...
-
-    async def withdraw_scheduled_call_approval(self, *, task_id: str, reason: str) -> RecordedApprovalDecision: ...  # noqa: D102
-
-    async def scheduled_call(self, *, task_id: str) -> ScheduledCall | None: ...  # noqa: D102
-
-    async def claim_scheduled_call(  # noqa: D102
-        self,
-        *,
-        call: ScheduledCall,
-        arguments_json: str,
-        receipt: ApprovalCardReservation,
-    ) -> ScheduledCallClaim | ScheduledCallRefusal: ...
-
-    async def record_scheduled_call_outcome(self, *, task_id: str, outcome: ScheduledCallOutcome) -> None: ...  # noqa: D102
-
-    async def resolve_continuation_approval_card(  # noqa: D102
-        self,
-        *,
-        card_event_id: str,
-        requested_status: Literal["approved", "denied", "expired"],
-        reason: str | None,
-        metadata: ApprovalDecisionMetadata,
-    ) -> RecordedApprovalDecision: ...
-
-    async def create_approval_grant(  # noqa: D102
-        self,
-        *,
-        room_id: str,
-        card_event_id: str,
-        sender_id: str,
-        seconds: int,
-        metadata: ApprovalDecisionMetadata,
-        reason: str | None = None,
-        current_binding: str | None = None,
-    ) -> tuple[RecordedApprovalDecision, ...]: ...
-
-    async def approval_grant_for_card(  # noqa: D102
-        self,
-        *,
-        room_id: str,
-        card_event_id: str,
-    ) -> ApprovalGrant | None: ...
-
-    async def maintain_automatic_approvals(self, *, grant_id: str | None = None) -> tuple[str, ...]: ...  # noqa: D102
-
-    async def revoke_approval_grant(  # noqa: D102
-        self,
-        *,
-        room_id: str,
-        card_event_id: str,
-        sender_id: str,
-        grant_id: str,
-    ) -> ApprovalGrantRevocation | None: ...
-
-    async def expire_unacknowledged_approval_card(  # noqa: D102
-        self,
-        *,
-        delivery_id: str,
-    ) -> RecordedApprovalDecision: ...
-
-    async def retire_approval_card(self, *, delivery_id: str, card_event_id: str) -> bool: ...  # noqa: D102
-    async def remember_terminal_approval_alias(  # noqa: D102
-        self,
-        *,
-        room_id: str,
-        card_event_id: str,
-        delivery_id: str,
-    ) -> None: ...
-
-    async def is_terminal_approval_card(self, *, room_id: str, card_event_id: str) -> bool: ...  # noqa: D102
-    async def pending_approval_card(self, *, room_id: str, card_event_id: str) -> StoredApprovalCard | None: ...  # noqa: D102
-
-    async def pending_approval_room_ids(self) -> tuple[str, ...]: ...  # noqa: D102
-    async def pending_approval_cards(  # noqa: D102
-        self,
-        *,
-        room_id: str,
-        limit: int = ...,
-        after: tuple[int, str] | None = None,
-    ) -> tuple[StoredApprovalCard | UnreadableApprovalCard, ...]: ...
+    @property
+    def approvals(self) -> ApprovalStore: ...  # noqa: D102
 
 
 __all__ = [

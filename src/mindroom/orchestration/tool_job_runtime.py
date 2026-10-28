@@ -1,4 +1,4 @@
-"""Managed tool-job lifecycle: recovery, revocation, card denial, and retention."""
+"""Managed tool-job lifecycle: recovery, revocation, follow-ups, and retention."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import turn_rows
 from mindroom.logging_config import get_logger
-from mindroom.tool_jobs.approvals import end_tool_call_approval, prune_job_approvals, settle_job_approvals
+from mindroom.tool_jobs.approvals import end_tool_call_approval, prune_job_approvals
 from mindroom.tool_jobs.authorization import locally_allowed
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import follow_up_jobs, next_follow_up_id
@@ -154,15 +154,15 @@ class ToolJobRuntimeCoordinator:
         return self._runtime
 
     async def _interrupt(self, job: BackgroundJob) -> BackgroundOutcome | None:
-        """Settle a stopped job's own cleanup: deny the cards it waits on, and reconcile a subagent's child."""
+        """Settle a stopped job's own cleanup and reconcile a subagent's child; the save of its end denies its cards."""
         if job.kind != "delegation":
             # A gated tool call that runs as a job may wait on its approval card.
-            return await end_tool_call_approval(self.runtime, job)
+            return end_tool_call_approval(job)
         config = self.config_provider()
         if config is None:
             msg = "Cannot settle a background job without runtime configuration."
             raise RuntimeError(msg)
-        outcome = await reconcile_delegation(
+        return await reconcile_delegation(
             job,
             cleanup=partial(
                 interrupt_stopped_child,
@@ -172,9 +172,6 @@ class ToolJobRuntimeCoordinator:
             ),
             runtime_paths=self.runtime_paths,
         )
-        # A job interrupted while it waited for approvals leaves its cards answerable until they are denied.
-        await settle_job_approvals(self.runtime, job.job_id)
-        return outcome
 
     def _authorized(self, job: BackgroundJob) -> bool:
         """Grant access only on a proven grant; unresolved membership fails closed."""
@@ -347,11 +344,9 @@ class ToolJobRuntimeCoordinator:
                 await asyncio.wait_for(self.runtime.changed.wait(), timeout=_RETRY_SECONDS)
 
     async def _reconcile(self) -> None:
-        """Stop revoked work, publish live jobs, deny interrupted jobs' cards, and admit follow-ups."""
+        """Stop revoked work, publish live jobs, and admit follow-ups."""
         await self.runtime.cancel_revoked(denied=self._denied)
         await self._publisher.publish(self.bot_provider, self.runtime.retained_jobs())
-        for job_id in tuple(self.runtime.unsettled_approvals):
-            await settle_job_approvals(self.runtime, job_id)
         await self._admit_follow_ups(self.runtime)
 
     async def _admit_follow_ups(self, runtime: ToolJobRuntime) -> None:

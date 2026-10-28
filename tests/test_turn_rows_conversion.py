@@ -22,13 +22,13 @@ import pytest_asyncio
 from mindroom.event_journal import (
     DeliveryStage,
     EventJournalStore,
-    postgres_backend,
-    sqlite_backend,
     turn_rows,
+    upgrades,
 )
 from mindroom.event_journal.legacy_turn_rows import (
     import_legacy_ledger_file,
     legacy_summary_sources,
+    upgrade_turn_records_to_rows,
 )
 from mindroom.turn_record import PreparedVoiceSource, SourceVisibleEcho, TurnRecord
 from tests.conftest import postgres_journal_schema_url
@@ -75,10 +75,10 @@ _LEGACY_TABLES = (
 
 
 @contextmanager
-def without_conversion(*, postgres: bool) -> Iterator[None]:
+def without_conversion() -> Iterator[None]:
     """Open as an earlier release: the conversion does not run in the schema transaction."""
-    module = postgres_backend if postgres else sqlite_backend
-    with patch.object(module, "upgrade_turn_records_to_rows", lambda *_args, **_kwargs: None):
+    earlier = tuple(upgrade for upgrade in upgrades._JOURNAL_UPGRADES if upgrade is not upgrade_turn_records_to_rows)
+    with patch.object(upgrades, "_JOURNAL_UPGRADES", earlier):
         yield
 
 
@@ -92,7 +92,7 @@ class Journal:
 
     async def legacy(self) -> EventJournalStore:
         """Open the database as an earlier release, without the conversion and with its old tables."""
-        with without_conversion(postgres=self.postgres):
+        with without_conversion():
             store = self.connect()
         self.opened.append(store)
 
