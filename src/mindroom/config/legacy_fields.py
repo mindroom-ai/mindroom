@@ -131,7 +131,7 @@ def retired_tool_override(overrides: Mapping[str, object]) -> tuple[str, str] | 
 # LEGACY_COMPAT: Retired max_retries setting of OpenAI-family models.
 # Legacy format: models.<name>.extra_kwargs.max_retries on an OpenAI-family route set the OpenAI SDK's own HTTP retries,
 #   beneath the request pipeline's retries.
-# Last legacy release: v2026.10.629; replacement: unreleased; the request pipeline retries a failed model request and
+# Last legacy release: v2026.10.642; replacement: unreleased; the request pipeline retries a failed model request and
 #   the SDK clients send each request once.
 # Handling: Reject it at config load on every provider, naming the key and saying to remove it.
 # Coverage: tests/test_extra_kwargs.py::test_a_retired_max_retries_fails_config_load_with_its_reason.
