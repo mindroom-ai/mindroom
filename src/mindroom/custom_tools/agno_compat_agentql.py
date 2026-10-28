@@ -12,10 +12,11 @@ from typing import TYPE_CHECKING, cast
 import requests
 from agentql import AgentQLServerError, AgentQLServerTimeoutError, APIKeyError, QueryParser
 from agentql._core._api_constants import (
+    AGENTQL_SERVER_URL_ENV_VAR,
     DEFAULT_REQUEST_ORIGIN,
+    DEFAULT_SERVER_URL,
     GET_AGENTQL_DATA_ENDPOINT,
     GET_AGENTQL_ELEMENT_ENDPOINT,
-    SERVICE_URL,
 )
 from agentql._core._errors import API_KEY_NOT_SET_MESSAGE
 from agentql._core._utils import raise_401_error
@@ -59,16 +60,27 @@ logger = get_logger(__name__)
 # Upstream PR: None identified for this credential handoff.
 # Remove when: Agno forwards its resolved key through an isolated AgentQL SDK
 # request API; retain scoped-key precedence, redirect rejection, parse diagnostics,
-# and concurrent-call isolation.
+# concurrent-call isolation, and the host read from the runtime environment and `.env`.
 # Coverage: tests/test_agentql_tools.py::test_agentql_resolved_key_reaches_request_without_shared_auth_mutation;
+# tests/test_agentql_tools.py::test_agentql_reads_its_host_from_the_env_file_beside_config;
 # tests/test_agentql_tools.py::test_agentql_concurrent_scoped_calls_leave_unrelated_sdk_auth_untouched;
 # tests/test_agentql_tools.py::test_agentql_retains_sdk_query_errors_and_browser_cleanup;
 # tests/test_agentql_tools.py::test_agentql_redirect_does_not_forward_scoped_request;
 # tests/test_agentql_tools.py::test_agentql_malformed_success_retains_parse_error.
 
 
+def _agentql_api_host(runtime_paths: RuntimePaths) -> str:
+    """Resolve the AgentQL host from the SDK's two settings, read from the runtime environment and its `.env`."""
+    return (
+        runtime_paths.env_value("AGENTQL_API_HOST")
+        or runtime_paths.env_value(AGENTQL_SERVER_URL_ENV_VAR)
+        or DEFAULT_SERVER_URL
+    )
+
+
 def _query_agentql_server(
     *,
+    api_host: str,
     api_key: str | None,
     query: str,
     accessibility_tree: dict[str, Any],
@@ -98,7 +110,7 @@ def _query_agentql_server(
             request_data["metadata"] |= cast("dict[str, Any]", kwargs["metadata"])
         endpoint = GET_AGENTQL_DATA_ENDPOINT if query_data else GET_AGENTQL_ELEMENT_ENDPOINT
         response = requests.post(
-            os.getenv("AGENTQL_API_HOST", SERVICE_URL) + endpoint,
+            api_host + endpoint,
             json=request_data,
             headers={"X-API-Key": api_key},
             timeout=timeout,
@@ -131,14 +143,16 @@ def _query_agentql_server(
 
 
 class _CredentialedPage(AgentQLPage):
-    """Retain SDK page behavior while binding request authentication to this page."""
+    """Retain SDK page behavior while binding the request host and authentication to this page."""
 
+    _api_host: str
     _api_key: str | None
 
     @classmethod
-    def with_api_key(cls, page: PlaywrightPage, api_key: str | None) -> Self:
-        """Initialize the SDK's page monitor and attach the toolkit's resolved key."""
+    def for_service(cls, page: PlaywrightPage, *, api_host: str, api_key: str | None) -> Self:
+        """Initialize the SDK's page monitor and attach the toolkit's AgentQL host and resolved key."""
         wrapped = cls.create(page)
+        wrapped._api_host = api_host
         wrapped._api_key = api_key
         return wrapped
 
@@ -159,6 +173,7 @@ class _CredentialedPage(AgentQLPage):
         if not accessibility_tree:
             accessibility_tree = get_accessibility_tree(self._page, include_hidden=include_hidden)
         response = _query_agentql_server(
+            api_host=self._api_host,
             api_key=self._api_key,
             query=query,
             accessibility_tree=accessibility_tree,
@@ -283,7 +298,11 @@ class MindRoomAgentQLTools(AgnoAgentQLTools):
                     args=[PROXIED_WEBRTC_ONLY_ARG],
                 ) as browser,
             ):
-                page = _CredentialedPage.with_api_key(browser.new_page(), self.api_key)
+                page = _CredentialedPage.for_service(
+                    browser.new_page(),
+                    api_host=_agentql_api_host(self._runtime_paths),
+                    api_key=self.api_key,
+                )
                 page.goto(url)
                 try:
                     response = page.query_data(query)

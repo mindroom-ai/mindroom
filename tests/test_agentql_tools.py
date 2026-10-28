@@ -53,13 +53,14 @@ class _AgentQLBoundary:
     )
     status_code: int = 200
     timeout_error: bool = False
+    api_host: str = "https://api.agentql.test"
 
     def respond(self, request: requests.PreparedRequest, **kwargs: object) -> requests.Response:
         """Retain requests' header/body building and the SDK's response/error handling."""
         self.requests.append(request)
         self.observed_auth.append((os.environ.get("AGENTQL_API_KEY"), self.sdk_config.api_key))
         assert request.method == "POST"
-        assert request.url == "https://api.agentql.test/api/v2/query-data"
+        assert request.url == f"{self.api_host}/api/v2/query-data"
         assert kwargs["timeout"] == 900
         assert isinstance(request.body, (str, bytes))
         body = json.loads(request.body)
@@ -137,7 +138,9 @@ def agentql_boundary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _AgentQ
     sdk_page = importlib.import_module("agentql.ext.playwright.sync_api.playwright_smart_locator").Page
     monkeypatch.setattr(sdk_config, "api_key", None)
     monkeypatch.delenv("AGENTQL_API_KEY", raising=False)
+    # The SDK's own pages read the host from the process environment, MindRoom's from the `.env` beside `config.yaml`.
     monkeypatch.setenv("AGENTQL_API_HOST", "https://api.agentql.test")
+    (tmp_path / ".env").write_text("AGENTQL_API_HOST=https://api.agentql.test\n")
     config_path = tmp_path / "sdk-config.ini"
     monkeypatch.setattr(sdk_utils, "CONFIG_FILE_PATH", config_path)
     monkeypatch.setattr(sdk_utils, "API_KEY_FILE_PATH_BEFORE_0_5_0", tmp_path / "absent-legacy.ini")
@@ -257,6 +260,42 @@ def test_agentql_resolved_key_reaches_request_without_shared_auth_mutation(
     else:
         assert not agentql_boundary.config_path.exists()
     assert all(browser.closed for browser in agentql_boundary.browsers)
+
+
+@pytest.mark.parametrize(
+    ("env_file", "expected_host"),
+    [
+        pytest.param("AGENTQL_API_HOST=https://host.agentql.test\n", "https://host.agentql.test", id="api-host"),
+        pytest.param(
+            "AGENTQL_SERVER_URL=https://server.agentql.test\n",
+            "https://server.agentql.test",
+            id="server-url",
+        ),
+        pytest.param(
+            "AGENTQL_API_HOST=https://host.agentql.test\nAGENTQL_SERVER_URL=https://server.agentql.test\n",
+            "https://host.agentql.test",
+            id="api-host-wins",
+        ),
+        pytest.param("", "https://api.agentql.com", id="sdk-default"),
+    ],
+)
+def test_agentql_reads_its_host_from_the_env_file_beside_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    agentql_boundary: _AgentQLBoundary,
+    env_file: str,
+    expected_host: str,
+) -> None:
+    """The AgentQL host settings in the `.env` beside `config.yaml` reach the query request, as the SDK orders them."""
+    monkeypatch.delenv("AGENTQL_API_HOST")
+    monkeypatch.delenv("AGENTQL_SERVER_URL", raising=False)
+    (tmp_path / ".env").write_text(env_file)
+    agentql_boundary.api_host = expected_host
+
+    result = _tool(tmp_path, "scoped-key").scrape_website(_URL)
+
+    assert [request.url for request in agentql_boundary.requests] == [f"{expected_host}/api/v2/query-data"]
+    assert not result.startswith("Error")
 
 
 @pytest.mark.parametrize(
@@ -577,7 +616,11 @@ def test_agentql_malformed_success_retains_parse_error(
     compat = importlib.import_module("mindroom.custom_tools.agno_compat_agentql")
     legacy_page = sdk.wrap(_BrowserPage(agentql_boundary))
     legacy_page.goto(_URL)
-    scoped_page = compat._CredentialedPage.with_api_key(_BrowserPage(agentql_boundary), "scoped-key")
+    scoped_page = compat._CredentialedPage.for_service(
+        _BrowserPage(agentql_boundary),
+        api_host="https://api.agentql.test",
+        api_key="scoped-key",
+    )
     scoped_page.goto(_URL)
 
     with pytest.raises(sdk.AgentQLServerError) as legacy_error:
