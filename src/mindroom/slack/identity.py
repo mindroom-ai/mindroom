@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.matrix.identity import matrix_user_id_from_email
-from mindroom.requester_identity import is_access_checked_requester_id
+from mindroom.requester_identity import is_human_requester_id
 from mindroom.slack.api import SlackApiError, slack_call
 from mindroom.slack.render import json_object, slack_display_name
 
@@ -103,7 +103,7 @@ async def _cached[T](
 
 
 def _matrix_id(email: str | None, config: Config, runtime_paths: RuntimePaths) -> str | None:
-    """Return the Matrix ID an email in the configured domain maps to, unless it names one of MindRoom's own accounts."""
+    """Return the Matrix ID an email in the configured domain maps to, unless it names an account that is not a person."""
     template = config.slack.matrix_user_id_template
     if template is None or email is None:
         return None
@@ -111,7 +111,7 @@ def _matrix_id(email: str | None, config: Config, runtime_paths: RuntimePaths) -
         matrix_id = matrix_user_id_from_email(email, template, config.slack.email_domain)
     except ValueError:
         return None
-    return matrix_id if is_access_checked_requester_id(matrix_id, config, runtime_paths) else None
+    return matrix_id if is_human_requester_id(matrix_id, config, runtime_paths) else None
 
 
 async def slack_author(

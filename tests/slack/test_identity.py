@@ -73,10 +73,13 @@ async def _author(
     slack: _FakeSlack,
     paths: RuntimePaths,
     slack_config: SlackConfig = _CONFIG,
+    *,
+    config: Config | None = None,
     **kwargs: Any,  # noqa: ANN401
 ) -> SlackAuthor:
+    config = config or Config(slack=slack_config)
     async with slack.client() as client:
-        return await slack_author(client, _BOT_TOKEN, _TEAM, _USER_ID, Config(slack=slack_config), paths, **kwargs)
+        return await slack_author(client, _BOT_TOKEN, _TEAM, _USER_ID, config, paths, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -151,6 +154,18 @@ async def test_email_naming_a_mindroom_account_does_not_map(localpart: str, path
     assert author == SlackAuthor(_USER_ID, "Ada", None)
     # Without that agent configured, the same localpart names nobody MindRoom runs, so it maps.
     assert person.matrix_id == (None if localpart == "mindroom_router" else "@mindroom_launch:localhost")
+
+
+@pytest.mark.asyncio
+async def test_email_naming_a_bridge_bot_account_does_not_map(paths: RuntimePaths) -> None:
+    """A configured bot account, such as a bridge's, is not a person, so no Slack author maps to it."""
+    config = Config(slack=_CONFIG, bot_accounts=["@bridgebot:example.org"])
+
+    assert await _author(_slack(_user("bridgebot@example.com")), paths, config=config) == SlackAuthor(
+        _USER_ID,
+        "Ada",
+        None,
+    )
 
 
 @pytest.mark.asyncio
