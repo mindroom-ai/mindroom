@@ -473,6 +473,8 @@ def build_config_update_plan(
         bots,
     )
     restart |= _call_agents_to_restart(current_config, new_config, bots)
+    # A name that moved between agents and teams keeps its account but needs the other kind of bot.
+    restart |= {name for name in kept_entities if (name in current_config.agents) != (name in new_config.agents)}
     if changed_mcp_servers:
         restart |= mcp_dependents(current_config, changed_mcp_servers) | mcp_dependents(
             new_config,

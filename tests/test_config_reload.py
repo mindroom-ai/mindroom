@@ -1711,13 +1711,14 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
         await orchestrator.reload_plugins_now(source="initial")
         assert plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module.VALUE == 1
 
-        async def start_blocked_reload(*_args: object, **_kwargs: object) -> None:
+        async def start_blocked_reload(*_args: object, **_kwargs: object) -> set[str]:
             nonlocal reload_task
             hooks_path.write_text("VALUE = 2\n", encoding="utf-8")
             reload_task = asyncio.create_task(orchestrator.reload_plugins_now(source="interleaved"))
             await asyncio.sleep(0)
             assert reload_task is not None
             assert not reload_task.done()
+            return set()
 
         with (
             patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
@@ -2054,6 +2055,34 @@ def test_config_update_plan_removes_deleted_entities_without_restarting_them(
 
     assert plan.remove == removed
     assert not plan.restart & removed
+
+
+def _crew_becomes_agent(data: dict[str, Any]) -> None:
+    del data["teams"]["crew"]
+    data["agents"]["crew"] = {"display_name": "Crew"}
+
+
+def _other_becomes_team(data: dict[str, Any]) -> None:
+    del data["agents"]["other"]
+    data["teams"]["other"] = {"display_name": "Other", "role": "Coordinate", "agents": ["helper"]}
+
+
+@pytest.mark.parametrize(
+    ("change", "entity"),
+    [
+        pytest.param(_crew_becomes_agent, "crew", id="team-to-agent"),
+        pytest.param(_other_becomes_team, "other", id="agent-to-team"),
+    ],
+)
+def test_config_update_plan_rebuilds_an_entity_that_changes_kind_under_the_same_name(
+    change: Callable[[dict[str, Any]], object],
+    entity: str,
+) -> None:
+    """The kept account needs the other kind of bot, so the entity restarts instead of keeping its old bot."""
+    plan = _entity_edit_plan(change)
+
+    assert entity in plan.restart
+    assert entity not in plan.start | plan.remove
 
 
 @pytest.mark.parametrize(

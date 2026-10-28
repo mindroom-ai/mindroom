@@ -2350,4 +2350,5 @@ async def test_removed_entity_reconcile_reports_owners_it_could_not_settle(
         assert await recovery.reconcile_removed_entities({"removed"}) == unresolved
 
     assert discard.await_args.args[2] == "Requesting agent 'removed' is no longer available."
-    assert schedule_retry.called is not settled
+    # A retry would judge the owner by the config still in force; the reload settles it again after publishing.
+    schedule_retry.assert_not_called()

@@ -990,11 +990,16 @@ async def test_update_config_removes_and_stops_entities_before_publishing_and_sy
     def record(event: str) -> None:
         events.append(f"{event}@{'new' if orchestrator.config is updated_config else 'old'}")
 
-    async def remove(entity_names: set[str]) -> None:
+    async def remove(entity_names: set[str]) -> set[str]:
         record(f"remove:{','.join(sorted(entity_names))}")
+        # Its approval settlement failed once, so the reload settles it again once the removal is published.
+        return set(entity_names)
 
     async def stop(entity_names: set[str]) -> None:
         record(f"stop:{','.join(sorted(entity_names))}")
+
+    async def reconcile_unavailable(entity_names: set[str]) -> None:
+        record(f"settle:{','.join(sorted(entity_names))}")
 
     async def sync_mcp_manager(_config: Config) -> set[str]:
         record("mcp")
@@ -1004,13 +1009,18 @@ async def test_update_config_removes_and_stops_entities_before_publishing_and_sy
         patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(updated_config)),
         patch.object(orchestrator.fleet, "remove", side_effect=remove),
         patch.object(orchestrator.fleet, "stop", side_effect=stop),
+        patch.object(
+            orchestrator._approval_recovery,
+            "reconcile_unavailable_entities",
+            side_effect=reconcile_unavailable,
+        ),
         patch.object(orchestrator, "_sync_mcp_manager", side_effect=sync_mcp_manager),
         patch.object(orchestrator.fleet, "start", new=AsyncMock(return_value=EntityStartResults())) as mock_start,
         patch.object(orchestrator, "_finalize_config_reload", new=AsyncMock()),
     ):
         assert await orchestrator.config_reload._update_config() is True
 
-    assert events[:3] == ["remove:plain@old", "stop:code@old", "mcp@new"]
+    assert events[:4] == ["remove:plain@old", "stop:code@old", "settle:plain@new", "mcp@new"]
     mock_start.assert_awaited_once_with({"code"})
 
 

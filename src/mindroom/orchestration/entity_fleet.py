@@ -272,16 +272,17 @@ class EntityFleet:
         for name in slots:
             del self._slots[name]
 
-    async def remove(self, entity_names: Iterable[str]) -> None:
+    async def remove(self, entity_names: Iterable[str]) -> set[str]:
         """Remove entities no longer configured: settle approvals, leave rooms, stop, and end their replies.
 
         Each step that acts on Matrix or the journal runs only for entities whose
         earlier steps succeeded, so a failed preparation never leaves rooms and a
-        reply ends only once its bot is gone.
+        reply ends only once its bot is gone. Returns the removed entities whose
+        approval settlement is still unresolved.
         """
         slots = self._existing(entity_names)
         if not slots:
-            return
+            return set()
         await self._prepare_change(slots)
         intent = ENTITY_REMOVED_SHUTDOWN
         failures: list[BaseException] = []
@@ -311,6 +312,7 @@ class EntityFleet:
         failures = [*cancellations, *failures]
         if failures:
             raise failures[0]
+        return unresolved
 
     def begin_process_shutdown(self) -> None:
         """Close response and callback admission on every bot before shutdown teardown yields."""

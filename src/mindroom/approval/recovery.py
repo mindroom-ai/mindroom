@@ -73,13 +73,12 @@ class ApprovalRecovery:
     async def reconcile_removed_entities(self, entity_names: set[str]) -> set[str]:
         """Settle the continuations of entities being removed, before the config that removes them is published.
 
-        Returns the entities whose settlement is still unresolved; the startup
-        cleanup retry finishes them once the removal is published.
+        Returns the entities whose settlement is still unresolved. No retry is
+        scheduled here: a retry would judge them by the config still in force,
+        which lists them, so the caller settles them again once the removal is
+        published.
         """
-        unresolved = await self._reconcile_unavailable_owner_pages(entity_names, _removed_entity_reason)
-        if unresolved:
-            self._retry_unsettled_owners()
-        return unresolved
+        return await self._reconcile_unavailable_owner_pages(entity_names, _removed_entity_reason)
 
     def _retry_unsettled_owners(self) -> None:
         self._startup_cleanup_done = False

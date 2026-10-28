@@ -1646,9 +1646,11 @@ class _MultiAgentOrchestrator:
                 commit_plugins = self._prepare_plugins(plan)
                 # Removal first, while the current router still delivers its approval notices
                 # and before a replacement router's orphan cleanup could kick the removed accounts.
-                await self.fleet.remove(plan.remove)
+                unsettled_removals = await self.fleet.remove(plan.remove)
                 await self.fleet.stop(plan.restart)
                 self._publish_config(plan, commit_plugins)
+                # Now that the removal is published, recovery can judge the removed owners as gone.
+                await self._approval_recovery.reconcile_unavailable_entities(unsettled_removals)
                 await self._script_runtime.complete_worker_replacement()
                 catalog_changed = await self._sync_mcp_manager(new_config)
                 logger.info(
