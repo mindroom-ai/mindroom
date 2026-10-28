@@ -43,6 +43,7 @@ from mindroom.teams.formation import TeamOutcome, TeamResolution
 from mindroom.teams.spec import TeamMode
 from mindroom.turn_record import SourceEventMetadata, TurnRecord
 from mindroom.turn_store import TurnStore
+from mindroom.turns.dispatch import TurnDispatcher
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import dispatch_reaction_durably, make_test_agent_bot, make_test_team_bot
 from tests.conftest import (
@@ -56,7 +57,7 @@ from tests.conftest import (
     patch_response_runner_module,
     record_turn_answered,
     replace_edit_regenerator_deps,
-    replace_turn_controller_deps,
+    replace_turn_deps,
     replace_turn_policy_deps,
     request_envelope,
     runtime_paths_for,
@@ -711,9 +712,9 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
     bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     wrap_extracted_collaborators(bot, "_delivery_gateway", "_response_runner")
-    replace_turn_controller_deps(
+    replace_turn_deps(
         bot,
         delivery_gateway=bot._delivery_gateway,
         response_runner=bot._response_runner,
@@ -1120,14 +1121,14 @@ async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
 
     # Mock logger
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     wrap_extracted_collaborators(bot, "_delivery_gateway", "_response_runner")
-    replace_turn_controller_deps(
+    replace_turn_deps(
         bot,
         delivery_gateway=bot._delivery_gateway,
         response_runner=bot._response_runner,
     )
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
 
     # Create a room
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
@@ -2494,9 +2495,9 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
 
     # Mock logger
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     wrap_extracted_collaborators(bot, "_delivery_gateway", "_response_runner")
-    replace_turn_controller_deps(
+    replace_turn_deps(
         bot,
         delivery_gateway=bot._delivery_gateway,
         response_runner=bot._response_runner,
@@ -2594,9 +2595,9 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
     bot.client = make_matrix_client_mock(user_id="@test_agent:example.com")
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     wrap_extracted_collaborators(bot, "_delivery_gateway", "_response_runner")
-    replace_turn_controller_deps(
+    replace_turn_deps(
         bot,
         delivery_gateway=bot._delivery_gateway,
         response_runner=bot._response_runner,
@@ -2659,7 +2660,7 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
 
 
 @pytest.mark.asyncio
-async def test_on_message_routes_interactive_text_selection_through_turn_controller(tmp_path: Path) -> None:
+async def test_on_message_routes_interactive_text_selection_through_turn_ingress(tmp_path: Path) -> None:
     """Numeric interactive replies should run the controller-owned selection workflow."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
@@ -2679,9 +2680,9 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
     bot.client = make_matrix_client_mock(user_id="@test_agent:example.com")
     install_runtime_journal_support(bot)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     wrap_extracted_collaborators(bot, "_delivery_gateway", "_response_runner", "_turn_policy")
-    replace_turn_controller_deps(
+    replace_turn_deps(
         bot,
         delivery_gateway=bot._delivery_gateway,
         response_runner=bot._response_runner,
@@ -2732,7 +2733,7 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
             thread_id="$thread:example.com",
         ),
     )
-    replace_turn_controller_deps(bot, interactive_questions=interactive_questions)
+    replace_turn_deps(bot, interactive_questions=interactive_questions)
 
     with (
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
@@ -2750,7 +2751,7 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
             new_callable=AsyncMock,
             return_value=thread_history_result([], is_full_history=True),
         ),
-        patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch_text,
+        patch.object(TurnDispatcher, "_dispatch_text_turn", new_callable=AsyncMock) as mock_dispatch_text,
     ):
         await bot._on_message(room, message_event)
         # The selection runs as a reaction's does, on a runner-owned task behind the conversation's earlier messages.
@@ -2806,9 +2807,9 @@ async def test_on_reaction_respects_responder_access(tmp_path: Path) -> None:
     bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     wrap_extracted_collaborators(bot, "_delivery_gateway", "_response_runner")
-    replace_turn_controller_deps(
+    replace_turn_deps(
         bot,
         delivery_gateway=bot._delivery_gateway,
         response_runner=bot._response_runner,
@@ -3117,7 +3118,7 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
     ):
         # Setup mocks
-        bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
+        bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(
             return_value=thread_history_result([], is_full_history=False),
         )
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
@@ -3172,7 +3173,7 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
 
     # Mock logger
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
 
     # Create a room
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
@@ -3226,7 +3227,7 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
     ):
         # Setup mocks
-        bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
+        bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(
             return_value=thread_history_result([], is_full_history=False),
         )
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
@@ -3295,7 +3296,7 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
 
     # Mock logger
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
 
     room = Mock(spec=nio.MatrixRoom)
     room.room_id = "!test:example.com"
@@ -3369,7 +3370,7 @@ async def test_on_media_message_unauthorized_sender_marks_responded(tmp_path: Pa
 
     # Mock logger
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
 
     # Create a room
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")

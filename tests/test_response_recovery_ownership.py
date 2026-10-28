@@ -75,7 +75,7 @@ def _runner_on(
 
 
 @pytest.mark.parametrize("scenario", ["retry", "setup_failure", "source_deleted", "deleted_after_model"])
-async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa: C901, PLR0915
+async def test_preparation_outcomes_reach_dispatch_and_journal_owners(  # noqa: C901, PLR0915
     journal_store: EventJournalStore,
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
@@ -99,7 +99,7 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
         ),
     )
     runner = _runner_on(bot, gateway, principal)
-    controller = unwrap_extracted_collaborator(bot._turn_controller)
+    turn_dispatcher = bot._turn_dispatcher
     gateway.deps.response_hooks.emit_cancelled_response = AsyncMock()
 
     async def settle_ignored(sources: tuple[str, ...]) -> None:
@@ -108,7 +108,7 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
 
     visible_responses = VisibleResponseReconciler(
         replace(
-            controller.deps.visible_responses.deps,
+            turn_dispatcher.deps.visible_responses.deps,
             turn_store=store,
             delivery_gateway=gateway,
             settle_ignored_sources=settle_ignored,
@@ -194,7 +194,7 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
             envelope=_envelope(target, source_event_id=SOURCE),
         )
         task = runner.track_inbox_response(
-            controller._execute_response_action(
+            turn_dispatcher._execute_response_action(
                 callback_room,
                 event,
                 dispatch,

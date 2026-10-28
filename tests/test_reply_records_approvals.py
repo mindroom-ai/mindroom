@@ -285,8 +285,8 @@ async def _send_message(bot: AgentBot, event_id: str, body: str, *, thread_id: s
             source={},
         ),
     )
-    await bot._turn_controller.handle_text_event(room, message)
-    await wait_for_background_tasks(timeout=5.0, owner=bot._turn_controller.deps.runtime)
+    await bot._turn_ingress.handle_text_event(room, message)
+    await wait_for_background_tasks(timeout=5.0, owner=bot._turn_ingress.deps.runtime)
 
 
 def _reactions(bot: AgentBot) -> list[dict[str, str]]:

@@ -257,7 +257,7 @@ async def execute_router_relay(
     handled_turn: TurnRecord | None = None,
     scheduled_prompt: str | None = None,
 ) -> None:
-    """Run one explicit router relay from the turn controller."""
+    """Run one explicit router relay from turn dispatch."""
     assert deps.agent_name == ROUTER_AGENT_NAME
 
     permission_sender_id = requester_user_id

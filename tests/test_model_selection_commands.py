@@ -162,7 +162,7 @@ async def test_other_runtime_target_never_owns_checkpoint(tmp_path: Path, wrong_
     """A second runtime device must not admit or acknowledge the selected device's command."""
     client, config, paths, _, router, _ = picker_setup(tmp_path)
     harness = _build_harness(config, tmp_path / "turns", agent_name="router")
-    executor = harness.controller.deps.command_executor
+    executor = harness.dispatcher.deps.command_executor
     executor.deps.runtime.client = client
     metadata = {
         "version": 1,
@@ -196,7 +196,7 @@ async def test_replay_preserves_result_after_single_real_mutation(tmp_path: Path
     """A failed Matrix send must replay the frozen result even after current state changes."""
     client, config, paths, _, router, _ = picker_setup(tmp_path)
     harness = _build_harness(config, tmp_path / "turns", agent_name="router")
-    executor = harness.controller.deps.command_executor
+    executor = harness.dispatcher.deps.command_executor
     executor.deps.runtime.client = client
     metadata = {
         "version": 1,
@@ -252,7 +252,7 @@ async def test_crash_before_result_returns_uncertainty_without_success(tmp_path:
     """An execution-start checkpoint cannot manufacture applied metadata after restart."""
     client, config, _, _, router, _ = picker_setup(tmp_path)
     harness = _build_harness(config, tmp_path / "turns", agent_name="router")
-    executor = harness.controller.deps.command_executor
+    executor = harness.dispatcher.deps.command_executor
     executor.deps.runtime.client = client
     event = root_event(
         event_id="$command",
@@ -299,7 +299,7 @@ async def test_same_thread_senders_cannot_overtake_waiting_model_command(
     config.agents["helper"].access.users.append(second_user)
     client.joined_members.return_value = joined_response(USER, second_user, router, agent)
     harness = _build_harness(config, tmp_path / "turns", agent_name="router")
-    executor = harness.controller.deps.command_executor
+    executor = harness.dispatcher.deps.command_executor
     executor.deps.runtime.client = client
     first_read = asyncio.Event()
     release_first = asyncio.Event()

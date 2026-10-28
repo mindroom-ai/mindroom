@@ -94,10 +94,11 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.turn_controller import _IngressAdmissionOutcome
-from mindroom.turn_policy import PreparedDispatch, _DispatchPlan
+from mindroom.turn_policy import DispatchPlan, PreparedDispatch
 from mindroom.turn_record import SourceEventMetadata, TurnRecord
+from mindroom.turns.dispatch import TurnDispatcher
 from mindroom.turns.facts import PrecheckedEvent
+from mindroom.turns.ingress import _IngressAdmissionOutcome
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -115,7 +116,7 @@ from tests.conftest import (
     message_origin,
     prepare_payload_via_seam,
     prepared_dispatch_result,
-    replace_turn_controller_deps,
+    replace_turn_deps,
     runtime_paths_for,
     test_runtime_paths,
     unwrap_extracted_collaborator,
@@ -184,7 +185,7 @@ def _make_bot(
     bot = make_test_agent_bot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
     bot.client = make_matrix_client_mock(user_id=agent_user.user_id)
     wrap_extracted_collaborators(bot)
-    replace_turn_controller_deps(
+    replace_turn_deps(
         bot,
         turn_policy=bot._turn_policy,
         delivery_gateway=bot._delivery_gateway,
@@ -251,8 +252,8 @@ class _RecordingPendingTurns:
 
 def _watch_pending_turns(bot: AgentBot) -> _RecordingPendingTurns:
     """Route the bot's degraded replay-guard reads through a recorder."""
-    recorder = _RecordingPendingTurns(store=bot._turn_controller.deps.pending_turns)
-    replace_turn_controller_deps(bot, pending_turns=cast("PendingTurnView", recorder))
+    recorder = _RecordingPendingTurns(store=bot._turn_dispatcher.deps.pending_turns)
+    replace_turn_deps(bot, pending_turns=cast("PendingTurnView", recorder))
     return recorder
 
 
@@ -292,11 +293,11 @@ async def _enqueue_for_dispatch(
         hook_source=hook_source or facts.hook_source,
         message_received_depth=message_received_depth or facts.message_received_depth,
     )
-    ticket = bot._turn_controller.reserve_prompt_ingress_order(room, requester_user_id)
+    ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, requester_user_id)
     try:
         # Ingress claims a source before it reaches the gate.
         assert await ticket.claim_turn(TurnRecord.create([event.event_id], completed=False)) is None
-        return await bot._turn_controller._enqueue_for_dispatch(
+        return await bot._turn_ingress._enqueue_for_dispatch(
             event,
             room,
             facts=facts,
@@ -339,9 +340,9 @@ def test_coalescing_config_rejects_removed_enabled_flag(tmp_path: Path) -> None:
         )
 
 
-def _respond_dispatch_plan(action: object | None = None) -> _DispatchPlan:
+def _respond_dispatch_plan(action: object | None = None) -> DispatchPlan:
     """Return a plan that continues into the response executor path."""
-    return _DispatchPlan(
+    return DispatchPlan(
         kind="respond",
         response_action=action or MagicMock(kind="individual"),
     )
@@ -382,16 +383,17 @@ async def test_duplicate_delivery_is_claimed_before_dispatch_resolution(tmp_path
         plan_started.set()
         await asyncio.Event().wait()
 
-    controller = replace_turn_controller_deps(bot)
+    replace_turn_deps(bot)
+    dispatcher = bot._turn_dispatcher
     plan_turn = AsyncMock(side_effect=slow_plan)
-    with patch.object(controller.deps.turn_policy, "plan_turn", new=plan_turn):
+    with patch.object(dispatcher.deps.turn_policy, "plan_turn", new=plan_turn):
         first = asyncio.create_task(
-            dispatch_test_turn(controller, room, event, "@user:localhost"),
+            dispatch_test_turn(dispatcher, room, event, "@user:localhost"),
         )
         await asyncio.wait_for(plan_started.wait(), timeout=1.0)
         await asyncio.wait_for(
             dispatch_test_turn(
-                controller,
+                dispatcher,
                 room,
                 event,
                 "@user:localhost",
@@ -627,16 +629,15 @@ async def test_post_gate_terminal_drop_settles_real_deferred_dispatch_obligation
     dispatcher = bot._journal_dispatcher
     await admit_dispatch_event(dispatcher, room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
 
-    plan_turn = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
+    plan_turn = AsyncMock(return_value=DispatchPlan(kind="ignore"))
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
-        patch.object(
-            bot._turn_controller,
-            "_should_skip_deep_synthetic_full_dispatch",
+        patch(
+            "mindroom.turns.dispatch.should_skip_deep_synthetic_full_dispatch",
             return_value=terminal_path == "deep_synthetic",
         ),
         patch.object(
@@ -682,8 +683,9 @@ async def test_single_message_dispatches_after_debounce_window(tmp_path: Path) -
         _ = handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn), media_events or []))
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -720,8 +722,9 @@ async def test_two_rapid_text_messages_dispatch_one_combined_turn(tmp_path: Path
         _ = media_events, handled_turn
         calls.append((dispatched_event.event_id, dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -762,7 +765,7 @@ async def test_two_rapid_text_messages_forward_prompt_map_to_dispatch(tmp_path: 
     first = _text_event(event_id="$m1", body="first", server_timestamp=1000, thread_id="$thread")
     second = _text_event(event_id="$m2", body="second", server_timestamp=1001, thread_id="$thread")
 
-    with patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as mock_dispatch:
+    with patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as mock_dispatch:
         await _enqueue_for_dispatch(
             bot,
             first,
@@ -780,7 +783,7 @@ async def test_two_rapid_text_messages_forward_prompt_map_to_dispatch(tmp_path: 
         await bot._coalescing_gate.drain_all()
 
     assert mock_dispatch.await_count == 1
-    handled_turn = mock_dispatch.await_args.args[1].handled_turn
+    handled_turn = mock_dispatch.await_args.args[0].handled_turn
     assert list(handled_turn.source_event_ids) == ["$m1", "$m2"]
     assert handled_turn.source_event_prompts == {
         "$m1": "first",
@@ -809,8 +812,9 @@ async def test_image_and_text_coalesce_into_single_dispatch(tmp_path: Path) -> N
         _ = handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn), len(media_events or [])))
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -863,13 +867,14 @@ async def test_room_root_image_and_caption_coalesce_into_single_dispatch(tmp_pat
     ) -> None:
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn), len(media_events or [])))
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
-        await bot._turn_controller.handle_media_event(room, image_event)
+        await bot._turn_ingress.handle_media_event(room, image_event)
         await asyncio.sleep(0.005)
-        await bot._turn_controller.handle_text_event(room, text_event)
+        await bot._turn_ingress.handle_text_event(room, text_event)
         await _wait_for(lambda: len(calls) == 1)
 
     assert calls == [
@@ -917,12 +922,13 @@ async def test_room_root_image_and_thread_caption_coalesce_into_single_thread_di
             ),
         )
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
-        await bot._turn_controller.handle_media_event(room, image_event)
-        await bot._turn_controller.handle_text_event(room, caption)
+        await bot._turn_ingress.handle_media_event(room, image_event)
+        await bot._turn_ingress.handle_text_event(room, caption)
         await bot._coalescing_gate.drain_all()
 
     assert calls == [(["$img", "$caption"], "$img")]
@@ -959,12 +965,13 @@ async def test_router_keeps_a_caption_that_names_an_agent_with_its_upload(
     ) -> None:
         calls.append(_handled_turn_source_event_ids(handled_turn))
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
-        await bot._turn_controller.handle_media_event(room, image_event)
-        await bot._turn_controller.handle_text_event(room, caption)
+        await bot._turn_ingress.handle_media_event(room, image_event)
+        await bot._turn_ingress.handle_text_event(room, caption)
         await bot._coalescing_gate.drain_all()
 
     assert calls == [["$img", "$caption"]]
@@ -991,8 +998,9 @@ async def test_images_then_caption_coalesce_into_single_dispatch(tmp_path: Path)
     ) -> None:
         calls.append((_handled_turn_source_event_ids(handled_turn), len(media_events or [])))
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -1046,8 +1054,9 @@ async def test_each_thread_text_dispatches_immediately_as_own_turn(tmp_path: Pat
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -1095,8 +1104,9 @@ async def test_image_after_text_dispatch_is_a_second_batch(tmp_path: Path) -> No
         _ = handled_turn
         calls.append((_handled_turn_source_event_ids(handled_turn), len(media_events or [])))
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -1144,8 +1154,9 @@ async def test_different_senders_dispatch_separately(tmp_path: Path) -> None:
         _ = media_events, handled_turn
         calls.append(_handled_turn_source_event_ids(handled_turn))
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -1279,8 +1290,9 @@ async def test_same_sender_different_threads_dispatch_separately(tmp_path: Path)
         _ = media_events, handled_turn
         calls.append(_handled_turn_source_event_ids(handled_turn))
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -1339,8 +1351,9 @@ async def test_room_message_and_plain_reply_to_known_thread_do_not_coalesce_toge
         _ = media_events, handled_turn
         calls.append(_handled_turn_source_event_ids(handled_turn))
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -1407,8 +1420,9 @@ async def test_plain_reply_with_unproven_root_is_not_admitted_under_guessed_key(
         calls.append(_handled_turn_source_event_ids(handled_turn))
 
     with (
-        patch(
-            "mindroom.turn_controller.dispatch_text_message",
+        patch.object(
+            TurnDispatcher,
+            "_dispatch_text_turn",
             new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
         ),
         pytest.raises(RuntimeError, match="Could not resolve canonical coalescing thread"),
@@ -1445,12 +1459,13 @@ async def test_command_executes_immediately_while_text_batch_debounces(tmp_path:
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
-        await bot._turn_controller.handle_text_event(room, first)
-        await bot._turn_controller.handle_text_event(room, command)
+        await bot._turn_ingress.handle_text_event(room, first)
+        await bot._turn_ingress.handle_text_event(room, command)
 
         # Ordinary text flushes on its own drain task, so the two may dispatch in either order.
         assert ("!help", ["$m2"]) in calls
@@ -1481,12 +1496,13 @@ async def test_command_during_media_debounce_executes_immediately(tmp_path: Path
         _ = media_events
         calls.append(_handled_turn_source_event_ids(handled_turn))
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
-        await bot._turn_controller.handle_media_event(room, image_event)
-        await bot._turn_controller.handle_text_event(room, command_event)
+        await bot._turn_ingress.handle_media_event(room, image_event)
+        await bot._turn_ingress.handle_text_event(room, command_event)
 
         assert calls == [["$m2"]]
 
@@ -1533,8 +1549,9 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
             await release_first_dispatch.wait()
 
     with (
-        patch(
-            "mindroom.turn_controller.dispatch_text_message",
+        patch.object(
+            TurnDispatcher,
+            "_dispatch_text_turn",
             new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
         ),
         patch.object(
@@ -1590,14 +1607,14 @@ async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: P
     idle = asyncio.Event()
     calls: list[PreparedTurn] = []
 
-    async def record_dispatch(_controller: object, batch: PreparedTurn) -> None:
+    async def record_dispatch(batch: PreparedTurn) -> None:
         calls.append(batch)
 
     async def wait_for_thread_response_idle(_room_id: str, _thread_id: str | None) -> None:
         await idle.wait()
 
     with (
-        patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
+        patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock(side_effect=record_dispatch)),
         patch.object(
             bot._response_runner,
             "wait_for_thread_response_idle",
@@ -1693,7 +1710,7 @@ async def test_active_follow_ups_from_two_senders_run_tools_as_their_own_sender(
             ),
         )
         if prompt == "add me to administrators":
-            await bot._turn_controller.handle_text_event(room, late_event)
+            await bot._turn_ingress.handle_text_event(room, late_event)
             pending_after_late_follow_up.extend(
                 message.event_id for message in queued_signal.pending_message_snapshot()
             )
@@ -1712,7 +1729,7 @@ async def test_active_follow_ups_from_two_senders_run_tools_as_their_own_sender(
             ),
         ):
             for event in events:
-                await bot._turn_controller.handle_text_event(room, event)
+                await bot._turn_ingress.handle_text_event(room, event)
             await asyncio.sleep(0.05)
             assert runs == []
 
@@ -1804,7 +1821,7 @@ async def test_follow_up_run_is_superseded_only_when_no_other_requester_waits(
             ),
         ):
             for event_id, body, sender, timestamp in dispatched_messages:
-                await bot._turn_controller.handle_text_event(
+                await bot._turn_ingress.handle_text_event(
                     room,
                     _text_event(
                         event_id=event_id,
@@ -1896,7 +1913,7 @@ async def test_follow_up_run_waits_for_an_agent_reply_written_for_the_same_reque
                     event.source["content"]["m.mentions"] = {"user_ids": [bot.matrix_id.full_id]}
                     if research_acts_for_alice:
                         event.source["content"][ACTING_REQUESTER_KEY] = "@alice:localhost"
-                await bot._turn_controller.handle_text_event(room, event)
+                await bot._turn_ingress.handle_text_event(room, event)
             follow_up_key = active_follow_up_coalescing_key(room.room_id, "$thread")
             await _wait_for(lambda: len(bot._coalescing_gate.queued_pending_events(follow_up_key)) == len(messages))
 
@@ -1975,15 +1992,16 @@ async def test_slow_thread_lookup_active_follow_up_stays_before_later_follow_up(
                 "coalescing_thread_id",
                 new=AsyncMock(side_effect=coalescing_thread_id),
             ),
-            patch(
-                "mindroom.turn_controller.dispatch_text_message",
+            patch.object(
+                TurnDispatcher,
+                "_dispatch_text_turn",
                 new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
             ),
         ):
-            second_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, second))
+            second_task = asyncio.create_task(bot._turn_ingress.handle_text_event(room, second))
             await asyncio.wait_for(second_lookup_started.wait(), timeout=0.5)
 
-            third_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, third))
+            third_task = asyncio.create_task(bot._turn_ingress.handle_text_event(room, third))
             await asyncio.wait_for(third_task, timeout=0.5)
 
             queued_signal.finish_response_turn()
@@ -2065,15 +2083,16 @@ async def test_later_slow_thread_lookup_active_follow_up_lands_as_own_turn(tmp_p
                 "coalescing_thread_id",
                 new=AsyncMock(side_effect=coalescing_thread_id),
             ),
-            patch(
-                "mindroom.turn_controller.dispatch_text_message",
+            patch.object(
+                TurnDispatcher,
+                "_dispatch_text_turn",
                 new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
             ),
         ):
-            first_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, first))
+            first_task = asyncio.create_task(bot._turn_ingress.handle_text_event(room, first))
             await asyncio.wait_for(first_task, timeout=0.5)
 
-            second_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, second))
+            second_task = asyncio.create_task(bot._turn_ingress.handle_text_event(room, second))
             await asyncio.wait_for(second_lookup_started.wait(), timeout=0.5)
 
             queued_signal.finish_response_turn()
@@ -2163,7 +2182,7 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
     queued_signal.begin_response_turn()
     try:
         with (
-            patch.object(bot._turn_controller, "_prepare_dispatch", new=fake_prepare_dispatch),
+            patch.object(bot._turn_dispatcher, "_prepare_dispatch", new=fake_prepare_dispatch),
             patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
             patch.object(
                 bot._inbound_turn_normalizer,
@@ -2175,7 +2194,7 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
                 "build_dispatch_payload_with_attachments",
                 new=fake_build_payload,
             ),
-            patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
+            patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),
             patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
             patch(
                 "mindroom.response_runner.ResponseRunner._generate_response_locked",
@@ -2445,13 +2464,14 @@ async def test_command_executes_immediately_despite_unresolved_ingress(tmp_path:
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    ticket = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
+    ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
     try:
-        with patch(
-            "mindroom.turn_controller.dispatch_text_message",
+        with patch.object(
+            TurnDispatcher,
+            "_dispatch_text_turn",
             new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
         ):
-            await bot._turn_controller.handle_text_event(room, command_event)
+            await bot._turn_ingress.handle_text_event(room, command_event)
 
         assert calls == [("!help", ["$cmd"])]
     finally:
@@ -3119,8 +3139,9 @@ async def test_enqueue_for_dispatch_returns_while_drain_dispatch_blocks(tmp_path
             entered_first_dispatch.set()
             await release_first_dispatch.wait()
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await asyncio.wait_for(
@@ -3188,8 +3209,9 @@ async def test_coalescing_exempt_source_kinds_bypass_gate(tmp_path: Path, source
         _ = media_events, handled_turn
         calls.append(dispatched_event.body)
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -3262,11 +3284,12 @@ async def test_untrusted_source_kind_content_does_not_bypass_or_promote(
     )
     calls: list[PreparedTurn] = []
 
-    async def record_dispatch(_controller: object, turn: PreparedTurn) -> None:
+    async def record_dispatch(turn: PreparedTurn) -> None:
         calls.append(turn)
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=record_dispatch),
     ):
         await _enqueue_for_dispatch(
@@ -3356,8 +3379,9 @@ async def test_overlapping_scheduled_checkins_coalesce(tmp_path: Path) -> None:
             entered_first_dispatch.set()
             await release_first_dispatch.wait()
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -3412,8 +3436,9 @@ async def test_prepare_for_sync_shutdown_waits_for_active_flush_task(tmp_path: P
         entered_dispatch.set()
         await release_dispatch.wait()
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -3457,8 +3482,9 @@ async def test_prepare_for_sync_shutdown_drains_pending_debounced_messages(tmp_p
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -3494,8 +3520,9 @@ async def test_prepare_for_sync_shutdown_drains_pending_media_debounce(tmp_path:
         _ = media_events
         calls.append(_handled_turn_source_event_ids(handled_turn))
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -3540,8 +3567,9 @@ async def test_shutdown_during_in_flight_dispatch_flushes_remaining_without_wait
             entered_dispatch.set()
             await release_dispatch.wait()
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -3604,8 +3632,9 @@ async def test_thread_followups_dispatch_while_first_turn_root_in_flight(tmp_pat
             entered_dispatch.set()
             await release_first_dispatch.wait()
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         first_task = asyncio.create_task(
@@ -3794,7 +3823,7 @@ async def test_enqueue_for_dispatch_timing_events_include_explicit_scope(tmp_pat
 
     with (
         patch.object(bot._coalescing_gate, "admit", new=AsyncMock()),
-        patch("mindroom.turn_controller.emit_elapsed_timing") as mock_emit,
+        patch("mindroom.turns.ingress.emit_elapsed_timing") as mock_emit,
     ):
         await _enqueue_for_dispatch(
             bot,
@@ -3821,7 +3850,7 @@ async def test_matrix_ingress_logging_includes_receive_lag(tmp_path: Path) -> No
     """Matrix callback logs should include receive lag when origin_server_ts is present."""
     bot = _make_bot(tmp_path)
     bot.logger = MagicMock()
-    bot._turn_controller.handle_text_event = AsyncMock()
+    bot._turn_ingress.handle_text_event = AsyncMock()
     room = _make_room()
     event = _text_event(event_id="$m1", body="hello", server_timestamp=1000, thread_id="$thread")
 
@@ -3838,9 +3867,9 @@ async def test_matrix_ingress_logging_includes_receive_lag(tmp_path: Path) -> No
         origin_server_ts_ms=1000,
         matrix_event_receive_lag_ms=1500.0,
     )
-    bot._turn_controller.handle_text_event.assert_awaited_once()
-    assert bot._turn_controller.handle_text_event.await_args.args == (room, event)
-    assert isinstance(bot._turn_controller.handle_text_event.await_args.kwargs["receipt_time"], float)
+    bot._turn_ingress.handle_text_event.assert_awaited_once()
+    assert bot._turn_ingress.handle_text_event.await_args.args == (room, event)
+    assert isinstance(bot._turn_ingress.handle_text_event.await_args.kwargs["receipt_time"], float)
 
 
 @pytest.mark.asyncio
@@ -3848,7 +3877,7 @@ async def test_matrix_ingress_logging_handles_missing_origin_timestamp(tmp_path:
     """Matrix callback logs should tolerate events without origin_server_ts."""
     bot = _make_bot(tmp_path)
     bot.logger = MagicMock()
-    bot._turn_controller.handle_text_event = AsyncMock()
+    bot._turn_ingress.handle_text_event = AsyncMock()
     room = _make_room()
     event = MagicMock(spec=nio.RoomMessageText)
     event.event_id = "$m1"
@@ -3866,9 +3895,9 @@ async def test_matrix_ingress_logging_handles_missing_origin_timestamp(tmp_path:
         "agent_name": "test_agent",
         "receive_timestamp_ms": 2500,
     }
-    bot._turn_controller.handle_text_event.assert_awaited_once()
-    assert bot._turn_controller.handle_text_event.await_args.args == (room, event)
-    assert isinstance(bot._turn_controller.handle_text_event.await_args.kwargs["receipt_time"], float)
+    bot._turn_ingress.handle_text_event.assert_awaited_once()
+    assert bot._turn_ingress.handle_text_event.await_args.args == (room, event)
+    assert isinstance(bot._turn_ingress.handle_text_event.await_args.kwargs["receipt_time"], float)
 
 
 @pytest.mark.asyncio
@@ -3888,10 +3917,10 @@ async def test_handle_prepared_turn_timing_events_include_dispatch_scope(tmp_pat
     )
 
     with (
-        patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()),
-        patch("mindroom.turn_controller.emit_elapsed_timing") as mock_emit,
+        patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()),
+        patch("mindroom.turns.dispatch.emit_elapsed_timing") as mock_emit,
     ):
-        await bot._turn_controller.handle_prepared_turn(batch)
+        await bot._turn_dispatcher.handle_prepared_turn(batch)
 
     batch_calls = [
         call
@@ -3923,11 +3952,11 @@ async def test_handle_prepared_turn_uses_batch_key_for_text_primary(tmp_path: Pa
         ],
     )
 
-    with patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as mock_dispatch:
-        await bot._turn_controller.handle_prepared_turn(batch)
+    with patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as mock_dispatch:
+        await bot._turn_dispatcher.handle_prepared_turn(batch)
 
-    dispatched_event = mock_dispatch.await_args.args[1].event
-    ingress = mock_dispatch.await_args.args[1].ingress
+    dispatched_event = mock_dispatch.await_args.args[0].event
+    ingress = mock_dispatch.await_args.args[0].ingress
     assert isinstance(dispatched_event, PreparedIngress)
     assert ingress.coalescing_key == batch.ingress.coalescing_key
     assert ingress.coalescing_key.thread_id == "$voice_thread"
@@ -4047,9 +4076,9 @@ async def test_coalesced_room_plain_reply_target_uses_prompt_thread_not_reply_th
 
     with (
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
-        patch.object(bot._turn_controller, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
+        patch.object(bot._turn_dispatcher, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
     ):
-        await bot._turn_controller.handle_prepared_turn(batch)
+        await bot._turn_dispatcher.handle_prepared_turn(batch)
 
     assert len(dispatches) == 1
     assert dispatches[0].target.resolved_thread_id == "$typed"
@@ -4705,7 +4734,7 @@ async def test_stop_drains_pending_debounce_tasks(tmp_path: Path) -> None:
     event = _image_event(event_id="$m1")
 
     with (
-        patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+        patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as mock_dispatch,
         patch("mindroom.bot.wait_for_background_tasks", new=AsyncMock()),
     ):
         await _enqueue_for_dispatch(
@@ -4738,7 +4767,7 @@ async def test_turn_store_marks_all_batch_event_ids(tmp_path: Path) -> None:
 
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
@@ -4794,8 +4823,9 @@ async def test_zero_debounce_dispatches_immediately(tmp_path: Path) -> None:
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
         await _enqueue_for_dispatch(
@@ -4832,12 +4862,13 @@ async def test_multiple_commands_each_dispatch_independently(tmp_path: Path) -> 
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
-    with patch(
-        "mindroom.turn_controller.dispatch_text_message",
+    with patch.object(
+        TurnDispatcher,
+        "_dispatch_text_turn",
         new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
     ):
-        await bot._turn_controller.handle_text_event(room, first_cmd)
-        await bot._turn_controller.handle_text_event(room, second_cmd)
+        await bot._turn_ingress.handle_text_event(room, first_cmd)
+        await bot._turn_ingress.handle_text_event(room, second_cmd)
 
     assert calls == [
         ("!help", ["$c1"]),
@@ -4852,7 +4883,7 @@ async def test_gate_entry_removed_after_dispatch_with_no_pending(tmp_path: Path)
     room = _make_room()
     event = _text_event(event_id="$m1", body="hello")
 
-    with patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()):
+    with patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()):
         assert _coalescing_gate_is_idle(bot._coalescing_gate)
         await _enqueue_for_dispatch(
             bot,
@@ -4900,13 +4931,13 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
     action_mock = AsyncMock()
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
-        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_dispatcher, room, older_event, "@user:localhost")
 
     # Older message should be skipped — resolve_dispatch_action never called
     action_mock.assert_not_awaited()
@@ -5018,21 +5049,21 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
         _event: object,
         prepared_dispatch: PreparedDispatch,
         **_kwargs: object,
-    ) -> _DispatchPlan:
+    ) -> DispatchPlan:
         plan_calls.append(prepared_dispatch)
-        return _DispatchPlan(kind="ignore")
+        return DispatchPlan(kind="ignore")
 
     with (
         capture_logs() as captured_logs,
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=prepare_dispatch,
         ),
         patch.object(bot._turn_policy, "plan_turn", new=plan_turn),
     ):
         await dispatch_test_turn(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             room,
             primary_event,
             "@bob:localhost",
@@ -5104,18 +5135,18 @@ async def test_backlog_replay_fails_closed_when_physical_source_collides_with_al
         source_event_metadata=source_event_metadata,
         requester_id="@bob:localhost",
     )
-    plan_turn = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
+    plan_turn = AsyncMock(return_value=DispatchPlan(kind="ignore"))
 
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=plan_turn),
     ):
         await dispatch_test_turn(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             room,
             primary_event,
             "@bob:localhost",
@@ -5170,17 +5201,17 @@ async def test_backlog_replay_degraded_thread_history_uses_pending_journal_event
     pending_turns = _watch_pending_turns(bot)
 
     action_mock = AsyncMock()
-    history_guard = MagicMock(wraps=bot._turn_controller._has_newer_unresponded_in_thread)
+    history_guard = MagicMock(wraps=bot._turn_dispatcher._has_newer_unresponded_in_thread)
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
-        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
+        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
-        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_dispatcher, room, older_event, "@user:localhost")
 
     history_guard.assert_not_called()
     assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$m1")]
@@ -5230,18 +5261,18 @@ async def test_backlog_replay_degraded_thread_history_ignores_equal_timestamp_pe
     await _admit_pending_thread_event(bot, same_timestamp_event_source)
     pending_turns = _watch_pending_turns(bot)
 
-    action_mock = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
-    history_guard = MagicMock(wraps=bot._turn_controller._has_newer_unresponded_in_thread)
+    action_mock = AsyncMock(return_value=DispatchPlan(kind="ignore"))
+    history_guard = MagicMock(wraps=bot._turn_dispatcher._has_newer_unresponded_in_thread)
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
-        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
+        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
-        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_dispatcher, room, older_event, "@user:localhost")
 
     history_guard.assert_not_called()
     assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$m1")]
@@ -5293,13 +5324,13 @@ async def test_backlog_replay_degraded_thread_history_counts_trusted_voice_comma
     action_mock = AsyncMock()
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
-        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_dispatcher, room, older_event, "@user:localhost")
 
     action_mock.assert_not_awaited()
     assert not await bot._turn_store.is_handled(room.room_id, "$m1")
@@ -5473,18 +5504,18 @@ async def test_backlog_replay_degraded_thread_history_ignores_visible_router_voi
     await _admit_pending_thread_event(bot, visible_echo_source)
     pending_turns = _watch_pending_turns(bot)
 
-    action_mock = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
-    history_guard = MagicMock(wraps=bot._turn_controller._has_newer_unresponded_in_thread)
+    action_mock = AsyncMock(return_value=DispatchPlan(kind="ignore"))
+    history_guard = MagicMock(wraps=bot._turn_dispatcher._has_newer_unresponded_in_thread)
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
-        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
+        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
-        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_dispatcher, room, older_event, "@user:localhost")
 
     history_guard.assert_not_called()
     assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$voice")]
@@ -5536,17 +5567,17 @@ async def test_backlog_replay_degraded_thread_history_counts_non_router_visible_
     pending_turns = _watch_pending_turns(bot)
 
     action_mock = AsyncMock()
-    history_guard = MagicMock(wraps=bot._turn_controller._has_newer_unresponded_in_thread)
+    history_guard = MagicMock(wraps=bot._turn_dispatcher._has_newer_unresponded_in_thread)
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
-        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
+        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
-        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_dispatcher, room, older_event, "@user:localhost")
 
     history_guard.assert_not_called()
     assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$voice")]
@@ -5601,18 +5632,18 @@ async def test_backlog_replay_degraded_thread_history_ignores_plain_reply_outsid
     }
     await _admit_pending_thread_event(bot, newer_event_source)
     pending_turns = _watch_pending_turns(bot)
-    action_mock = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
-    history_guard = MagicMock(wraps=bot._turn_controller._has_newer_unresponded_in_thread)
+    action_mock = AsyncMock(return_value=DispatchPlan(kind="ignore"))
+    history_guard = MagicMock(wraps=bot._turn_dispatcher._has_newer_unresponded_in_thread)
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
-        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
+        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
-        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_dispatcher, room, older_event, "@user:localhost")
 
     history_guard.assert_not_called()
     assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$m1")]
@@ -5664,18 +5695,18 @@ async def test_backlog_replay_degraded_thread_history_ignores_edit_events(tmp_pa
     }
     await _admit_pending_thread_event(bot, edit_event_source)
 
-    action_mock = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
-    history_guard = MagicMock(wraps=bot._turn_controller._has_newer_unresponded_in_thread)
+    action_mock = AsyncMock(return_value=DispatchPlan(kind="ignore"))
+    history_guard = MagicMock(wraps=bot._turn_dispatcher._has_newer_unresponded_in_thread)
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
-        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
+        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
-        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_dispatcher, room, older_event, "@user:localhost")
 
     history_guard.assert_not_called()
     action_mock.assert_awaited_once()
@@ -5711,19 +5742,19 @@ async def test_backlog_replay_degraded_thread_history_fails_open_without_positiv
     dispatch.context.requires_model_history_refresh = True
     pending_turns = _watch_pending_turns(bot)
 
-    action_mock = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
-    history_guard = MagicMock(wraps=bot._turn_controller._has_newer_unresponded_in_thread)
+    action_mock = AsyncMock(return_value=DispatchPlan(kind="ignore"))
+    history_guard = MagicMock(wraps=bot._turn_dispatcher._has_newer_unresponded_in_thread)
     with (
         capture_logs() as captured_logs,
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
-        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
+        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
-        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_dispatcher, room, older_event, "@user:localhost")
 
     history_guard.assert_not_called()
     assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$m1")]
@@ -5790,16 +5821,16 @@ async def test_backlog_replay_degraded_thread_history_only_counts_unsettled_jour
         await bot._journal_store.principal(bot._journal_principal_id).settle("$m2")
     pending_turns = _watch_pending_turns(bot)
 
-    action_mock = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
+    action_mock = AsyncMock(return_value=DispatchPlan(kind="ignore"))
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
-        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_dispatcher, room, older_event, "@user:localhost")
 
     assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$m1")]
     assert action_mock.await_count == (1 if settled else 0)
@@ -5830,23 +5861,23 @@ async def test_media_dispatch_uses_replay_snapshot_instead_of_mutated_planning_h
         latest_event_id="$img2",
     )
 
-    action_mock = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
+    action_mock = AsyncMock(return_value=DispatchPlan(kind="ignore"))
     dispatch.context.thread_history = [hydrated_msg]
     dispatch.context.replay_guard_history = []
 
     newer_mock = AsyncMock(return_value=False)
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
-        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=newer_mock),
+        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=newer_mock),
         patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
     ):
         await dispatch_test_turn(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             room,
             dispatch_event,
             "@user:localhost",
@@ -5880,7 +5911,7 @@ async def test_thread_history_guard_does_not_interfere_with_normal_dispatch(tmp_
 
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
@@ -5892,7 +5923,7 @@ async def test_thread_history_guard_does_not_interfere_with_normal_dispatch(tmp_
         ),
         patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
     ):
-        await dispatch_test_turn(bot._turn_controller, room, event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_dispatcher, room, event, "@user:localhost")
 
     # Dispatch proceeded to completion
     assert await bot._turn_store.is_handled(room.room_id, "$m1")
@@ -6165,7 +6196,7 @@ async def test_newer_command_does_not_suppress_older_message(tmp_path: Path) -> 
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
@@ -6177,7 +6208,7 @@ async def test_newer_command_does_not_suppress_older_message(tmp_path: Path) -> 
         ),
         patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
     ):
-        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_dispatcher, room, older_event, "@user:localhost")
 
     # The older message must NOT be suppressed — dispatch action should be called
     action_mock.assert_awaited_once()
@@ -6215,7 +6246,7 @@ async def test_newer_command_with_whitespace_does_not_suppress(tmp_path: Path) -
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
@@ -6227,7 +6258,7 @@ async def test_newer_command_with_whitespace_does_not_suppress(tmp_path: Path) -
         ),
         patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
     ):
-        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_dispatcher, room, older_event, "@user:localhost")
 
     action_mock.assert_awaited_once()
 
@@ -6272,7 +6303,7 @@ async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
@@ -6284,7 +6315,7 @@ async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
         ),
         patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
     ):
-        await dispatch_test_turn(bot._turn_controller, room, scheduled_event, "@mindroom_test_agent:localhost")
+        await dispatch_test_turn(bot._turn_dispatcher, room, scheduled_event, "@mindroom_test_agent:localhost")
 
     action_mock.assert_awaited_once()
 
@@ -6321,7 +6352,7 @@ async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
@@ -6333,7 +6364,7 @@ async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
         ),
         patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
     ):
-        await dispatch_test_turn(bot._turn_controller, room, hook_event, "@mindroom_test_agent:localhost")
+        await dispatch_test_turn(bot._turn_dispatcher, room, hook_event, "@mindroom_test_agent:localhost")
 
     action_mock.assert_awaited_once()
 
@@ -6372,7 +6403,7 @@ async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
@@ -6384,7 +6415,7 @@ async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
         ),
         patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
     ):
-        await dispatch_test_turn(bot._turn_controller, room, first_fire, "@mindroom_test_agent:localhost")
+        await dispatch_test_turn(bot._turn_dispatcher, room, first_fire, "@mindroom_test_agent:localhost")
 
     # First fire must NOT be suppressed
     action_mock.assert_awaited_once()
@@ -6423,13 +6454,13 @@ async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -
     action_mock = AsyncMock()
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
-        await dispatch_test_turn(bot._turn_controller, room, coalesced_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_dispatcher, room, coalesced_event, "@user:localhost")
 
     # Coalesced user batch MUST be suppressed — not an automation event
     action_mock.assert_not_awaited()
@@ -6465,14 +6496,14 @@ async def test_coalesced_media_batch_suppressed_by_replay_snapshot(tmp_path: Pat
     action_mock = AsyncMock()
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
         await dispatch_test_turn(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             room,
             coalesced_event,
             "@user:localhost",
@@ -6506,10 +6537,10 @@ async def test_normal_text_command_still_dispatches_as_command(tmp_path: Path) -
     handle_cmd_mock = AsyncMock(return_value=True)
     prepare_dispatch_mock = AsyncMock(return_value=prepared_dispatch_result(dispatch))
     with (
-        patch.object(bot._turn_controller, "_prepare_dispatch", new=prepare_dispatch_mock),
+        patch.object(bot._turn_dispatcher, "_prepare_dispatch", new=prepare_dispatch_mock),
         patch.object(bot._command_turn_executor, "execute_if_owned", new=handle_cmd_mock),
     ):
-        await dispatch_test_turn(bot._turn_controller, room, command_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_dispatcher, room, command_event, "@user:localhost")
 
     # A command reads only the conversation it can without waiting on thread history.
     assert prepare_dispatch_mock.await_args.kwargs["use_command_context"] is True
@@ -6549,16 +6580,16 @@ async def test_active_voice_follow_up_preserves_voice_command_policy(tmp_path: P
     prepare_dispatch_mock = AsyncMock(return_value=prepared_dispatch_result(dispatch))
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=prepare_dispatch_mock,
         ),
         patch.object(bot._turn_policy, "plan_turn", new=plan_mock),
         patch.object(bot._command_turn_executor, "execute_if_owned", new=execute_command_mock),
-        patch.object(bot._turn_controller, "_execute_response_action", new=execute_response_mock),
+        patch.object(bot._turn_dispatcher, "_execute_response_action", new=execute_response_mock),
     ):
         await dispatch_test_turn(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             room,
             voice_command_event,
             "@user:localhost",
@@ -6605,13 +6636,13 @@ async def test_older_command_not_suppressed_during_replay(tmp_path: Path) -> Non
     handle_cmd_mock = AsyncMock(return_value=True)
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
         patch.object(bot._command_turn_executor, "execute_if_owned", new=handle_cmd_mock),
     ):
-        await dispatch_test_turn(bot._turn_controller, room, cmd_event, "@user:localhost")
+        await dispatch_test_turn(bot._turn_dispatcher, room, cmd_event, "@user:localhost")
 
     # Command must have been dispatched, not suppressed
     handle_cmd_mock.assert_awaited_once()
@@ -6706,7 +6737,7 @@ async def _capture_gate_dispatches(
     media_batches: list[list[object]] = []
     payload_requests: list[DispatchPayloadWithAttachmentsRequest] = []
 
-    async def record_plan(*args: object, **kwargs: object) -> _DispatchPlan:
+    async def record_plan(*args: object, **kwargs: object) -> DispatchPlan:
         dispatch = cast("PreparedDispatch", args[2])
         envelopes.append(dispatch.envelope)
         media_batches.append(list(cast("list[object] | None", kwargs.get("media_events")) or []))
@@ -6764,7 +6795,7 @@ async def _capture_gate_dispatches(
             new=AsyncMock(side_effect=extract_dispatch_context),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=record_plan)),
-        patch.object(bot._turn_controller, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
+        patch.object(bot._turn_dispatcher, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
         patch.object(
             bot._inbound_turn_normalizer,
             "build_dispatch_payload_with_attachments",
@@ -7459,7 +7490,7 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
     captured_extra_content: list[object] = []
     payload_requests: list[DispatchPayloadWithAttachmentsRequest] = []
 
-    async def record_plan(*args: object, **kwargs: object) -> _DispatchPlan:
+    async def record_plan(*args: object, **kwargs: object) -> DispatchPlan:
         dispatch = cast("PreparedDispatch", args[2])
         captured_envelopes.append(dispatch.envelope)
         captured_extra_content.append(kwargs.get("extra_content"))
@@ -7498,15 +7529,15 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
             new=AsyncMock(side_effect=extract_dispatch_context),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=record_plan)),
-        patch.object(bot._turn_controller, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
+        patch.object(bot._turn_dispatcher, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
         patch.object(
             bot._inbound_turn_normalizer,
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(side_effect=record_payload_request),
         ),
     ):
-        ticket = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
-        handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
+        ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
+        handled = await bot._turn_ingress._dispatch_file_sidecar_text_preview(
             room,
             PrecheckedEvent(
                 event=sidecar_event,
@@ -7548,7 +7579,7 @@ async def test_sidecar_hydration_preserves_trusted_attachment_metadata(tmp_path:
     captured_envelopes: list[MessageEnvelope] = []
     payload_requests: list[DispatchPayloadWithAttachmentsRequest] = []
 
-    async def record_plan(*args: object, **_kwargs: object) -> _DispatchPlan:
+    async def record_plan(*args: object, **_kwargs: object) -> DispatchPlan:
         dispatch = cast("PreparedDispatch", args[2])
         captured_envelopes.append(dispatch.envelope)
         return _respond_dispatch_plan()
@@ -7567,10 +7598,10 @@ async def test_sidecar_hydration_preserves_trusted_attachment_metadata(tmp_path:
             new=AsyncMock(side_effect=record_payload_request),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=record_plan)),
-        patch.object(bot._turn_controller, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
+        patch.object(bot._turn_dispatcher, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
     ):
         await dispatch_test_turn(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             room,
             hydrated,
             "@requester:localhost",
@@ -7608,7 +7639,7 @@ async def test_sidecar_hydration_refreshes_prompt_and_mentions_before_dispatch(t
     captured_envelopes: list[MessageEnvelope] = []
     captured_handled_turns: list[TurnRecord] = []
 
-    async def record_plan(*args: object, **_kwargs: object) -> _DispatchPlan:
+    async def record_plan(*args: object, **_kwargs: object) -> DispatchPlan:
         dispatch = cast("PreparedDispatch", args[2])
         captured_envelopes.append(dispatch.envelope)
         return _respond_dispatch_plan()
@@ -7619,10 +7650,10 @@ async def test_sidecar_hydration_refreshes_prompt_and_mentions_before_dispatch(t
     handled_turn = TurnRecord.create(["$sidecar"], source_event_prompts={"$sidecar": "@test_agent hydrated body"})
     with (
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=record_plan)),
-        patch.object(bot._turn_controller, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
+        patch.object(bot._turn_dispatcher, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
     ):
         await dispatch_test_turn(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             room,
             hydrated,
             "@user:localhost",
@@ -7668,13 +7699,14 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
             "prepare_file_sidecar_text_event",
             new=AsyncMock(return_value=hydrated),
         ),
-        patch(
-            "mindroom.turn_controller.dispatch_text_message",
+        patch.object(
+            TurnDispatcher,
+            "_dispatch_text_turn",
             new=AsyncMock(side_effect=RuntimeError("dispatch failed")),
         ),
     ):
-        ticket = bot._turn_controller.reserve_prompt_ingress_order(room, sidecar.sender)
-        outcome = await bot._turn_controller._dispatch_file_sidecar_text_preview(
+        ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, sidecar.sender)
+        outcome = await bot._turn_ingress._dispatch_file_sidecar_text_preview(
             room,
             PrecheckedEvent(event=sidecar, facts=make_ingress_facts(sidecar.sender, requester_user_id=sidecar.sender)),
             ticket=ticket,
@@ -7710,13 +7742,13 @@ async def test_router_skips_intermediate_agent_stream_edit_without_precheck(tmp_
         "event_id": "$agent-placeholder",
     }
     assert EventInfo.from_event(streaming_edit.source).is_edit
-    controller = replace_turn_controller_deps(bot)
+    replace_turn_deps(bot)
 
     with patch(
-        "mindroom.turn_controller.TurnController._precheck_dispatch_event",
+        "mindroom.turns.ingress.TurnIngress._precheck_dispatch_event",
         side_effect=AssertionError("intermediate stream edits must skip ingress precheck"),
     ) as precheck:
-        outcome = await controller.handle_text_event(room, streaming_edit)
+        outcome = await bot._turn_ingress.handle_text_event(room, streaming_edit)
 
     assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
     precheck.assert_not_called()
@@ -7738,7 +7770,7 @@ async def test_router_early_skip_keeps_sidecar_preview_for_hydration(tmp_path: P
         "is_complete_content": True,
     }
 
-    should_skip = await bot._turn_controller._should_skip_router_before_shared_ingress_work(
+    should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
         room,
         sidecar_preview,
         facts=make_ingress_facts(sidecar_preview.sender, requester_user_id="@user:localhost"),
@@ -7782,7 +7814,7 @@ async def test_router_early_skip_only_honors_joined_non_agent_mentions(
     assert isinstance(content, dict)
     content["m.mentions"] = {"user_ids": [mentioned_user_id]}
 
-    should_skip = await bot._turn_controller._should_skip_router_before_shared_ingress_work(
+    should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
         room,
         event,
         facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
@@ -7815,11 +7847,11 @@ async def test_first_router_turn_refreshes_lazy_members_before_mention_routing(t
     content["m.mentions"] = {"user_ids": [mentioned_user_id]}
 
     with patch.object(
-        bot._turn_controller,
+        bot._turn_ingress,
         "_dispatch_prepared_text_like_ingress",
         new=AsyncMock(return_value=_IngressAdmissionOutcome.DEFERRED),
     ):
-        outcome = await bot._turn_controller.handle_text_event(room, event)
+        outcome = await bot._turn_ingress.handle_text_event(room, event)
 
     assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
     assert room_membership_is_complete(room)
@@ -7839,8 +7871,8 @@ async def test_first_turn_membership_refresh_failure_reuses_cached_state_for_pla
     bot.client.joined_members.side_effect = TimeoutError("membership lookup timed out")
     event = _text_event(event_id="$membership-timeout", body="hello")
 
-    with patch.object(bot._turn_controller, "_execute_response_action", new=AsyncMock()):
-        outcome = await bot._turn_controller.handle_text_event(room, event)
+    with patch.object(bot._turn_dispatcher, "_execute_response_action", new=AsyncMock()):
+        outcome = await bot._turn_ingress.handle_text_event(room, event)
         drain_result = await bot._coalescing_gate.drain_all()
 
     assert outcome is TurnDispatchOutcome.DEFERRED
@@ -7871,9 +7903,9 @@ async def test_router_early_skip_labels_thread_snapshot_refresh(tmp_path: Path) 
         ),
     )
     snapshot = AsyncMock(return_value=ThreadHistoryResult([], is_full_history=False))
-    bot._turn_controller.deps.resolver.dispatch_thread_snapshot = snapshot
+    bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = snapshot
 
-    should_skip = await bot._turn_controller._should_skip_router_before_shared_ingress_work(
+    should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
         room,
         event,
         facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
@@ -7909,9 +7941,9 @@ async def test_router_early_skip_fails_open_for_thread_snapshot_failure(tmp_path
         ),
     )
     snapshot = AsyncMock(side_effect=RuntimeError("snapshot failed"))
-    bot._turn_controller.deps.resolver.dispatch_thread_snapshot = snapshot
+    bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = snapshot
 
-    should_skip = await bot._turn_controller._should_skip_router_before_shared_ingress_work(
+    should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
         room,
         event,
         facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),

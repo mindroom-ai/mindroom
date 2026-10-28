@@ -31,6 +31,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import ClaimContended, TurnClaim
+from mindroom.turns.dispatch import TurnDispatcher
 from mindroom.voice import handler as voice_handler
 from tests.bot_helpers import dispatch_reaction_durably
 from tests.conftest import (
@@ -40,7 +41,7 @@ from tests.conftest import (
     prepared_dispatch_result,
     record_turn_answered,
     replace_interactive_selection_handlers,
-    replace_turn_controller_deps,
+    replace_turn_deps,
     turn_claim_is_live,
     unwrap_extracted_collaborator,
 )
@@ -449,9 +450,9 @@ async def test_router_command_targeting_unresolved_conversation_fails_visibly(tm
             new=AsyncMock(side_effect=ThreadMembershipLookupError("unproven root")),
         ),
         patch.object(bot._delivery_gateway, "send_text", new=send_text_mock),
-        patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as dispatch_mock,
+        patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as dispatch_mock,
     ):
-        await bot._turn_controller.handle_text_event(room, command_event)
+        await bot._turn_ingress.handle_text_event(room, command_event)
 
     send_text_mock.assert_awaited_once()
     request = send_text_mock.await_args.args[0]
@@ -498,9 +499,9 @@ async def test_unresolved_router_command_waits_for_reload_and_rechecks_authoriza
         patch.object(bot._conversation_resolver, "coalescing_thread_id", side_effect=unresolved_thread),
         patch.object(bot._response_runner, "wait_for_admission_or_shutdown", side_effect=wait_for_replacement),
         patch.object(bot._delivery_gateway, "send_text", new_callable=AsyncMock, return_value="$notice") as send_text,
-        patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as dispatch,
+        patch.object(TurnDispatcher, "_dispatch_text_turn", new_callable=AsyncMock) as dispatch,
     ):
-        command_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, command_event))
+        command_task = asyncio.create_task(bot._turn_ingress.handle_text_event(room, command_event))
         await asyncio.wait_for(lookup_started.wait(), timeout=1)
         assert admission_gate.close_if_idle()
         bot.config = replacement_config
@@ -520,7 +521,7 @@ async def test_non_router_agent_settles_unresolvable_command_without_notice(tmp_
     """Non-router agents explicitly ignore unresolvable commands without growing the turn ledger."""
     bot = _make_bot(tmp_path)
     settle_ignored = AsyncMock()
-    replace_turn_controller_deps(bot, settle_ignored_sources=settle_ignored)
+    replace_turn_deps(bot, settle_ignored_sources=settle_ignored)
     room = _make_room()
     command_event = _text_event(event_id="$cmd", body="!help", server_timestamp=1000, thread_id="$pending_root")
     send_text_mock = AsyncMock(return_value="$notice")
@@ -532,9 +533,9 @@ async def test_non_router_agent_settles_unresolvable_command_without_notice(tmp_
             new=AsyncMock(side_effect=ThreadMembershipLookupError("unproven root")),
         ),
         patch.object(bot._delivery_gateway, "send_text", new=send_text_mock),
-        patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as dispatch_mock,
+        patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as dispatch_mock,
     ):
-        await bot._turn_controller.handle_text_event(room, command_event)
+        await bot._turn_ingress.handle_text_event(room, command_event)
 
     send_text_mock.assert_not_awaited()
     dispatch_mock.assert_not_awaited()
@@ -555,10 +556,10 @@ async def test_unresolvable_non_command_text_still_rejects_ingress(tmp_path: Pat
             "coalescing_thread_id",
             new=AsyncMock(side_effect=ThreadMembershipLookupError("unproven root")),
         ),
-        patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as dispatch_mock,
+        patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as dispatch_mock,
         pytest.raises(ThreadMembershipLookupError),
     ):
-        await bot._turn_controller.handle_text_event(room, event)
+        await bot._turn_ingress.handle_text_event(room, event)
 
     dispatch_mock.assert_not_awaited()
     assert not await bot._turn_store.is_handled(room.room_id, "$m1")
@@ -591,7 +592,7 @@ def _turn_controller_dispatcher(
     room: nio.MatrixRoom,
     journal_store: EventJournalStore,
 ) -> JournalDispatcher:
-    """Return a journal dispatcher delivering message and media events to the bot's TurnController."""
+    """Return a journal dispatcher delivering message and media events to the bot's turn ingress."""
 
     async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
         pass
@@ -599,8 +600,8 @@ def _turn_controller_dispatcher(
     return JournalDispatcher(
         store=journal_store.principal("agent@lane"),
         callbacks=JournalCallbacks(
-            on_message=bot._turn_controller.handle_text_event,
-            on_media=bot._turn_controller.handle_media_event,
+            on_message=bot._turn_ingress.handle_text_event,
+            on_media=bot._turn_ingress.handle_media_event,
             on_reaction=cast("Callable", noop),
             on_approval=cast("Callable", noop),
             on_room_lifecycle=cast("Callable", noop),
@@ -647,7 +648,7 @@ async def test_unplaceable_event_settles_and_its_room_moves_on(
 
     with (
         patch.object(bot._conversation_resolver, "coalescing_thread_id", side_effect=unplaceable),
-        patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as dispatch_mock,
+        patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as dispatch_mock,
     ):
         await admit_dispatch_event(dispatcher, room, poison, kind, EventClass.ACTIONABLE)
         await admit_dispatch_event(dispatcher, room, later, EventKind.MESSAGE, EventClass.ACTIONABLE)
@@ -676,7 +677,7 @@ async def test_transient_relation_lookup_failure_keeps_the_event_pending(
             "coalescing_thread_id",
             new=AsyncMock(side_effect=ThreadMembershipLookupError("homeserver unavailable")),
         ),
-        patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as dispatch_mock,
+        patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as dispatch_mock,
     ):
         await admit_dispatch_event(dispatcher, room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
         await dispatcher.drain_once()
@@ -855,19 +856,19 @@ async def test_long_running_turn_never_delays_other_ingress_from_same_sender(tmp
         return prepared_dispatch_result(dispatch)
 
     with (
-        patch.object(bot._turn_controller, "_prepare_dispatch", new=fake_prepare_dispatch),
+        patch.object(bot._turn_dispatcher, "_prepare_dispatch", new=fake_prepare_dispatch),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
-        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
+        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),
         patch(
             "mindroom.response_runner.ResponseRunner._generate_response_locked",
             new=fake_generate_response_locked,
         ),
     ):
-        await bot._turn_controller.handle_text_event(room, first)
+        await bot._turn_ingress.handle_text_event(room, first)
         await asyncio.wait_for(first_locked.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
-        await bot._turn_controller.handle_text_event(room, second)
-        await bot._turn_controller.handle_text_event(room, other_thread_reply)
+        await bot._turn_ingress.handle_text_event(room, second)
+        await bot._turn_ingress.handle_text_event(room, other_thread_reply)
 
         await _wait_for(lambda: sorted(generated) == ["$m1", "$m2", "$m3"])
         assert not release_first_response.is_set()
@@ -997,13 +998,14 @@ async def test_hung_voice_download_fallback_releases_later_sender_slot(
     try:
         with (
             patch("mindroom.voice.handler._download_audio", side_effect=hung_download),
-            patch(
-                "mindroom.turn_controller.dispatch_text_message",
+            patch.object(
+                TurnDispatcher,
+                "_dispatch_text_turn",
                 new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
             ),
         ):
-            await bot._turn_controller.handle_media_event(room, voice_note)
-            await bot._turn_controller.handle_text_event(room, later_text)
+            await bot._turn_ingress.handle_media_event(room, voice_note)
+            await bot._turn_ingress.handle_text_event(room, later_text)
             await _wait_for(lambda: "$later" in dispatched_source_ids)
 
         assert "$voice" in dispatched_source_ids
@@ -1065,11 +1067,11 @@ async def test_voice_echo_and_follow_up_slots_never_hold_another_conversation(tm
         return _normalized_voice_transcript(request.event, thread_id="$threadA")
 
     with (
-        patch.object(bot._turn_controller, "_prepare_dispatch", new=fake_prepare_dispatch),
+        patch.object(bot._turn_dispatcher, "_prepare_dispatch", new=fake_prepare_dispatch),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
-        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
+        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),
         patch.object(
-            bot._turn_controller.deps.normalizer,
+            bot._turn_ingress.deps.normalizer,
             "prepare_voice_event",
             new=AsyncMock(side_effect=fake_prepare_voice_event),
         ),
@@ -1078,14 +1080,14 @@ async def test_voice_echo_and_follow_up_slots_never_hold_another_conversation(tm
             new=fake_generate_response_locked,
         ),
     ):
-        await bot._turn_controller.handle_text_event(room, first)
+        await bot._turn_ingress.handle_text_event(room, first)
         await asyncio.wait_for(first_locked.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
-        await bot._turn_controller.handle_media_event(room, voice_note)
-        await bot._turn_controller.handle_text_event(room, echo)
-        await bot._turn_controller.handle_text_event(room, follow_up)
-        await bot._turn_controller.handle_media_event(room, image)
-        await bot._turn_controller.handle_text_event(room, other_thread)
+        await bot._turn_ingress.handle_media_event(room, voice_note)
+        await bot._turn_ingress.handle_text_event(room, echo)
+        await bot._turn_ingress.handle_text_event(room, follow_up)
+        await bot._turn_ingress.handle_media_event(room, image)
+        await bot._turn_ingress.handle_text_event(room, other_thread)
 
         await _wait_for(lambda: "$b1" in generated)
         assert not release_first_response.is_set()
@@ -1162,13 +1164,13 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
             thread_id="$threadA",
         ),
     )
-    replace_turn_controller_deps(bot, interactive_questions=interactive_questions)
+    replace_turn_deps(bot, interactive_questions=interactive_questions)
     answer_task: asyncio.Task[None] | None = None
     try:
         with (
-            patch.object(bot._turn_controller, "_prepare_dispatch", new=fake_prepare_dispatch),
+            patch.object(bot._turn_dispatcher, "_prepare_dispatch", new=fake_prepare_dispatch),
             patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
-            patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
+            patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),
             patch.object(bot._delivery_gateway, "send_text", new=AsyncMock(side_effect=fake_send_text)),
             patch.object(bot._conversation_resolver, "fetch_thread_history", new=AsyncMock(return_value=[])),
             patch(
@@ -1176,14 +1178,14 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
                 new=fake_generate_response_locked,
             ),
         ):
-            await bot._turn_controller.handle_text_event(room, first)
+            await bot._turn_ingress.handle_text_event(room, first)
             await asyncio.wait_for(first_locked.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
             # The answer's callback hands the selection to a runner-owned task and returns while the active turn
             # still holds this conversation.
-            answer_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, answer))
+            answer_task = asyncio.create_task(bot._turn_ingress.handle_text_event(room, answer))
             await asyncio.wait_for(answer_task, timeout=SETTLE_TIMEOUT_SECONDS)
-            await bot._turn_controller.handle_text_event(room, other_thread)
+            await bot._turn_ingress.handle_text_event(room, other_thread)
 
             await _wait_for(lambda: "$b1" in generated)
             assert not release_first_response.is_set()
@@ -1276,7 +1278,7 @@ async def test_edit_and_reaction_slots_settle_before_their_execution_finishes(tm
                 new=claim_interactive,
             ),
         ):
-            edit_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, edit_event))
+            edit_task = asyncio.create_task(bot._turn_ingress.handle_text_event(room, edit_event))
             await asyncio.wait_for(edit_started.wait(), timeout=1.0)
             reaction_task = asyncio.create_task(dispatch_reaction_durably(bot, room, reaction_event))
             await asyncio.wait_for(selection_started.wait(), timeout=1.0)
@@ -1369,15 +1371,15 @@ async def test_response_failure_drains_follow_up_queue(tmp_path: Path) -> None:
         return prepared_dispatch_result(dispatch)
 
     with (
-        patch.object(bot._turn_controller, "_prepare_dispatch", new=fake_prepare_dispatch),
+        patch.object(bot._turn_dispatcher, "_prepare_dispatch", new=fake_prepare_dispatch),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
-        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
+        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),
         patch(
             "mindroom.response_runner.ResponseRunner._generate_response_locked",
             new=fake_generate_response_locked,
         ),
     ):
-        await bot._turn_controller.handle_text_event(room, first)
+        await bot._turn_ingress.handle_text_event(room, first)
         await asyncio.wait_for(first_locked.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
         for event_id, sender in (("$f1", "@alice:localhost"), ("$f2", "@bob:localhost")):
@@ -1414,7 +1416,7 @@ async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> N
     response_running = asyncio.Event()
     calls: list[PreparedTurn] = []
 
-    async def record_dispatch(_controller: object, batch: PreparedTurn) -> None:
+    async def record_dispatch(batch: PreparedTurn) -> None:
         calls.append(batch)
 
     async def blocked_response() -> None:
@@ -1434,7 +1436,7 @@ async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> N
         room_id="!room:example.org",
     )
     await asyncio.wait_for(response_running.wait(), timeout=1.0)
-    with patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock(side_effect=record_dispatch)):
         for event_id, sender in (("$f1", "@alice:localhost"), ("$f2", "@bob:localhost")):
             await _enqueue_for_dispatch(
                 bot,

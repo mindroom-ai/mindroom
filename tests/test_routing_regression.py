@@ -38,7 +38,6 @@ from mindroom.orchestration.runtime import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.routing import ResponderSelection, suggest_responder_for_message
 from mindroom.teams.formation import TeamOutcome, TeamResolution
-from mindroom.text_ingress_dispatch import _run_admitted_router_relay
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy, _ResponderAvailability
 from tests.access_schema_support import with_current_room_member_access
@@ -273,7 +272,7 @@ def _router_readiness_event(event_id: str) -> nio.RoomMessageText:
 
 
 def _router_relay(router_bot: AgentBot, room: nio.MatrixRoom, event_id: str) -> Awaitable[None]:
-    return router_bot._turn_controller._execute_router_relay(
+    return router_bot._turn_dispatcher._execute_router_relay(
         room,
         _router_readiness_event(event_id),
         [],
@@ -618,8 +617,7 @@ class TestRoutingRegression:
         release_send = asyncio.Event()
 
         def admitted_relay(event_id: str) -> Awaitable[None]:
-            return _run_admitted_router_relay(
-                router_bot._turn_controller,
+            return router_bot._turn_dispatcher._run_admitted_router_relay(
                 lambda: _router_relay(router_bot, room, event_id),
             )
 
@@ -708,8 +706,7 @@ class TestRoutingRegression:
 
         router_bot.client.room_send.side_effect = blocking_room_send
         relay_task = asyncio.create_task(
-            _run_admitted_router_relay(
-                router_bot._turn_controller,
+            router_bot._turn_dispatcher._run_admitted_router_relay(
                 lambda: _router_relay(router_bot, room, "$mcp-restart"),
             ),
         )
@@ -997,7 +994,7 @@ class TestRoutingRegression:
             },
         }
 
-        await router_bot._turn_controller._execute_router_relay(
+        await router_bot._turn_dispatcher._execute_router_relay(
             mock_room,
             message_event,
             [],
@@ -1081,7 +1078,7 @@ class TestRoutingRegression:
         message_event.server_timestamp = 1000
         message_event.source = {"content": {"body": "Please route this"}}
 
-        await router_bot._turn_controller._execute_router_relay(
+        await router_bot._turn_dispatcher._execute_router_relay(
             mock_room,
             message_event,
             [],
@@ -1164,7 +1161,7 @@ class TestRoutingRegression:
             },
         }
 
-        await router_bot._turn_controller._execute_router_relay(
+        await router_bot._turn_dispatcher._execute_router_relay(
             mock_room,
             message_event,
             [],
@@ -1329,7 +1326,7 @@ class TestRoutingRegression:
         message_event.server_timestamp = 1000
         message_event.source = {"content": {"body": "Who can help?"}}
 
-        await router_bot._turn_controller._execute_router_relay(
+        await router_bot._turn_dispatcher._execute_router_relay(
             mock_room,
             message_event,
             [],

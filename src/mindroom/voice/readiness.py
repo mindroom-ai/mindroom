@@ -79,7 +79,7 @@ class VoiceReadiness:
     logger: structlog.stdlib.BoundLogger
 
     async def prepared_source(self, source_event_id: str) -> PreparedVoiceSource | None:
-        """Read the checkpoint before the controller resolves the conversation target."""
+        """Read the checkpoint before voice ingress resolves the conversation target."""
         try:
             return await self.turn_store.prepared_voice_for_source(source_event_id)
         except Exception as exc:

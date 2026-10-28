@@ -55,8 +55,8 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.edit_regenerator import EditRegenerator
     from mindroom.event_journal import ApprovalContinuation, EventJournalStore, MatrixDelivery, PrincipalStore
-    from mindroom.turn_controller import TurnController
     from mindroom.turn_store import TurnStore
+    from mindroom.turns.ingress import TurnIngress
 
 
 @dataclass
@@ -68,7 +68,7 @@ class _ApprovalCase:
     gateway: DeliveryGateway
     runner: ResponseRunner
     regenerator: EditRegenerator
-    controller: TurnController
+    ingress: TurnIngress
     resolver: ConversationResolver
     manager: ApprovalManager
     target: MessageTarget
@@ -115,7 +115,7 @@ class _ApprovalCase:
             ),
             patch.object(self.bot, "_delivery_gateway", self.gateway),
         ):
-            outcome = await self.controller.handle_text_event(self.room, event)
+            outcome = await self.ingress.handle_text_event(self.room, event)
             await finish_edit_regenerations(self.bot)
         return outcome
 
@@ -327,12 +327,12 @@ async def _paused_case(  # noqa: PLR0915
         thread_id=None,
         entity_name="general",
     )
-    controller = unwrap_extracted_collaborator(bot._turn_controller)
+    ingress = bot._turn_ingress
     update_turn_owner_deps(bot, edit_regenerator=regenerator)
     outcomes: list[TurnDispatchOutcome] = []
 
     async def dispatch_edit(room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
-        outcome = await controller.handle_text_event(room, event)
+        outcome = await ingress.handle_text_event(room, event)
         outcomes.append(outcome)
         return outcome
 
@@ -424,7 +424,7 @@ async def _paused_case(  # noqa: PLR0915
             gateway,
             runner,
             regenerator,
-            controller,
+            ingress,
             resolver,
             manager,
             target,
@@ -451,7 +451,7 @@ async def approval_case(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("requires_human", [False, True])
 class TestEditApprovalOwnership:
-    """Exercise independent pause, resume, and settlement contracts through real controllers."""
+    """Exercise independent pause, resume, and settlement contracts through real turn owners."""
 
     async def test_a_newer_edit_of_the_paused_reply_cancels_its_approval_and_regenerates(
         self,

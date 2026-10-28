@@ -2845,7 +2845,7 @@ async def test_dispatched_welcome_selects_target_through_real_turn_policy(
     facts = target._ingress_validator.classify(event)
     assert await target._ingress_validator.precheck_event(room, event, facts)
     assert facts.lane_requester_id == "@alice:localhost"
-    prepared = await target._turn_controller._prepare_dispatch(
+    prepared = await target._turn_dispatcher._prepare_dispatch(
         room,
         event,
         facts,

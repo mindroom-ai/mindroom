@@ -8,7 +8,7 @@ retired when dispatch merges it into the claim on the whole turn, which the
 response task then releases.
 
 These are characterization tests for the turn-pipeline lifecycle refactor:
-they pin the current leak-free behavior through the focused ``TurnController``
+they pin the current leak-free behavior through the focused ``TurnIngress``
 harness (real ``TurnStore``, ``CoalescingGate``, and ingress lanes).
 """
 
@@ -244,7 +244,7 @@ async def test_text_claim_is_held_before_text_normalization(
     room = _room_with_members(config, "general")
     event = _text_event("claim before normalization")
     spy = _ResolveClaimSpy(
-        inner=harness.controller.deps.normalizer,
+        inner=harness.ingress.deps.normalizer,
         turn_store=harness.turn_store,
         ledger=ledger,
         source_event_id=event.event_id,
@@ -277,7 +277,7 @@ async def test_admitted_text_turn_releases_pre_gate_claim_before_dispatch_reclai
     room = _room_with_members(config, "general")
     event = _text_event("ordinary admitted turn")
 
-    outcome = await harness.controller.handle_text_event(room, event)
+    outcome = await harness.ingress.handle_text_event(room, event)
     await harness.gate.drain_all()
     await harness.runner.settle_inbox_responses()
 
@@ -338,7 +338,7 @@ async def test_router_pre_ingress_skip_releases_claim(
     resolve_spy = _FailingNormalizer()
     _install_normalizer(harness, resolve_spy)
 
-    outcome = await harness.controller.handle_text_event(room, event)
+    outcome = await harness.ingress.handle_text_event(room, event)
 
     assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
     assert resolve_spy.calls == 0, "the router skip must happen before normalization"
@@ -362,7 +362,7 @@ async def test_cancelled_text_ingress_releases_claim(
     blocker = _BlockingNormalizer(started=asyncio.Event())
     _install_normalizer(harness, blocker)
 
-    ingress = asyncio.create_task(harness.controller.handle_text_event(room, event))
+    ingress = asyncio.create_task(harness.ingress.handle_text_event(room, event))
     await blocker.started.wait()
     ingress.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -391,7 +391,7 @@ async def test_abandoned_lane_slot_releases_claim_exactly_once(
     room = _room_with_members(config, "general")
     event = _text_event("admit through abandoned lane")
 
-    ticket = harness.controller.reserve_prompt_ingress_order(room, _SENDER)
+    ticket = harness.ingress.reserve_prompt_ingress_order(room, _SENDER)
     worker = harness.gate.lanes._workers.get(ReceiptLaneKey(room_id=room.room_id, sender_id=_SENDER))
     assert worker is not None
     worker.cancel()
@@ -400,7 +400,7 @@ async def test_abandoned_lane_slot_releases_claim_exactly_once(
     await asyncio.wait_for(ticket.slot.settled.wait(), timeout=1.0)
 
     with pytest.raises(IngressAdmissionClosedError):
-        await harness.controller.handle_text_event(room, event, ticket=ticket)
+        await harness.ingress.handle_text_event(room, event, ticket=ticket)
 
     assert ledger.kinds() == ["claim", "release"]
     _assert_claims_released_exactly_once(ledger)
@@ -426,7 +426,7 @@ async def test_media_gate_admission_failure_releases_claim_exactly_once(
     )
 
     with pytest.raises(IngressAdmissionClosedError):
-        await harness.controller.handle_media_event(room, event)
+        await harness.ingress.handle_media_event(room, event)
 
     assert ledger.kinds() == ["claim", "release"]
     _assert_claims_released_exactly_once(ledger)

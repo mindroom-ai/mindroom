@@ -23,6 +23,7 @@ from mindroom.dispatch_source import INTERACTIVE_SELECTION_SOURCE_KIND, MESSAGE_
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import send_streaming_response
+from mindroom.turns.dispatch import TurnDispatcher
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
@@ -31,7 +32,7 @@ from tests.conftest import (
     live_turn_claim,
     make_ingress_facts,
     make_pending_event,
-    replace_turn_controller_deps,
+    replace_turn_deps,
     runtime_paths_for,
     test_runtime_paths,
     turn_claim_is_live,
@@ -213,7 +214,7 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
     )
     wrap_extracted_collaborators(bot, "_delivery_gateway")
     bot._delivery_gateway.send_text = AsyncMock(return_value="$ack:localhost")
-    replace_turn_controller_deps(
+    replace_turn_deps(
         bot,
         resolver=bot._conversation_resolver,
         delivery_gateway=bot._delivery_gateway,
@@ -351,12 +352,12 @@ async def test_handle_interactive_selection_does_not_mark_handled_when_runner_re
     )
     wrap_extracted_collaborators(bot, "_delivery_gateway")
     bot._delivery_gateway.send_text = AsyncMock(return_value="$ack:localhost")
-    replace_turn_controller_deps(
+    replace_turn_deps(
         bot,
         resolver=bot._conversation_resolver,
         delivery_gateway=bot._delivery_gateway,
     )
-    bot._turn_controller.deps.turn_store.record_turn = AsyncMock()
+    bot._turn_ingress.deps.turn_store.record_turn = AsyncMock()
     generate_response_mock = AsyncMock(return_value=None)
     install_generate_response_mock(bot, generate_response_mock)
 
@@ -370,7 +371,7 @@ async def test_handle_interactive_selection_does_not_mark_handled_when_runner_re
         )
 
     generate_response_mock.assert_awaited_once()
-    bot._turn_controller.deps.turn_store.record_turn.assert_not_called()
+    bot._turn_ingress.deps.turn_store.record_turn.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -430,7 +431,7 @@ async def test_on_message_claims_interactive_text_by_durable_source_event(
     interactive_questions = MagicMock()
     interactive_questions.claim_interactive_text = AsyncMock(return_value=None)
     wrap_extracted_collaborators(bot, "_delivery_gateway", "_turn_policy")
-    replace_turn_controller_deps(
+    replace_turn_deps(
         bot,
         resolver=bot._conversation_resolver,
         delivery_gateway=bot._delivery_gateway,
@@ -447,7 +448,7 @@ async def test_on_message_claims_interactive_text_by_durable_source_event(
             new_callable=AsyncMock,
             return_value="$thread-root:localhost",
         ),
-        patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch_text,
+        patch.object(TurnDispatcher, "_dispatch_text_turn", new_callable=AsyncMock) as mock_dispatch_text,
     ):
         await bot._on_message(room, message_event)
         await _wait_for(lambda: mock_dispatch_text.await_count == 1)
@@ -542,7 +543,7 @@ async def test_sidecar_preview_claims_interactive_text_by_durable_source_event(
     interactive_questions = MagicMock()
     interactive_questions.claim_interactive_text = AsyncMock(return_value=None)
     wrap_extracted_collaborators(bot, "_turn_policy", "_inbound_turn_normalizer")
-    replace_turn_controller_deps(
+    replace_turn_deps(
         bot,
         resolver=bot._conversation_resolver,
         turn_policy=bot._turn_policy,
@@ -566,12 +567,12 @@ async def test_sidecar_preview_claims_interactive_text_by_durable_source_event(
             return_value=prepared_event,
         ),
         patch.object(
-            bot._turn_controller,
+            bot._turn_ingress,
             "_enqueue_prepared_text_for_dispatch",
             new_callable=AsyncMock,
         ) as mock_enqueue,
     ):
-        await bot._turn_controller._handle_media_message_inner(room, sidecar_event)
+        await bot._turn_ingress._handle_media_message_inner(room, sidecar_event)
 
     interactive_questions.claim_interactive_text.assert_awaited_once_with(
         source_event_id=prepared_event.event_id,

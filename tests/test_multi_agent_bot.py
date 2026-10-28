@@ -335,7 +335,7 @@ class TestAgentBot(AgentBotTestBase):
         assert bot._tool_runtime_support.matrix_id.full_id == actual_user_id
         assert bot._response_runner.deps.matrix_full_id == actual_user_id
         assert bot._turn_policy.deps.matrix_id.full_id == actual_user_id
-        assert bot._turn_controller.deps.matrix_id.full_id == actual_user_id
+        assert bot._turn_ingress.deps.matrix_id.full_id == actual_user_id
         mock_client.add_event_callback.assert_called_once_with(
             bot._on_invite_before_sync_certification,
             nio.InviteEvent,
@@ -1536,7 +1536,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch.object(bot._turn_policy, "can_reply_to_sender_in_room", return_value=False),
             patch.object(
-                bot._turn_controller.deps.turn_policy,
+                bot._turn_ingress.deps.turn_policy,
                 "can_reply_to_sender_in_room",
                 return_value=False,
             ),

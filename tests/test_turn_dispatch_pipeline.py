@@ -1,4 +1,4 @@
-"""Text-turn dispatch pipeline through the TurnController seam: history hydration, execute-dispatch, and failure paths."""
+"""Text-turn dispatch pipeline through the turn ingress and dispatch seams: history hydration, execute-dispatch, and failure paths."""
 
 from __future__ import annotations
 
@@ -61,11 +61,12 @@ from mindroom.response_runner import (
 from mindroom.response_sources import ResponseSources
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamResolution, TeamResolutionMember
 from mindroom.teams.spec import TeamMode
-from mindroom.turn_controller import _IngressAdmissionOutcome
-from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
+from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
 from mindroom.turn_record import SourceVisibleEcho, TurnRecord
 from mindroom.turn_store import ClaimContended, TurnClaim
+from mindroom.turns.dispatch import TurnDispatcher
 from mindroom.turns.facts import PrecheckedEvent
+from mindroom.turns.ingress import _IngressAdmissionOutcome
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -98,7 +99,7 @@ from tests.conftest import (
     patch_response_runner_module,
     prepared_dispatch_result,
     replace_delivery_gateway_deps,
-    replace_turn_controller_deps,
+    replace_turn_deps,
     runtime_paths_for,
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
@@ -260,7 +261,7 @@ class TestAgentBot(AgentBotTestBase):
             _in_room(TurnRecord.create([event.event_id], completed=False), room.room_id),
         )
         assert handled_turn is not None
-        controller = unwrap_extracted_collaborator(bot._turn_controller)
+        dispatcher = bot._turn_dispatcher
         claim = await turn_store.claim(handled_turn)
         assert isinstance(claim, TurnClaim)
         send_started = asyncio.Event()
@@ -275,7 +276,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with patch.object(DeliveryGateway, "send_text", new=AsyncMock(side_effect=send_rejection)) as send_text:
             response_task = bot._response_runner.track_inbox_response(
-                controller._execute_response_action(
+                dispatcher._execute_response_action(
                     room,
                     event,
                     dispatch,
@@ -374,7 +375,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             pytest.raises(ValueError, match="requires a visible Matrix response event ID"),
         ):
-            await bot._turn_controller._execute_response_action(
+            await bot._turn_dispatcher._execute_response_action(
                 room,
                 event,
                 dispatch,
@@ -583,12 +584,12 @@ class TestAgentBot(AgentBotTestBase):
         ]
         call_order: list[str] = []
 
-        async def fake_plan(*_args: object, **_kwargs: object) -> _DispatchPlan:
+        async def fake_plan(*_args: object, **_kwargs: object) -> DispatchPlan:
             call_order.append("action")
             assert list(dispatch.context.thread_history) == snapshot_history
             assert dispatch.context.planning_thread_history == ()
             assert dispatch.context.planning_thread_history_unavailable is True
-            return _DispatchPlan(
+            return DispatchPlan(
                 kind="respond",
                 response_action=ResponseAction(kind="individual"),
             )
@@ -631,7 +632,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch.object(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
             ),
@@ -674,7 +675,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
         ):
             await dispatch_test_turn(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 room,
                 PrecheckedEvent(
                     event=event,
@@ -735,15 +736,15 @@ class TestAgentBot(AgentBotTestBase):
         async def fake_plan(
             *_args: object,
             **_kwargs: object,
-        ) -> _DispatchPlan:
+        ) -> DispatchPlan:
             assert list(dispatch.context.thread_history) == []
             assert dispatch.context.planning_thread_history == ()
             assert dispatch.context.requires_model_history_refresh is True
-            return _DispatchPlan(kind="ignore")
+            return DispatchPlan(kind="ignore")
 
         with (
             patch.object(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
             ),
@@ -757,10 +758,10 @@ class TestAgentBot(AgentBotTestBase):
                 "build_dispatch_payload_with_attachments",
                 new=AsyncMock(),
             ) as mock_build_payload,
-            patch.object(bot._turn_controller, "_execute_response_action", new=AsyncMock()) as mock_execute,
+            patch.object(bot._turn_dispatcher, "_execute_response_action", new=AsyncMock()) as mock_execute,
         ):
             await dispatch_test_turn(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 room,
                 PrecheckedEvent(
                     event=event,
@@ -826,7 +827,7 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(return_value=event),
             ),
             patch.object(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
             ),
@@ -837,7 +838,7 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_execute_command,
         ):
             await dispatch_test_turn(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 room,
                 PrecheckedEvent(
                     event=event,
@@ -916,7 +917,7 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_execute_command,
         ):
             await dispatch_test_turn(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 room,
                 PrecheckedEvent(
                     event=event,
@@ -986,15 +987,15 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch.object(bot._inbound_turn_normalizer, "resolve_text_event", new=AsyncMock(return_value=event)),
             patch.object(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
             ),
-            patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
-            patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
+            patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),
+            patch("mindroom.turns.dispatch.should_skip_deep_synthetic_full_dispatch", return_value=False),
         ):
             await dispatch_test_turn(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 room,
                 PrecheckedEvent(
                     event=event,
@@ -1095,7 +1096,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch.object(bot._inbound_turn_normalizer, "resolve_text_event", new=AsyncMock(return_value=event)),
             patch.object(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
             ),
@@ -1103,7 +1104,7 @@ class TestAgentBot(AgentBotTestBase):
                 bot._turn_policy,
                 "plan_turn",
                 new=AsyncMock(
-                    return_value=_DispatchPlan(
+                    return_value=DispatchPlan(
                         kind="route",
                         router_message="hello",
                         router_event=event,
@@ -1111,15 +1112,15 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             ),
             patch.object(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 "_execute_router_relay",
                 new=AsyncMock(side_effect=fake_execute_router_relay),
             ),
-            patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
-            patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
+            patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),
+            patch("mindroom.turns.dispatch.should_skip_deep_synthetic_full_dispatch", return_value=False),
         ):
             await dispatch_test_turn(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 room,
                 PrecheckedEvent(
                     event=event,
@@ -1171,11 +1172,11 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         with (
-            patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+            patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
-            ticket = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
-            await bot._turn_controller._enqueue_for_dispatch(
+            ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
+            await bot._turn_ingress._enqueue_for_dispatch(
                 PreparedIngress(
                     sender=event.sender,
                     event_id=event.event_id,
@@ -1255,13 +1256,13 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(return_value=event),
             ),
             patch.object(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=None),
             ) as mock_prepare,
         ):
             await dispatch_test_turn(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 room,
                 PrecheckedEvent(
                     event=event,
@@ -1450,14 +1451,14 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch.object(
-                bot._turn_controller,
+                bot._turn_ingress,
                 "_precheck_dispatch_event",
                 return_value=PrecheckedEvent(
                     event=event,
                     facts=bot._ingress_validator.classify(event),
                 ),
             ),
-            patch.object(bot._turn_controller, "_ingest_live_text_event", side_effect=hold_ingress),
+            patch.object(bot._turn_ingress, "_ingest_live_text_event", side_effect=hold_ingress),
         ):
             task = asyncio.create_task(bot._on_message(room, event))
             await _first_of(ingress_started.wait(), task)
@@ -1493,14 +1494,14 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch.object(
-                bot._turn_controller,
+                bot._turn_ingress,
                 "_precheck_dispatch_event",
                 return_value=PrecheckedEvent(
                     event=event,
                     facts=bot._ingress_validator.classify(event),
                 ),
             ),
-            patch.object(bot._turn_controller, "_ingest_live_text_event", side_effect=hold_ingress),
+            patch.object(bot._turn_ingress, "_ingest_live_text_event", side_effect=hold_ingress),
         ):
             task = asyncio.create_task(bot._on_message(room, event))
             # Not a bare ``await ingress_started.wait()``. The event is set by
@@ -1570,7 +1571,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch.object(
-                bot._turn_controller,
+                bot._turn_ingress,
                 "_precheck_dispatch_event",
                 return_value=PrecheckedEvent(
                     event=event,
@@ -1585,7 +1586,7 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.conversation_resolver.ConversationResolver.build_envelope",
                 return_value=envelope,
             ),
-            patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
+            patch("mindroom.turns.dispatch.should_skip_deep_synthetic_full_dispatch", return_value=False),
             patch.object(
                 bot._response_runner,
                 "active_thread_ids_for_room",
@@ -1601,8 +1602,9 @@ class TestAgentBot(AgentBotTestBase):
                 "reserve_waiting_human_message",
                 return_value=MagicMock(),
             ) as mock_reserve_waiting_human_message,
-            patch(
-                "mindroom.turn_controller.dispatch_text_message",
+            patch.object(
+                TurnDispatcher,
+                "_dispatch_text_turn",
                 new=AsyncMock(),
             ) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
@@ -1649,7 +1651,7 @@ class TestAgentBot(AgentBotTestBase):
         runtime_paths = runtime_paths_for(config)
         ids = entity_ids(config, runtime_paths)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        replace_turn_controller_deps(bot, runtime=replace(bot._runtime_view, client=_make_matrix_client_mock()))
+        replace_turn_deps(bot, runtime=replace(bot._runtime_view, client=_make_matrix_client_mock()))
         room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
         room.add_member(bot.matrix_id.full_id, "Calculator", None)
         room.add_member("@user:localhost", "User", None)
@@ -1683,8 +1685,8 @@ class TestAgentBot(AgentBotTestBase):
             ) as reserve_waiting_human_message,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as admit,
         ):
-            ticket = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
-            outcome = await bot._turn_controller._dispatch_prepared_text_like_ingress(
+            ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
+            outcome = await bot._turn_ingress._dispatch_prepared_text_like_ingress(
                 room=room,
                 prepared_event=prepared_event,
                 facts=bot._ingress_validator.classify(prepared_event),
@@ -1714,7 +1716,7 @@ class TestAgentBot(AgentBotTestBase):
         runtime_paths = runtime_paths_for(config)
         ids = entity_ids(config, runtime_paths)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        replace_turn_controller_deps(bot, runtime=replace(bot._runtime_view, client=_make_matrix_client_mock()))
+        replace_turn_deps(bot, runtime=replace(bot._runtime_view, client=_make_matrix_client_mock()))
         room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
         room.add_member(bot.matrix_id.full_id, "Calculator", None)
         room.add_member("@user:localhost", "User", None)
@@ -1749,8 +1751,8 @@ class TestAgentBot(AgentBotTestBase):
             ) as reserve_waiting_human_message,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as admit,
         ):
-            ticket = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
-            outcome = await bot._turn_controller._dispatch_prepared_text_like_ingress(
+            ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
+            outcome = await bot._turn_ingress._dispatch_prepared_text_like_ingress(
                 room=room,
                 prepared_event=prepared_event,
                 facts=bot._ingress_validator.classify(prepared_event),
@@ -1806,7 +1808,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch.object(
-                bot._turn_controller,
+                bot._turn_ingress,
                 "_precheck_dispatch_event",
                 return_value=PrecheckedEvent(
                     event=event,
@@ -1817,13 +1819,13 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
                 new=AsyncMock(return_value=prepared_event),
             ),
-            patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
+            patch("mindroom.turns.dispatch.should_skip_deep_synthetic_full_dispatch", return_value=False),
             patch.object(
                 bot._conversation_resolver,
                 "coalescing_thread_id",
                 new=AsyncMock(return_value=None),
             ),
-            patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+            patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
             await asyncio.wait_for(bot._on_message(room, event), timeout=0.05)
@@ -1890,7 +1892,7 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_reserve_waiting_human_message,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
-            ticket = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
+            ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
             assert await ticket.claim_turn(TurnRecord.create([voice_event.event_id], completed=False)) is None
             turn_claim = ticket.claim
             await bot._voice_ingress.admit(
@@ -1988,17 +1990,17 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(return_value=prepared_event),
             ),
             patch.object(bot._conversation_resolver, "build_envelope", return_value=envelope),
-            patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
+            patch("mindroom.turns.dispatch.should_skip_deep_synthetic_full_dispatch", return_value=False),
             patch.object(
                 bot._conversation_resolver,
                 "coalescing_thread_id",
                 new=AsyncMock(return_value="$thread_root"),
             ),
-            patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+            patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
-            ticket = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
-            handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
+            ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
+            handled = await bot._turn_ingress._dispatch_file_sidecar_text_preview(
                 room,
                 PrecheckedEvent(
                     event=sidecar_event,
@@ -2085,7 +2087,7 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(return_value=prepared_event),
             ),
             patch.object(bot._conversation_resolver, "build_envelope", return_value=envelope),
-            patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
+            patch("mindroom.turns.dispatch.should_skip_deep_synthetic_full_dispatch", return_value=False),
             patch.object(
                 bot._conversation_resolver,
                 "coalescing_thread_id",
@@ -2106,11 +2108,11 @@ class TestAgentBot(AgentBotTestBase):
                 "reserve_waiting_human_message",
                 return_value=MagicMock(),
             ) as mock_reserve_waiting_human_message,
-            patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+            patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
-            ticket = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
-            handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
+            ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
+            handled = await bot._turn_ingress._dispatch_file_sidecar_text_preview(
                 room,
                 PrecheckedEvent(
                     event=sidecar_event,
@@ -2212,11 +2214,11 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
             patch(
-                "mindroom.turn_controller.select_ad_hoc_team_mode",
+                "mindroom.turns.dispatch.select_ad_hoc_team_mode",
                 new=AsyncMock(return_value=TeamMode.COORDINATE),
             ),
         ):
-            await bot._turn_controller._execute_response_action(
+            await bot._turn_dispatcher._execute_response_action(
                 room,
                 event,
                 dispatch,
@@ -2302,9 +2304,9 @@ class TestAgentBot(AgentBotTestBase):
         mock_select_team_mode = AsyncMock(return_value=TeamMode.COORDINATE)
         with (
             patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
-            patch("mindroom.turn_controller.select_ad_hoc_team_mode", new=mock_select_team_mode),
+            patch("mindroom.turns.dispatch.select_ad_hoc_team_mode", new=mock_select_team_mode),
         ):
-            await bot._turn_controller._execute_response_action(
+            await bot._turn_dispatcher._execute_response_action(
                 room,
                 event,
                 dispatch,
@@ -2319,8 +2321,8 @@ class TestAgentBot(AgentBotTestBase):
         mock_select_team_mode.assert_awaited_once_with(
             event.body,
             action.form_team.eligible_member_names,
-            bot._turn_controller.deps.runtime.config,
-            bot._turn_controller.deps.runtime_paths,
+            bot._turn_ingress.deps.runtime.config,
+            bot._turn_ingress.deps.runtime_paths,
         )
         assert mock_generate_team_response.await_count == 1
         assert mock_generate_team_response.await_args.kwargs["team_mode"] == "coordinate"
@@ -2394,9 +2396,9 @@ class TestAgentBot(AgentBotTestBase):
         mock_select_team_mode = AsyncMock(return_value=TeamMode.COLLABORATE)
         with (
             patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
-            patch("mindroom.turn_controller.select_ad_hoc_team_mode", new=mock_select_team_mode),
+            patch("mindroom.turns.dispatch.select_ad_hoc_team_mode", new=mock_select_team_mode),
         ):
-            await bot._turn_controller._execute_response_action(
+            await bot._turn_dispatcher._execute_response_action(
                 room,
                 event,
                 dispatch,
@@ -2460,7 +2462,7 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         with patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"):
-            await bot._turn_controller._execute_response_action(
+            await bot._turn_dispatcher._execute_response_action(
                 room,
                 event,
                 dispatch,
@@ -2514,7 +2516,7 @@ class TestAgentBot(AgentBotTestBase):
         )
         wrap_extracted_collaborators(bot, "_turn_policy")
         bot._turn_policy.plan_turn = AsyncMock(
-            return_value=_DispatchPlan(
+            return_value=DispatchPlan(
                 kind="respond",
                 response_action=ResponseAction(kind="individual"),
             ),
@@ -2722,7 +2724,7 @@ class TestAgentBot(AgentBotTestBase):
             "mindroom.response_runner._prepare_memory_and_model_context",
             side_effect=RuntimeError(failure_message),
         ):
-            await bot._turn_controller._execute_response_action(
+            await bot._turn_dispatcher._execute_response_action(
                 room,
                 event,
                 dispatch,
@@ -2954,7 +2956,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
         ):
-            await bot._turn_controller._execute_response_action(
+            await bot._turn_dispatcher._execute_response_action(
                 room,
                 event,
                 dispatch,

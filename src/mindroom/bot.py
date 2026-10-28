@@ -159,9 +159,10 @@ from .startup_errors import PermanentStartupError
 from .tool_jobs.client_cancel import cancel_room_jobs, handle_job_cancel_event, person_may_cancel
 from .tool_jobs.follow_ups import follow_up_event
 from .tool_jobs.runtime import get_background_runtime
-from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
+from .turns.dispatch import TurnDispatchDeps, TurnDispatcher
+from .turns.ingress import TurnIngress, TurnIngressDeps
 from .turns.interactive_selection import InteractiveSelections, InteractiveSelectionsDeps
 from .user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
 from .visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
@@ -397,7 +398,8 @@ class AgentBot:
     _reply_membership_sync: AgentReplyMembershipSync | None
     _interactive_selections: InteractiveSelections
     _voice_ingress: VoiceIngress
-    _turn_controller: TurnController
+    _turn_dispatcher: TurnDispatcher
+    _turn_ingress: TurnIngress
     _room_lifecycle: BotRoomLifecycle
     _decryption_diagnostics: DecryptionDiagnostics
     _local_membership_lock: asyncio.Lock
@@ -912,15 +914,13 @@ class AgentBot:
                 ),
             ),
         )
-        self._turn_controller = TurnController(
-            TurnControllerDeps(
+        self._turn_dispatcher = TurnDispatcher(
+            TurnDispatchDeps(
                 runtime=self._runtime_view,
                 logger=self.logger,
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,
-                matrix_id=runtime_matrix_id,
                 pending_turns=principal,
-                interactive_questions=principal,
                 resolver=self._conversation_resolver,
                 normalizer=self._inbound_turn_normalizer,
                 command_executor=self._command_turn_executor,
@@ -930,11 +930,32 @@ class AgentBot:
                 delivery_gateway=self._delivery_gateway,
                 turn_store=self._turn_store,
                 coalescing_gate=self._coalescing_gate,
-                edit_regenerator=self._edit_regenerator,
                 ingress=self._ingress_validator,
                 visible_responses=self._visible_responses,
                 retry_dispatch_sources=self._journal_dispatcher.retry_turn_sources,
                 settle_dispatch_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
+                selections=self._interactive_selections,
+            ),
+        )
+        self._turn_ingress = TurnIngress(
+            TurnIngressDeps(
+                runtime=self._runtime_view,
+                logger=self.logger,
+                runtime_paths=self.runtime_paths,
+                agent_name=self.agent_name,
+                matrix_id=runtime_matrix_id,
+                interactive_questions=principal,
+                resolver=self._conversation_resolver,
+                normalizer=self._inbound_turn_normalizer,
+                turn_policy=self._turn_policy,
+                response_runner=self._response_runner,
+                delivery_gateway=self._delivery_gateway,
+                turn_store=self._turn_store,
+                coalescing_gate=self._coalescing_gate,
+                edit_regenerator=self._edit_regenerator,
+                ingress=self._ingress_validator,
+                visible_responses=self._visible_responses,
+                dispatcher=self._turn_dispatcher,
                 selections=self._interactive_selections,
                 voice=self._voice_ingress,
             ),
@@ -950,7 +971,7 @@ class AgentBot:
                 turn_policy=self._turn_policy,
                 user_stop_reconciler=self._user_stop_reconciler,
                 ingress=self._ingress_validator,
-                reserve_prompt_ingress_order=self._turn_controller.reserve_prompt_ingress_order,
+                reserve_prompt_ingress_order=self._turn_ingress.reserve_prompt_ingress_order,
                 enqueue_interactive_selection=self._interactive_selections.enqueue_interactive_selection,
                 emit_reaction_received_hooks=self._emit_reaction_received_hooks,
                 wait_for_admission_or_shutdown=self._response_runner.wait_for_admission_or_shutdown,
@@ -2495,7 +2516,7 @@ class AgentBot:
 
     async def _dispatch_prepared_turn(self, turn: PreparedTurn) -> None:
         """Delegate one prepared turn to the turn engine."""
-        await self._turn_controller.handle_prepared_turn(turn)
+        await self._turn_dispatcher.handle_prepared_turn(turn)
 
     def _retry_failed_coalesced_dispatch(self, pending_events: tuple[PendingEvent, ...]) -> None:
         """Return failed gate sources to their exact durable callback owner."""
@@ -2561,7 +2582,7 @@ class AgentBot:
         approval_reply_to_event_id = EventInfo.from_event(event.source).reply_to_event_id
         if approval_reply_to_event_id is not None and is_process_active_approval_card(approval_reply_to_event_id):
             requester_user_id = self._ingress_validator.classify(event).lane_requester_id
-            early_ticket = self._turn_controller.reserve_prompt_ingress_order(
+            early_ticket = self._turn_ingress.reserve_prompt_ingress_order(
                 room,
                 requester_user_id,
                 receipt_time=receipt_time,
@@ -2581,7 +2602,7 @@ class AgentBot:
                 # Its card answers it, so a message that waited for the approval is not skipped as older than it.
                 await self._turn_store.record_turn(TurnRecord.create([event.event_id]), room_id=room.room_id)
                 return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-            return await self._turn_controller.handle_text_event(
+            return await self._turn_ingress.handle_text_event(
                 room,
                 event,
                 receipt_time=receipt_time,
@@ -2789,7 +2810,7 @@ class AgentBot:
         """Delegate one inbound media event to the turn engine."""
         receipt_time = time.monotonic()
         self._log_matrix_event_callback_started(room, event, callback_name="media")
-        return await self._turn_controller.handle_media_event(room, event, receipt_time=receipt_time)
+        return await self._turn_ingress.handle_media_event(room, event, receipt_time=receipt_time)
 
     async def _run_regenerated_response(self, request: ResponseRequest) -> str | None:
         """Run one edit-regenerated turn through this bot's response path."""

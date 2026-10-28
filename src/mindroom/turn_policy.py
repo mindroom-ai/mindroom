@@ -91,7 +91,7 @@ class PreparedDispatch:
 
 
 @dataclass(frozen=True)
-class _DispatchPlan:
+class DispatchPlan:
     """Pure policy output for one normalized inbound turn."""
 
     kind: Literal["ignore", "route", "respond"]
@@ -526,7 +526,7 @@ class TurnPolicy:
         extra_content: dict[str, Any] | None = None,
         media_events: list[MediaDispatchEvent] | None = None,
         router_event: DispatchEvent | None = None,
-    ) -> _DispatchPlan | None:
+    ) -> DispatchPlan | None:
         """Return one router-specific dispatch plan when this entity is the router."""
         if self.deps.agent_name != ROUTER_AGENT_NAME:
             return None
@@ -541,8 +541,8 @@ class TurnPolicy:
             runtime_paths=self.deps.runtime_paths,
         ):
             if not self.can_reply_to_sender_in_room(requester_user_id, room.room_id):
-                return _DispatchPlan(kind="ignore", ignore_reason="router")
-            plan = _DispatchPlan(
+                return DispatchPlan(kind="ignore", ignore_reason="router")
+            plan = DispatchPlan(
                 kind="respond",
                 response_action=ResponseAction(
                     kind="reject",
@@ -550,13 +550,13 @@ class TurnPolicy:
                 ),
             )
         elif context.mentioned_agents or context.has_non_agent_mentions:
-            plan = _DispatchPlan(kind="ignore", ignore_reason="router")
+            plan = DispatchPlan(kind="ignore", ignore_reason="router")
         elif context.planning_thread_history_unavailable:
             self.deps.logger.info("Skipping routing: thread policy history unavailable")
-            plan = _DispatchPlan(kind="ignore", ignore_reason="router")
+            plan = DispatchPlan(kind="ignore", ignore_reason="router")
         else:
             if not self.can_reply_to_sender_in_room(requester_user_id, room.room_id):
-                return _DispatchPlan(kind="ignore", ignore_reason="router")
+                return DispatchPlan(kind="ignore", ignore_reason="router")
             available_responders = await self.responder_candidates_for_room(room, requester_user_id)
             if context.is_thread and thread_requires_explicit_agent_targeting(
                 planning_thread_history,
@@ -567,12 +567,12 @@ class TurnPolicy:
                 available_responders_in_room=available_responders,
             ):
                 self.deps.logger.info("Skipping routing: thread already requires explicit responder targeting")
-                plan = _DispatchPlan(kind="ignore", ignore_reason="router")
+                plan = DispatchPlan(kind="ignore", ignore_reason="router")
             elif len(available_responders) == 1:
                 self.deps.logger.info("Skipping routing: only one responder candidate")
-                plan = _DispatchPlan(kind="ignore", ignore_reason="router")
+                plan = DispatchPlan(kind="ignore", ignore_reason="router")
             else:
-                plan = _DispatchPlan(
+                plan = DispatchPlan(
                     kind="route",
                     router_message=message,
                     extra_content=extra_content,
@@ -592,7 +592,7 @@ class TurnPolicy:
         extra_content: dict[str, Any] | None = None,
         media_events: list[MediaDispatchEvent] | None = None,
         router_event: DispatchEvent | None = None,
-    ) -> _DispatchPlan:
+    ) -> DispatchPlan:
         """Return the explicit policy plan for one prepared inbound turn."""
         router_plan = await self._plan_router_dispatch(
             room,
@@ -612,8 +612,8 @@ class TurnPolicy:
             has_active_response_for_target=has_active_response_for_target,
         )
         if action.kind == "skip":
-            return _DispatchPlan(kind="ignore")
-        return _DispatchPlan(kind="respond", response_action=action)
+            return DispatchPlan(kind="ignore")
+        return DispatchPlan(kind="respond", response_action=action)
 
     def _adaptive_response_action(
         self,

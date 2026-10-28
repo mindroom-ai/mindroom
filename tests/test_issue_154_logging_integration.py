@@ -34,7 +34,7 @@ from tests.conftest import (
     bind_runtime_paths,
     install_model_providers,
     make_turn_context,
-    replace_turn_controller_deps,
+    replace_turn_deps,
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
@@ -228,7 +228,7 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log(
         generate_response=AsyncMock(side_effect=generate_response),
         generate_team_response_helper=AsyncMock(),
     )
-    controller = replace_turn_controller_deps(
+    replace_turn_deps(
         bot,
         logger=get_logger("tests.issue_154.turn"),
         response_runner=response_runner,
@@ -263,7 +263,7 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log(
         ),
     )
 
-    await controller._execute_response_action(
+    await bot._turn_dispatcher._execute_response_action(
         room,
         event,
         dispatch,

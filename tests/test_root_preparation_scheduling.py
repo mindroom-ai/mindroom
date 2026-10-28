@@ -369,7 +369,7 @@ async def test_controller_prepares_independent_roots_without_changing_reply_targ
     room = _room_with_members(config, "general")
     started = {event_id: asyncio.Event() for event_id in ("$a", "$b")}
     release = asyncio.Event()
-    resolver = harness.controller.deps.resolver
+    resolver = harness.ingress.deps.resolver
     original_extract = resolver.extract_dispatch_context
 
     async def extract(
@@ -386,9 +386,9 @@ async def test_controller_prepares_independent_roots_without_changing_reply_targ
 
     monkeypatch.setattr(resolver, "extract_dispatch_context", extract)
     try:
-        await harness.controller.handle_text_event(room, _text_event("@general first", event_id="$a"))
+        await harness.ingress.handle_text_event(room, _text_event("@general first", event_id="$a"))
         await asyncio.wait_for(started["$a"].wait(), timeout=1)
-        await harness.controller.handle_text_event(room, _text_event("@general second", event_id="$b"))
+        await harness.ingress.handle_text_event(room, _text_event("@general second", event_id="$b"))
         await asyncio.wait_for(started["$b"].wait(), timeout=1)
         assert harness.gate.has_pending_source_event("$a")
     finally:

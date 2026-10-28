@@ -58,8 +58,8 @@ def _wire_dispatcher(harness: _Harness, room: nio.MatrixRoom, tmp_path: Path) ->
     dispatcher = _obligation_runner(
         harness,
         tracking_path=tmp_path / "dispatch",
-        principal_id=harness.controller.deps.matrix_id.full_id,
-        entity_name=harness.controller.deps.agent_name,
+        principal_id=harness.ingress.deps.matrix_id.full_id,
+        entity_name=harness.ingress.deps.agent_name,
         room=room,
     )
 
@@ -72,7 +72,7 @@ def _wire_dispatcher(harness: _Harness, room: nio.MatrixRoom, tmp_path: Path) ->
         dispatcher.retry_turn_source(room_id, source_event_id)
 
     gate = CoalescingGate(
-        dispatch_turn=harness.controller.handle_prepared_turn,
+        dispatch_turn=harness.dispatcher.handle_prepared_turn,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
         on_undelivered_source=retry,
@@ -86,9 +86,9 @@ def _wire_dispatcher(harness: _Harness, room: nio.MatrixRoom, tmp_path: Path) ->
         settle_dispatch_sources=dispatcher.settle_intentionally_ignored_turn_sources,
         dispatch_source_is_terminal=dispatcher.source_is_terminal,
         visible_responses=replace(
-            harness.controller.deps.visible_responses,
+            harness.dispatcher.deps.visible_responses,
             deps=replace(
-                harness.controller.deps.visible_responses.deps,
+                harness.dispatcher.deps.visible_responses.deps,
                 settle_ignored_sources=dispatcher.settle_intentionally_ignored_turn_sources,
             ),
         ),
@@ -195,7 +195,7 @@ async def test_delayed_voice_echo_keeps_source_pending_until_one_reply(  # noqa:
         assert snapshot.to_content() == normalized.source["content"]
         assert snapshot.thread_id == _THREAD_ROOT
 
-        target = router.controller.deps.resolver.build_message_target(
+        target = router.ingress.deps.resolver.build_message_target(
             room_id=room.room_id,
             thread_id=_THREAD_ROOT,
             reply_to_event_id=event.event_id,
@@ -233,7 +233,7 @@ async def test_delayed_voice_echo_keeps_source_pending_until_one_reply(  # noqa:
         assert await harness.turn_store.prepared_voice_for_source(event.event_id) is None
         normalize.assert_awaited_once()
 
-        await harness.controller.handle_media_event(room, event)
+        await harness.ingress.handle_media_event(room, event)
         await harness.gate.drain_all()
         assert len(harness.runner.requests) == 1
     finally:
@@ -445,7 +445,7 @@ async def test_router_initial_echo_failure_retains_owner_and_reuses_checkpoint( 
         assert len(router.gateway.sent) == 1
         assert await router.turn_store.visible_echo_for_source(event.event_id) == "$sent-1:localhost"
         normalize.assert_awaited_once()
-        await router.controller.handle_media_event(room, event)
+        await router.ingress.handle_media_event(room, event)
         await router.gate.drain_all()
         assert len(router.gateway.sent) == 1
     finally:

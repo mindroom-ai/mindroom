@@ -55,7 +55,7 @@ from tests.conftest import (
     drain_coalescing,
     make_matrix_client_mock,
     message_origin,
-    replace_turn_controller_deps,
+    replace_turn_deps,
     runtime_paths_for,
     test_runtime_paths,
     unwrap_extracted_collaborator,
@@ -257,7 +257,7 @@ def owned_matrix_login(client: object, session: object | None = None) -> SimpleN
 def _wrap_extracted_collaborators(bot: AgentBot) -> AgentBot:
     """Wrap frozen extracted collaborators so tests can patch their methods."""
     wrapped_bot = wrap_extracted_collaborators(bot)
-    replace_turn_controller_deps(
+    replace_turn_deps(
         wrapped_bot,
         resolver=wrapped_bot._conversation_resolver,
         normalizer=wrapped_bot._inbound_turn_normalizer,

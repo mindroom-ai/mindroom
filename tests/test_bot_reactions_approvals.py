@@ -78,7 +78,7 @@ from tests.conftest import (
     record_turn_answered,
     replace_interactive_selection_handlers,
     replace_reaction_dispatcher_deps,
-    replace_turn_controller_deps,
+    replace_turn_deps,
     request_envelope,
     runtime_paths_for,
     unwrap_extracted_collaborator,
@@ -299,7 +299,7 @@ def _install_text_dispatch_mock(
     """Replace the unwrapped text-dispatch collaborator through an auto-restored seam."""
     handle_text_event = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
     monkeypatch.setattr(
-        unwrap_extracted_collaborator(bot._turn_controller),
+        bot._turn_ingress,
         "handle_text_event",
         handle_text_event,
     )
@@ -999,7 +999,7 @@ class TestAgentBot(AgentBotTestBase):
 
         monkeypatch.setattr(bot._coalescing_gate, "_dispatch_turn", dispatch_turn)
         replace_interactive_selection_handlers(bot, start=start_selection)
-        earlier_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
+        earlier_owner = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
         earlier_event = PreparedIngress(
             sender="@user:localhost",
             event_id="$earlier",
@@ -1059,7 +1059,7 @@ class TestAgentBot(AgentBotTestBase):
 
         replace_interactive_selection_handlers(bot, handle=blocked_selection)
         monkeypatch.setattr(
-            unwrap_extracted_collaborator(bot._turn_controller),
+            bot._turn_ingress,
             "handle_text_event",
             handle_other_thread,
         )
@@ -1199,7 +1199,7 @@ class TestAgentBot(AgentBotTestBase):
         settlement_error = OSError("simulated journal settlement failure")
         settle_dispatch_sources = AsyncMock(side_effect=settlement_error)
         retry_dispatch_sources = MagicMock()
-        replace_turn_controller_deps(
+        replace_turn_deps(
             bot,
             settle_dispatch_sources=settle_dispatch_sources,
             retry_dispatch_sources=retry_dispatch_sources,
@@ -1232,7 +1232,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         settle_dispatch_sources = AsyncMock()
-        replace_turn_controller_deps(
+        replace_turn_deps(
             bot,
             settle_dispatch_sources=settle_dispatch_sources,
         )
@@ -1260,7 +1260,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         source_is_terminal = AsyncMock(return_value=True)
-        replace_turn_controller_deps(
+        replace_turn_deps(
             bot,
             dispatch_source_is_terminal=source_is_terminal,
         )
@@ -1311,7 +1311,7 @@ class TestAgentBot(AgentBotTestBase):
             await release_terminal_probe.wait()
             return True
 
-        replace_turn_controller_deps(bot, dispatch_source_is_terminal=source_is_terminal)
+        replace_turn_deps(bot, dispatch_source_is_terminal=source_is_terminal)
         selection, target = _claimed_test_selection(bot)
         room = nio.MatrixRoom(target.room_id, bot.matrix_id.full_id)
 
@@ -1717,7 +1717,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _selection, target = _claimed_test_selection(bot)
         retry_dispatch_sources = MagicMock()
-        replace_turn_controller_deps(
+        replace_turn_deps(
             bot,
             retry_dispatch_sources=retry_dispatch_sources,
         )
@@ -2022,7 +2022,7 @@ class TestAgentBot(AgentBotTestBase):
             try:
                 reaction_slots = bot._coalescing_gate.lanes.unsettled_slots()
                 assert reaction_slots
-                later_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
+                later_owner = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
                 try:
                     assert reaction_slots[0].receipt_time < later_owner.slot.receipt_time
                 finally:

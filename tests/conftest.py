@@ -170,14 +170,17 @@ from mindroom.response_turn import CompletedAttempt
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import _session_state, _write_session_state, ensure_session_row, persist_to
 from mindroom.thread_utils import decide_agent_response
-from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_store import TurnClaim, TurnStore, _ClaimRegistry, _reset_turn_claim_registries
+from mindroom.turns.dispatch import TurnDispatcher, _DispatchPreparation, _ReplayGuardContext
 from mindroom.turns.facts import IngressFacts
+from mindroom.turns.ingress import TurnIngress
+from mindroom.turns.interactive_selection import InteractiveSelections
 from mindroom.usage.storage import quote_identifier
 from mindroom.user_stop_reconciliation import UserStopReconciler
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
+from mindroom.voice.ingress import VoiceIngress
 from mindroom.voice.visible_voice_echo import VisibleVoiceEchoLifecycle, _reset_visible_voice_echo_barriers
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backends import static_runner as static_runner_module
@@ -505,7 +508,7 @@ __all__ = [
     "replace_delivery_gateway_deps",
     "replace_edit_regenerator_deps",
     "replace_response_runner_deps",
-    "replace_turn_controller_deps",
+    "replace_turn_deps",
     "replace_turn_policy_deps",
     "replace_turn_store_deps",
     "request_envelope",
@@ -801,7 +804,7 @@ def dispatch_context_result(context: MessageContext) -> DispatchContextResult:
 
 
 def prepared_dispatch_result(dispatch: PreparedDispatch) -> _DispatchPreparation:
-    """Wrap a prepared dispatch in the private turn-controller preparation result shape."""
+    """Wrap a prepared dispatch in the private turn-dispatch preparation result shape."""
     return _DispatchPreparation(
         dispatch=dispatch,
         replay_guard=_ReplayGuardContext(
@@ -2797,15 +2800,14 @@ def replace_turn_policy_deps(bot: RuntimeBot, **changes: object) -> TurnPolicy:
     store_changes = {name: value for name, value in changes.items() if name in store_field_names}
     if store_changes:
         replace_turn_store_deps(bot, **store_changes)
-    controller = unwrap_extracted_collaborator(bot._turn_controller)
-    controller_field_names = set(controller.deps.__dataclass_fields__)
-    controller_changes = {name: value for name, value in changes.items() if name in controller_field_names}
+    owner_field_names = _turn_owner_field_names(bot)
+    owner_changes = {name: value for name, value in changes.items() if name in owner_field_names}
     if policy_changes:
-        controller_changes["turn_policy"] = bot._turn_policy
+        owner_changes["turn_policy"] = bot._turn_policy
     if store_changes:
-        controller_changes["turn_store"] = bot._turn_store
-    if controller_changes:
-        replace_turn_controller_deps(bot, **controller_changes)
+        owner_changes["turn_store"] = bot._turn_store
+    if owner_changes:
+        replace_turn_deps(bot, **owner_changes)
     return rebuilt
 
 
@@ -2826,7 +2828,7 @@ def replace_delivery_gateway_deps(bot: RuntimeBot, **changes: object) -> Deliver
     rebuilt = DeliveryGateway(replace(gateway.deps, **changes))
     bot._delivery_gateway = rebuilt
     wrap_extracted_collaborators(bot, "_delivery_gateway")
-    replace_turn_controller_deps(bot, delivery_gateway=bot._delivery_gateway)
+    replace_turn_deps(bot, delivery_gateway=bot._delivery_gateway)
     replace_response_runner_deps(bot, delivery_gateway=bot._delivery_gateway)
     return rebuilt
 
@@ -2838,7 +2840,7 @@ def replace_response_runner_deps(bot: RuntimeBot, **changes: object) -> Response
     rebuilt = ResponseRunner(replace(coordinator.deps, **changes))
     bot._response_runner = rebuilt
     wrap_extracted_collaborators(bot, "_response_runner")
-    replace_turn_controller_deps(bot, response_runner=bot._response_runner)
+    replace_turn_deps(bot, response_runner=bot._response_runner)
     return rebuilt
 
 
@@ -2871,7 +2873,7 @@ def replace_edit_regenerator_deps(bot: RuntimeBot, **changes: object) -> EditReg
     rebuilt = EditRegenerator(replace(regenerator.deps, **rebuilt_changes))
     bot._edit_regenerator = rebuilt
     wrap_extracted_collaborators(bot, "_edit_regenerator")
-    replace_turn_controller_deps(bot, edit_regenerator=bot._edit_regenerator)
+    replace_turn_deps(bot, edit_regenerator=bot._edit_regenerator)
     return rebuilt
 
 
@@ -2909,14 +2911,30 @@ _VOICE_READINESS_CHANGES = {
 }
 
 
+def _turn_owners(bot: RuntimeBot) -> tuple[TurnIngress, TurnDispatcher, InteractiveSelections, VoiceIngress]:
+    """Return the bot's turn owners: ingress, dispatch, interactive selections, and voice ingress."""
+    return bot._turn_ingress, bot._turn_dispatcher, bot._interactive_selections, bot._voice_ingress
+
+
+def _turn_owner_field_names(bot: RuntimeBot) -> set[str]:
+    """Return every deps field some turn owner has."""
+    return set().union(*(owner.deps.__dataclass_fields__ for owner in _turn_owners(bot)))
+
+
+def _held_turn_collaborator(bot: RuntimeBot, field_name: str) -> object:
+    """Return the collaborator the turn owners hold for one deps field."""
+    return next(
+        getattr(owner.deps, field_name) for owner in _turn_owners(bot) if field_name in owner.deps.__dataclass_fields__
+    )
+
+
 def update_turn_owner_deps(bot: RuntimeBot, **changes: object) -> None:
     """Swap collaborators in place on every turn owner whose deps name them, voice readiness included.
 
     In place, because the gate and the reaction dispatcher keep the owners they were built with.
     """
-    controller = unwrap_extracted_collaborator(bot._turn_controller)
-    owners = (controller, bot._interactive_selections, bot._voice_ingress)
-    known = set(_VOICE_READINESS_CHANGES).union(*(owner.deps.__dataclass_fields__ for owner in owners))
+    owners = _turn_owners(bot)
+    known = set(_VOICE_READINESS_CHANGES) | _turn_owner_field_names(bot)
     unknown = set(changes) - known
     assert not unknown, f"not a turn owner collaborator: {sorted(unknown)}"
     for owner in owners:
@@ -2928,13 +2946,10 @@ def update_turn_owner_deps(bot: RuntimeBot, **changes: object) -> None:
         voice.deps = replace(voice.deps, readiness=replace(voice.deps.readiness, **readiness_changes))
 
 
-def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnController:
+def replace_turn_deps(bot: RuntimeBot, **changes: object) -> None:
     """Swap turn collaborators captured at construction, rebuilding the collaborators that capture them too."""
     sync_bot_runtime_state(bot)
-    controller = unwrap_extracted_collaborator(bot._turn_controller)
-    owner_field_names = set().union(
-        *(owner.deps.__dataclass_fields__ for owner in (controller, bot._interactive_selections, bot._voice_ingress)),
-    )
+    owner_field_names = _turn_owner_field_names(bot)
     rebuilt_changes = {name: value for name, value in changes.items() if name in owner_field_names}
     default_collaborators = {
         "resolver": "_conversation_resolver",
@@ -2952,7 +2967,7 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
     # the test passes another; only a bot attribute swapped since the last call replaces it.
     propagated = bot.__dict__.setdefault("_propagated_turn_collaborators", {})
     for field_name, attr_name in default_collaborators.items():
-        held = getattr(controller.deps, field_name)
+        held = _held_turn_collaborator(bot, field_name)
         propagated.setdefault(attr_name, held)
         if field_name not in rebuilt_changes:
             current = getattr(bot, attr_name)
@@ -2977,9 +2992,9 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
     bot._visible_voice_echo = VisibleVoiceEchoLifecycle(
         replace(
             visible_voice_echo.deps,
-            runtime=rebuilt_changes.get("runtime", controller.deps.runtime),
-            logger=rebuilt_changes.get("logger", controller.deps.logger),
-            agent_name=rebuilt_changes.get("agent_name", controller.deps.agent_name),
+            runtime=rebuilt_changes.get("runtime", _held_turn_collaborator(bot, "runtime")),
+            logger=rebuilt_changes.get("logger", _held_turn_collaborator(bot, "logger")),
+            agent_name=rebuilt_changes.get("agent_name", _held_turn_collaborator(bot, "agent_name")),
             delivery_gateway=rebuilt_changes["delivery_gateway"],
             turn_store=rebuilt_changes["turn_store"],
             ingress=rebuilt_changes["ingress"],
@@ -2996,8 +3011,8 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
     bot._visible_responses = VisibleResponseReconciler(
         replace(
             visible_responses.deps,
-            runtime=rebuilt_changes.get("runtime", controller.deps.runtime),
-            logger=rebuilt_changes.get("logger", controller.deps.logger),
+            runtime=rebuilt_changes.get("runtime", _held_turn_collaborator(bot, "runtime")),
+            logger=rebuilt_changes.get("logger", _held_turn_collaborator(bot, "logger")),
             turn_store=rebuilt_changes["turn_store"],
             delivery_gateway=rebuilt_changes["delivery_gateway"],
             **visible_response_changes,
@@ -3025,10 +3040,10 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
     bot._command_turn_executor = CommandTurnExecutor(
         replace(
             command_executor.deps,
-            runtime=rebuilt_changes.get("runtime", controller.deps.runtime),
-            logger=rebuilt_changes.get("logger", controller.deps.logger),
-            runtime_paths=rebuilt_changes.get("runtime_paths", controller.deps.runtime_paths),
-            agent_name=rebuilt_changes.get("agent_name", controller.deps.agent_name),
+            runtime=rebuilt_changes.get("runtime", _held_turn_collaborator(bot, "runtime")),
+            logger=rebuilt_changes.get("logger", _held_turn_collaborator(bot, "logger")),
+            runtime_paths=rebuilt_changes.get("runtime_paths", _held_turn_collaborator(bot, "runtime_paths")),
+            agent_name=rebuilt_changes.get("agent_name", _held_turn_collaborator(bot, "agent_name")),
             normalizer=rebuilt_changes["normalizer"],
             turn_policy=rebuilt_changes["turn_policy"],
             turn_store=rebuilt_changes["turn_store"],
@@ -3048,25 +3063,25 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
     )
     wrap_extracted_collaborators(bot, "_user_stop_reconciler")
     update_turn_owner_deps(bot, **rebuilt_changes, visible_voice_echo=bot._visible_voice_echo)
-    rebuilt = controller
+    ingress = bot._turn_ingress
     reaction_dispatcher = bot._reaction_dispatcher
     replace_reaction_dispatcher_deps(
         bot,
-        runtime=rebuilt.deps.runtime,
-        logger=rebuilt.deps.logger,
-        runtime_paths=rebuilt.deps.runtime_paths,
-        agent_name=rebuilt.deps.agent_name,
-        turn_policy=rebuilt.deps.turn_policy,
+        runtime=ingress.deps.runtime,
+        logger=ingress.deps.logger,
+        runtime_paths=ingress.deps.runtime_paths,
+        agent_name=ingress.deps.agent_name,
+        turn_policy=ingress.deps.turn_policy,
         user_stop_reconciler=bot._user_stop_reconciler,
-        ingress=rebuilt.deps.ingress,
-        reserve_prompt_ingress_order=rebuilt.reserve_prompt_ingress_order,
+        ingress=ingress.deps.ingress,
+        reserve_prompt_ingress_order=ingress.reserve_prompt_ingress_order,
         enqueue_interactive_selection=bot._interactive_selections.enqueue_interactive_selection,
         config_confirmation=replace(
             reaction_dispatcher.deps.config_confirmation,
-            runtime=rebuilt.deps.runtime,
-            runtime_paths=rebuilt.deps.runtime_paths,
-            build_message_target=rebuilt.deps.resolver.build_message_target,
-            delivery_gateway=rebuilt.deps.delivery_gateway,
+            runtime=ingress.deps.runtime,
+            runtime_paths=ingress.deps.runtime_paths,
+            build_message_target=ingress.deps.resolver.build_message_target,
+            delivery_gateway=ingress.deps.delivery_gateway,
         ),
     )
     edit_changes = {
@@ -3077,7 +3092,6 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
     if edit_changes:
         replace_edit_regenerator_deps(bot, **edit_changes)
     propagated.update({attr_name: getattr(bot, attr_name) for attr_name in default_collaborators.values()})
-    return rebuilt
 
 
 @contextmanager
@@ -3163,7 +3177,7 @@ def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> Non
         )
 
     bot._delivery_gateway.deliver_final = AsyncMock(side_effect=_deliver_final)
-    replace_turn_controller_deps(bot, delivery_gateway=bot._delivery_gateway)
+    replace_turn_deps(bot, delivery_gateway=bot._delivery_gateway)
     replace_response_runner_deps(bot, delivery_gateway=bot._delivery_gateway)
 
 
@@ -3212,7 +3226,7 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
         return event_id
 
     bot._response_runner.generate_response = AsyncMock(side_effect=_generate)
-    replace_turn_controller_deps(bot, response_runner=bot._response_runner)
+    replace_turn_deps(bot, response_runner=bot._response_runner)
 
 
 def install_edit_message_mock(bot: RuntimeBot, edit_message: AsyncMock) -> None:
@@ -3230,7 +3244,7 @@ def install_edit_message_mock(bot: RuntimeBot, edit_message: AsyncMock) -> None:
         )
 
     bot._delivery_gateway.edit_text = AsyncMock(side_effect=_edit_text)
-    replace_turn_controller_deps(bot, delivery_gateway=bot._delivery_gateway)
+    replace_turn_deps(bot, delivery_gateway=bot._delivery_gateway)
     replace_response_runner_deps(bot, delivery_gateway=bot._delivery_gateway)
 
 

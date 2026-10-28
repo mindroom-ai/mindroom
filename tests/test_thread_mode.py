@@ -476,7 +476,7 @@ class TestRouterHandoffThreadMode:
                 new_callable=AsyncMock,
             ) as mock_get_latest,
         ):
-            await bot._turn_controller._execute_router_relay(
+            await bot._turn_dispatcher._execute_router_relay(
                 room,
                 self._routing_event(),
                 [],
@@ -514,7 +514,7 @@ class TestRouterHandoffThreadMode:
                 return_value="$latest",
             ) as mock_get_latest,
         ):
-            await bot._turn_controller._execute_router_relay(
+            await bot._turn_dispatcher._execute_router_relay(
                 room,
                 self._routing_event(),
                 [],

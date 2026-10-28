@@ -29,6 +29,7 @@ from mindroom.router_relay import execute_router_relay
 from mindroom.teams.formation import TeamResolution
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_record import TurnRecord
+from mindroom.turns.dispatch import TurnDispatcher
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -83,7 +84,7 @@ class TestAgentBot(AgentBotTestBase):
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
-        bot._turn_controller._execute_router_relay = AsyncMock()
+        bot._turn_dispatcher._execute_router_relay = AsyncMock()
 
         mock_context = MagicMock()
         mock_context.am_i_mentioned = False
@@ -133,7 +134,7 @@ class TestAgentBot(AgentBotTestBase):
             await bot._on_media_message(room, event)
             await drain_coalescing(bot)
 
-        bot._turn_controller._execute_router_relay.assert_called_once_with(
+        bot._turn_dispatcher._execute_router_relay.assert_called_once_with(
             room,
             event,
             [],
@@ -213,7 +214,7 @@ class TestAgentBot(AgentBotTestBase):
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
-        bot._turn_controller._execute_router_relay = AsyncMock()
+        bot._turn_dispatcher._execute_router_relay = AsyncMock()
 
         mock_context = MagicMock()
         mock_context.am_i_mentioned = False
@@ -283,9 +284,9 @@ class TestAgentBot(AgentBotTestBase):
             await bot._on_media_message(room, event)
             await drain_coalescing(bot)
 
-        bot._turn_controller._execute_router_relay.assert_called_once()
+        bot._turn_dispatcher._execute_router_relay.assert_called_once()
         mock_register_file.assert_not_awaited()
-        call_kwargs = bot._turn_controller._execute_router_relay.call_args.kwargs
+        call_kwargs = bot._turn_dispatcher._execute_router_relay.call_args.kwargs
         assert call_kwargs["message"] == "[Attached file]"
         assert call_kwargs["requester_user_id"] == "@user:localhost"
         assert call_kwargs["extra_content"] == {ORIGINAL_SENDER_KEY: "@user:localhost"}
@@ -313,7 +314,7 @@ class TestAgentBot(AgentBotTestBase):
         _wrap_extracted_collaborators(bot)
         bot.client = make_matrix_client_mock(user_id=agent_user.user_id)
         bot.logger = MagicMock()
-        bot._turn_controller._execute_router_relay = AsyncMock()
+        bot._turn_dispatcher._execute_router_relay = AsyncMock()
 
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
         for user_id in (
@@ -358,13 +359,13 @@ class TestAgentBot(AgentBotTestBase):
         bot.client.room_get_event.return_value = root_response
         plans: list[tuple[str, str | None, tuple[str, ...]]] = []
 
-        async def record_plan(_controller: object, _room: object, prepared: object, plan: object, **_: object) -> None:
+        async def record_plan(_dispatcher: object, _room: object, prepared: object, plan: object, **_: object) -> None:
             plans.append((plan.kind, plan.ignore_reason, tuple(prepared.handled_turn.source_event_ids)))
 
         with (
             patch("mindroom.turn_policy.classify_responder_candidates_from_cached_room") as mock_get_available,
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-            patch("mindroom.text_ingress_dispatch._apply_turn_plan", new=record_plan),
+            patch.object(TurnDispatcher, "_apply_turn_plan", new=record_plan),
         ):
             mock_get_available.return_value = ResponderCandidatePermissions(
                 [
@@ -378,7 +379,7 @@ class TestAgentBot(AgentBotTestBase):
             await drain_coalescing(bot)
 
         assert plans == [("ignore", "router", ("$upload", "$caption"))]
-        bot._turn_controller._execute_router_relay.assert_not_called()
+        bot._turn_dispatcher._execute_router_relay.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_router_routing_registers_file_with_effective_thread_scope(
@@ -454,7 +455,7 @@ class TestAgentBot(AgentBotTestBase):
                 return_value=attachment_record,
             ) as mock_register_file,
         ):
-            await bot._turn_controller._execute_router_relay(
+            await bot._turn_dispatcher._execute_router_relay(
                 room=room,
                 event=event,
                 thread_history=[],
@@ -709,7 +710,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        bot._turn_controller._execute_router_relay = AsyncMock()
+        bot._turn_dispatcher._execute_router_relay = AsyncMock()
         bot._conversation_resolver.extract_message_context = AsyncMock(
             return_value=MessageContext(
                 am_i_mentioned=False,
@@ -761,9 +762,9 @@ class TestAgentBot(AgentBotTestBase):
             await bot._on_media_message(room, image_event)
             await drain_coalescing(bot)
 
-        assert bot._turn_controller._execute_router_relay.await_count == 2
-        first_call = bot._turn_controller._execute_router_relay.await_args_list[0].kwargs
-        second_call = bot._turn_controller._execute_router_relay.await_args_list[1].kwargs
+        assert bot._turn_dispatcher._execute_router_relay.await_count == 2
+        first_call = bot._turn_dispatcher._execute_router_relay.await_args_list[0].kwargs
+        second_call = bot._turn_dispatcher._execute_router_relay.await_args_list[1].kwargs
         assert first_call["requester_user_id"] == "@user:localhost"
         assert first_call["message"] is None
         assert second_call["requester_user_id"] == "@user:localhost"
@@ -794,7 +795,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        bot._turn_controller._execute_router_relay = AsyncMock()
+        bot._turn_dispatcher._execute_router_relay = AsyncMock()
         bot._conversation_resolver.extract_message_context = AsyncMock(
             return_value=MessageContext(
                 am_i_mentioned=False,
@@ -853,8 +854,8 @@ class TestAgentBot(AgentBotTestBase):
             await bot._on_message(room, event)
             await drain_coalescing(bot)
 
-        bot._turn_controller._execute_router_relay.assert_awaited_once()
-        call = bot._turn_controller._execute_router_relay.await_args.kwargs
+        bot._turn_dispatcher._execute_router_relay.assert_awaited_once()
+        call = bot._turn_dispatcher._execute_router_relay.await_args.kwargs
         assert call["requester_user_id"] == "@user:localhost"
         assert call["extra_content"] == {
             ORIGINAL_SENDER_KEY: "@user:localhost",
@@ -900,7 +901,7 @@ class TestAgentBot(AgentBotTestBase):
             },
         )
 
-        await bot._turn_controller._execute_router_relay(
+        await bot._turn_dispatcher._execute_router_relay(
             room=room,
             event=event,
             thread_history=[],
@@ -949,7 +950,7 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         with pytest.raises(RuntimeError, match="Failed to route to entity 'general'"):
-            await bot._turn_controller._execute_router_relay(
+            await bot._turn_dispatcher._execute_router_relay(
                 room=room,
                 event=event,
                 thread_history=[],
@@ -980,7 +981,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        bot._turn_controller._execute_router_relay = AsyncMock()
+        bot._turn_dispatcher._execute_router_relay = AsyncMock()
         bot._conversation_resolver.extract_message_context = AsyncMock(
             return_value=MessageContext(
                 am_i_mentioned=False,
@@ -1023,7 +1024,7 @@ class TestAgentBot(AgentBotTestBase):
             await bot._on_media_message(room, image_event)
             await drain_coalescing(bot)
 
-        bot._turn_controller._execute_router_relay.assert_not_awaited()
+        bot._turn_dispatcher._execute_router_relay.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_router_replies_with_guidance_when_only_router_is_mentioned(self, tmp_path: Path) -> None:

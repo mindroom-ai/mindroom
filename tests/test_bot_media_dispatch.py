@@ -38,11 +38,11 @@ from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget
 from mindroom.teams.formation import TeamResolution
 from mindroom.thread_utils import AgentResponseDecision
-from mindroom.turn_controller import _IngressAdmissionOutcome, _media_source_kind
 from mindroom.turn_policy import PreparedDispatch
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import ClaimContended, TurnClaim
 from mindroom.turns.facts import PrecheckedEvent
+from mindroom.turns.ingress import _IngressAdmissionOutcome, _media_source_kind
 from tests.bot_helpers import (
     AgentBotTestBase,
     _agent_response_handled_turn,
@@ -69,7 +69,7 @@ from tests.conftest import (
     drain_coalescing,
     install_generate_response_mock,
     make_ingress_facts,
-    replace_turn_controller_deps,
+    replace_turn_deps,
     runtime_paths_for,
 )
 
@@ -221,14 +221,14 @@ class TestAgentBot(AgentBotTestBase):
             facts=make_ingress_facts(event.sender, source_kind=_media_source_kind(event)),
         )
         bot._conversation_resolver.coalescing_thread_id = AsyncMock(return_value=None)
-        bot._turn_controller._precheck_dispatch_event = AsyncMock(return_value=prechecked_event)
-        bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
-        bot._turn_controller._enqueue_for_dispatch = AsyncMock()
+        bot._turn_ingress._precheck_dispatch_event = AsyncMock(return_value=prechecked_event)
+        bot._turn_ingress._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
+        bot._turn_ingress._enqueue_for_dispatch = AsyncMock()
 
-        await bot._turn_controller._handle_media_message_inner(room, event)
+        await bot._turn_ingress._handle_media_message_inner(room, event)
 
         bot._conversation_resolver.coalescing_thread_id.assert_awaited_once_with(room, event)
-        bot._turn_controller._enqueue_for_dispatch.assert_awaited_once()
+        bot._turn_ingress._enqueue_for_dispatch.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_audio_dispatch_resolves_thread_key_before_admit_and_defers_stt(
@@ -286,14 +286,14 @@ class TestAgentBot(AgentBotTestBase):
             await release_stt.wait()
 
         bot._conversation_resolver.coalescing_thread_id = AsyncMock(side_effect=record_thread_id)
-        bot._turn_controller._precheck_dispatch_event = AsyncMock(
+        bot._turn_ingress._precheck_dispatch_event = AsyncMock(
             return_value=PrecheckedEvent(
                 event=event,
                 facts=make_ingress_facts(event.sender, source_kind=_media_source_kind(event)),
             ),
         )
-        bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
-        bot._turn_controller._enqueue_for_dispatch = AsyncMock()
+        bot._turn_ingress._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
+        bot._turn_ingress._enqueue_for_dispatch = AsyncMock()
         bot._coalescing_gate.enter_lane = MagicMock(side_effect=record_enter_lane)
         bot._coalescing_gate.submit_lane_slot = mock_submit = MagicMock(side_effect=record_submit)
 
@@ -301,7 +301,7 @@ class TestAgentBot(AgentBotTestBase):
             "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.prepare_voice_event",
             new=AsyncMock(side_effect=record_voice_normalization),
         ):
-            await bot._turn_controller._handle_media_message_inner(room, event)
+            await bot._turn_ingress._handle_media_message_inner(room, event)
             mock_submit.assert_called_once()
             assert call_order == ["reserve", "coalescing_thread", "admit"]
             assert admitted_ready_task is not None
@@ -316,7 +316,7 @@ class TestAgentBot(AgentBotTestBase):
             room,
             event,
         )
-        bot._turn_controller._dispatch_special_media_as_text.assert_not_awaited()
+        bot._turn_ingress._dispatch_special_media_as_text.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_media_ingress_claims_source_before_async_thread_resolution(
@@ -341,18 +341,18 @@ class TestAgentBot(AgentBotTestBase):
         ingress.precheck_event.return_value = True
         resolver = MagicMock(wraps=bot._conversation_resolver)
         resolver.coalescing_thread_id = AsyncMock(side_effect=block_thread_resolution)
-        controller = replace_turn_controller_deps(bot, ingress=ingress, resolver=resolver)
-        first = asyncio.create_task(controller._handle_media_message_inner(room, event))
+        replace_turn_deps(bot, ingress=ingress, resolver=resolver)
+        first = asyncio.create_task(bot._turn_ingress._handle_media_message_inner(room, event))
 
         await resolution_started.wait()
         competing_claim = TurnRecord.create([event.event_id], completed=False)
-        assert isinstance(await controller.deps.turn_store.claim(competing_claim), ClaimContended)
+        assert isinstance(await bot._turn_ingress.deps.turn_store.claim(competing_claim), ClaimContended)
 
         first.cancel()
         with pytest.raises(asyncio.CancelledError):
             await first
 
-        claim = await controller.deps.turn_store.claim(competing_claim)
+        claim = await bot._turn_ingress.deps.turn_store.claim(competing_claim)
         assert isinstance(claim, TurnClaim)
         claim.release()
 
@@ -374,19 +374,21 @@ class TestAgentBot(AgentBotTestBase):
         ingress.precheck_event.return_value = True
         resolver = MagicMock(wraps=bot._conversation_resolver)
         resolver.coalescing_thread_id = AsyncMock()
-        controller = replace_turn_controller_deps(bot, ingress=ingress, resolver=resolver)
-        active_claim = await controller.deps.turn_store.claim(TurnRecord.create([event.event_id], completed=False))
+        replace_turn_deps(bot, ingress=ingress, resolver=resolver)
+        active_claim = await bot._turn_ingress.deps.turn_store.claim(
+            TurnRecord.create([event.event_id], completed=False),
+        )
         assert isinstance(active_claim, TurnClaim)
 
         with patch.object(bot._journal_dispatcher, "retry_turn_sources") as retry_turn_sources:
-            assert await controller._handle_media_message_inner(room, event) is TurnDispatchOutcome.DEFERRED
+            assert await bot._turn_ingress._handle_media_message_inner(room, event) is TurnDispatchOutcome.DEFERRED
             resolver.coalescing_thread_id.assert_not_awaited()
-            assert controller.deps.turn_store.has_live_turn_claim(event.event_id)
+            assert bot._turn_ingress.deps.turn_store.has_live_turn_claim(event.event_id)
             retry_turn_sources.assert_not_called()
             active_claim.release()
 
         retry_turn_sources.assert_called_once_with(room.room_id, (event.event_id,))
-        assert not controller.deps.turn_store.has_live_turn_claim(event.event_id)
+        assert not bot._turn_ingress.deps.turn_store.has_live_turn_claim(event.event_id)
 
     @pytest.mark.asyncio
     async def test_media_ingress_leaves_source_claimable_when_lane_reservation_fails(
@@ -413,12 +415,12 @@ class TestAgentBot(AgentBotTestBase):
             raise RuntimeError(msg)
 
         gate.enter_lane.side_effect = reject_lane_reservation
-        controller = replace_turn_controller_deps(bot, ingress=ingress, coalescing_gate=gate)
+        replace_turn_deps(bot, ingress=ingress, coalescing_gate=gate)
 
         with pytest.raises(RuntimeError, match="lane unavailable"):
-            await controller._handle_media_message_inner(room, event)
+            await bot._turn_ingress._handle_media_message_inner(room, event)
 
-        claim = await controller.deps.turn_store.claim(competing_claim)
+        claim = await bot._turn_ingress.deps.turn_store.claim(competing_claim)
         assert isinstance(claim, TurnClaim)
         claim.release()
 
@@ -439,12 +441,12 @@ class TestAgentBot(AgentBotTestBase):
             facts=make_ingress_facts(event.sender, source_kind=_media_source_kind(event)),
         )
 
-        bot._turn_controller._precheck_dispatch_event = AsyncMock(return_value=prechecked_event)
-        bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
-        bot._turn_controller.deps.resolver.coalescing_thread_id = AsyncMock(side_effect=asyncio.CancelledError)
+        bot._turn_ingress._precheck_dispatch_event = AsyncMock(return_value=prechecked_event)
+        bot._turn_ingress._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
+        bot._turn_ingress.deps.resolver.coalescing_thread_id = AsyncMock(side_effect=asyncio.CancelledError)
 
         with pytest.raises(asyncio.CancelledError):
-            await bot._turn_controller._handle_media_message_inner(room, event)
+            await bot._turn_ingress._handle_media_message_inner(room, event)
 
         await asyncio.wait_for(bot._coalescing_gate.drain_all(), timeout=1.0)
         assert bot._coalescing_gate.lanes.all_settled()
@@ -490,8 +492,8 @@ class TestAgentBot(AgentBotTestBase):
             debounce_seconds=lambda: 0.01,
             is_shutting_down=lambda: False,
         )
-        replace_turn_controller_deps(bot, coalescing_gate=bot._coalescing_gate)
-        bot._turn_controller.deps.resolver.coalescing_thread_id = AsyncMock(side_effect=coalescing_thread_id)
+        replace_turn_deps(bot, coalescing_gate=bot._coalescing_gate)
+        bot._turn_ingress.deps.resolver.coalescing_thread_id = AsyncMock(side_effect=coalescing_thread_id)
         prepare_voice = AsyncMock(
             return_value=_VoiceNormalizationResult(
                 event=PreparedIngress(
@@ -525,10 +527,10 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             ),
         ):
-            text_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, text_event))
+            text_task = asyncio.create_task(bot._turn_ingress.handle_text_event(room, text_event))
             # The later voice message arrives while the text's thread lookup blocks.
             await text_lookup_started.wait()
-            await bot._turn_controller.handle_media_event(room, voice_event)
+            await bot._turn_ingress.handle_media_event(room, voice_event)
             await asyncio.sleep(0.03)
 
             assert dispatches == []
@@ -580,8 +582,8 @@ class TestAgentBot(AgentBotTestBase):
             debounce_seconds=lambda: 0.01,
             is_shutting_down=lambda: False,
         )
-        replace_turn_controller_deps(bot, coalescing_gate=bot._coalescing_gate)
-        bot._turn_controller.deps.resolver.coalescing_thread_id = AsyncMock(side_effect=coalescing_thread_id)
+        replace_turn_deps(bot, coalescing_gate=bot._coalescing_gate)
+        bot._turn_ingress.deps.resolver.coalescing_thread_id = AsyncMock(side_effect=coalescing_thread_id)
 
         with (
             patch(
@@ -597,10 +599,10 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             ),
         ):
-            media_task = asyncio.create_task(bot._turn_controller.handle_media_event(room, image_event))
+            media_task = asyncio.create_task(bot._turn_ingress.handle_media_event(room, image_event))
             # The later text arrives while the image's thread lookup blocks.
             await media_lookup_started.wait()
-            await bot._turn_controller.handle_text_event(room, text_event)
+            await bot._turn_ingress.handle_text_event(room, text_event)
             await asyncio.sleep(0.03)
 
             assert dispatches == []
@@ -670,8 +672,8 @@ class TestAgentBot(AgentBotTestBase):
             debounce_seconds=lambda: 0.01,
             is_shutting_down=lambda: False,
         )
-        replace_turn_controller_deps(bot, coalescing_gate=bot._coalescing_gate)
-        bot._turn_controller.deps.resolver.coalescing_thread_id = AsyncMock(return_value="$thread-root")
+        replace_turn_deps(bot, coalescing_gate=bot._coalescing_gate)
+        bot._turn_ingress.deps.resolver.coalescing_thread_id = AsyncMock(return_value="$thread-root")
 
         with (
             patch(
@@ -691,10 +693,10 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             ),
         ):
-            sidecar_task = asyncio.create_task(bot._turn_controller.handle_media_event(room, sidecar_event))
+            sidecar_task = asyncio.create_task(bot._turn_ingress.handle_media_event(room, sidecar_event))
             # The later text arrives while the sidecar's preview normalization blocks.
             await preview_normalization_started.wait()
-            await bot._turn_controller.handle_text_event(room, text_event)
+            await bot._turn_ingress.handle_text_event(room, text_event)
             await asyncio.sleep(0.03)
 
             assert dispatches == []

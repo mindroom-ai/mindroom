@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
     from mindroom.dispatch_handoff import MediaDispatchEvent
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
-    from mindroom.turn_controller import TurnController
+    from mindroom.turns.dispatch import TurnDispatcher
     from mindroom.turns.facts import IngressFacts
 
 
@@ -109,7 +109,7 @@ def make_test_turn(
 
 
 async def dispatch_test_turn(
-    controller: TurnController,
+    dispatcher: TurnDispatcher,
     room: nio.MatrixRoom,
     event: PreparedIngress | nio.RoomMessageFormatted | PrecheckedEvent,
     requester_user_id: str | None = None,
@@ -121,7 +121,7 @@ async def dispatch_test_turn(
     gate-exit merge meets that owner as production would.
     """
     turn = make_test_turn(room, event, requester_user_id, **kwargs)
-    claimed = await controller.deps.turn_store.claim(
+    claimed = await dispatcher.deps.turn_store.claim(
         TurnRecord.create(
             turn.handled_turn.source_event_ids,
             discovery_event_ids=turn.handled_turn.discovery_event_ids,
@@ -129,7 +129,7 @@ async def dispatch_test_turn(
         ),
     )
     claims = (claimed,) if isinstance(claimed, TurnClaim) else ()
-    await controller.handle_prepared_turn(replace(turn, claims=claims))
+    await dispatcher.handle_prepared_turn(replace(turn, claims=claims))
 
 
 def prepared_turn_recorder(callback: Callable[..., Awaitable[None]]) -> Callable[..., Awaitable[None]]:

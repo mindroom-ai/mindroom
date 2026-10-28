@@ -303,7 +303,7 @@ class TestResponseTrackingRegression:
         }
 
         # Process routing
-        await bot._turn_controller._execute_router_relay(
+        await bot._turn_dispatcher._execute_router_relay(
             mock_room,
             message_event,
             [],
@@ -333,7 +333,7 @@ class TestResponseTrackingRegression:
         mock_suggest_responder.reset_mock()
 
         # Process same message again (simulating restart)
-        await bot._turn_controller._execute_router_relay(
+        await bot._turn_dispatcher._execute_router_relay(
             mock_room,
             message_event,
             [],

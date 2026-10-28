@@ -305,7 +305,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
     with (
         patch("mindroom.bot.login_agent_owned_session") as mock_login,
         patch("mindroom.config.main.load_config", return_value=mock_config),
-        patch("mindroom.turn_controller.select_ad_hoc_team_mode", new=AsyncMock()) as mock_select_mode,
+        patch("mindroom.turns.dispatch.select_ad_hoc_team_mode", new=AsyncMock()) as mock_select_mode,
     ):
         mock_client = make_matrix_client_mock(user_id=mock_calculator_agent.user_id)
         mock_client.user_id = mock_calculator_agent.user_id

@@ -85,7 +85,8 @@ from mindroom.response_sources import ResponseSources
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.session_storage.types import ConversationSession, SessionKind
-from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
+from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
+from mindroom.turns.dispatch import TurnDispatcher
 from mindroom.turns.facts import PrecheckedEvent
 from tests.access_schema_support import with_current_room_member_access
 from tests.agent_loop.helpers import collect, context, spec, toolkit
@@ -610,8 +611,8 @@ async def test_room_mode_root_batch_consumes_all_same_target_reservations(tmp_pa
         ],
     )
 
-    with patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()):
-        await bot._turn_controller.handle_prepared_turn(batch)
+    with patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()):
+        await bot._turn_dispatcher.handle_prepared_turn(batch)
 
     first_reservation.release.assert_called_once_with()
     second_reservation.release.assert_called_once_with()
@@ -1200,7 +1201,7 @@ async def test_generate_response_skips_signal_for_non_human_prompt_ingress(
     """Automation and router-authored notices should not interrupt the active turn."""
     bot = _bot(tmp_path)
     response_target = response_envelope.target
-    coordinator = unwrap_extracted_collaborator(bot._turn_controller.deps.response_runner)
+    coordinator = unwrap_extracted_collaborator(bot._turn_ingress.deps.response_runner)
     lifecycle = coordinator._lifecycle_coordinator
     lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
     queued_signal = lifecycle._get_or_create_queued_signal(response_target)
@@ -2409,14 +2410,14 @@ async def test_reserved_command_follow_up_cleanup_when_dispatch_returns(tmp_path
         assert reservation is not None
         with (
             patch.object(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
             ),
             patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock()) as mock_plan_turn,
         ):
             await dispatch_test_turn(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 room,
                 PrecheckedEvent(
                     event=event,
@@ -2473,15 +2474,15 @@ async def test_reserved_superseded_follow_up_cleanup_when_dispatch_returns(tmp_p
         assert reservation is not None
         with (
             patch.object(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
             ),
-            patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=True),
+            patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=True),
             patch.object(bot._turn_policy, "plan_turn", new=AsyncMock()) as mock_plan_turn,
         ):
             await dispatch_test_turn(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 room,
                 PrecheckedEvent(
                     event=event,
@@ -2505,11 +2506,11 @@ async def test_reserved_follow_up_cleanup_when_hook_suppression_returns_before_d
     case = _reserved_follow_up_case(bot, room, event_id="$suppressed")
     try:
         with (
-            patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=None)),
+            patch.object(bot._turn_dispatcher, "_prepare_dispatch", new=AsyncMock(return_value=None)),
             patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock()) as mock_plan_turn,
         ):
             await dispatch_test_turn(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 room,
                 PrecheckedEvent(
                     event=case.event,
@@ -2534,17 +2535,17 @@ async def test_reserved_follow_up_cleanup_when_plan_ignores_before_response(tmp_
     try:
         with (
             patch.object(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=prepared_dispatch_result(case.dispatch)),
             ),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
-                new=AsyncMock(return_value=_DispatchPlan(kind="ignore")),
+                new=AsyncMock(return_value=DispatchPlan(kind="ignore")),
             ),
         ):
             await dispatch_test_turn(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 room,
                 PrecheckedEvent(
                     event=case.event,
@@ -2568,18 +2569,18 @@ async def test_reserved_follow_up_cleanup_when_route_returns_before_response(tmp
     try:
         with (
             patch.object(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=prepared_dispatch_result(case.dispatch)),
             ),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
-                new=AsyncMock(return_value=_DispatchPlan(kind="route", router_message="route this")),
+                new=AsyncMock(return_value=DispatchPlan(kind="route", router_message="route this")),
             ),
-            patch.object(bot._turn_controller, "_execute_router_relay", new=AsyncMock()) as mock_route,
+            patch.object(bot._turn_dispatcher, "_execute_router_relay", new=AsyncMock()) as mock_route,
         ):
             await dispatch_test_turn(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 room,
                 PrecheckedEvent(
                     event=case.event,
@@ -2604,28 +2605,28 @@ async def test_reserved_follow_up_cleanup_when_dispatch_raises_before_lifecycle(
     try:
         with (
             patch.object(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=prepared_dispatch_result(case.dispatch)),
             ),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
                 new=AsyncMock(
-                    return_value=_DispatchPlan(
+                    return_value=DispatchPlan(
                         kind="respond",
                         response_action=ResponseAction(kind="individual"),
                     ),
                 ),
             ),
             patch.object(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 "_execute_response_action",
                 new=AsyncMock(side_effect=RuntimeError("dispatch failed")),
             ),
             pytest.raises(RuntimeError, match="dispatch failed"),
         ):
             await dispatch_test_turn(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 room,
                 PrecheckedEvent(
                     event=case.event,
@@ -2649,27 +2650,27 @@ async def test_reserved_follow_up_cleanup_when_dispatch_cancelled_before_lifecyc
     try:
         with (
             patch.object(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=prepared_dispatch_result(case.dispatch)),
             ),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
                 new=AsyncMock(
-                    return_value=_DispatchPlan(
+                    return_value=DispatchPlan(
                         kind="respond",
                         response_action=ResponseAction(kind="individual"),
                     ),
                 ),
             ),
             patch.object(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 "_execute_response_action",
                 new=AsyncMock(side_effect=asyncio.CancelledError),
             ),
         ):
             await dispatch_test_turn(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 room,
                 PrecheckedEvent(
                     event=case.event,
@@ -2705,14 +2706,14 @@ async def test_reserved_follow_up_cleanup_when_prepare_dispatch_raises(tmp_path:
         assert reservation is not None
         with (
             patch.object(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 "_prepare_dispatch",
                 new=AsyncMock(side_effect=RuntimeError("prepare failed")),
             ),
             pytest.raises(RuntimeError, match="prepare failed"),
         ):
             await dispatch_test_turn(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 room,
                 event,
                 "@user:localhost",
@@ -2759,13 +2760,14 @@ async def test_reserved_follow_up_cleanup_when_handle_prepared_turn_fails_before
             ],
         )
         with (
-            patch(
-                "mindroom.turn_controller.dispatch_text_message",
+            patch.object(
+                TurnDispatcher,
+                "_dispatch_text_turn",
                 new=AsyncMock(side_effect=RuntimeError("dispatch failed")),
             ),
             pytest.raises(RuntimeError, match="dispatch failed"),
         ):
-            await bot._turn_controller.handle_prepared_turn(batch)
+            await bot._turn_dispatcher.handle_prepared_turn(batch)
     finally:
         queued_signal.finish_response_turn()
 
@@ -2835,11 +2837,12 @@ async def test_coalesced_batch_consumes_queued_notice_for_batch_thread(tmp_path:
             ],
         )
 
-        with patch(
-            "mindroom.turn_controller.dispatch_text_message",
+        with patch.object(
+            TurnDispatcher,
+            "_dispatch_text_turn",
             new=AsyncMock(side_effect=prepared_turn_recorder(capture_dispatch)),
         ):
-            await bot._turn_controller.handle_prepared_turn(batch)
+            await bot._turn_dispatcher.handle_prepared_turn(batch)
     finally:
         pre_signal.finish_response_turn()
         post_signal.finish_response_turn()
@@ -2860,7 +2863,7 @@ async def test_room_scoped_root_voice_consumes_final_target_queued_notice(tmp_pa
         body="🎤 voice follow-up",
         payload_trusted=True,
     )
-    target = bot._turn_controller.deps.resolver.build_message_target(
+    target = bot._turn_ingress.deps.resolver.build_message_target(
         room_id=room.room_id,
         thread_id=None,
         reply_to_event_id=voice_event.event_id,
@@ -2900,11 +2903,12 @@ async def test_room_scoped_root_voice_consumes_final_target_queued_notice(tmp_pa
             ],
         )
 
-        with patch(
-            "mindroom.turn_controller.dispatch_text_message",
+        with patch.object(
+            TurnDispatcher,
+            "_dispatch_text_turn",
             new=AsyncMock(side_effect=prepared_turn_recorder(capture_dispatch)),
         ):
-            await bot._turn_controller.handle_prepared_turn(batch)
+            await bot._turn_dispatcher.handle_prepared_turn(batch)
     finally:
         queued_signal.finish_response_turn()
 
@@ -2933,13 +2937,13 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
         raise asyncio.CancelledError
 
     try:
-        ticket = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
+        ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
         try:
             with (
-                patch.object(bot._turn_controller, "_enqueue_for_dispatch", new=cancel_enqueue),
+                patch.object(bot._turn_ingress, "_enqueue_for_dispatch", new=cancel_enqueue),
                 pytest.raises(asyncio.CancelledError),
             ):
-                await bot._turn_controller._enqueue_prepared_text_for_dispatch(
+                await bot._turn_ingress._enqueue_prepared_text_for_dispatch(
                     room=room,
                     prepared_event=event,
                     facts=make_ingress_facts(event.sender),
@@ -3088,19 +3092,19 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
     with (
         patch.object(bot._inbound_turn_normalizer, "resolve_text_event", new=AsyncMock(return_value=event)),
         patch.object(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
-        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=True),
+        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=True),
         patch.object(
             bot._turn_policy,
             "plan_turn",
-            new=AsyncMock(return_value=_DispatchPlan(kind="ignore")),
+            new=AsyncMock(return_value=DispatchPlan(kind="ignore")),
         ) as mock_plan,
     ):
         await dispatch_test_turn(
-            bot._turn_controller,
+            bot._turn_dispatcher,
             room,
             PrecheckedEvent(event=event, facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost")),
         )

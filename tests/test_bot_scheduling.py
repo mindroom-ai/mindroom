@@ -45,7 +45,7 @@ from tests.conftest import (
     install_send_response_mock,
     make_ingress_facts,
     make_matrix_client_mock,
-    replace_turn_controller_deps,
+    replace_turn_deps,
     replace_turn_policy_deps,
     runtime_paths_for,
     sync_bot_runtime_state,
@@ -120,7 +120,7 @@ def _sync_turn_policy_runtime(bot: AgentBot) -> None:
     turn_store.is_handled = AsyncMock(return_value=False)
     turn_store.record_turn = AsyncMock()
     _replace_turn_policy_deps(bot, logger=bot.logger)
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
 
 
 async def _execute_command(
@@ -184,7 +184,7 @@ def mock_agent_bot(send_response_mock: AsyncMock) -> AgentBot:
     bot.logger = MagicMock()
     _sync_turn_policy_runtime(bot)
     install_send_response_mock(bot, send_response_mock)
-    bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
+    bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
     )
     return bot
@@ -692,7 +692,7 @@ class TestCommandHandling:
             wrap_extracted_collaborators(bot, "_turn_policy")
             _sync_turn_policy_runtime(bot)
             unwrap_extracted_collaborator(bot._command_turn_executor).execute = AsyncMock()
-            bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
+            bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(
                 return_value=thread_history_result([], is_full_history=False),
             )
 
@@ -752,7 +752,7 @@ class TestCommandHandling:
             _sync_turn_policy_runtime(bot)
             unwrap_extracted_collaborator(bot._command_turn_executor).execute = AsyncMock()
             bot._conversation_resolver.coalescing_thread_id = AsyncMock(return_value="$thread-root")
-            bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
+            bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(
                 return_value=thread_history_result([], is_full_history=False),
             )
 
@@ -1230,7 +1230,7 @@ class TestCommandHandling:
                 },
             )
 
-            result = await bot._turn_controller._prepare_dispatch(
+            result = await bot._turn_dispatcher._prepare_dispatch(
                 room,
                 event,
                 replace(bot._ingress_validator.classify(event), source_kind=SCHEDULED_SOURCE_KIND),
@@ -1294,7 +1294,7 @@ class TestCommandHandling:
                 },
             )
 
-            result = await bot._turn_controller._precheck_dispatch_event(room, event)
+            result = await bot._turn_ingress._precheck_dispatch_event(room, event)
 
         assert result is not None
         assert result.facts.lane_requester_id == "@mindroom_router:localhost"
@@ -1632,8 +1632,8 @@ class TestRouterSkipsSingleAgent:
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
         _sync_turn_policy_runtime(bot)
-        bot._turn_controller._enqueue_for_dispatch = AsyncMock()
-        bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
+        bot._turn_ingress._enqueue_for_dispatch = AsyncMock()
+        bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(
             return_value=thread_history_result([], is_full_history=False),
         )
 
@@ -1661,8 +1661,8 @@ class TestRouterSkipsSingleAgent:
         await bot._on_message(room, event)
         await drain_coalescing(bot)
 
-        bot._turn_controller._enqueue_for_dispatch.assert_not_awaited()
-        bot._turn_controller.deps.resolver.dispatch_thread_snapshot.assert_not_awaited()
+        bot._turn_ingress._enqueue_for_dispatch.assert_not_awaited()
+        bot._turn_ingress.deps.resolver.dispatch_thread_snapshot.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_router_skips_shared_ingress_work_for_agent_owned_thread_follow_up(self) -> None:
@@ -1697,8 +1697,8 @@ class TestRouterSkipsSingleAgent:
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
         _sync_turn_policy_runtime(bot)
-        bot._turn_controller._enqueue_for_dispatch = AsyncMock()
-        bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
+        bot._turn_ingress._enqueue_for_dispatch = AsyncMock()
+        bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(
             return_value=thread_history_result(
                 [
                     _message(sender="@mindroom_general:localhost", body="I can help with that."),
@@ -1732,11 +1732,11 @@ class TestRouterSkipsSingleAgent:
         await bot._on_message(room, event)
         await drain_coalescing(bot)
 
-        bot._turn_controller.deps.resolver.dispatch_thread_snapshot.assert_awaited_once_with(
+        bot._turn_ingress.deps.resolver.dispatch_thread_snapshot.assert_awaited_once_with(
             "!test:server",
             "$thread_root",
         )
-        bot._turn_controller._enqueue_for_dispatch.assert_not_awaited()
+        bot._turn_ingress._enqueue_for_dispatch.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_router_skips_routing_with_single_agent(self) -> None:
@@ -1769,10 +1769,10 @@ class TestRouterSkipsSingleAgent:
         bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
-        bot._turn_controller._execute_router_relay = AsyncMock()
+        bot._turn_dispatcher._execute_router_relay = AsyncMock()
         _sync_turn_policy_runtime(bot)
         _sync_turn_policy_runtime(bot)
-        bot._turn_controller._execute_router_relay = AsyncMock()
+        bot._turn_dispatcher._execute_router_relay = AsyncMock()
 
         # Create context with no mentions and no agents in thread
         mock_context = _message_context(
@@ -1819,7 +1819,7 @@ class TestRouterSkipsSingleAgent:
             await drain_coalescing(bot)
 
         # Verify router didn't attempt to route
-        bot._turn_controller._execute_router_relay.assert_not_called()
+        bot._turn_dispatcher._execute_router_relay.assert_not_called()
 
         # Verify it logged that it's skipping routing
         info_calls = [call[0][0] for call in bot.logger.info.call_args_list]
@@ -1859,9 +1859,9 @@ class TestRouterSkipsSingleAgent:
         bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
-        bot._turn_controller._execute_router_relay = AsyncMock()
+        bot._turn_dispatcher._execute_router_relay = AsyncMock()
         _sync_turn_policy_runtime(bot)
-        bot._turn_controller._execute_router_relay = AsyncMock()
+        bot._turn_dispatcher._execute_router_relay = AsyncMock()
 
         # Create context with no mentions and no agents in thread
         mock_context = _message_context(
@@ -1912,8 +1912,8 @@ class TestRouterSkipsSingleAgent:
             await drain_coalescing(bot)
 
         # Verify router DID attempt to route
-        bot._turn_controller._execute_router_relay.assert_called_once()
-        routed_call = bot._turn_controller._execute_router_relay.call_args
+        bot._turn_dispatcher._execute_router_relay.assert_called_once()
+        routed_call = bot._turn_dispatcher._execute_router_relay.call_args
         assert routed_call.args[0] is room
         routed_event = routed_call.args[1]
         assert routed_event.event_id == event.event_id
@@ -1962,10 +1962,10 @@ class TestRouterSkipsSingleAgent:
         bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
-        bot._turn_controller._execute_router_relay = AsyncMock()
-        replace_turn_controller_deps(bot, settle_ignored_sources=AsyncMock())
+        bot._turn_dispatcher._execute_router_relay = AsyncMock()
+        replace_turn_deps(bot, settle_ignored_sources=AsyncMock())
         _sync_turn_policy_runtime(bot)
-        bot._turn_controller._execute_router_relay = AsyncMock()
+        bot._turn_dispatcher._execute_router_relay = AsyncMock()
 
         mock_context = _message_context(
             am_i_mentioned=False,
@@ -2013,7 +2013,7 @@ class TestRouterSkipsSingleAgent:
                 [],
             )
             await dispatch_test_turn(
-                bot._turn_controller,
+                bot._turn_dispatcher,
                 room,
                 PrecheckedEvent(
                     event=event,
@@ -2028,7 +2028,7 @@ class TestRouterSkipsSingleAgent:
                 ),
             )
 
-        bot._turn_controller._execute_router_relay.assert_not_called()
+        bot._turn_dispatcher._execute_router_relay.assert_not_called()
         info_calls = [call[0][0] for call in bot.logger.info.call_args_list]
         assert "Skipping routing: thread already requires explicit responder targeting" in info_calls
 
@@ -2207,9 +2207,9 @@ class TestRouterSkipsSingleAgent:
         bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
-        bot._turn_controller._execute_router_relay = AsyncMock()
+        bot._turn_dispatcher._execute_router_relay = AsyncMock()
         _sync_turn_policy_runtime(bot)
-        bot._turn_controller._execute_router_relay = AsyncMock()
+        bot._turn_dispatcher._execute_router_relay = AsyncMock()
 
         # Room with router + one agent + a human
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
@@ -2261,7 +2261,7 @@ class TestRouterSkipsSingleAgent:
 
         # Voice transcriptions should work: router skips routing but doesn't interfere
         # This is a regression test to ensure voice works in single-responder rooms.
-        assert not bot._turn_controller._execute_router_relay.called, (
+        assert not bot._turn_dispatcher._execute_router_relay.called, (
             "Router should skip routing for voice in single-responder room"
         )
         info_calls = [call[0][0] for call in bot.logger.info.call_args_list]

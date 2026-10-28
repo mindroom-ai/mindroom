@@ -517,7 +517,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 ),
             ) as mock_send,
         ):
-            await bot._turn_controller._execute_router_relay(
+            await bot._turn_dispatcher._execute_router_relay(
                 room,
                 event,
                 thread_history=[],

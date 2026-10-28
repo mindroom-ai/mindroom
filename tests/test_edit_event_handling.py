@@ -13,6 +13,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.turns.dispatch import TurnDispatcher
 from mindroom.turns.facts import PrecheckedEvent
 from tests.access_schema_support import with_current_room_member_access, with_responder_access
 from tests.bot_helpers import make_test_agent_bot
@@ -21,7 +22,7 @@ from tests.conftest import (
     install_generate_response_mock,
     install_runtime_journal_support,
     make_ingress_facts,
-    replace_turn_controller_deps,
+    replace_turn_deps,
     wrap_extracted_collaborators,
 )
 from tests.identity_helpers import persist_entity_accounts
@@ -82,7 +83,7 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
     install_runtime_journal_support(bot)
 
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
 
     # Create a room
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@router:example.com")
@@ -129,14 +130,14 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
     # Mock the routing method that would be called for the router
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_ingress,
             "_precheck_dispatch_event",
             return_value=PrecheckedEvent(
                 event=edit_event,
                 facts=make_ingress_facts(edit_event.sender, requester_user_id="@user:example.com"),
             ),
         ),
-        patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
+        patch.object(TurnDispatcher, "_dispatch_text_turn", new_callable=AsyncMock) as mock_dispatch,
         patch.object(bot._edit_regenerator, "handle_message_edit", new_callable=AsyncMock) as mock_handle_edit,
     ):
         # Process the edit event - this should not re-enter normal dispatch.
@@ -171,7 +172,7 @@ async def test_edit_event_reserves_prompt_order_while_regenerating(tmp_path: Pat
     bot.client.user_id = "@router:example.com"
     install_runtime_journal_support(bot)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@router:example.com")
     edit_event = nio.RoomMessageText.from_dict(
         {
@@ -208,7 +209,7 @@ async def test_edit_event_reserves_prompt_order_while_regenerating(tmp_path: Pat
 
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_ingress,
             "_precheck_dispatch_event",
             return_value=PrecheckedEvent(
                 event=edit_event,
@@ -257,7 +258,7 @@ async def test_edit_waits_for_reload_and_rechecks_authorization(tmp_path: Path) 
     bot.client.user_id = agent_user.user_id
     install_runtime_journal_support(bot)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id=agent_user.user_id)
     edit_event = nio.RoomMessageText.from_dict(
         {
@@ -285,7 +286,7 @@ async def test_edit_waits_for_reload_and_rechecks_authorization(tmp_path: Path) 
 
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_ingress,
             "_precheck_dispatch_event",
             return_value=PrecheckedEvent(
                 event=edit_event,
@@ -335,7 +336,7 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
     bot.client.user_id = "@router:example.com"
     install_runtime_journal_support(bot)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@router:example.com")
 
@@ -384,7 +385,7 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
     # Mock the routing method
     with (
         patch.object(
-            bot._turn_controller,
+            bot._turn_ingress,
             "_precheck_dispatch_event",
             side_effect=[
                 PrecheckedEvent(
@@ -394,7 +395,7 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
                 for edit_event in edit_events
             ],
         ),
-        patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
+        patch.object(TurnDispatcher, "_dispatch_text_turn", new_callable=AsyncMock) as mock_dispatch,
         patch.object(bot._edit_regenerator, "handle_message_edit", new_callable=AsyncMock) as mock_handle_edit,
     ):
         # Process all edit events
@@ -437,7 +438,7 @@ async def test_regular_agent_ignores_edits(tmp_path: Path) -> None:
     bot.client.user_id = "@test_agent:example.com"
     install_runtime_journal_support(bot)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
 

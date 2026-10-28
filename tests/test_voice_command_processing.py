@@ -36,7 +36,7 @@ from mindroom.llm.media import Audio
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
-from mindroom.turn_policy import _DispatchPlan
+from mindroom.turn_policy import DispatchPlan
 from mindroom.turn_record import TurnRecord
 from mindroom.voice.handler import prepare_voice_message
 from mindroom.voice.visible_voice_echo import VisibleVoiceEchoRequest
@@ -51,7 +51,7 @@ from tests.conftest import (
     install_runtime_journal_support,
     install_send_response_mock,
     orchestrator_runtime_paths,
-    replace_turn_controller_deps,
+    replace_turn_deps,
     runtime_paths_for,
     serve_media_from_download,
     unwrap_extracted_collaborator,
@@ -135,7 +135,7 @@ def _install_voice_thread_dispatch_mocks(
     bot: AgentBot,
 ) -> None:
     """Provide minimal explicit-thread cache reads for normalized voice dispatch."""
-    bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
+    bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
     )
 
@@ -174,7 +174,7 @@ def _make_visible_router_echo_scenario(
         rooms=["!test:example.com"],
     )
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     bot.client = AsyncMock()
     bot.client.rooms = {}
     _install_voice_thread_dispatch_mocks(bot)
@@ -213,7 +213,7 @@ async def test_router_voice_text_for_a_user_is_conversation_not_a_command(tmp_pa
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = AsyncMock(return_value=False)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
 
     room = _make_room("@mindroom_router:localhost", "@alice:localhost")
     event = nio.RoomMessageText.from_dict(
@@ -240,7 +240,7 @@ async def test_router_voice_text_for_a_user_is_conversation_not_a_command(tmp_pa
             "execute_if_owned",
             new=AsyncMock(return_value=True),
         ) as mock_handle,
-        patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_DispatchPlan(kind="ignore"))),
+        patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=DispatchPlan(kind="ignore"))),
     ):
         bot.client = MagicMock()
         await bot._on_message(room, event)
@@ -266,7 +266,7 @@ async def test_router_ignores_non_voice_self_messages(tmp_path) -> None:  # noqa
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = AsyncMock(return_value=False)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
 
     room = _make_room("@mindroom_router:example.com", "@bob:example.com")
     event = MagicMock(spec=nio.RoomMessageText)
@@ -314,7 +314,7 @@ async def test_a_sidecar_relay_the_router_sent_stays_conversation(tmp_path) -> N
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = AsyncMock(return_value=False)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.download = AsyncMock(
@@ -393,7 +393,7 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = AsyncMock(return_value=False)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     serve_media_from_download(bot.client)
     bot.client.rooms = {}
@@ -478,7 +478,7 @@ async def test_router_treats_sidecar_skill_command_as_unknown_command(tmp_path) 
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = AsyncMock(return_value=False)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.download = AsyncMock(
@@ -546,7 +546,7 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
     turn_store.is_handled = AsyncMock(return_value=False)
     turn_store.record_turn = AsyncMock(wraps=turn_store.record_turn)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.user_id = bot.matrix_id.full_id
@@ -750,7 +750,7 @@ async def test_router_ignores_audio_events_from_internal_agents(tmp_path) -> Non
     turn_store.is_handled = AsyncMock(return_value=False)
     turn_store.record_turn = AsyncMock(wraps=turn_store.record_turn)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     bot.client = MagicMock()
     send_response = AsyncMock()
     install_send_response_mock(bot, send_response)
@@ -807,7 +807,7 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
     turn_store.record_pending_turn = AsyncMock(wraps=turn_store.record_pending_turn)
     turn_store.record_turn = AsyncMock(wraps=turn_store.record_turn)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     bot.client = AsyncMock()
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_home:localhost"
@@ -885,7 +885,7 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = AsyncMock(return_value=False)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     bot.client = AsyncMock()
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_home:localhost"
@@ -941,7 +941,7 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
         turn_store = unwrap_extracted_collaborator(bot._turn_store)
         turn_store.is_handled = AsyncMock(return_value=False)
         bot.logger = MagicMock()
-        replace_turn_controller_deps(bot, logger=bot.logger)
+        replace_turn_deps(bot, logger=bot.logger)
         bot.client = AsyncMock()
         bot.client.rooms = {}
         bot.client.user_id = agent_user.user_id
@@ -1056,7 +1056,7 @@ async def test_router_posts_transcription_placeholder_before_voice_is_ready(tmp_
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         bot._delivery_gateway.send_text.side_effect = send_visible_echo
-        await bot._turn_controller.handle_media_event(room, event)
+        await bot._turn_ingress.handle_media_event(room, event)
         try:
             await asyncio.wait_for(placeholder_send_started.wait(), timeout=1)
             await asyncio.wait_for(transcription_started.wait(), timeout=1)
@@ -1121,15 +1121,15 @@ async def test_concurrent_voice_redelivery_shares_visible_echo_lifecycle(tmp_pat
 
     with (
         patch.object(
-            bot._turn_controller.deps.normalizer,
+            bot._turn_ingress.deps.normalizer,
             "prepare_voice_event",
             new=AsyncMock(side_effect=normalize_voice),
         ),
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
     ):
         bot._delivery_gateway.send_text.side_effect = send_placeholder
-        await bot._turn_controller.handle_media_event(room, event)
-        redelivery = asyncio.create_task(bot._turn_controller.handle_media_event(room, event))
+        await bot._turn_ingress.handle_media_event(room, event)
+        redelivery = asyncio.create_task(bot._turn_ingress.handle_media_event(room, event))
         try:
             await asyncio.wait_for(normalization_started.wait(), timeout=1)
             await asyncio.wait_for(placeholder_send_started.wait(), timeout=1)
@@ -1170,7 +1170,7 @@ async def test_voice_echo_finishes_after_config_is_disabled_mid_transcription(tm
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         bot._delivery_gateway.send_text.side_effect = send_placeholder
-        await bot._turn_controller.handle_media_event(room, event)
+        await bot._turn_ingress.handle_media_event(room, event)
         await asyncio.wait_for(placeholder_sent.wait(), timeout=1)
         await asyncio.wait_for(transcription_started.wait(), timeout=1)
         bot.config.voice.visible_router_echo = False
@@ -1195,12 +1195,12 @@ async def test_voice_echo_edit_failure_retries_existing_placeholder(tmp_path) ->
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}@home turn on the lights"
-        await bot._turn_controller.handle_media_event(room, event)
+        await bot._turn_ingress.handle_media_event(room, event)
         await drain_coalescing(bot)
         assert not await bot._turn_store.is_handled(room.room_id, event.event_id)
 
         bot._delivery_gateway.edit_text.return_value = True
-        await bot._turn_controller.handle_media_event(room, event)
+        await bot._turn_ingress.handle_media_event(room, event)
         await drain_coalescing(bot)
 
     bot._delivery_gateway.send_text.assert_awaited_once()
@@ -1213,7 +1213,7 @@ async def test_voice_echo_edit_failure_retries_existing_placeholder(tmp_path) ->
 async def test_finalized_voice_transcript_is_not_replaced_by_late_fallback(tmp_path) -> None:  # noqa: ANN001
     """A late fallback must not downgrade a successfully delivered transcript."""
     bot, room, event = _make_visible_router_echo_scenario(tmp_path)
-    voice_target = bot._turn_controller.deps.resolver.build_message_target(
+    voice_target = bot._turn_ingress.deps.resolver.build_message_target(
         room_id=room.room_id,
         thread_id=event.event_id,
         reply_to_event_id=event.event_id,
@@ -1260,7 +1260,7 @@ async def test_finalized_voice_transcript_is_not_replaced_by_late_fallback(tmp_p
 async def test_cancelled_voice_finish_does_not_replace_finalized_transcript(tmp_path) -> None:  # noqa: ANN001
     """Cancellation cleanup must not downgrade a successfully delivered transcript."""
     bot, room, event = _make_visible_router_echo_scenario(tmp_path)
-    voice_target = bot._turn_controller.deps.resolver.build_message_target(
+    voice_target = bot._turn_ingress.deps.resolver.build_message_target(
         room_id=room.room_id,
         thread_id=event.event_id,
         reply_to_event_id=event.event_id,
@@ -1306,7 +1306,7 @@ async def test_cancelled_voice_finish_does_not_replace_finalized_transcript(tmp_
 async def test_transcript_wins_when_fallback_edit_is_in_flight(tmp_path) -> None:  # noqa: ANN001
     """A transcript arriving during fallback delivery should become final visible text."""
     bot, room, event = _make_visible_router_echo_scenario(tmp_path)
-    voice_target = bot._turn_controller.deps.resolver.build_message_target(
+    voice_target = bot._turn_ingress.deps.resolver.build_message_target(
         room_id=room.room_id,
         thread_id=event.event_id,
         reply_to_event_id=event.event_id,
@@ -1382,13 +1382,13 @@ async def test_voice_preparation_failure_replaces_placeholder_with_fallback(tmp_
 
     with (
         patch.object(
-            bot._turn_controller.deps.normalizer,
+            bot._turn_ingress.deps.normalizer,
             "prepare_voice_event",
             side_effect=RuntimeError("transcription failed"),
         ),
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
     ):
-        await bot._turn_controller.handle_media_event(room, event)
+        await bot._turn_ingress.handle_media_event(room, event)
         await drain_coalescing(bot)
 
     bot._delivery_gateway.send_text.assert_awaited_once()
@@ -1418,13 +1418,13 @@ async def test_voice_readiness_cancellation_schedules_terminal_placeholder_fallb
     bot._delivery_gateway.send_text.side_effect = send_placeholder
     with (
         patch.object(
-            bot._turn_controller.deps.normalizer,
+            bot._turn_ingress.deps.normalizer,
             "prepare_voice_event",
             side_effect=wait_for_cancellation,
         ),
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
     ):
-        await bot._turn_controller.handle_media_event(room, event)
+        await bot._turn_ingress.handle_media_event(room, event)
         await asyncio.wait_for(normalization_started.wait(), timeout=1)
         await asyncio.wait_for(placeholder_sent.wait(), timeout=1)
         drain_result = await bot._coalescing_gate.drain_all(ready_timeout_seconds=0.0)
@@ -1467,7 +1467,7 @@ async def test_voice_placeholder_is_owned_by_runtime_shutdown(tmp_path) -> None:
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         bot._delivery_gateway.send_text.side_effect = send_placeholder
-        await bot._turn_controller.handle_media_event(room, event)
+        await bot._turn_ingress.handle_media_event(room, event)
         await asyncio.wait_for(placeholder_send_started.wait(), timeout=1)
         try:
             completed = await wait_for_background_tasks(timeout=0.0, owner=bot._runtime_view)
@@ -1503,7 +1503,7 @@ async def test_voice_placeholder_finish_is_owned_by_runtime_shutdown(tmp_path) -
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}@home turn on the lights"
         bot._delivery_gateway.edit_text.side_effect = edit_placeholder
-        await bot._turn_controller.handle_media_event(room, event)
+        await bot._turn_ingress.handle_media_event(room, event)
         await asyncio.wait_for(edit_started.wait(), timeout=1)
         try:
             completed = await wait_for_background_tasks(timeout=0.0, owner=bot._runtime_view)
@@ -1781,7 +1781,7 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
     turn_store.is_handled = AsyncMock(return_value=False)
     turn_store.record_responded_turn = AsyncMock(wraps=turn_store.record_responded_turn)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     bot.client = AsyncMock()
     send_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, send_response)
@@ -1869,7 +1869,7 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
         turn_store = unwrap_extracted_collaborator(bot._turn_store)
         turn_store.is_handled = AsyncMock(return_value=False)
         bot.logger = MagicMock()
-        replace_turn_controller_deps(bot, logger=bot.logger)
+        replace_turn_deps(bot, logger=bot.logger)
         bot.client = AsyncMock()
         bot.client.rooms = {}
         bot.client.user_id = f"@mindroom_{agent_name}:localhost"
@@ -1946,7 +1946,7 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
         turn_store = unwrap_extracted_collaborator(bot._turn_store)
         turn_store.is_handled = AsyncMock(return_value=False)
         bot.logger = MagicMock()
-        replace_turn_controller_deps(bot, logger=bot.logger)
+        replace_turn_deps(bot, logger=bot.logger)
         bot.client = AsyncMock()
         bot.client.rooms = {}
         bot.client.user_id = f"@mindroom_{agent_name}:localhost"
