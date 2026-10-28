@@ -5519,6 +5519,7 @@ visibility = [
     "mindroom.api.sandbox_exec",
     "mindroom.config.egress_broker",
     "mindroom.custom_tools.egress_credentials",
+    "mindroom.orchestration.config_warnings",
     "mindroom.orchestrator",
     "mindroom.tool_system.metadata",
     "mindroom.tool_system.sandbox_proxy",

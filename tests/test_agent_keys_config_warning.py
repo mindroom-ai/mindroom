@@ -15,8 +15,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _WARNING = (
-    "Agent lists the egress_credentials tool, but its shell and python run in the primary process, "
-    "so Agent Keys never applies to them"
+    "Agent lists the egress_credentials tool, but none of its shell or python calls run in a worker, "
+    "so Agent Keys never applies to it"
 )
 _BROKER_AND_RUNNER = {"MINDROOM_EGRESS_BROKER_PORT": "8768", "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test"}
 
@@ -35,10 +35,15 @@ def _warnings(tmp_path: Path, agent: dict[str, object], process_env: dict[str, s
     return [log for log in logs if log["event"] == _WARNING]
 
 
-def test_warns_when_agent_keys_cannot_reach_the_agents_commands(tmp_path: Path) -> None:
-    """An agent that lists `egress_credentials` but keeps shell in the primary is left off the Agent Keys pages."""
-    agent = {"tools": ["shell", "egress_credentials"], "worker_tools": []}
-
+@pytest.mark.parametrize(
+    "agent",
+    [
+        pytest.param({"tools": ["shell", "egress_credentials"], "worker_tools": []}, id="shell-in-primary"),
+        pytest.param({"tools": ["egress_credentials"]}, id="no-command-tool"),
+    ],
+)
+def test_warns_when_agent_keys_cannot_reach_the_agents_commands(tmp_path: Path, agent: dict[str, object]) -> None:
+    """An agent that lists `egress_credentials` without a worker-routed shell or python is left off the pages."""
     warnings = _warnings(tmp_path, agent, _BROKER_AND_RUNNER)
 
     assert [warning["agent"] for warning in warnings] == ["coder"]

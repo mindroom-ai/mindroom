@@ -96,7 +96,7 @@ Matrix sync callback
 | `personal_agents.py` | Onboarding one user's personal agent: name choice, Matrix account registration, then the roster entry |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `file_access.py` | Agent `file_access` resolution and the shared path authorization every path-taking tool opens files through |
-| `orchestration/config_warnings.py` | Startup and reload warnings for risky but allowed config choices (foreign homeserver authorities, unconfined primary-process tools next to worker code tools) |
+| `orchestration/config_warnings.py` | Startup and reload warnings for risky but allowed config choices (foreign homeserver authorities, unconfined primary-process tools next to worker code tools, Agent Keys opt-ins without a worker-routed shell or python) |
 | `approval/tool_approval.py` | Tool-call approval rule evaluation and public approval API |
 | `approval/execution.py` | Agent reconstruction and exact-call execution for persisted native approval continuations |
 | `approval/resume.py` | Resuming a persisted paused agent run on the agent loop with exact decisions: its history replay, native history, hooks, and the parent continuation the delegation driver injects |

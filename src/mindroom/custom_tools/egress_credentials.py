@@ -1,6 +1,6 @@
 """Egress broker credential status tool for MindRoom agents.
 
-Listing this tool is what opts an agent into Agent Keys: only its worker-routed shell and python calls get the broker env.
+Listing this tool opts an agent into Agent Keys: only its worker-routed shell and python calls get the broker env.
 When a brokered request fails with ``credential_not_configured``, the agent
 calls this tool to tell the user which services the egress broker can inject
 credentials for, which of them have a key or a connected account Agent Keys
@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 from agno.tools import Toolkit
 
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.egress_broker.env import personal_page_served
+from mindroom.egress_broker.env import egress_tool_without_worker_commands, personal_page_served
 from mindroom.egress_broker.messages import CONNECTIONS_PAGE_NOT_SERVED
 from mindroom.egress_broker.oauth_source import oauth_status
 from mindroom.egress_broker.secrets import is_personal_target, service_status
@@ -42,6 +42,11 @@ _NO_WORKER_NOTE = (
     "Egress credentials require a worker-scoped agent; ask the operator to give this agent a worker scope."
 )
 _NO_CONFIG_NOTE = "The egress broker configuration is not available in this context, so no services can be listed."
+_NO_WORKER_COMMANDS_NOTE = (
+    "None of this agent's shell or python calls run in a worker, so Agent Keys never adds a key or account to them "
+    "and the Agent Keys pages do not list this agent. Ask the operator to route `shell` or `python` to a worker "
+    "with `worker_tools`."
+)
 _NO_SERVICES_NOTE = (
     "No egress services are configured. An operator defines them under `egress_broker.services` in config.yaml, "
     "and users can add services of their own on the egress page where it is available."
@@ -88,6 +93,9 @@ class EgressCredentialsTools(Toolkit):
         if context is None:
             return self._payload([], link, _NO_CONFIG_NOTE)
         config = context.current_config
+        agent_name = self._worker_target.routing_agent_name
+        if agent_name is not None and egress_tool_without_worker_commands(config, agent_name, self._runtime_paths):
+            return self._payload([], None, _NO_WORKER_COMMANDS_NOTE)
         manager = get_runtime_credentials_manager(self._runtime_paths)
         # The config's services plus the ones the user defined in this agent's scope, as the broker matches them.
         # A restrict-only service only limits paths and never takes a credential, so it is not listed.

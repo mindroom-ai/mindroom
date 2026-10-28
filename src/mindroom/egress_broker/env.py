@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, WORKER_EGRESS_NO_PROXY, RuntimePaths, compose_worker_proxy_env
 from mindroom.origins import connections_sign_in_enabled
 from mindroom.runtime_env_policy import EGRESS_BROKER_ENV_BY_KEY
+from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
 from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
@@ -24,6 +25,7 @@ __all__ = [
     "egress_agent_scope",
     "egress_broker_enabled",
     "egress_tool_unavailable",
+    "egress_tool_without_worker_commands",
     "personal_page_served",
     "primary_callback_hosts",
 ]
@@ -82,31 +84,48 @@ def egress_agent_scope(config: Config, agent_name: str, runtime_paths: RuntimePa
     or the global one all agents without a worker scope share (`unscoped`).
     The sandbox proxy and both egress APIs decide here which agents use the broker.
     """
-    # Deferred: the sandbox proxy imports this module.
-    from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded  # noqa: PLC0415
-    from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool  # noqa: PLC0415
-
     if agent_name not in config.agents:
         return None
     entity = config.resolve_entity(agent_name)
     tools = entity.available_tools
-    if _EGRESS_TOOL_NAME not in tools:
+    if _EGRESS_TOOL_NAME not in tools or not _runs_commands_in_a_worker(config, agent_name, tools, runtime_paths):
         return None
+    return "unscoped" if entity.execution_scope is None else entity.execution_scope
+
+
+def egress_tool_without_worker_commands(config: Config, agent_name: str, runtime_paths: RuntimePaths) -> bool:
+    """Return whether an agent lists `egress_credentials` while none of its shell or python calls run in a worker.
+
+    The broker then never reaches the agent, so `egress_agent_scope` leaves it out.
+    """
+    if agent_name not in config.agents:
+        return False
+    tools = config.resolve_entity(agent_name).available_tools
+    return _EGRESS_TOOL_NAME in tools and not _runs_commands_in_a_worker(config, agent_name, tools, runtime_paths)
+
+
+def _runs_commands_in_a_worker(
+    config: Config,
+    agent_name: str,
+    tools: Iterable[str],
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Return whether any of the agent's `EXECUTION_ENV_TOOL_NAMES` among `tools` runs in a worker."""
+    # Deferred: the sandbox proxy imports this module.
+    from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool  # noqa: PLC0415
+
     # Without a `worker_tools` setting, routing follows each tool's registered default target.
     ensure_tool_registry_loaded(runtime_paths)
     worker_tools = config.get_agent_worker_tools(agent_name)
     try:
-        routed = any(
+        return any(
             sandbox_proxy_enabled_for_tool(tool_name, runtime_paths=runtime_paths, worker_tools_override=worker_tools)
             for tool_name in EXECUTION_ENV_TOOL_NAMES.intersection(tools)
         )
     except WorkerBackendError:
         # An unreadable worker backend never runs these tools in the primary, so the agent stays listed and each
         # page degrades per service instead of failing.
-        routed = True
-    if not routed:
-        return None
-    return "unscoped" if entity.execution_scope is None else entity.execution_scope
+        return True
 
 
 def broker_execution_env(

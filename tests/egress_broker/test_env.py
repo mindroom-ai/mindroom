@@ -16,6 +16,7 @@ from mindroom.egress_broker.env import (
     broker_execution_env,
     egress_agent_scope,
     egress_broker_enabled,
+    egress_tool_without_worker_commands,
     personal_page_served,
     primary_callback_hosts,
 )
@@ -337,3 +338,30 @@ def test_agents_whose_shell_and_python_run_in_the_primary_do_not_use_the_broker(
     )
 
     assert egress_agent_scope(config, "agent", runtime_paths) == scope
+
+
+@pytest.mark.parametrize(
+    ("agent", "unused"),
+    [
+        pytest.param(_agent("shell", "egress_credentials", worker_tools=[]), True, id="shell-in-primary"),
+        pytest.param(_agent("egress_credentials"), True, id="tool-without-shell"),
+        pytest.param(_agent("shell", "egress_credentials", worker_tools=["shell"]), False, id="shell-in-worker"),
+        pytest.param(_agent("shell", worker_tools=[]), False, id="no-egress-tool"),
+    ],
+)
+def test_an_egress_tool_no_worker_command_uses_is_reported(
+    tmp_path: Path,
+    agent: dict[str, object],
+    *,
+    unused: bool,
+) -> None:
+    """An agent that lists `egress_credentials` while no shell or python call of its own runs in a worker is named."""
+    config = Config(agents={"agent": agent})
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env=_RUNNER,
+    )
+
+    assert egress_tool_without_worker_commands(config, "agent", runtime_paths) is unused
+    assert egress_tool_without_worker_commands(config, "removed", runtime_paths) is False

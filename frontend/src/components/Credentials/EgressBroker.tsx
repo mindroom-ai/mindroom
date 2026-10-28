@@ -379,7 +379,7 @@ function ServiceSection({
         <p className="text-xs text-muted-foreground">
           {personalAgents
             ? "Only agents whose keys each user sets use the broker, so no keys are set here."
-            : "No agent uses these keys. An agent uses them once it has shell or python and the egress_credentials tool."}
+            : "No agent uses these keys. An agent uses them once it has the egress_credentials tool and shell or python running in a worker."}
         </p>
       )}
       {error && (

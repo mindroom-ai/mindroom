@@ -7920,7 +7920,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
-      "description": "Opt this agent's shell and python calls into Agent Keys and see which keys and accounts it can use",
+      "description": "Opt this agent's worker-routed shell and python calls into Agent Keys and see which keys and accounts it can use",
       "display_name": "Egress Credentials",
       "docs_url": "https://docs.mindroom.chat/deployment/egress-broker/#agent-tool",
       "executes_code": false,

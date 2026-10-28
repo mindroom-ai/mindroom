@@ -73,13 +73,17 @@ def _runtime_paths(tmp_path: Path, **env: str) -> RuntimePaths:
     )
 
 
-def _context(runtime_paths: RuntimePaths, services: dict[str, object] | None = None) -> ToolRuntimeContext:
+def _context(
+    runtime_paths: RuntimePaths,
+    services: dict[str, object] | None = None,
+    agents: dict[str, AgentConfig] | None = None,
+) -> ToolRuntimeContext:
     return ToolRuntimeContext(
         agent_name="code",
         target=MessageTarget.resolve(room_id="!room:example.org", thread_id="$thread", reply_to_event_id="$request"),
         requester_id=_ALICE,
         client=MagicMock(),
-        config=Config(egress_broker={"services": _SERVICES if services is None else services}),
+        config=Config(agents=agents or {}, egress_broker={"services": _SERVICES if services is None else services}),
         runtime_paths=runtime_paths,
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
@@ -412,6 +416,18 @@ def test_without_worker_target_explains_a_worker_scoped_agent_is_required(tmp_pa
     assert "worker-scoped" in str(payload["note"])
 
 
+def test_an_agent_whose_commands_run_in_the_primary_is_told_agent_keys_do_not_apply(tmp_path: Path) -> None:
+    """Its shell runs in the primary, so the tool lists no services and sends the agent to the operator, not a page."""
+    runtime_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://mindroom.example")
+    agent = AgentConfig(display_name="Code", tools=["shell", "egress_credentials"], worker_tools=[])
+
+    payload = _list(_tool(runtime_paths), _context(runtime_paths, agents={"code": agent}))
+
+    assert payload["services"] == []
+    assert payload["manage_url"] is None
+    assert "worker_tools" in str(payload["note"])
+
+
 def test_without_runtime_context_returns_empty_services(tmp_path: Path) -> None:
     """Outside a live request there is no committed config, so the tool reports nothing instead of raising."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -438,7 +454,7 @@ def test_registers_and_builds_via_metadata(tmp_path: Path) -> None:
     metadata = TOOL_METADATA["egress_credentials"]
     assert metadata.display_name == "Egress Credentials"
     assert metadata.description == (
-        "Opt this agent's shell and python calls into Agent Keys and see which keys and accounts it can use"
+        "Opt this agent's worker-routed shell and python calls into Agent Keys and see which keys and accounts it can use"
     )
     assert metadata.category is ToolCategory.INTEGRATIONS
     assert metadata.status is ToolStatus.AVAILABLE

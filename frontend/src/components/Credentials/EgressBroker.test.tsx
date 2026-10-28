@@ -30,7 +30,7 @@ import { EgressBroker } from "./EgressBroker";
 const NOT_RUNNING =
   "Egress broker is not running. Set MINDROOM_EGRESS_BROKER_PORT and MINDROOM_EGRESS_BROKER_URL.";
 const NO_AGENT_USES_KEYS =
-  "No agent uses these keys. An agent uses them once it has shell or python and the egress_credentials tool.";
+  "No agent uses these keys. An agent uses them once it has the egress_credentials tool and shell or python running in a worker.";
 
 let storeState: {
   agents: unknown[];
