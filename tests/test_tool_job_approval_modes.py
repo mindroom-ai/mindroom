@@ -25,6 +25,7 @@ from mindroom.event_journal import (
     ApprovalCall,
     BackgroundApprovalDecision,
     EventJournalStore,
+    ToolJobStore,
     tool_job_run_id,
 )
 from mindroom.llm.runs import RunStatus, ToolExecution
@@ -357,7 +358,25 @@ async def test_reply_goes_on_while_its_call_waits_for_approval(tmp_path: Path, m
 
 @pytest.mark.asyncio
 async def test_cancelled_job_denies_the_card_it_waits_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A job cancelled while it waits for its approval leaves no card that could still approve the call."""
+    """A job cancelled while it waits for its approval leaves no card that could still approve the call.
+
+    The cancel request's own save denies the card, so it is not answerable while the job winds down.
+    """
+    saves: list[tuple[str, bool]] = []
+    original_save = ToolJobStore.save
+
+    async def recording_save(
+        store: ToolJobStore,
+        job_id: str,
+        job_json: str,
+        result_payload_json: str | None = None,
+        *,
+        ends_approvals: bool,
+    ) -> None:
+        saves.append((json.loads(job_json)["status"], ends_approvals))
+        await original_save(store, job_id, job_json, result_payload_json, ends_approvals=ends_approvals)
+
+    monkeypatch.setattr(ToolJobStore, "save", recording_save)
     async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=0) as run:
         async with execution_resources():
             with tool_runtime_context(run.context):
@@ -368,6 +387,7 @@ async def test_cancelled_job_denies_the_card_it_waits_on(tmp_path: Path, monkeyp
                 await wait_for_status(run.runtime, job_id, "cancelled")
             assert await run.cards.decisions() == [BackgroundApprovalDecision("denied", JOB_ENDED_REASON)]
         assert run.effects == []
+    assert ("cancel_requested", True) in saves
 
 
 @pytest.mark.asyncio

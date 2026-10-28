@@ -32,8 +32,8 @@ async def test_snapshot_and_payload_round_trip(journal_store: EventJournalStore)
     await jobs.take_ownership()
     await jobs.accept("job", '{"status": "running"}')
     assert await jobs.load_payload("job") is None
-    await jobs.save("job", '{"status": "completed"}', '{"value": "full result"}', ended=True)
-    await jobs.save("job", '{"status": "completed", "consumed": true}', ended=True)
+    await jobs.save("job", '{"status": "completed"}', '{"value": "full result"}', ends_approvals=True)
+    await jobs.save("job", '{"status": "completed", "consumed": true}', ends_approvals=True)
     assert [(job.job_id, job.job_json) for job in await jobs.load_all()] == [
         ("job", '{"status": "completed", "consumed": true}'),
     ]
@@ -67,14 +67,14 @@ async def test_a_newer_runtime_fences_the_older_one(journal_database: Callable[[
     for write in (
         older.require_ownership(),
         older.accept("other", "{}"),
-        older.save("job", '{"status": "completed"}', '{"value": "late"}', ended=True),
+        older.save("job", '{"status": "completed"}', '{"value": "late"}', ends_approvals=True),
         older.delete("job"),
     ):
         with pytest.raises(ToolJobOwnershipLostError):
             await write
     assert [(job.job_id, job.job_json) for job in await newer.load_all()] == [("job", '{"status": "running"}')]
     assert await newer.load_payload("job") is None
-    await newer.save("job", '{"status": "interrupted"}', ended=True)
+    await newer.save("job", '{"status": "interrupted"}', ends_approvals=True)
     assert [job.job_json for job in await newer.load_all()] == ['{"status": "interrupted"}']
 
 
@@ -119,11 +119,11 @@ async def test_the_save_of_a_jobs_end_denies_its_pending_cards(journal_store: Ev
     await jobs.take_ownership()
     await jobs.accept("job", '{"status": "running"}')
 
-    await jobs.save("job", '{"status": "awaiting_approval"}', ended=False)
+    await jobs.save("job", '{"status": "awaiting_approval"}', ends_approvals=False)
     waiting = await pending_card(router.approvals, room_id="!room:test", card_event_id="$card")
     assert waiting is not None
     assert not waiting.decided
-    await jobs.save("job", '{"status": "cancelled"}', ended=True)
+    await jobs.save("job", '{"status": "cancelled"}', ends_approvals=True)
 
     ended = await pending_card(router.approvals, room_id="!room:test", card_event_id="$card")
     assert ended is not None

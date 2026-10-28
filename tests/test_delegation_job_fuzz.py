@@ -191,10 +191,10 @@ async def test_subagent_fuzz_oracle_detects_corruption(
                 job_json: str,
                 result_payload_json: str | None = None,
                 *,
-                ended: bool,
+                ends_approvals: bool,
             ) -> None:
-                del ended
-                await save(store, job_id, job_json, result_payload_json, ended=False)
+                del ends_approvals
+                await save(store, job_id, job_json, result_payload_json, ends_approvals=False)
 
             monkeypatch.setattr(ToolJobStore, "save", save_without_denial)
             with pytest.raises(AssertionError):

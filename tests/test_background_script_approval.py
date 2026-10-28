@@ -515,7 +515,7 @@ async def test_an_ended_jobs_card_shows_its_denial_as_the_end_commits(
         await jobs.take_ownership()
         await jobs.accept("job-1", "{}")
         # No manager decides this call: the job's own save does.
-        await jobs.save("job-1", "{}", ended=True)
+        await jobs.save("job-1", "{}", ends_approvals=True)
 
         await asyncio.wait_for(final_sent.wait(), timeout=_SETTLED_DECISION_WAIT_SECONDS)
         decision = await asyncio.wait_for(decision_task, timeout=_SETTLED_DECISION_WAIT_SECONDS)

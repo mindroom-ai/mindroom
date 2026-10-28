@@ -1805,8 +1805,15 @@ class ToolJobStore:
             lambda transaction: tool_jobs.accept(transaction, self._runtime_generation, job_id, job_json),
         )
 
-    async def save(self, job_id: str, job_json: str, result_payload_json: str | None = None, *, ended: bool) -> None:
-        """Replace a job's snapshot, with its outcome payload when one is given; an ended job's save denies its cards."""
+    async def save(
+        self,
+        job_id: str,
+        job_json: str,
+        result_payload_json: str | None = None,
+        *,
+        ends_approvals: bool,
+    ) -> None:
+        """Replace a job's snapshot, with its outcome payload when one is given; a save that ends the job's approvals denies its cards."""
         await self._backend.write(
             lambda transaction: tool_jobs.save(
                 transaction,
@@ -1814,7 +1821,7 @@ class ToolJobStore:
                 job_id,
                 job_json,
                 result_payload_json,
-                ended=ended,
+                ends_approvals=ends_approvals,
             ),
         )
 
