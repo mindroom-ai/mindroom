@@ -52,9 +52,12 @@ def is_job_function(function: ToolFunction) -> bool:
 
 
 async def _claimed_result(runtime: ToolJobRuntime, job: BackgroundJob, claim: JobClaim) -> Any:  # noqa: ANN401 - Tool value.
-    """Return a claimed outcome as this call's own result, raising its failure for the call to report."""
+    """Return a claimed outcome as this call's own result, raising any other outcome for the call to report as failed.
+
+    Like the call that started the job, a cancelled, denied, or interrupted job fails with the reason it gives.
+    """
     value, payload = await consume_tool_job(runtime, job, claim)
-    if job.status == "failed":
+    if job.status != "completed":
         raise RuntimeError(job_failure_text(value, payload))
     return value
 
