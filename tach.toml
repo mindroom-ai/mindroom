@@ -3215,7 +3215,6 @@ depends_on = [
     "mindroom.api.startup_probes",
     "mindroom.approval.manager",
     "mindroom.approval.recovery",
-    "mindroom.config.reload_status",
     "mindroom.matrix_rtc.call_manager",
     "mindroom.knowledge.status",
     "mindroom.knowledge.refresh_scheduler",
@@ -3230,7 +3229,6 @@ depends_on = [
     "mindroom.api.script_gateway",
     "mindroom.approval.transport",
     "mindroom.bot",
-    "mindroom.config.main",
     "mindroom.constants",
     "mindroom.delegation.recovery",
     "mindroom.desktop.identity",
@@ -3239,9 +3237,7 @@ depends_on = [
     "mindroom.event_journal.opening",
     "mindroom.hooks",
     "mindroom.knowledge.watch",
-    "mindroom.matrix.client_session",
     "mindroom.matrix.provisioning_heartbeat",
-    "mindroom.matrix.thread_diagnostics",
     "mindroom.matrix.users",
     "mindroom.mcp.manager",
     "mindroom.mcp.toolkit",
@@ -3983,7 +3979,6 @@ depends_on = ["mindroom.logging_config", "mindroom.matrix.room_power"]
 visibility = [
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.rooms",
-    "mindroom.orchestrator",
     "mindroom.thread_tags",
     "mindroom.topic_generator",
 ]
@@ -4074,7 +4069,6 @@ visibility = [
     "mindroom.matrix.typing",
     "mindroom.matrix.users",
     "mindroom.orchestration.runtime",
-    "mindroom.orchestrator",
 ]
 
 [[modules]]
