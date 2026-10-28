@@ -169,7 +169,7 @@ class ConfigReloadLifecycle:
         """Queue a debounced config reload; a request made during startup runs once startup publishes."""
         self._requested_at = asyncio.get_running_loop().time()
         if not self.is_running():
-            logger.info("Configuration changed during startup; reloading once startup finishes")
+            logger.info("Configuration change recorded until the runtime runs")
             return
         if self._reload_task is not None and not self._reload_task.done():
             logger.info("Configuration reload already queued; extending debounce window")
