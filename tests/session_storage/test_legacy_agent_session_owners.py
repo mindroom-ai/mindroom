@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import closing
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
@@ -12,7 +13,7 @@ import pytest
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, resolve_runtime_paths
 from mindroom.history.run_visibility import replays_in_scope
 from mindroom.history.storage import remove_history_of_redacted_events
-from mindroom.history.types import HistoryScope
+from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
 from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
@@ -22,7 +23,7 @@ from mindroom.session_storage.schema import LOG_VERSION, TableNames
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.storage import SYSTEM_USAGE_ENTITY, SYSTEM_USAGE_STORAGE_NAME, quote_identifier
 from tests.conftest import seed_session
-from tests.history_helpers import compact_runs, stored_run_ids
+from tests.history_helpers import compact_runs, stored_run_ids, summary_rows_of
 from tests.session_storage.agno_layout import write_agno_database
 
 if TYPE_CHECKING:
@@ -188,3 +189,43 @@ async def test_redacting_an_event_an_adopted_run_answered_cuts_from_that_run(tmp
 
     assert await remove_history_of_redacted_events(store, loaded, redacted_history_events) == ["$session-run"]
     assert stored_run_ids(store, "session") == []
+
+
+def test_a_summary_converted_under_the_display_name_id_still_replays(tmp_path: Path) -> None:
+    """The summary an Agno-layout row kept, which the conversion stores under the row's owner, moves to the agent."""
+    session = _session("session", _DISPLAY_NAME_ID)
+    session.summary = ScopeSummary(text="summary kept by Agno", updated_at=datetime.fromtimestamp(0, UTC))
+    _agno_database(tmp_path / "code", session)
+
+    store = create_agent_state_storage("code", tmp_path / "code")
+
+    loaded = store.load_session("session", "agent")
+    assert loaded is not None
+    assert loaded.summary is not None
+    assert loaded.summary.text == "summary kept by Agno"
+    assert [row.summary for row in summary_rows_of(store, _SCOPE.key, "session")] == ["summary kept by Agno"]
+
+
+def test_a_summary_stored_under_the_display_name_id_still_replays_after_the_upgrade(tmp_path: Path) -> None:
+    """A version 2 database's summary rows under the row's old owner move to the agent, in their order."""
+    old_scope = HistoryScope(kind="agent", scope_id=_DISPLAY_NAME_ID)
+    session = _session("session", _DISPLAY_NAME_ID)
+    session.runs.append(_run("later"))
+    _v2_database(tmp_path / "code", session)
+    stored = create_state_storage("code", tmp_path / "code")
+    loaded = stored.load_session("session", "agent")
+    assert loaded is not None
+    compact_runs(stored, loaded, old_scope, ["session-run"], "first summary")
+    compact_runs(stored, loaded, old_scope, ["later"], "second summary")
+
+    store = create_agent_state_storage("code", tmp_path / "code")
+
+    reloaded = store.load_session("session", "agent")
+    assert reloaded is not None
+    assert reloaded.summary is not None
+    assert reloaded.summary.text == "second summary"
+    assert [run.run_id for run in reloaded.runs if replays_in_scope(run, _SCOPE)] == []
+    assert [row.summary for row in summary_rows_of(store, _SCOPE.key, "session")] == [
+        "first summary",
+        "second summary",
+    ]
