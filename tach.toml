@@ -64,7 +64,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.embeddings.ollama_embedder"
-depends_on = ["mindroom.embeddings.errors", "mindroom.providers.ollama.errors"]
+depends_on = ["mindroom.embeddings.errors", "mindroom.providers.ollama.errors", "mindroom.providers.ollama.settings"]
 visibility = ["mindroom.embeddings.factory"]
 
 [[modules]]
@@ -3700,7 +3700,7 @@ depends_on = [
     "mindroom.timing",
     "mindroom.tool_system.dependencies",
 ]
-visibility = ["mindroom.memory._backend"]
+visibility = ["mindroom.cli.doctor", "mindroom.memory._backend"]
 
 [[modules]]
 path = "mindroom.memory._mem0_usage"
@@ -4963,6 +4963,7 @@ depends_on = [
     "mindroom.credentials.sync",
     "mindroom.embeddings.embedder_health",
     "mindroom.embeddings.errors",
+    "mindroom.embeddings.factory",
     "mindroom.embeddings.sentence_transformers_embedder",
     "mindroom.llm",
     "mindroom.matrix.client_session",
@@ -4974,10 +4975,14 @@ depends_on = [
     "mindroom.providers.key_checks",
     "mindroom.providers.model_http_client",
     "mindroom.providers.names",
+    "mindroom.providers.ollama.settings",
     "mindroom.runtime_env_policy",
     "mindroom.startup_errors",
     # Deferred import in the Vertex AI Claude connection check, so the anthropic SDK loads only when used.
     "mindroom.providers.anthropic.messages",
+    # Deferred imports in the Ollama server checks, so the Ollama SDK and memory setup load only when used.
+    "mindroom.memory.config",
+    "mindroom.providers.ollama.adapter",
 ]
 
 [[modules]]

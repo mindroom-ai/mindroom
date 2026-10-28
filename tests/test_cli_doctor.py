@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import google.auth
 import httpx
+import ollama
 import pytest
 import typer
 from google.auth.exceptions import DefaultCredentialsError, RefreshError
@@ -233,6 +234,37 @@ def test_a_provider_without_a_key_check_is_not_probed(monkeypatch: pytest.Monkey
     assert _validate_provider_key(provider, "k") == (None, "no key check for this provider")
 
 
+def _ollama_servers(monkeypatch: pytest.MonkeyPatch, status: int = 200) -> list[httpx.Request]:
+    """Answer the Ollama SDK clients doctor builds with ``status`` and return the requests they sent.
+
+    ``httpx.get`` records nothing, so a check that bypasses the SDK client shows up as a missing request.
+    """
+    sent: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(status, json={"models": []})
+
+    transport = httpx.MockTransport(respond)
+
+    class _Client(ollama.Client):
+        def __init__(self, host: str | None = None, **kwargs: Any) -> None:  # noqa: ANN401
+            super().__init__(host, transport=transport, **kwargs)
+
+    monkeypatch.setattr(ollama, "Client", _Client)
+    monkeypatch.setattr(
+        "mindroom.cli.doctor.httpx.get",
+        lambda url, **_kwargs: httpx.Response(200, request=httpx.Request("GET", url)),
+    )
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    return sent
+
+
+def _servers_and_keys(sent: list[httpx.Request]) -> list[tuple[str, str | None]]:
+    return [(str(request.url), request.headers.get("authorization")) for request in sent]
+
+
 def test_doctor_checks_each_accepted_provider_spelling_as_the_route_the_runtime_uses(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -240,18 +272,13 @@ def test_doctor_checks_each_accepted_provider_spelling_as_the_route_the_runtime_
 ) -> None:
     """Spellings config load accepts group under the runtime's route and get that route's checks."""
     runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
-    probed: list[str] = []
+    probed = _ollama_servers(monkeypatch)
     vertex_models: list[str] = []
-
-    def get(url: str, **_kwargs: object) -> httpx.Response:
-        probed.append(url)
-        return httpx.Response(200, request=httpx.Request("GET", url))
 
     def validate_vertex(model_config: ModelConfig, _runtime_paths: RuntimePaths) -> tuple[bool, str]:
         vertex_models.append(model_config.id)
         return True, ""
 
-    monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
     monkeypatch.setattr("mindroom.cli.doctor._validate_vertexai_claude_connection", validate_vertex)
     config = Config(
         models={
@@ -262,10 +289,135 @@ def test_doctor_checks_each_accepted_provider_spelling_as_the_route_the_runtime_
         router=RouterConfig(model="default"),
     )
 
-    assert _check_providers(config, runtime_paths) == (2, 0, 0)
+    assert _check_providers(config, runtime_paths) == (3, 0, 0)
     assert "Providers: ollama (2 models), vertexai_claude (1 model)" in capsys.readouterr().out
-    assert probed == ["http://gpu.example:11434/api/tags"]
+    assert _servers_and_keys(probed) == [
+        ("http://gpu.example:11434/api/tags", None),
+        ("http://localhost:11434/api/tags", None),
+    ]
     assert vertex_models == ["claude-sonnet-5-5"]
+
+
+def test_doctor_checks_each_ollama_server_through_the_client_its_models_send_with(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each server is checked once with its first model's key, ``client_params.host`` wins, and a bare host works."""
+    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    probed = _ollama_servers(monkeypatch)
+    proxied = {"client_params": {"host": "https://ollama.example"}}
+    config = Config(
+        models={
+            "gpu": ModelConfig(provider="ollama", id="qwen3.8:27b", host="gpu.example:11434", api_key="gpu-key"),
+            "proxied": ModelConfig(
+                provider="ollama",
+                id="qwen3.8:27b",
+                host="http://ignored.example:11434",
+                extra_kwargs=proxied,
+            ),
+            "also_gpu": ModelConfig(provider="ollama", id="gemma4", host="gpu.example:11434", api_key="gpu-key"),
+        },
+        router=RouterConfig(model="gpu"),
+    )
+
+    assert _check_providers(config, runtime_paths) == (2, 0, 0)
+    assert _servers_and_keys(probed) == [
+        ("http://gpu.example:11434/api/tags", "Bearer gpu-key"),
+        ("https://ollama.example/api/tags", None),
+    ]
+
+
+def test_doctor_fails_an_ollama_server_that_rejects_the_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A server that answers with an error, such as a rejected key, fails the check with its status.
+
+    The check waits at most 5 seconds whatever ``timeout`` the model's replies wait.
+    """
+    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    sent = _ollama_servers(monkeypatch, status=401)
+    model = ModelConfig(provider="ollama", id="m", host="https://ollama.example", extra_kwargs={"timeout": 600})
+    config = Config(models={"default": model}, router=RouterConfig(model="default"))
+
+    assert _check_providers(config, runtime_paths) == (0, 1, 0)
+    assert "ollama unreachable: https://ollama.example (HTTP 401)" in capsys.readouterr().out
+    assert [request.extensions["timeout"]["read"] for request in sent] == [5]
+
+
+def test_doctor_checks_the_ollama_servers_memory_reaches_as_the_runtime_resolves_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The saved Ollama host wins over the memory LLM's and embedder's own, and only the embedder sends the key."""
+    runtime_paths = _runtime_with_env(
+        tmp_path,
+        {"OLLAMA_HOST": "http://saved.example:11434", "OLLAMA_API_KEY": "embed-key"},
+    )
+    probed = _ollama_servers(monkeypatch)
+    config = Config(
+        memory={
+            "backend": "mem0",
+            "llm": {"provider": "ollama", "config": {"model": "qwen3.8:27b", "host": "http://llm.example:11434"}},
+            "embedder": {"provider": "ollama", "config": {"model": "nomic-embed-text", "host": "http://embed.example"}},
+        },
+        router=RouterConfig(model="default"),
+    )
+
+    assert _check_memory_llm(config, runtime_paths) == (1, 0, 0)
+    assert _check_memory_embedder(config, runtime_paths) == (1, 0, 0)
+    assert _servers_and_keys(probed) == [
+        ("http://saved.example:11434/api/tags", None),
+        ("http://saved.example:11434/api/tags", "Bearer embed-key"),
+    ]
+
+
+def test_doctor_leaves_an_ollama_memory_llm_without_a_host_to_the_ollama_sdk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Mem0 gives the Ollama SDK no host when ``memory.llm.config`` sets none, so the SDK's default server is checked."""
+    runtime_paths = _runtime_with_env(tmp_path, {"OLLAMA_HOST": "http://saved.example:11434"})
+    probed = _ollama_servers(monkeypatch)
+    config = Config(
+        memory={"backend": "mem0", "llm": {"provider": "ollama", "config": {"model": "qwen3.8:27b"}}},
+        router=RouterConfig(model="default"),
+    )
+
+    assert _check_memory_llm(config, runtime_paths) == (1, 0, 0)
+    assert _servers_and_keys(probed) == [("http://127.0.0.1:11434/api/tags", None)]
+    assert "Memory LLM: ollama reachable (OLLAMA_HOST or the Ollama SDK default)" in capsys.readouterr().out
+
+
+def test_doctor_reports_ollama_settings_it_cannot_read_and_goes_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An unreadable credential store leaves each Ollama check a warning instead of ending doctor."""
+    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    probed = _ollama_servers(monkeypatch)
+
+    def unreadable(**_kwargs: object) -> str:
+        msg = "credentials store is not readable"
+        raise PermissionError(msg)
+
+    monkeypatch.setattr("mindroom.providers.ollama.adapter.get_ollama_host", unreadable)
+    monkeypatch.setattr("mindroom.memory.config.get_ollama_host", unreadable)
+    config = Config(
+        models={"default": ModelConfig(provider="ollama", id="qwen3.8:27b")},
+        memory={"backend": "mem0"},
+        router=RouterConfig(model="default"),
+    )
+
+    assert _check_providers(config, runtime_paths) == (0, 0, 1)
+    assert _check_memory_llm(config, runtime_paths) == (0, 0, 1)
+    output = " ".join(capsys.readouterr().out.split())
+    assert "models.default: could not read its Ollama settings (credentials store is not readable)" in output
+    assert "Memory LLM: could not read its Ollama settings (credentials store is not readable)" in output
+    assert probed == []
 
 
 def _record_key_checks(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, str]]]:

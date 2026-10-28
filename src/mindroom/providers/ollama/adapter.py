@@ -37,7 +37,7 @@ from mindroom.providers.assistant_turn import ThinkTagSplitter, finished_assista
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
 from mindroom.providers.media_files import read_media_file
 from mindroom.providers.ollama.errors import provider_error
-from mindroom.providers.ollama.settings import OllamaSettings
+from mindroom.providers.ollama.settings import OllamaSettings, ollama_client_options
 from mindroom.providers.tool_policy import disables_tools
 
 if TYPE_CHECKING:
@@ -161,16 +161,15 @@ class OllamaProvider:
 
     def _sdk_client(self) -> AsyncClient:
         if self._client is None:
-            self._client = AsyncClient(**self._client_params())
+            self._client = AsyncClient(**self.client_options())
         return self._client
 
-    def _client_params(self) -> dict[str, Any]:
+    def client_options(self) -> dict[str, Any]:
+        """Return the Ollama SDK client options every request of this model goes out with, as doctor checks them."""
         settings = self.settings
-        params: dict[str, Any] = {"host": self.identity.endpoint}
+        params = ollama_client_options(self.identity.endpoint, settings.api_key)
         if settings.timeout is not None:
             params["timeout"] = settings.timeout
-        if settings.api_key:
-            params["headers"] = {"authorization": f"Bearer {settings.api_key}"}
         return {**params, **(settings.client_params or {})}
 
 

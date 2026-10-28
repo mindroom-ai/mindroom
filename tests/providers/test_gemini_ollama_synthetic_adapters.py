@@ -379,8 +379,8 @@ def test_ollama_sends_the_runtime_env_key_unless_the_model_has_its_own(tmp_path:
     shared = build_ollama_provider(ModelConfig(**OLLAMA), runtime_paths)
     own = build_ollama_provider(ModelConfig(**OLLAMA, api_key="own-key"), runtime_paths)
 
-    assert shared._client_params()["headers"] == {"authorization": "Bearer env-key"}
-    assert own._client_params()["headers"] == {"authorization": "Bearer own-key"}
+    assert shared.client_options()["headers"] == {"authorization": "Bearer env-key"}
+    assert own.client_options()["headers"] == {"authorization": "Bearer own-key"}
 
 
 def test_gemini_timeout_reaches_the_sdk_client_in_milliseconds(tmp_path: Path) -> None:
