@@ -424,14 +424,15 @@ class TurnIngress:
                 )
                 return _IngressAdmissionOutcome.DEFERRED
         if command_for(facts, dispatch_prompt_for_event(prepared_event)) is not None:
-            await self._dispatch_command_control_input(
+            dispatched = await self._dispatch_command_control_input(
                 room=room,
                 dispatch_event=prepared_event,
                 facts=facts,
                 coalescing_thread_id=coalescing_thread_id,
                 ticket=ticket,
             )
-            return _IngressAdmissionOutcome.CONSUMED
+            # A command that could not keep its claim went back to the journal, which retries it.
+            return _IngressAdmissionOutcome.CONSUMED if dispatched else _IngressAdmissionOutcome.DEFERRED
         return await self._enqueue_prepared_text_for_dispatch(
             room=room,
             prepared_event=prepared_event,
@@ -593,8 +594,11 @@ class TurnIngress:
         facts: IngressFacts,
         coalescing_thread_id: str | None,
         ticket: IngressTicket,
-    ) -> None:
-        """Dispatch one command as a control input without entering the coalescing gate, under its ingress claim."""
+    ) -> bool:
+        """Dispatch one command as a control input without entering the coalescing gate, under its ingress claim.
+
+        Returns False when its source went back to the journal instead.
+        """
         # A command an entity wrote for a human runs with that human's authority, as its conversation would;
         # handle_command refuses the commands only the human may send.
         pending_event = PendingEvent(
@@ -608,7 +612,7 @@ class TurnIngress:
             [pending_event],
             queues_other_run=partial(self.deps.coalescing_gate.queues_other_run, key),
         )
-        await self.deps.dispatcher.dispatch_control_turn(replace(turn, claims=(ticket.take_claim(),)))
+        return await self.deps.dispatcher.dispatch_control_turn(replace(turn, claims=(ticket.take_claim(),)))
 
     async def _adaptive_text_debounce_seconds(
         self,

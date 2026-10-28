@@ -1803,6 +1803,33 @@ async def test_command_dispatch_keeps_the_alias_its_ingress_claimed(
 
 
 @pytest.mark.asyncio
+async def test_command_that_cannot_keep_its_claim_stays_with_the_journal(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A command whose claim cannot merge goes back to the journal: its callback defers it instead of settling it."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _text_event("!help", event_id="$refused-command:localhost")
+
+    async def refuse(claims: tuple[TurnClaim, ...], _turn_record: TurnRecord) -> None:
+        for claim in claims:
+            claim.release()
+
+    execute_if_owned = AsyncMock(return_value=True)
+    monkeypatch.setattr(harness.turn_store, "merge_claims", refuse)
+    monkeypatch.setattr(harness.dispatcher.deps.command_executor, "execute_if_owned", execute_if_owned)
+
+    outcome = await harness.ingress.handle_text_event(room, event)
+
+    assert outcome is TurnDispatchOutcome.DEFERRED
+    assert harness.retried_dispatch_sources == [(event.event_id,)]
+    execute_if_owned.assert_not_awaited()
+    assert not harness.turn_store.has_live_turn_claim(event.event_id)
+
+
+@pytest.mark.asyncio
 async def test_contended_claim_does_not_strand_the_winner_in_the_senders_lane(
     config: Config,
     tmp_path: Path,

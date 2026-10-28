@@ -298,29 +298,35 @@ class TurnDispatcher:
                 timing_scope=timing_scope,
             )
 
-    async def dispatch_control_turn(self, turn: PreparedTurn) -> None:
-        """Dispatch one command that bypassed the coalescing gate, under the claim its ingress handed over."""
-        await self._dispatch_text_turn(turn)
+    async def dispatch_control_turn(self, turn: PreparedTurn) -> bool:
+        """Dispatch one command that bypassed the coalescing gate, under the claim its ingress handed over.
 
-    async def _dispatch_text_turn(
-        self,
-        turn: PreparedTurn,
-    ) -> None:
-        """Run the normal text or command dispatch pipeline for a prepared text event.
+        Returns False when its sources went back to the journal instead of dispatching.
+        """
+        return await self._dispatch_text_turn(turn)
+
+    async def _dispatch_text_turn(self, turn: PreparedTurn) -> bool:
+        """Run the normal text or command dispatch pipeline for a prepared turn, or hand its sources back.
 
         The turn's per-event claims become one claim on the whole turn, which this
-        dispatch owns until a response task takes it.
+        dispatch owns until a response task takes it. Returns False when they cannot.
         """
         claim = await self.deps.turn_store.merge_claims(turn.claims, turn.handled_turn)
         if claim is None:
             # Another live owner shares an event, or a completed turn answered an alias: its sources go back to
             # the journal, whose ingress decides them one by one.
             self.deps.retry_dispatch_sources(turn.room.room_id, turn.handled_turn.source_event_ids)
-            return
+            return False
+        await self._dispatch_claimed_text_turn(turn, claim)
+        return True
+
+    async def _dispatch_claimed_text_turn(self, turn: PreparedTurn, claim: TurnClaim) -> None:
+        """Run the dispatch pipeline under the turn's merged claim until a response task takes it."""
+        held: TurnClaim | None = claim
 
         def take_claim() -> TurnClaim:
-            nonlocal claim
-            taken, claim = claim, None
+            nonlocal held
+            taken, held = held, None
             assert taken is not None
             return taken
 
@@ -379,8 +385,8 @@ class TurnDispatcher:
                     take_claim=take_claim,
                 )
         finally:
-            if claim is not None:
-                claim.release()
+            if held is not None:
+                held.release()
             if timing_scope_token is not None:
                 timing_scope_context.reset(timing_scope_token)
 
