@@ -56,9 +56,9 @@ def current_claude_turn(message: Message) -> Message:
 
 # LEGACY_COMPAT: Claude turns stored without their response blocks.
 # Legacy format: an assistant message whose ``provider_data`` holds neither ``claude_blocks`` nor a non-empty
-#   ``content_blocks`` list, with ``signature`` beside its joined
-#   ``reasoning_content``, its joined ``redacted_reasoning_content``, and ``server_tool_blocks`` (each response block
-#   other than text, thinking, and tool use, as the SDK's ``model_dump``).
+#   ``content_blocks`` list, with ``signature`` beside its joined ``reasoning_content``, its joined
+#   ``redacted_reasoning_content``, and ``server_tool_blocks`` (each response block other than text, thinking, and
+#   tool use, as the SDK's ``model_dump``).
 # Last legacy release: v2026.9.43 stored them through Agno 3.0.5; v2026.9.44 (Agno 3.0.9) also stored every response
 #   block in order under ``content_blocks``.
 # Handling: the turn rebuilds from its fields: a thinking block from its reasoning while a signature is stored, a
