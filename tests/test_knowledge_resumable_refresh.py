@@ -23,9 +23,12 @@ from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import TYPE_CHECKING, Any, BinaryIO
 
+import httpx
+import httpx2
 import pytest
 from agno.knowledge.document.base import Document
 from agno.knowledge.reader.markdown_reader import MarkdownReader
+from openai import APIStatusError, RateLimitError
 from structlog.testing import capture_logs
 
 import mindroom.embeddings.batching as embedding_batching_module
@@ -317,9 +320,6 @@ def _server_error() -> EmbedderRequestError:
 
 def _api_error() -> Exception:
     """Return what the OpenAI embedder raises for a 503 with a ``Retry-After`` hint, classified at its boundary."""
-    import httpx  # noqa: PLC0415
-    from openai import APIStatusError  # noqa: PLC0415
-
     request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
     response = httpx.Response(503, request=request, headers={"retry-after": "7"})
     return openai_embedder_error(APIStatusError("overloaded", response=response, body=None))
@@ -1123,9 +1123,6 @@ async def test_batch_failure_falls_back_to_per_file_without_reembedding_successe
 
 def _tokens_per_minute_error() -> Exception:
     """Return what the OpenAI embedder raises for a request larger than the account's tokens-per-minute limit."""
-    import httpx  # noqa: PLC0415
-    from openai import RateLimitError  # noqa: PLC0415
-
     message = (
         "Request too large for text-embedding-3-small in organization org-test on tokens per min (TPM): Limit 40000, "
         "Requested 80000. The input or output tokens must be reduced in order to run successfully."
@@ -1197,8 +1194,6 @@ async def test_a_refresh_sends_a_request_the_account_s_billing_stops_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The refresh retries a failed request itself, so the OpenAI SDK must not resend it underneath."""
-    import httpx2  # noqa: PLC0415
-
     sent: list[httpx2.Request] = []
 
     def respond(request: httpx2.Request) -> httpx2.Response:
@@ -1226,6 +1221,46 @@ async def test_a_refresh_sends_a_request_the_account_s_billing_stops_once(
 
     assert result.index_published is False
     assert len(sent) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_embedder_clients")
+async def test_a_knowledge_search_keeps_the_sdk_s_retry_of_a_failed_query(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing retries a search's query embedding in place, so the OpenAI SDK's own retry of a 503 must stay."""
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        sent.append(request)
+        if len(sent) == 1:
+            return httpx2.Response(503, headers={"retry-after-ms": "1"}, json={"error": {"message": "overloaded"}})
+        return httpx2.Response(200, json={"object": "list", "data": [{"embedding": [4.0, 1.0], "index": 0}]})
+
+    sdk_client = openai_embedder_module.AsyncOpenAI
+    monkeypatch.setattr(
+        openai_embedder_module,
+        "AsyncOpenAI",
+        lambda **kwargs: sdk_client(
+            **{**kwargs, "http_client": httpx2.AsyncClient(transport=httpx2.MockTransport(respond))},
+        ),
+    )
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "a.md").write_text("body", encoding="utf-8")
+    embedder_config = {"model": "text-embedding-3-small", "api_key": "test-key", "host": "http://embeddings.local/v1"}
+    config = _config(tmp_path, docs_path, memory={"embedder": {"provider": "openai", "config": embedder_config}})
+    runtime_paths = runtime_paths_for(config)
+    # The refresh embeds with the recording embedder; the search builds its embedder the production way.
+    monkeypatch.setattr(knowledge_registry, "create_configured_embedder", create_configured_embedder)
+    assert (await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)).index_published
+    lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
+    assert lookup.index is not None
+
+    hits = await lookup.index.reader.asearch("body", limit=5)
+
+    assert ([hit.content for hit in hits], len(sent)) == (["body"], 2)
 
 
 class _InFlightEmbedder(_RecordingEmbedder):
