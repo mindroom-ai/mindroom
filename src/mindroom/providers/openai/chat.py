@@ -126,7 +126,7 @@ class ChatAdapter:
         parts = accumulator.parts
         # A stream assembles its tool calls from their pieces, so each is complete only now.
         for call in parts.tool_calls:
-            yield ToolCallReady(call)
+            yield timer.output(ToolCallReady(call))
         for event in finished_turn(
             self.identity,
             timer,

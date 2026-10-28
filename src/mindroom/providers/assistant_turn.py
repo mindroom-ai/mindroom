@@ -38,7 +38,9 @@ def stamp_model(message: Message, identity: ModelIdentity) -> None:
 class TurnTimer:
     """When one turn's request started and when its first output arrived, as monotonic times.
 
-    Text, reasoning, and complete tool calls are output; usage reports and stream progress are not.
+    Text, reasoning, and complete tool calls are output; usage reports and stream progress are not. An adapter passes
+    every output event it yields through ``output`` or ``chunk``, including the tool calls it completes only after its
+    stream ends.
     """
 
     started: float = field(default_factory=time.monotonic)

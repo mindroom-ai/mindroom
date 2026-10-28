@@ -45,6 +45,7 @@ from tests.providers.golden_support import (
     hide_provider_environment,
     ndjson_response,
     pipeline_provider,
+    responses_events,
     sse_response,
 )
 from tests.session_storage.agno_layout import converted_store
@@ -522,6 +523,88 @@ async def test_every_family_ends_a_turn_with_its_final_usage_timed_from_its_firs
     assert (completed.message.content, completed.stop_reason, usage.final, usage.usage) == ("ok", "end", True, metrics)
     assert metrics.time_to_first_token is not None
     assert 0 <= metrics.time_to_first_token <= metrics.duration
+
+
+_WEATHER_ARGUMENTS = '{"city": "Paris"}'
+
+
+def _chat_weather_call() -> httpx.Response:
+    """A Chat stream that opens the call, streams its arguments as a second piece, then finishes."""
+    opened = {"index": 0, "id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": ""}}
+    arguments = {"index": 0, "function": {"arguments": _WEATHER_ARGUMENTS}}
+    choices = [
+        {"index": 0, "delta": {"tool_calls": [opened]}, "finish_reason": None},
+        {"index": 0, "delta": {"tool_calls": [arguments]}, "finish_reason": None},
+        {"index": 0, "delta": {}, "finish_reason": "tool_calls"},
+    ]
+    base = {"id": "c", "object": "chat.completion.chunk", "created": 1, "model": "m"}
+    return sse_response([*({**base, "choices": [choice]} for choice in choices), "[DONE]"])
+
+
+def _ollama_weather_call() -> httpx.Response:
+    calling = ollama_chunk()
+    calling["message"]["tool_calls"] = [{"function": {"name": "get_weather", "arguments": {"city": "Paris"}}}]
+    return ndjson_response([calling, ollama_chunk(done=True)])
+
+
+# One reply per adapter whose only output is one ``get_weather`` call, its arguments streamed where the wire streams them.
+_REPLIES_THAT_ONLY_CALL_A_TOOL: dict[str, Callable[[], httpx.Response]] = {
+    "anthropic": lambda: sse_response(
+        claude_events(
+            [{"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {}}],
+            deltas=[{"type": "input_json_delta", "partial_json": _WEATHER_ARGUMENTS}],
+            stop_reason="tool_use",
+        ),
+        named=True,
+    ),
+    "gemini": lambda: sse_response(
+        [gemini_chunk({"functionCall": {"name": "get_weather", "args": {"city": "Paris"}}}, finish=True)],
+    ),
+    "ollama": _ollama_weather_call,
+    "openai_chat": _chat_weather_call,
+    "openai_responses": lambda: sse_response(
+        responses_events(
+            {
+                "id": "resp_1",
+                "object": "response",
+                "created_at": 1,
+                "model": "gpt-6-astra",
+                "status": "completed",
+                "output": [
+                    {
+                        "id": "fc_1",
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "get_weather",
+                        "arguments": _WEATHER_ARGUMENTS,
+                        "status": "completed",
+                    },
+                ],
+            },
+        ),
+        named=True,
+    ),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", _REPLIES_THAT_ONLY_CALL_A_TOOL)
+async def test_a_reply_that_only_calls_a_tool_is_timed_from_that_call(family: str, tmp_path: Path) -> None:
+    """A complete tool call is output, so a reply without text still records its time to first token."""
+    spec = FAMILIES[family]
+    wire = Wire(_REPLIES_THAT_ONLY_CALL_A_TOOL[family]())
+
+    turn = await complete(
+        pipeline_provider(spec.adapter(tmp_path, wire)),
+        ModelRequest(messages=[Message(role="user", content="Weather in Paris?")], tools=[_tool("get_weather")]),
+    )
+
+    assert [(call["function"]["name"], json.loads(call["function"]["arguments"])) for call in turn.tool_calls] == [
+        ("get_weather", {"city": "Paris"}),
+    ]
+    assert turn.content == ""
+    assert turn.usage.time_to_first_token is not None
+    assert 0 <= turn.usage.time_to_first_token <= turn.usage.duration
 
 
 # --- Stream activity and server tools ----------------------------------------------------------------------------

@@ -134,7 +134,7 @@ class SyntheticProvider:
             yield timer.output(TextDelta(chunk))
         tool_calls = [] if continuation or plan.tool_call_id is None else [_shell_call(plan.tool_call_id)]
         for call in tool_calls:
-            yield ToolCallReady(call)
+            yield timer.output(ToolCallReady(call))
         for event in finished_turn(
             self.identity,
             timer,
