@@ -26,7 +26,15 @@ from mindroom.event_journal.history_recovery import (
 )
 from mindroom.logging_config import get_logger
 
-from . import approval_calls, approval_cards, approval_continuations, membership_hooks, replies, reply_messages
+from . import (
+    approval_calls,
+    approval_cards,
+    approval_continuations,
+    approval_signals,
+    membership_hooks,
+    replies,
+    reply_messages,
+)
 from .identity import decode_thread_id, encode_thread_id
 from .models import (
     TURN_BACKED_KINDS,
@@ -690,7 +698,8 @@ def _advance_membership_epoch(
     )
     # A paused run owns exactly the source rows this fence is about to settle.
     # Delete the aggregate first so no durable continuation survives with no
-    # runnable source. Its calls go with it unless a live card still shows them.
+    # runnable source. Its calls go with it unless a live card still shows them,
+    # and the conversation it held is free from this commit.
     for departed in transaction.fetchall(
         f"""
         SELECT approval_id FROM approval_continuations
@@ -700,6 +709,7 @@ def _advance_membership_epoch(
         (principal_id, room_id),
     ):
         approval_calls.delete_reply_calls(transaction, approval_id=str(departed["approval_id"]))
+        approval_signals.ended(transaction, principal_id, str(departed["approval_id"]))
     transaction.execute(
         f"""
         DELETE FROM approval_continuations

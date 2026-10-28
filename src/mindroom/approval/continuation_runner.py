@@ -143,9 +143,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.turn_origin import TurnOrigin
 
-# How often a message waiting behind an approval rechecks that the approval still exists.
-_APPROVAL_HOLD_RECHECK_SECONDS = 30.0
-
 _SHUTDOWN = ApprovalFailure(ApprovalFailureKind.SHUTDOWN)
 # The note a settled failure shows below its reply; an error's carries its reason.
 _FAILURE_NOTES = {
@@ -478,9 +475,8 @@ class ApprovalContinuationRunner:
                 thread_summary_message_count_hint=self.host.thread_summary_message_count_hint(request),
                 runtime_generation=(self.deps.approval_runtime_generation if continuation_state == "waiting" else None),
             )
-            # Later messages of the conversation wait while the approval is pending, as behind a running reply.
-            # It is held before the pause commits, so the approval's end, which releases it, cannot come first.
-            self.lifecycle_coordinator.hold_for_approval(approval_id, target)
+            # Later messages of the conversation wait while the approval is pending, as behind a running reply:
+            # the pause's commit holds the conversation while this reply still holds its lock.
             if not await self._pause_reply(
                 shown.handle,
                 draft,
@@ -520,9 +516,6 @@ class ApprovalContinuationRunner:
                 approval_id,
                 error=error,
             )
-            if await self.deps.approval_store.approval_continuation(approval_id) is None:
-                # No approval is pending, or its end already ran: nothing holds the conversation.
-                self.lifecycle_coordinator.release_approval_hold(approval_id)
             if handoff is not None:
                 return handoff
             raise
@@ -1376,54 +1369,9 @@ class ApprovalContinuationRunner:
                 )
         return response_text
 
-    def hold_for_approval(self, continuation: ApprovalContinuation) -> None:
-        """Keep a pending approval's conversation busy, as a restart finds it."""
-        self.lifecycle_coordinator.hold_for_approval(continuation.approval_id, continuation_target(continuation))
-
-    def release_approval_hold(self, approval_id: str) -> None:
-        """Let the conversation of an approval that ended answer its waiting messages."""
-        self.lifecycle_coordinator.release_approval_hold(approval_id)
-
-    def release_approval_holds_in_room(self, room_id: str) -> None:
-        """Release the approval holds of a room this bot left."""
-        self.lifecycle_coordinator.release_approval_holds_in_room(room_id)
-
     def is_held_for_approval(self, target: MessageTarget) -> bool:
         """Return whether a pending approval keeps this conversation busy."""
         return bool(self.lifecycle_coordinator.approval_holds(target.room_id, target.resolved_thread_id))
-
-    async def wait_for_thread_response_idle(self, room_id: str, thread_id: str | None) -> None:
-        """Wait until one canonical room/thread has no active response turn.
-
-        While it waits it rechecks that each approval holding the conversation
-        still exists, so a hold whose end never reached this bot, as after a
-        departure it did not see, cannot keep it waiting. A recheck that lands
-        while a pause is still committing can take the new approval for an
-        ended one and drop its hold, so messages that arrive while that
-        approval waits are answered without waiting for it.
-        """
-        while True:
-            try:
-                await asyncio.wait_for(
-                    self.lifecycle_coordinator.wait_for_thread_idle(room_id, thread_id),
-                    timeout=_APPROVAL_HOLD_RECHECK_SECONDS,
-                )
-            except TimeoutError:
-                await self._release_ended_approval_holds(room_id, thread_id)
-                continue
-            return
-
-    async def _release_ended_approval_holds(self, room_id: str, thread_id: str | None) -> None:
-        """Release the holds of a conversation whose approvals no longer exist."""
-        for approval_id in self.lifecycle_coordinator.approval_holds(room_id, thread_id):
-            try:
-                ended = await self.deps.approval_store.approval_continuation(approval_id) is None
-            except Exception:
-                # The journal is unreachable: keep waiting, and recheck on the next interval.
-                self.deps.logger.warning("approval_hold_recheck_failed", approval_id=approval_id, exc_info=True)
-                return
-            if ended:
-                self.lifecycle_coordinator.release_approval_hold(approval_id)
 
     async def run_owned_approvals(
         self,

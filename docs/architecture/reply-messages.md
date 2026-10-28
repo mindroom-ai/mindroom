@@ -53,15 +53,15 @@ Every fact about an AI reply has one owner and one writer, so no two stores can 
 - Nothing blocks a repeated call; the model is told which calls finished and which were cut short and may have taken effect, to check before repeating them.
   In real-model runs a fast model rarely repeated a finished call (up to 1 of 24 runs) but repeated a cut-short call whenever its tools gave it no way to check.
   The owner accepted this, because blocking an identical call would also block a read-only call the model must run again when its shortened result is not enough.
-- Effects that run after a rule commits, such as cancelling a span or waking an approval, are best effort, because the records already say what must happen; only an approval's finish or release runs its effects to completion even when its caller is cancelled, so the conversation it held is always released.
+- Effects that run after a rule commits, such as cancelling a span or waking an approval, are best effort, because the records already say what must happen; only an approval's finish or release runs its effects to completion even when its caller is cancelled, so the claims that waited for it always retry.
 
 ### Approvals
 
 - An approval pauses and holds its reply and its conversation: later messages to that agent in that conversation wait with a ⏳ reaction, as behind a running reply, until the approval ends; no approval holds the room's event lane.
 - With background jobs on, a top-level agent's gated call that can become a managed job asks for its approval from that job instead of pausing its reply, so the approval holds neither the reply nor its conversation; after `approval_wait_timeout` the reply goes on and the job's outcome reaches the conversation like any other job's, and a restart interrupts the job, so that approval does not survive a restart as a paused reply's does.
 - The hold is not the conversation lock, because the resume, the failure settlement, an edit's regeneration, and approval recovery must still take that lock.
-- The hold is taken before the pause commits, so the approval's end can never come before it, and each bot start takes the holds of its principal's pending approvals before it replays the journal.
-- A message waiting behind a hold rechecks every 30 seconds that its approval still exists, so a hold whose end did not reach this bot still ends.
+- The hold starts at the pause's commit and ends at the commit that ends the approval, whichever path ends it, including a departure; the pause commits while its reply still holds the conversation's lock, so no message is answered between the pause and its hold, and no end precedes its hold.
+- Each bot start holds the conversations of its principal's pending approvals before it replays the journal.
 - Deleting the message a held reply answers cancels the approval, as a Stop would, and removes the reply.
 - A released approval hands its sources back to replay, unless a Stop is recorded: the reply then ends `cancelled` instead of replaying what the user stopped.
 
@@ -100,7 +100,6 @@ Delivery and recovery:
 - An upgrade from an earlier release cancels every approval of a paused reply that release left pending, because it cannot rule out that one is pending; approvals of scheduled calls are kept.
   A cancelled approval's Matrix message keeps what it showed, which can still say that it waits for approval, and a click on its card does nothing.
 - A message that already waited for the conversation's lock when the reply before it paused for an approval is answered while that approval waits; it is still answered once.
-- A 30-second recheck of the approvals holding a conversation that lands while a reply's pause is still committing can drop that approval's hold, so later messages are answered while it waits; this needs the recheck to land inside that commit.
 - A room departure and a removed entity end their replies without writing to Matrix, so those messages keep what they last showed: the bot has left the room, or the entity has no bot; a removed entity's reply still delivers the notes and redactions it owes if the entity comes back.
 - A note Matrix refused for good is not sent again (I15).
 - An interactive selection whose acknowledgement Matrix refuses for good stays unanswered without a note: the acknowledgement is smaller than the question MindRoom already delivered, so only a room-wide refusal such as lost send permission can refuse it, and that would refuse the note too.

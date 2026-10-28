@@ -181,7 +181,6 @@ if TYPE_CHECKING:
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import AdmissionFacts, IngestionRecordAdmission
     from mindroom.event_journal.models import ResponseRecoveryState
-    from mindroom.event_journal.replies import ApprovalEnded
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
@@ -661,8 +660,7 @@ class AgentBot:
             # Resolved late: the dispatcher is built after the reply runtime.
             retry_sources=lambda room_id, event_ids: self._journal_dispatcher.retry_turn_sources(room_id, event_ids),
             complete_turn=lambda record: self._turn_store.publish_completed_turn(record),
-            hold_conversation=lambda continuation: self._response_runner.hold_for_approval(continuation),
-            approval_ended=lambda ended: self._approval_ended(ended),
+            approval_ended=lambda ended: self._settle_reply_debt_later(ended.reply_id),
         )
         self._delivery_gateway = DeliveryGateway(
             DeliveryGatewayDeps(
@@ -966,11 +964,6 @@ class AgentBot:
             )
             == "room"
         )
-
-    def _approval_ended(self, ended: ApprovalEnded) -> None:
-        """Let the ended approval's conversation answer its waiting messages, and settle what its reply owes."""
-        self._response_runner.release_approval_hold(ended.approval_id)
-        self._settle_reply_debt_later(ended.reply_id)
 
     def _reply_row_resolved(self, reply_id: str) -> None:
         """Wake claims that waited for this reply's rows, and settle any debt its rows left."""
@@ -1724,8 +1717,6 @@ class AgentBot:
             if (runtime := get_background_runtime(self.runtime_paths)) is not None:
                 # Nobody here can see or cancel the work this entity leaves behind.
                 await cancel_room_jobs(runtime, agent_name=self.agent_name, room_id=room_id)
-            # The departure ended the room's approvals without their settlement.
-            self._response_runner.release_approval_holds_in_room(room_id)
             await self._room_lifecycle.forget_invited_room(room_id)
 
     async def ensure_rooms(self) -> None:
@@ -1879,6 +1870,17 @@ class AgentBot:
             except BaseException:
                 self.logger.warning("Failed to close Matrix client after startup failure", exc_info=True)
 
+    async def _take_over_replies(self) -> None:
+        """Own this principal's replies, then hold the conversation each of its pending approvals waits in.
+
+        Both happen before journal replay, so a message to a held conversation waits for its approval after a restart.
+        """
+        await self._reply_runtime.start()
+        if self._own_journal is not None:
+            # Only a bot built outside the orchestrator opens a store of its own, which nothing else loads.
+            await self._own_journal.store.load_approval_signals()
+        self._response_runner.follow_approval_holds(self._journal_store.approval_signals, self._journal_principal_id)
+
     async def start(self) -> None:
         """Start the agent bot with user account setup (but don't join rooms yet)."""
         await self.ensure_user_account()
@@ -1899,7 +1901,7 @@ class AgentBot:
             # Keep durable tracking-state loading off the event loop at startup.
             await self._turn_store.warm()
             # This bot instance now owns its replies; spans of earlier instances can no longer write.
-            await self._reply_runtime.start()
+            await self._take_over_replies()
             client = self.client
             assert client is not None
 
@@ -2302,6 +2304,8 @@ class AgentBot:
     ) -> None:
         """Release resources after every response owner is terminal."""
         try:
+            # Its replacement follows this principal's approvals from here on.
+            self._response_runner.stop_following_approval_holds()
             if self.client is not None:
                 unregister_scheduled_task_state_writer(self.client)
             if self.agent_name == ROUTER_AGENT_NAME:

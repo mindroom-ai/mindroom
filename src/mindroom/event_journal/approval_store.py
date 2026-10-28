@@ -13,6 +13,7 @@ from . import (
     approval_cards,
     approval_continuations,
     approval_grants,
+    approval_signals,
     replies,
     scheduled_approvals,
 )
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
         RecordedApprovalDecision,
     )
     from .approval_continuations import ApprovalContinuation, ApprovalContinuationState, ApprovalFailure
+    from .approval_signals import ApprovalSignals
     from .backend import Backend, Transaction
     from .replies import AppliedTransition, PostCommitEffect, PreparedReplyRow, ReplyRowEnqueue, ReplyRowRequest
     from .scheduled_approvals import (
@@ -52,6 +54,7 @@ class ApprovalStore:
 
     _backend: Backend
     _principal_id: str
+    _signals: ApprovalSignals
 
     async def reserve_reply_cards(
         self,
@@ -376,12 +379,6 @@ class ApprovalStore:
         except _PauseRefusedError as refused:
             return refused.enqueue
 
-    async def pending_approvals(self) -> tuple[ApprovalContinuation, ...]:
-        """Return every approval continuation this principal owns."""
-        return await self._backend.read(
-            lambda transaction: approval_continuations.for_principal(transaction, self._principal_id),
-        )
-
     async def approval_continuation_for_source(
         self,
         event_id: str,
@@ -615,6 +612,11 @@ class ApprovalStore:
         """Return this view's durable principal identity."""
         return self._principal_id
 
+    @property
+    def signals(self) -> ApprovalSignals:
+        """Return what the store's committed approval writes tell this process."""
+        return self._signals
+
 
 def _claim_approval_resume(
     transaction: Transaction,
@@ -707,4 +709,9 @@ def _pause_for_approval(
     enqueued = enqueue_reply_row(transaction, principal_id, request, prepared)
     if not enqueued.transition.applied:
         raise _PauseRefusedError(enqueued)
+    # Its conversation is held from this commit, while the paused reply still holds the conversation's lock.
+    approval_signals.paused(
+        transaction,
+        approval_signals.PausedReply(principal_id, held.approval_id, held.room_id, held.thread_id),
+    )
     return enqueued

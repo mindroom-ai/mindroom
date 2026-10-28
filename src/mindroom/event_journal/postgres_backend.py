@@ -27,7 +27,7 @@ _SCHEMA_LOCK_KEY = 7_403_118_615_233_901
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from .backend import Operation, Row
+    from .backend import Operation, PublishSignals, Row
 
 
 _POOL_SIZE = 4
@@ -65,6 +65,7 @@ class _PostgresTransaction:
     """Statement execution against one open PostgreSQL connection."""
 
     cursor: psycopg.Cursor[dict[str, Any]]
+    signals: list[object] = field(default_factory=list)
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> None:
         """Run one statement."""
@@ -79,6 +80,10 @@ class _PostgresTransaction:
         """Run one query and return every row."""
         self.cursor.execute(_statement(sql), tuple(params))
         return tuple(self.cursor.fetchall())
+
+    def signal(self, value: object) -> None:
+        """Record what this operation's commit tells in-process listeners."""
+        self.signals.append(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,8 +135,8 @@ class PostgresBackend:
     )
 
     @classmethod
-    def open(cls, database_url: str) -> PostgresBackend:
-        """Create the schema and open the connections.
+    def open(cls, database_url: str, *, publish: PublishSignals) -> PostgresBackend:
+        """Create the schema and open the connections; ``publish`` receives what each committed write signalled.
 
         Synchronous for the same reason as the SQLite backend: a bot builds
         its collaborators before it has an event loop.
@@ -149,6 +154,7 @@ class PostgresBackend:
             apply=backend._apply_write,
             offload=backend._offload,
             task_name="event_journal_postgres_writer",
+            publish=publish,
         )
         return backend
 
@@ -197,8 +203,9 @@ class PostgresBackend:
 
     def _apply_one(self, cursor: psycopg.Cursor[dict[str, Any]], operation: Operation[Any]) -> WriteOutcome:
         cursor.execute("SAVEPOINT journal_write")
+        transaction = _PostgresTransaction(cursor)
         try:
-            result = operation(_PostgresTransaction(cursor))
+            result = operation(transaction)
         except Exception as error:
             if self._writer.broken:
                 # The error took the connection, and the batch with it.
@@ -207,7 +214,7 @@ class PostgresBackend:
             cursor.execute("RELEASE SAVEPOINT journal_write")
             return WriteOutcome(error=error)
         cursor.execute("RELEASE SAVEPOINT journal_write")
-        return WriteOutcome(result=result)
+        return WriteOutcome(result=result, signals=tuple(transaction.signals))
 
     async def read[T](self, operation: Operation[T]) -> T:
         """Run one operation on a pooled reader.

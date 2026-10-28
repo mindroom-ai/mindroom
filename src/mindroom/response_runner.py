@@ -168,7 +168,8 @@ if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
     from mindroom.dispatch_source import ScheduledHistoryBudget
-    from mindroom.event_journal import ApprovalContinuation, JournalEvent
+    from mindroom.event_journal import JournalEvent
+    from mindroom.event_journal.approval_signals import ApprovalSignals
     from mindroom.event_journal.approval_store import ApprovalStore
     from mindroom.history.types import HistoryScope
     from mindroom.judgment.state import JudgmentMessage
@@ -1746,17 +1747,13 @@ class ResponseRunner:
         """Return canonical thread IDs with active response lifecycles in one room."""
         return self._lifecycle_coordinator.active_thread_ids_for_room(room_id)
 
-    def hold_for_approval(self, continuation: ApprovalContinuation) -> None:
-        """Keep a pending approval's conversation busy, as a restart finds it."""
-        self._approvals.hold_for_approval(continuation)
+    def follow_approval_holds(self, signals: ApprovalSignals, principal_id: str) -> None:
+        """Hold the conversation of each pending approval of this principal, from the ones pending now on."""
+        self._lifecycle_coordinator.follow_approval_holds(signals, principal_id)
 
-    def release_approval_hold(self, approval_id: str) -> None:
-        """Let the conversation of an approval that ended answer its waiting messages."""
-        self._approvals.release_approval_hold(approval_id)
-
-    def release_approval_holds_in_room(self, room_id: str) -> None:
-        """Release the approval holds of a room this bot left."""
-        self._approvals.release_approval_holds_in_room(room_id)
+    def stop_following_approval_holds(self) -> None:
+        """Stop holding conversations for approvals that pause or end from now on."""
+        self._lifecycle_coordinator.stop_following_approval_holds()
 
     def is_held_for_approval(self, target: MessageTarget) -> bool:
         """Return whether a pending approval keeps this conversation busy."""
@@ -1764,7 +1761,7 @@ class ResponseRunner:
 
     async def wait_for_thread_response_idle(self, room_id: str, thread_id: str | None) -> None:
         """Wait until one canonical room/thread has no active response turn."""
-        await self._approvals.wait_for_thread_response_idle(room_id, thread_id)
+        await self._lifecycle_coordinator.wait_for_thread_idle(room_id, thread_id)
 
     def reserve_waiting_human_message(
         self,

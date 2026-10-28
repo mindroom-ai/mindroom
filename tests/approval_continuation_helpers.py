@@ -167,7 +167,7 @@ async def resumed_approval(bot: AgentBot, continuation: ApprovalContinuation) ->
     continuation runs as the span's attempt for as long as the context is open.
     """
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    await bot._reply_runtime.start()
+    await bot._take_over_replies()
     async with runner.deps.replies.span_scope() as slot:
         claimed = await runner._approvals._claim_owned_approval(continuation, slot=slot)
         assert claimed is not None

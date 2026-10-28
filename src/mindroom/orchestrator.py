@@ -2464,6 +2464,8 @@ class _MultiAgentOrchestrator:
             msg = "Another MindRoom runtime is already using this event journal"
             raise PermanentStartupError(msg)
         self._journal_held = True
+        # Every bot follows the paused replies of its principal from these on.
+        await store.load_approval_signals()
 
     async def event_journal_still_held(self) -> bool:
         """Return whether this runtime still holds the journal it claimed; true before it claims one."""

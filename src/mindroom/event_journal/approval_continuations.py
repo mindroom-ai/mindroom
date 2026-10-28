@@ -12,7 +12,7 @@ from mindroom.reply_lifecycle import ApprovalFailureKind, ReplyState
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload, serialize_tool_execution_identity
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
-from . import approval_calls, membership_state, outbox, reply_messages, reply_spans
+from . import approval_calls, approval_signals, membership_state, outbox, reply_messages, reply_spans
 from .models import DeliveryStage
 
 if TYPE_CHECKING:
@@ -518,19 +518,6 @@ def all_owners(
     return _load_owners(transaction, rows)
 
 
-def for_principal(transaction: Transaction, principal_id: str) -> tuple[ApprovalContinuation, ...]:
-    """Return every continuation one principal owns."""
-    rows = transaction.fetchall(
-        f"""
-        SELECT principal_id, {_CONTINUATION_COLUMNS} FROM approval_continuations
-        WHERE principal_id = ?
-        ORDER BY approval_id/*bytes*/
-        """,  # noqa: S608 - a fixed column list, not input
-        (principal_id,),
-    )
-    return tuple(continuation for _owner, continuation in _load_owners(transaction, rows))
-
-
 def claim(transaction: Transaction, principal_id: str, *, approval_id: str, span_id: str) -> bool:
     """Name the span that runs a ready continuation; only one span claims each generation."""
     claimed = transaction.fetchone(
@@ -764,6 +751,7 @@ def delete(transaction: Transaction, principal_id: str, *, approval_id: str) -> 
         "DELETE FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
         (principal_id, approval_id),
     )
+    approval_signals.ended(transaction, principal_id, approval_id)
 
 
 def may_release(

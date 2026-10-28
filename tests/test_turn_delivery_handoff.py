@@ -572,7 +572,10 @@ class TestTheHandoffIsOneCommit:
         await admit(journal(bot), *(text_event(event_id, ts=1_000 + index) for index, event_id in enumerate(batch)))
         await adopt(bot, batch)
         backend = DiesAfterNextWriteCommit(inner=bot._journal_store.backend)
-        crashing = EventJournalStore(backend=cast("Any", backend)).principal(bot._journal_principal_id)
+        crashing = EventJournalStore(
+            backend=cast("Any", backend),
+            approval_signals=bot._journal_store.approval_signals,
+        ).principal(bot._journal_principal_id)
         sends: list[str] = []
         model_runs = 0
 
@@ -628,7 +631,10 @@ class TestTheHandoffIsOneCommit:
             return f"$sent-{claimed.transaction_id}"
 
         await MatrixDeliveryWorker(
-            store=EventJournalStore(backend=cast("Any", backend)).principal(bot._journal_principal_id),
+            store=EventJournalStore(
+                backend=cast("Any", backend),
+                approval_signals=bot._journal_store.approval_signals,
+            ).principal(bot._journal_principal_id),
             send=send,
             observe_delivered=ignore_delivered_projection,
             handoff=TurnHandoff(

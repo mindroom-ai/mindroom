@@ -702,7 +702,6 @@ async def test_a_replay_lists_the_tool_calls_of_an_attempt_a_superseded_one_took
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         complete_turn=AsyncMock(),
-        hold_conversation=lambda _continuation: None,
         approval_ended=lambda _ended: None,
     )
     await principal.replies.record_tool_call(
@@ -745,7 +744,6 @@ async def test_a_regeneration_lists_only_the_tool_calls_of_its_own_edits_earlier
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         complete_turn=AsyncMock(),
-        hold_conversation=lambda _continuation: None,
         approval_ended=lambda _ended: None,
     )
     lost_regeneration = replace(
@@ -1009,7 +1007,6 @@ async def test_a_stop_still_cancels_its_span_when_waking_its_approval_fails(jour
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         complete_turn=AsyncMock(),
-        hold_conversation=lambda _continuation: None,
         approval_ended=ended.append,
         spans=_Spans(),
     )
@@ -1061,7 +1058,6 @@ async def test_a_departure_cancels_a_span_claimed_before_its_task_registers(jour
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         complete_turn=AsyncMock(),
-        hold_conversation=lambda _continuation: None,
         approval_ended=lambda _ended: None,
     )
     runtime.spans.expect(span.span_id)
@@ -1088,7 +1084,6 @@ async def test_the_bot_cancels_the_spans_deletions_ended_and_a_restart_drops_the
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         complete_turn=AsyncMock(),
-        hold_conversation=lambda _continuation: None,
         approval_ended=lambda _ended: None,
         spans=spans,
     )
@@ -1320,7 +1315,6 @@ async def test_a_resume_behind_an_unresolved_row_of_its_reply_waits_for_it(journ
         generation="gen-2",
         retry_sources=lambda room_id, sources: retried.append((room_id, sources)),
         complete_turn=AsyncMock(),
-        hold_conversation=lambda _continuation: None,
         approval_ended=lambda _ended: None,
     )
     await runtime.take_ownership()
@@ -1403,7 +1397,6 @@ async def test_an_approval_end_reaches_its_conversation_even_when_its_caller_is_
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         complete_turn=AsyncMock(),
-        hold_conversation=lambda _continuation: None,
         approval_ended=ended.append,
     )
     committing = asyncio.Event()

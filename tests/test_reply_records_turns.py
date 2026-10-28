@@ -61,7 +61,7 @@ pytestmark = pytest.mark.asyncio
 async def _streaming_bot(tmp_path: Path) -> AgentBot:
     bot = _bot(tmp_path)
     # Startup makes this bot instance the owner of its replies, so a Stop finds its spans live.
-    await bot._reply_runtime.start()
+    await bot._take_over_replies()
     # Ingress admitted the request, so the journal holds it pending until a reply settles it.
     await bot.journal_principal().admit(
         InboundEvent(
@@ -377,7 +377,7 @@ async def test_a_participation_turn_whose_preparation_fails_leaves_nothing_behin
 
     restarted = _bot(tmp_path)
     unique_room_send_responses(restarted.client)
-    await restarted._reply_runtime.start()
+    await restarted._take_over_replies()
     assert (await restarted._delivery_gateway.recover_deliveries()).complete
     assert _sent_bodies(restarted) == []
 
@@ -1277,7 +1277,7 @@ async def test_a_stop_after_a_restart_cancels_the_reply_the_old_instance_left(tm
 
     restarted = _bot(tmp_path)
     unique_room_send_responses(restarted.client)
-    await restarted._reply_runtime.start()
+    await restarted._take_over_replies()
     try:
         # Its source is still pending, so the reply waits for its replay; no span runs it.
         waiting = await _reply(restarted)
@@ -1317,7 +1317,7 @@ async def _restarted_after_partial(
     await asyncio.wait_for(shown(), timeout=5)
     restarted = _bot(tmp_path)
     unique_room_send_responses(restarted.client)
-    await restarted._reply_runtime.start()
+    await restarted._take_over_replies()
     return restarted, response
 
 
@@ -1583,7 +1583,7 @@ async def test_a_regeneration_rerun_after_a_restart_keeps_what_its_first_attempt
     await asyncio.wait_for(shown(), timeout=5)
     restarted = _bot(tmp_path)
     unique_room_send_responses(restarted.client)
-    await restarted._reply_runtime.start()
+    await restarted._take_over_replies()
     try:
         with pytest.raises(RuntimeError, match="model down"):
             await _answer(
@@ -1624,7 +1624,7 @@ async def test_a_replay_ingress_will_not_answer_ends_the_reply_a_restart_left(tm
 
     restarted = _bot(tmp_path)
     unique_room_send_responses(restarted.client)
-    await restarted._reply_runtime.start()
+    await restarted._take_over_replies()
     try:
         assert (await _reply(restarted)).state is rl.ReplyState.ACTIVE
         # As ingress settles a replay it rejects, such as one whose requester lost access.

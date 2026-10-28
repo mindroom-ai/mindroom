@@ -48,7 +48,7 @@ async def approval(tmp_path: Path) -> AsyncIterator[tuple[AgentBot, ApprovalCont
     # The next instance takes the replies over and recovers the resume the stopped one left.
     restarted = _bot(tmp_path)
     initialize_approval_store_for_test(restarted.runtime_paths, cards=restarted.journal_principal())
-    await restarted._reply_runtime.start()
+    await restarted._take_over_replies()
     left = await restarted.journal_principal().approvals.approval_continuation(continuation.approval_id)
     assert left is not None
     assert left.state == "claimed"

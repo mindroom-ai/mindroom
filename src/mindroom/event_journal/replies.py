@@ -57,8 +57,8 @@ class WakeApproval:
 class ApprovalEnded:
     """After commit: the approval that held this reply ended.
 
-    The claims that waited for it retry, the reply's debt is due, and its
-    conversation stops waiting for it.
+    The claims that waited for it retry and the reply's debt is due; the
+    conversation it held learns of its end from the approval signals.
     """
 
     approval_id: str

@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Literal, cast
 
 from mindroom.tool_approval_grants import EXACT_ARGUMENTS
 
-from . import approval_cards, approval_continuations
+from . import approval_cards, approval_continuations, approval_signals
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -433,6 +433,14 @@ def resolve_call(
             reason=decision_reason,
             metadata=metadata if decision == requested else None,
         )
+    )
+    # Its waiter wakes, and its card's terminal edit is sent, as this commits, whoever decided it.
+    approval_signals.decided(
+        transaction,
+        call,
+        None
+        if card is None
+        else approval_signals.DecidedCard(card.principal_id, card.delivery_id, card_event_id, card.room_id),
     )
     if owner_kind != "reply":
         return approval_cards.RecordedApprovalDecision(

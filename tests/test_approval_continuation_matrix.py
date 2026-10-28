@@ -519,7 +519,7 @@ async def test_dispatch_resumes_a_ready_reply(tmp_path: Path) -> None:
     bot = _new_bot(tmp_path)
     runner = _runner(bot)
     owned = await _paused(bot)
-    await bot._reply_runtime.start()
+    await bot._take_over_replies()
     with (
         _observed(bot) as observer,
         patch.object(runner._approvals, "_execute_claimed_approval", side_effect=await _completed_resume(bot)),
@@ -723,7 +723,7 @@ async def test_resumed_with_refused_final_finishes_its_paused_reply(tmp_path: Pa
     runner = _runner(bot)
     store = _store(bot)
     owned = await _paused(bot)
-    await bot._reply_runtime.start()
+    await bot._take_over_replies()
 
     async def refused(
         claimed: ApprovalContinuation,
@@ -881,7 +881,7 @@ async def test_resumed_advanced_to_a_ready_generation_resumes_it(tmp_path: Path)
     runner = _runner(bot)
     store = _store(bot)
     owned = await _paused(bot)
-    await bot._reply_runtime.start()
+    await bot._take_over_replies()
     answer = await _completed_resume(bot)
     runs = 0
 
@@ -916,7 +916,7 @@ async def test_resumed_leaves_another_paused_reply_of_its_source_alone(tmp_path:
     runner = _runner(bot)
     store = _store(bot)
     owned = await _paused(bot)
-    await bot._reply_runtime.start()
+    await bot._take_over_replies()
     claim = AsyncMock(wraps=runner._approvals._claim_owned_approval)
     read_source = type(store.approvals).approval_continuation_for_source
 
@@ -950,7 +950,7 @@ async def test_resumed_advanced_to_a_waiting_generation_waits(tmp_path: Path) ->
     runner = _runner(bot)
     store = _store(bot)
     owned = await _paused(bot)
-    await bot._reply_runtime.start()
+    await bot._take_over_replies()
 
     async def advance(claimed: ApprovalContinuation, **_kwargs: object) -> object:
         advanced = await _advance(store, claimed, decided=False)

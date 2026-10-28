@@ -277,9 +277,7 @@ class ReplyRuntime:
     retry_sources: Callable[[str, tuple[str, ...]], None]
     # Tells the turn ledger about a turn a reply's settlement already recorded answered.
     complete_turn: Callable[[TurnRecord], Awaitable[object]]
-    # Keeps a pending approval's conversation busy, for the approvals a start finds.
-    hold_conversation: Callable[[ApprovalContinuation], None]
-    # Releases the conversation the ended approval held, and settles what its reply owes.
+    # Settles what the reply of an ended approval owes.
     approval_ended: Callable[[ApprovalEnded], None]
     # The task of each span this bot instance executes, which a Stop cancels.
     spans: SpanRegistry = field(default_factory=SpanRegistry)
@@ -296,7 +294,7 @@ class ReplyRuntime:
         Span cancels run last: the acknowledgement that applies a Stop can run
         in the span's own task, whose next await the cancel interrupts. The
         in-memory effects run even when an awaited one fails, so a failed read
-        cannot keep a stopped span running or a conversation held.
+        cannot keep a stopped span running or a claim waiting.
         """
         try:
             for effect in effects:
@@ -356,7 +354,7 @@ class ReplyRuntime:
         """Run what an ended approval's commit left, returning whether it ended.
 
         Callers run it to completion even when they are cancelled, so a
-        committed end always releases the conversation its approval held.
+        committed end always retries the claims that waited for it and settles what its reply owes.
         """
         effects = await ending
         if effects is None:
@@ -463,9 +461,6 @@ class ReplyRuntime:
         await self.store.replies.take_deletion_endings()
         for applied in await self.store.replies.owner_lost(self.generation, now_ns=time.time_ns()):
             await self.run_effects(applied.post_commit)
-        # A message to a conversation an approval still holds waits for that approval, after a restart too.
-        for continuation in await self.store.approvals.pending_approvals():
-            self.hold_conversation(continuation)
 
     @asynccontextmanager
     async def span_scope(self) -> AsyncIterator[SpanSlot]:

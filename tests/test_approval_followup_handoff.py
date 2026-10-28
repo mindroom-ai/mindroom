@@ -116,7 +116,7 @@ async def _seed_ready_continuation(bot: AgentBot) -> ApprovalContinuation:
     """Pause a reply for a ready continuation, then start the bot that resumes it."""
     continuation = _ready_continuation()
     assert await paused_for_approval(bot.journal_principal(), continuation) == continuation
-    await bot._reply_runtime.start()
+    await bot._take_over_replies()
     return continuation
 
 

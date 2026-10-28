@@ -22,6 +22,7 @@ from mindroom.event_journal.history_recovery import (
 
 from . import (
     approval_continuations,
+    approval_signals,
     interactive_questions,
     journal,
     legacy_turn_records,
@@ -34,6 +35,7 @@ from . import (
     tool_jobs,
     turn_records,
 )
+from .approval_signals import ApprovalSignals
 from .membership_state import claim_active_membership_epoch
 from .models import (
     AdmissionResult,
@@ -160,6 +162,7 @@ class PrincipalStore:
 
     _backend: Backend
     _principal_id: str
+    _approval_signals: ApprovalSignals
 
     async def load_or_create_ingestion_consumer(self, *, new_generation: UUID) -> IngestionConsumer:  # noqa: D102
         return await self._backend.write(lambda tx: _consumer(tx, self._principal_id, new_generation, None))
@@ -1087,7 +1090,11 @@ class PrincipalStore:
         # The approval store writes its pause rows with this module's reply-row writer.
         from .approval_store import ApprovalStore  # noqa: PLC0415
 
-        return ApprovalStore(_backend=self._backend, _principal_id=self._principal_id)
+        return ApprovalStore(
+            _backend=self._backend,
+            _principal_id=self._principal_id,
+            _signals=self._approval_signals,
+        )
 
 
 def _turn_membership_is_current(
@@ -1555,27 +1562,39 @@ class EventJournalStore:
     """The shared backend, which hands out per-principal views."""
 
     backend: Backend
+    # What this store's committed approval writes tell the process; its backend publishes them here.
+    approval_signals: ApprovalSignals
 
     @classmethod
     def open_sqlite(cls, database_path: Path) -> EventJournalStore:
         """Open a single-writer SQLite store."""
         from .sqlite_backend import SqliteBackend  # noqa: PLC0415 - backend chosen at runtime
 
-        return cls(backend=SqliteBackend.open(database_path))
+        signals = ApprovalSignals()
+        return cls(backend=SqliteBackend.open(database_path, publish=signals.publish), approval_signals=signals)
 
     @classmethod
     def open_postgres(cls, database_url: str) -> EventJournalStore:
         """Open a PostgreSQL store."""
         from .postgres_backend import PostgresBackend  # noqa: PLC0415 - keeps psycopg optional
 
-        return cls(backend=PostgresBackend.open(database_url))
+        signals = ApprovalSignals()
+        return cls(backend=PostgresBackend.open(database_url, publish=signals.publish), approval_signals=signals)
 
     def principal(self, principal_id: str) -> PrincipalStore:
         """Return the bound view for one bot."""
         if not principal_id:
             msg = "An event-journal principal requires an identity"
             raise ValueError(msg)
-        return PrincipalStore(_backend=self.backend, _principal_id=principal_id)
+        return PrincipalStore(
+            _backend=self.backend,
+            _principal_id=principal_id,
+            _approval_signals=self.approval_signals,
+        )
+
+    async def load_approval_signals(self) -> None:
+        """Load every principal's paused replies into the approval signals, before any bot follows them."""
+        await self.backend.write(approval_signals.load)
 
     async def approval_continuations(
         self,

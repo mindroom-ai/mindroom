@@ -1864,7 +1864,7 @@ async def test_claimed_approval_generic_interruption_keeps_generic_marker(tmp_pa
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     store = runner.deps.replies.store
-    await bot._reply_runtime.start()
+    await bot._take_over_replies()
     claimed = await store.approvals.approval_continuation(continuation.approval_id)
     assert claimed is not None
     unique_room_send_responses(bot.client)
@@ -2079,7 +2079,7 @@ async def test_final_recovery_error_fences_current_claim(tmp_path: Path, *, canc
         approval_id=f"approval-recovery-error-{cancelled}",
     )
     assert await paused_for_approval(store, continuation) is not None
-    await bot._reply_runtime.start()
+    await bot._take_over_replies()
     failure = asyncio.CancelledError() if cancelled else RuntimeError("Agno continuation failed")
 
     with (
@@ -2395,7 +2395,7 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
         thread_id=target.resolved_thread_id,
     )
     assert await paused_for_approval(runner.deps.replies.store, continuation) is not None
-    await bot._reply_runtime.start()
+    await bot._take_over_replies()
     follow_up_started = asyncio.Event()
     release_follow_up = asyncio.Event()
 
@@ -2618,7 +2618,7 @@ async def test_incomplete_resume_failure_keeps_the_source_unhandled(tmp_path: Pa
         ),
     )
     assert await paused_for_approval(runner.deps.replies.store, continuation) is not None
-    await bot._reply_runtime.start()
+    await bot._take_over_replies()
     incomplete = FinalDeliveryOutcome(
         terminal_status="error",
         event_id="$waiting",
@@ -4588,7 +4588,7 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
         approval_id="approval-final-late-cancel",
     )
     assert await paused_for_approval(store, continuation) is not None
-    await bot._reply_runtime.start()
+    await bot._take_over_replies()
 
     async def acknowledge_then_cancel(claimed: ApprovalContinuation, **_kwargs: object) -> None:
         await freeze_resume_final(store, claimed, text="plain final", payload={"body": "plain final"})

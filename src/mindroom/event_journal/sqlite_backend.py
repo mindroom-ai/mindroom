@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from typing import TextIO
 
-    from .backend import Operation, Row
+    from .backend import Operation, PublishSignals, Row
 
 
 logger = get_logger(__name__)
@@ -52,6 +52,7 @@ class _SqliteTransaction:
     """Statement execution against one open SQLite connection."""
 
     connection: sqlite3.Connection
+    signals: list[object] = field(default_factory=list)
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> None:
         """Run one statement."""
@@ -64,6 +65,10 @@ class _SqliteTransaction:
     def fetchall(self, sql: str, params: Sequence[Any] = ()) -> tuple[Row, ...]:
         """Run one query and return every row."""
         return tuple(self.connection.execute(render(sql, SQLITE_DIALECT), tuple(params)).fetchall())
+
+    def signal(self, value: object) -> None:
+        """Record what this operation's commit tells in-process listeners."""
+        self.signals.append(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,8 +175,8 @@ class SqliteBackend:
     )
 
     @classmethod
-    def open(cls, database_path: Path) -> SqliteBackend:
-        """Create the schema and connect.
+    def open(cls, database_path: Path, *, publish: PublishSignals) -> SqliteBackend:
+        """Create the schema and connect; ``publish`` receives what each committed write signalled.
 
         Synchronous, because a bot builds its collaborators before it has an
         event loop. The writer task is created on the first write instead, so
@@ -185,6 +190,7 @@ class SqliteBackend:
             apply=backend._apply,
             offload=backend._offload,
             task_name=f"event_journal_sqlite_writer_{database_path.name}",
+            publish=publish,
         )
         return backend
 
@@ -246,8 +252,9 @@ class SqliteBackend:
 
     def _apply_one(self, operation: Operation[Any]) -> WriteOutcome:
         self._writer.execute("SAVEPOINT journal_write")
+        transaction = _SqliteTransaction(self._writer)
         try:
-            result = operation(_SqliteTransaction(self._writer))
+            result = operation(transaction)
         except Exception as error:
             if not self._writer.in_transaction:
                 # The error took the whole transaction, and the batch with it.
@@ -256,7 +263,7 @@ class SqliteBackend:
             self._writer.execute("RELEASE journal_write")
             return WriteOutcome(error=error)
         self._writer.execute("RELEASE journal_write")
-        return WriteOutcome(result=result)
+        return WriteOutcome(result=result, signals=tuple(transaction.signals))
 
     async def write[T](self, operation: Operation[T]) -> T:
         """Queue one operation for the writer task and await its commit."""

@@ -66,6 +66,7 @@ from mindroom.event_journal import (
     sqlite_backend,
     turn_records,
 )
+from mindroom.event_journal.approval_signals import ApprovalSignals, PausedReply
 from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
 from mindroom.event_journal.offloading import ThreadOffload, settled
 from mindroom.event_journal.reads import _CONVERSATION_CURSOR_CLAUSE
@@ -388,6 +389,10 @@ class _PausingTransaction:
         self._pause(sql)
         return rows
 
+    def signal(self, value: object) -> None:
+        """Record a signal on the real transaction."""
+        self._inner.signal(value)
+
 
 @dataclass(frozen=True, slots=True)
 class _PausingBackend:
@@ -497,6 +502,10 @@ class _HydrationWriteTransaction:
     def fetchall(self, sql: str, params: Sequence[object] = ()) -> tuple[Mapping[str, object], ...]:
         """Run one query without changing the write profile."""
         return self._inner.fetchall(sql, params)
+
+    def signal(self, value: object) -> None:
+        """Record a signal on the real transaction."""
+        self._inner.signal(value)
 
 
 @dataclass(slots=True)
@@ -3539,6 +3548,7 @@ class TestProjectedInteractivePrompts:
                 pause_after_membership_claim,
                 statement_matches=lambda sql: "INSERT INTO room_membership" in sql,
             ),
+            approval_signals=rival_stores.first.approval_signals,
         ).principal(principal_id)
         refetch = asyncio.create_task(
             racing_refetch.install_refetched_revision(
@@ -4695,7 +4705,9 @@ class TestBoundedHydrationInstallation:
     ) -> None:
         """Putting the complete projection loop back in one write breaks this test."""
         observed = _ObservedHydrationBackend(journal_store.backend)
-        alice = EventJournalStore(backend=observed).principal("agent@alice")
+        alice = EventJournalStore(backend=observed, approval_signals=journal_store.approval_signals).principal(
+            "agent@alice",
+        )
         events = hydration_messages(_EVENTS_SPANNING_TWO_HYDRATION_CHUNKS)
 
         installed = await alice.install_hydrated_conversation(
@@ -4725,7 +4737,9 @@ class TestBoundedHydrationInstallation:
     ) -> None:
         """Skipping the final write when there are no chunks breaks this test."""
         observed = _ObservedHydrationBackend(journal_store.backend)
-        alice = EventJournalStore(backend=observed).principal("agent@alice")
+        alice = EventJournalStore(backend=observed, approval_signals=journal_store.approval_signals).principal(
+            "agent@alice",
+        )
 
         installed = await alice.install_hydrated_conversation(
             room_id=ROOM,
@@ -4751,7 +4765,9 @@ class TestBoundedHydrationInstallation:
         recovery = await alice.record_room_history_recovery(ROOM)
         assert recovery is not None
         observed = _ObservedHydrationBackend(journal_store.backend)
-        recovering = EventJournalStore(backend=observed).principal("agent@alice")
+        recovering = EventJournalStore(backend=observed, approval_signals=journal_store.approval_signals).principal(
+            "agent@alice",
+        )
         events = hydration_messages(3)
 
         installed = await recovering.install_room_history_recovery_chunk(
@@ -4782,7 +4798,9 @@ class TestBoundedHydrationInstallation:
         assert stale is not None
         assert current is not None
         observed = _ObservedHydrationBackend(journal_store.backend)
-        recovering = EventJournalStore(backend=observed).principal("agent@alice")
+        recovering = EventJournalStore(backend=observed, approval_signals=journal_store.approval_signals).principal(
+            "agent@alice",
+        )
 
         installed = await recovering.install_room_history_recovery_chunk(
             stale,
@@ -4808,7 +4826,9 @@ class TestBoundedHydrationInstallation:
         stale_epoch = await alice.membership_epoch(ROOM)
         await admit_room_membership(alice, ROOM, "leave", source=DepartureSource.LOCAL)
         observed = _ObservedHydrationBackend(journal_store.backend)
-        recovering = EventJournalStore(backend=observed).principal("agent@alice")
+        recovering = EventJournalStore(backend=observed, approval_signals=journal_store.approval_signals).principal(
+            "agent@alice",
+        )
 
         installed = await recovering.install_room_history_recovery_chunk(
             recovery,
@@ -4848,7 +4868,9 @@ class TestBoundedHydrationInstallation:
         assert recovery is not None
         events = hydration_messages(_EVENTS_SPANNING_TWO_HYDRATION_CHUNKS)
         observed = _ObservedHydrationBackend(journal_store.backend)
-        recovering = EventJournalStore(backend=observed).principal("agent@alice")
+        recovering = EventJournalStore(backend=observed, approval_signals=journal_store.approval_signals).principal(
+            "agent@alice",
+        )
         epoch = await recovering.membership_epoch(ROOM)
 
         await self._install_recovery_events(
@@ -4893,7 +4915,9 @@ class TestBoundedHydrationInstallation:
                 raise RuntimeError(msg)
 
         observed = _ObservedHydrationBackend(journal_store.backend, before_write=fail_second_write)
-        recovering = EventJournalStore(backend=observed).principal("agent@alice")
+        recovering = EventJournalStore(backend=observed, approval_signals=journal_store.approval_signals).principal(
+            "agent@alice",
+        )
         epoch = await recovering.membership_epoch(ROOM)
 
         with pytest.raises(RuntimeError, match="injected failure"):
@@ -4937,7 +4961,9 @@ class TestBoundedHydrationInstallation:
         recovery = await alice.record_room_history_recovery(ROOM)
         assert recovery is not None
         observed = _ObservedHydrationBackend(journal_store.backend)
-        recovering = EventJournalStore(backend=observed).principal("agent@alice")
+        recovering = EventJournalStore(backend=observed, approval_signals=journal_store.approval_signals).principal(
+            "agent@alice",
+        )
 
         outcome = await recovering.settle_room_history_recovery(
             recovery,
@@ -4966,7 +4992,9 @@ class TestBoundedHydrationInstallation:
                 await release.wait()
 
         observed = _ObservedHydrationBackend(journal_store.backend, after_write=pause_after_first_write)
-        hydrating = EventJournalStore(backend=observed).principal("agent@alice")
+        hydrating = EventJournalStore(backend=observed, approval_signals=journal_store.approval_signals).principal(
+            "agent@alice",
+        )
         alice = journal_store.principal("agent@alice")
         events = hydration_messages(_EVENTS_SPANNING_TWO_HYDRATION_CHUNKS)
         epoch = await alice.membership_epoch(ROOM)
@@ -5015,7 +5043,9 @@ class TestBoundedHydrationInstallation:
                 await admit_room_membership(alice, ROOM, "leave", source=DepartureSource.LOCAL)
 
         observed = _ObservedHydrationBackend(journal_store.backend, after_write=fence_after_first_write)
-        hydrating = EventJournalStore(backend=observed).principal("agent@alice")
+        hydrating = EventJournalStore(backend=observed, approval_signals=journal_store.approval_signals).principal(
+            "agent@alice",
+        )
         installed = await hydrating.install_hydrated_conversation(
             room_id=ROOM,
             thread_id=None,
@@ -5050,7 +5080,9 @@ class TestBoundedHydrationInstallation:
                 newer_recovery = await alice.record_room_history_recovery(ROOM)
 
         observed = _ObservedHydrationBackend(journal_store.backend, after_write=fence_and_record_new_recovery)
-        recovering = EventJournalStore(backend=observed).principal("agent@alice")
+        recovering = EventJournalStore(backend=observed, approval_signals=journal_store.approval_signals).principal(
+            "agent@alice",
+        )
         events = hydration_messages(_EVENTS_SPANNING_TWO_HYDRATION_CHUNKS)
 
         installed = await recovering.install_room_history_recovery_chunk(
@@ -5270,6 +5302,7 @@ class TestDeliveryRetirementAndEchoAreCrossProcessOrdered:
                 pause_after_claim,
                 statement_matches=lambda sql: "INSERT INTO room_membership" in sql,
             ),
+            approval_signals=rival_stores.first.approval_signals,
         ).principal(principal_id)
         retirement = asyncio.create_task(
             retiring.retire_matrix_delivery(
@@ -5334,6 +5367,7 @@ class TestInteractiveActivationAndDepartureAreCrossProcessOrdered:
                 pause_after_claim,
                 statement_matches=lambda sql: "INSERT INTO room_membership" in sql,
             ),
+            approval_signals=rival_stores.first.approval_signals,
         ).principal(principal_id)
         inbound, projected = message(
             "$question",
@@ -5434,6 +5468,7 @@ class TestAFenceCannotBeSteppedOverByAConcurrentWalk:
                 _PausingBackend(rival_stores.first.backend, hold_the_walk_open),
                 after_the_fence,
             ),
+            approval_signals=rival_stores.first.approval_signals,
         ).principal(principal_id)
         epoch = await reader.membership_epoch(ROOM)
 
@@ -5484,6 +5519,7 @@ class TestRecoveryFinalizesOnlyItsExactObligation:
                 pause_after_recovery_claim,
                 statement_matches=lambda sql: "UPDATE room_history_recovery SET state = state" in sql,
             ),
+            approval_signals=rival_stores.first.approval_signals,
         ).principal(principal_id)
         settlement = asyncio.create_task(
             recovering.settle_room_history_recovery(
@@ -5555,6 +5591,7 @@ class TestOutbox:
                 pause_discovery,
                 statement_matches=lambda sql: "SELECT index_event_id, record_json FROM turn_records" in sql,
             ),
+            approval_signals=rival_stores.second.approval_signals,
         ).principal("agent@alice")
         terminal = TerminalTurnWrite(
             agent_name="general",
@@ -5662,6 +5699,7 @@ class TestOutbox:
                     pause_writer,
                     statement_matches=claims,
                 ),
+                approval_signals=rival_stores.first.approval_signals,
             ),
             agent_name="general",
         )
@@ -5671,6 +5709,7 @@ class TestOutbox:
                 pause_ack,
                 statement_matches=claims,
             ),
+            approval_signals=rival_stores.second.approval_signals,
         ).principal("agent@alice")
         echo = asyncio.create_task(
             writer_store.record_pending_turn(
@@ -5761,6 +5800,7 @@ class TestOutbox:
         store = await _store(
             EventJournalStore(
                 backend=_PausingBackend(rival_stores.first.backend, pause_writer, statement_matches=claims),
+                approval_signals=rival_stores.first.approval_signals,
             ),
             agent_name="general",
         )
@@ -5809,6 +5849,7 @@ class TestOutbox:
         assert later not in frozen_record.revision_replay
         ack_principal = EventJournalStore(
             backend=_PausingBackend(rival_stores.second.backend, pause_ack, statement_matches=claims),
+            approval_signals=rival_stores.second.approval_signals,
         ).principal("agent@alice")
 
         pause_enabled = True
@@ -5906,6 +5947,7 @@ class TestOutbox:
                 pause,
                 statement_matches=lambda sql: "UPDATE turn_records SET record_json = record_json" in sql,
             ),
+            approval_signals=rival_stores.first.approval_signals,
         ).turn_records("general")
         echo = asyncio.create_task(
             writer.upsert(
@@ -6063,7 +6105,10 @@ class TestOutbox:
         reached_first_statement = threading.Event()
 
         def contend(store: EventJournalStore, hook: Callable[[], object]) -> Awaitable[MatrixDelivery | None]:
-            paused = EventJournalStore(backend=_PausingBackend(store.backend, hook))
+            paused = EventJournalStore(
+                backend=_PausingBackend(store.backend, hook),
+                approval_signals=store.approval_signals,
+            )
             return paused.principal(principal).claim_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
 
         claims = await asyncio.gather(
@@ -6917,6 +6962,7 @@ class TestApprovalContinuations:
                     else "UPDATE journal_events" in sql and "NOT EXISTS" in sql
                 ),
             ),
+            approval_signals=rival_stores.first.approval_signals,
         ).principal("agent@alice")
         racing = rival_stores.second.principal("agent@alice")
 
@@ -7214,7 +7260,8 @@ class TestApprovalContinuations:
         [paged] = [continuation for _principal, continuation in await journal_store.approval_continuations()]
         assert [
             (continuation.calls, continuation.earlier_calls)
-            for continuation in (third, *await alice.approvals.pending_approvals(), paged)
+            for continuation in (third, await alice.approvals.approval_continuation("approval-1"), paged)
+            if continuation is not None
         ] == [(latest, (*first.calls, *second.calls))] * 3
 
     async def test_automatically_decided_chained_generation_stays_fenced_until_activation(
@@ -7509,6 +7556,7 @@ class TestApprovalContinuations:
                 pause_after_continuation_read,
                 statement_matches=lambda sql: "SELECT" in sql and "FROM approval_continuations" in sql,
             ),
+            approval_signals=rival_stores.first.approval_signals,
         ).principal("router@shared")
         reservation = asyncio.create_task(
             reserving.approvals.reserve_reply_cards(
@@ -7599,6 +7647,7 @@ class TestApprovalContinuations:
                 pause_after_continuation_read,
                 statement_matches=lambda sql: "AS continuation_principal_id" in sql,
             ),
+            approval_signals=rival_stores.first.approval_signals,
         ).principal("router@shared")
         decision = asyncio.create_task(
             resolve_card_event(
@@ -7674,6 +7723,7 @@ class TestApprovalContinuations:
                     "UPDATE approval_continuations SET state = state WHERE approval_id" in sql
                 ),
             ),
+            approval_signals=rival_stores.first.approval_signals,
         ).principal("router@shared")
         decision = asyncio.create_task(
             resolve_card_event(
@@ -8326,6 +8376,7 @@ class TestApprovalContinuations:
                 pause_after_source_settlement,
                 statement_matches=lambda sql: "UPDATE journal_events" in sql and "event_id =" in sql,
             ),
+            approval_signals=rival_stores.first.approval_signals,
         ).principal("agent@alice")
         finish = asyncio.create_task(finishing.approvals.finish_approval_continuation("approval-1"))
         try:
@@ -8484,6 +8535,7 @@ class TestApprovalContinuations:
                 pause_after_membership_lock,
                 statement_matches=lambda sql: "INSERT INTO room_membership" in sql,
             ),
+            approval_signals=rival_stores.second.approval_signals,
         ).principal("router@alice")
         departure = asyncio.create_task(admit_room_membership(departing, ROOM, "leave", source=DepartureSource.LOCAL))
         try:
@@ -8704,6 +8756,50 @@ class TestApprovalContinuations:
             )
             == ()
         )
+
+    async def test_the_approval_signals_follow_a_paused_reply_from_its_pause_to_its_departure(
+        self,
+        journal_store: EventJournalStore,
+        alice: PrincipalStore,
+    ) -> None:
+        """A pause reports its paused reply as it commits, and the responder's departure reports its end as it commits."""
+        changes: list[object] = []
+        stop = journal_store.approval_signals.follow_paused_replies(
+            alice.principal_id,
+            paused=changes.append,
+            ended=changes.append,
+        )
+        await self.admit_sources(alice)
+        await paused_for_approval(
+            alice,
+            replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
+        )
+        assert changes == [PausedReply(alice.principal_id, "approval-1", ROOM, "$thread")]
+
+        await admit_room_membership(alice, ROOM, "leave", source=DepartureSource.REPORTED)
+
+        assert changes[1:] == ["approval-1"]
+        stop()
+
+    async def test_a_store_loads_the_paused_replies_the_journal_holds(
+        self,
+        journal_database: Callable[[], EventJournalStore],
+    ) -> None:
+        """A store opened over a journal reports the replies paused there once it loads them, as a restart does."""
+        alice = journal_database().principal("agent@alice")
+        await self.admit_sources(alice)
+        await paused_for_approval(alice, self.continuation(state="waiting"))
+        reopened = journal_database()
+        await reopened.load_approval_signals()
+        paused: list[PausedReply] = []
+
+        reopened.approval_signals.follow_paused_replies(
+            "agent@alice",
+            paused=paused.append,
+            ended=lambda _approval_id: None,
+        )
+
+        assert paused == [PausedReply("agent@alice", "approval-1", ROOM, "$thread")]
 
     async def test_room_departure_discards_continuation_and_cards_with_its_sources(
         self,
@@ -9429,7 +9525,7 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
         tmp_path: Path,
     ) -> None:
         """Shared application workers cannot keep a journal connection open at shutdown."""
-        backend = SqliteBackend.open(tmp_path / "dedicated-offload.db")
+        backend = SqliteBackend.open(tmp_path / "dedicated-offload.db", publish=ApprovalSignals().publish)
         await backend.write(lambda transaction: transaction.fetchall("SELECT 1 AS one"))
         await backend.read(lambda transaction: transaction.fetchall("SELECT 1 AS one"))
 
@@ -9460,7 +9556,7 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Cancelling one waiter cannot abandon the backend's connection close."""
-        backend = SqliteBackend.open(tmp_path / "cancelled-close.db")
+        backend = SqliteBackend.open(tmp_path / "cancelled-close.db", publish=ApprovalSignals().publish)
         running = threading.Event()
         release = threading.Event()
         close_started = asyncio.Event()
@@ -9505,7 +9601,7 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
         tmp_path: Path,
     ) -> None:
         """Every close caller waits for the one teardown already in progress."""
-        backend = SqliteBackend.open(tmp_path / "concurrent-close.db")
+        backend = SqliteBackend.open(tmp_path / "concurrent-close.db", publish=ApprovalSignals().publish)
         running = threading.Event()
         release = threading.Event()
 
@@ -9657,7 +9753,7 @@ class TestClosingAnswersEveryWriteItWillNotRun:
         reached them either. Both outcomes are a reload the bot never returns
         from, holding a turn that Matrix has already been told was accepted.
         """
-        backend = SqliteBackend.open(tmp_path / "closing.db")
+        backend = SqliteBackend.open(tmp_path / "closing.db", publish=ApprovalSignals().publish)
         running = threading.Event()
         release = threading.Event()
 
@@ -9712,7 +9808,7 @@ class TestClosingAnswersEveryWriteItWillNotRun:
         never finished. A writer that never ran its first step never enters its
         coroutine at all, so the refusal cannot live there.
         """
-        backend = SqliteBackend.open(tmp_path / "cancelled-writer.db")
+        backend = SqliteBackend.open(tmp_path / "cancelled-writer.db", publish=ApprovalSignals().publish)
         ran = threading.Event()
 
         def operation(_transaction: Transaction) -> str:
@@ -9821,7 +9917,7 @@ class TestTheJournalIsAtLeastAsDurableAsWhatCertifiesIt:
         writes runs inside ``write``, on the writer connection, so a reader
         would pay an fsync it has nothing to flush.
         """
-        backend = SqliteBackend.open(tmp_path / "durable.db")
+        backend = SqliteBackend.open(tmp_path / "durable.db", publish=ApprovalSignals().publish)
         try:
             writer = await backend.write(_synchronous_mode)
             reader = await backend.read(_synchronous_mode)

@@ -397,28 +397,13 @@ async def test_a_message_in_another_conversation_is_answered_while_an_approval_w
         assert await bot.journal_principal().approvals.approval_continuation_for_source("$event") is not None
 
 
-async def test_a_hold_whose_approval_is_gone_does_not_keep_its_conversation_waiting(tmp_path: Path) -> None:
-    """A waiting message rechecks the approvals that hold its conversation, so a hold whose end was lost goes."""
-    async with _approval_bot(tmp_path, requires_human=True) as bot:
-        target = _target()
-        runner = unwrap_extracted_collaborator(bot._response_runner)
-        runner._lifecycle_coordinator.hold_for_approval("approval-gone", target)
-        assert runner.is_held_for_approval(target)
-        with patch("mindroom.approval.continuation_runner._APPROVAL_HOLD_RECHECK_SECONDS", 0.01):
-            await asyncio.wait_for(
-                runner.wait_for_thread_response_idle(target.room_id, target.resolved_thread_id),
-                timeout=5,
-            )
-        assert not runner.is_held_for_approval(target)
-
-
 async def test_a_restart_keeps_the_conversation_of_a_pending_approval_busy(tmp_path: Path) -> None:
     """The bot that takes over holds the conversation of every approval still pending, before it replays anything."""
     async with _approval_bot(tmp_path, requires_human=True) as bot:
         await _respond(bot)
         restarted = _bot(tmp_path)
         assert not restarted._response_runner.is_held_for_approval(_target())
-        await restarted._reply_runtime.start()
+        await restarted._take_over_replies()
         assert restarted._response_runner.is_held_for_approval(_target())
 
 
