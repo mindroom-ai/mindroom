@@ -6138,7 +6138,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.llm"
-depends_on = ["mindroom.redaction"]
+depends_on = ["mindroom.logging_config", "mindroom.redaction"]
 
 [[modules]]
 path = "mindroom.providers.openai"

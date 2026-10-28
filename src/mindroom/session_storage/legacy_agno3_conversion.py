@@ -715,21 +715,16 @@ def _convert_segment(
 
 
 def _use_text_call_ids(messages: Iterable[Message], tools: Iterable[ToolExecution] = ()) -> None:
-    """Keep the decoded messages' and tools' call ids only as text or None, as MindRoom wrote them.
+    """Keep the decoded messages' tool calls only as objects and the tools' call ids only as text or None.
 
-    Worker code can write run data, so a message's tool calls keep only their objects, and a call id of another type
-    becomes None; every reader can then hash and compare the ids.
+    Worker code can write run data, so every reader can then hash and compare the ids; decoding a message already
+    keeps its own call ids as text or None (``Message.from_dict``).
     """
     for message in messages:
         calls = message.tool_calls if isinstance(message.tool_calls, list) else []
-        message.tool_calls = [_with_text_id(call) for call in calls if isinstance(call, dict)]
-        message.tool_call_id = message.tool_call_id if isinstance(message.tool_call_id, str) else None
+        message.tool_calls = [call for call in calls if isinstance(call, dict)]
     for tool in tools:
         tool.tool_call_id = tool.tool_call_id if isinstance(tool.tool_call_id, str) else None
-
-
-def _with_text_id(call: dict[str, Any]) -> dict[str, Any]:
-    return call if isinstance(call.get("id"), str | None) else {**call, "id": None}
 
 
 def _decoded[Value, Record](decode: Callable[[Value], Record], data: Value) -> Record | None:

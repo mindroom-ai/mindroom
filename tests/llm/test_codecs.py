@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.history.message_content import render_message_content
 from mindroom.llm import usage as llm_usage
@@ -176,6 +177,34 @@ def test_message_from_dict_reads_non_persisted_flags_from_model_dump_payloads() 
     message = Message.from_dict(agno("message_model_dump_with_non_persisted_flags"))
 
     assert message.add_to_agent_memory is False
+
+
+@pytest.mark.parametrize("malformed", [7, "", ["call-1"]], ids=["number", "empty", "list"])
+def test_a_message_stored_with_a_malformed_call_id_loads_without_it(malformed: object) -> None:
+    """A call id that is not non-empty text is dropped once, when the row decodes, with a log line; the load goes on.
+
+    Every wire then reads a call id as text or None, and well-formed ids and calls stay as stored.
+    """
+    calls = [
+        {"id": malformed, "type": "function", "function": {"name": "invalid", "arguments": "{}"}},
+        {"id": "call-2", "type": "function", "function": {"name": "valid", "arguments": "{}"}},
+        {"type": "function", "function": {"name": "unnamed", "arguments": "{}"}},
+    ]
+    stored = [
+        {"id": "m.call", "role": "assistant", "tool_calls": calls, "created_at": 1},
+        {"id": "m.bad", "role": "tool", "tool_call_id": malformed, "tool_name": "invalid", "created_at": 1},
+        {"id": "m.good", "role": "tool", "tool_call_id": "call-2", "tool_name": "valid", "created_at": 1},
+    ]
+
+    with capture_logs() as logs:
+        assistant, bad, good = (Message.from_dict(data) for data in stored)
+
+    assert assistant.tool_calls == [{**calls[0], "id": None}, calls[1], calls[2]]
+    assert (bad.tool_call_id, good.tool_call_id) == (None, "call-2")
+    assert [(log["event"], log["message_id"]) for log in logs] == [
+        ("stored_tool_call_id_dropped", "m.call"),
+        ("stored_tool_call_id_dropped", "m.bad"),
+    ]
 
 
 # --- tool executions and requirements --------------------------------------------------------------------------
