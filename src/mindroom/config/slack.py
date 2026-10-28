@@ -93,7 +93,7 @@ def _check_channels(path: str, channels: object) -> None:
 
 
 def _check_agent(config: Config, name: str, agent: AgentConfig) -> None:
-    """Check one agent's `channels` and `room` overrides."""
+    """Check one agent's `channels`, `room` and `write` overrides."""
     overrides = _slack_overrides(agent)
     channels = overrides.get("channels")
     room = overrides.get("room")
@@ -104,6 +104,9 @@ def _check_agent(config: Config, name: str, agent: AgentConfig) -> None:
         return
     if channels is None:
         msg = f"{path}.room needs channels"
+        raise ValueError(msg)
+    if overrides.get("write", True) is not True:
+        msg = f"{path}.room needs write; an answering agent posts its replies to Slack"
         raise ValueError(msg)
     if room not in agent.rooms:
         msg = f"{path}.room must be one of the agent's rooms"

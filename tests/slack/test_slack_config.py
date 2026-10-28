@@ -102,6 +102,25 @@ def test_room_must_be_one_of_the_agents_rooms() -> None:
         _config(agents, **_MAPPING)
 
 
+def test_room_needs_write() -> None:
+    """An answering agent always posts its replies to Slack, so it cannot be read-only."""
+    agents = {"helper": _agent(rooms=["lobby"], channels=["C0123ABCD"], room="lobby", write=False)}
+
+    with pytest.raises(
+        ValidationError,
+        match=r"agents\.helper\.tools\.slack\.room needs write; an answering agent posts its replies to Slack",
+    ):
+        _config(agents, **_MAPPING)
+
+    reader = _config({"helper": _agent(channels=["C0123ABCD"], write=False)}, **_MAPPING)
+    assert slack_answering_agents(reader) == ()
+    answering = _config(
+        {"helper": _agent(rooms=["lobby"], channels=["C0123ABCD"], room="lobby", write=True)},
+        **_MAPPING,
+    )
+    assert [agent.agent for agent in slack_answering_agents(answering)] == ["helper"]
+
+
 def test_a_channel_has_one_answering_agent() -> None:
     """Two agents cannot both answer mentions in one channel, even when they list other channels too."""
     agents = {

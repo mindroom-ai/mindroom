@@ -156,7 +156,7 @@ The `slack` entry of an agent takes these options:
 | --- | --- | --- | --- |
 | `channels` | list of channel IDs | unset | Makes the agent a [project agent](#project-agents) with these channels, such as `C0123ABCD`; leave it out for a personal agent. A channel's ID is at the bottom of its details in Slack. Set it on the agent's own entry, not in `defaults.tools`. |
 | `room` | string | unset | One of the agent's `rooms`, where Slack mentions of the app in its channels start threads. Needs `channels` and the `slack` section above. |
-| `write` | boolean | `true` | When `false`, the agent has no `slack_post` and `slack_react`. Replies to Slack mentions are still posted. |
+| `write` | boolean | `true` | When `false`, the agent has no `slack_post` and `slack_react`. An agent with `room` needs `true`, because it posts its replies to Slack. |
 
 ## Personal Agents
 
@@ -312,5 +312,6 @@ Config errors name the setting:
 | `Answering Slack mentions needs slack.email_domain and slack.matrix_user_id_template` | Add the `slack` section before setting `room`. |
 | `agents.<name>.tools.slack.room needs channels` | `room` is only for project agents. |
 | `agents.<name>.tools.slack.room must be one of the agent's rooms` | Add the room to the agent's `rooms`. |
+| `agents.<name>.tools.slack.room needs write; an answering agent posts its replies to Slack` | Remove `write: false`, or remove `room`. |
 | `agents.<name>.tools.slack.channels: Slack channel IDs look like C0123ABCD` | Use channel IDs, not names. |
 | `Slack channel C0123ABCD is answered by both first and second` | Remove the channel from one agent's `room` setup. |
