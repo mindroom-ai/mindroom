@@ -979,8 +979,8 @@ When the homeserver advertises a handoff page, the app instead sends the Access 
 
 With the steps below in place, the sign-in screen asks for the organization's sign-in first, then shows the usual sign-in options.
 When the Access session ends, the bar at the top asks for that sign-in again.
-These sign-ins run in a private browser session, because Safari's cross-site tracking protection breaks the Access login in one that shares Safari's cookies.
-So the organization's full login comes up twice when adding the account (the organization's sign-in, then the usual one), and once each time the Access session ends.
+The organization's sign-in, and SSO sign-in to the homeserver, run in a private browser session, because Safari's cross-site tracking protection breaks the Access login in one that shares Safari's cookies.
+So with SSO the organization's full login comes up twice when adding the account (the organization's sign-in, then the SSO one), and it comes up once each time the Access session ends.
 An Access session revoked before it expires shows as a lost connection until the token's expiry time.
 Calls need `/.well-known/matrix/client`, which these steps leave behind Access, so calls do not work on iOS for such a homeserver.
 Push notifications for such a homeserver carry no message content and read "New message".
