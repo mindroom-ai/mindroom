@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -366,56 +366,6 @@ def test_configured_docker_worker_manager_receives_validation_snapshot(
     )
 
     assert lease_manager.call_args.kwargs["dedicated_worker_validation_snapshot"] == validation_snapshot
-
-
-def test_configured_docker_worker_lease_hands_over_the_runtime_generated_agents(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Personal and created agents reach the Docker manager from the config the runtime accepted."""
-    runtime_paths = _runtime_paths(tmp_path)
-    generated = {"creator_research": {"display_name": "Research"}}
-    monkeypatch.setattr(Config, "generated_agent_data", lambda _self: generated)
-    monkeypatch.setattr(
-        "mindroom.tool_system.sandbox_proxy.sandbox_proxy_config",
-        lambda _paths: MagicMock(proxy_url="http://worker.test", proxy_token="worker-token"),  # noqa: S106
-    )
-    monkeypatch.setattr(workers_runtime_module, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(workers_runtime_module, "primary_worker_backend_name", lambda _paths: "docker")
-    monkeypatch.setattr(workers_runtime_module, "serialized_dedicated_worker_validation_snapshot", MagicMock())
-    lease_manager = MagicMock(return_value=MagicMock())
-    monkeypatch.setattr(workers_runtime_module, "lease_primary_worker_manager", lease_manager)
-
-    workers_runtime_module.lease_configured_primary_worker_manager(runtime_paths, runtime_config=Config())
-
-    assert lease_manager.call_args.kwargs["generated_agents"] == generated
-
-
-def test_docker_worker_manager_takes_new_generated_agents_without_a_rebuild(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A roster change must not replace the Docker manager, because a replaced manager removes every container."""
-    runtime_paths = _runtime_paths(tmp_path)
-    monkeypatch.setattr(workers_runtime_module, "primary_worker_backend_name", lambda _paths: "docker")
-    monkeypatch.setattr(workers_runtime_module, "docker_backend_config_signature", lambda *_a, **_k: ("docker", "base"))
-    monkeypatch.setattr(workers_runtime_module, "docker_backend_cleanup_signature", lambda *_a, **_k: ("docker",))
-    manager = MagicMock(spec=workers_runtime_module.DockerWorkerBackend)
-    build = MagicMock(return_value=manager)
-    monkeypatch.setattr(workers_runtime_module, "_build_primary_worker_manager", build)
-
-    for generated in ({"one": {}}, {"two": {}}):
-        lease = workers_runtime_module.lease_primary_worker_manager(
-            runtime_paths,
-            proxy_url=None,
-            proxy_token="worker-token",  # noqa: S106
-            generated_agents=generated,
-        )
-        with lease as leased:
-            assert leased is manager
-
-    assert build.call_count == 1
-    assert manager.use_generated_agents.call_args_list == [call({"one": {}}), call({"two": {}})]
 
 
 def test_docker_worker_manager_build_passes_validation_snapshot(

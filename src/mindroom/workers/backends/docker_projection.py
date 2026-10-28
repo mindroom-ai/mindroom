@@ -50,6 +50,15 @@ if TYPE_CHECKING:
     from mindroom.workers.backends.local import LocalWorkerStatePaths
 
 logger = get_logger(__name__)
+# Personal and created agents of the config each runtime last committed, by config path. Only the runtime writes it,
+# because building these agents needs a validated config, and the config file on disk may hold an edit it rejected.
+_COMMITTED_GENERATED_AGENTS: dict[Path, dict[str, dict[str, object]]] = {}
+
+
+def publish_generated_agents(runtime_paths: RuntimePaths, agents: dict[str, dict[str, object]]) -> None:
+    """Give Docker worker configs the personal and created agents of the config the runtime just committed."""
+    _COMMITTED_GENERATED_AGENTS[runtime_paths.config_path.resolve()] = agents
+
 
 _PROJECTED_ASSETS_DIRNAME = ".mindroom-worker-assets"
 _PROJECTED_CONFIGS_DIRNAME = ".mindroom-worker-config-projections"
@@ -265,8 +274,6 @@ class DockerProjectionManager:
         self._runtime_paths = runtime_paths
         self._asset_hash_cache: dict[Path, tuple[str, str]] = {}
         self._config_data_cache: tuple[Path, str | None, dict[str, object], frozenset[Path]] | None = None
-        # Personal and created agents as the runtime's accepted config built them, handed over with each lease.
-        self.generated_agents: dict[str, dict[str, object]] = {}
 
     def config_mount_specs(
         self,
@@ -485,11 +492,11 @@ class DockerProjectionManager:
             msg = f"Failed to add personal agents to the Docker worker config: {exc}"
             raise WorkerBackendError(msg) from exc
         data = cast("dict[str, object]", expansion.data)
-        if not self.generated_agents:
+        generated = _COMMITTED_GENERATED_AGENTS.get(self._runtime_paths.config_path.resolve())
+        if not generated:
             return data
-        # Owners' edits and created agents need a validated config, so they come from the runtime's, not the file.
         authored = cast("dict[str, object]", data.get("agents", {}))
-        return {**data, "agents": {**authored, **copy.deepcopy(self.generated_agents)}}
+        return {**data, "agents": {**authored, **copy.deepcopy(generated)}}
 
     def _asset_contents_hash(self, host_path: Path) -> str:
         resolved_host_path = host_path.expanduser().resolve()

@@ -704,7 +704,7 @@ def test_docker_worker_projection_includes_created_agents_and_edits(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Created agents and owners' edits come from the config the runtime accepted, even once the file is broken."""
+    """Created agents and owners' edits come from the config the runtime committed, even once the file is broken."""
     paths = test_runtime_paths(tmp_path)
     helper = {"display_name": "Helper", "model": "default", "tools": ["shell"], "worker_scope": "shared"}
     config_data = PERSONAL_AGENTS_BASE | {"agents": {"helper": helper | {"created_agents_per_owner": 1}}}
@@ -723,7 +723,10 @@ def test_docker_worker_projection_includes_created_agents_and_edits(
         runtime_paths=paths,
         storage_path=paths.storage_root,
     )
-    backend.use_generated_agents(Config.validate_with_runtime(config_data, paths).generated_agent_data())
+    docker_projection_module.publish_generated_agents(
+        paths,
+        Config.validate_with_runtime(config_data, paths).generated_agent_data(),
+    )
 
     def projected_agents(worker_key: str | None) -> dict[str, dict[str, object]]:
         state = local_worker_state_paths_for_root(tmp_path / "workers" / str(worker_key))
@@ -735,7 +738,7 @@ def test_docker_worker_projection_includes_created_agents_and_edits(
     assert agents["mind_alice_smith"]["display_name"] == "Scout"
     assert list(projected_agents("v1:default:shared:helper_research")) == ["helper_research"]
 
-    # A rejected edit to the file leaves the runtime, and so the workers, on the accepted config.
+    # A rejected edit to the file leaves the runtime, and so the workers, on the committed config.
     config_data["agents"]["broken"] = {"display_name": "Broken", "model": "default", "delegate_to": ["nobody"]}
     (tmp_path / "config.yaml").write_text(yaml.safe_dump(config_data), encoding="utf-8")
     assert list(projected_agents("v1:default:shared:helper_research")) == ["helper_research"]
