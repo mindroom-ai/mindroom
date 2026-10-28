@@ -18,7 +18,6 @@ from mindroom.response_turn import (
     CompletedAttempt,
     TurnRunState,
     TurnSinks,
-    run_blocking_response_turn,
 )
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs.consumption import set_consumption_storage
@@ -29,7 +28,7 @@ from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
-from tests.test_response_turn import _AdapterLog, _blocking_adapter, _continuation, _ctx
+from tests.test_response_turn import _AdapterLog, _collected_turn, _continuation, _ctx, _resolving_adapter
 from tests.test_tool_job_turn_integration import _wait_until_ready
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
@@ -166,7 +165,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
 
         with tool_runtime_context(context):
             interrupted_task = asyncio.create_task(
-                run_blocking_response_turn(
+                _collected_turn(
                     _ctx(
                         entity_label="leader",
                         session_id=context.session_id,
@@ -175,7 +174,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
                         requester_id=owner.requester_id,
                         background_tool_jobs=True,
                     ),
-                    _blocking_adapter(
+                    _resolving_adapter(
                         _AdapterLog(),
                         interrupted_attempt,
                         load_scope=lambda: crash_scope,

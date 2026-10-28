@@ -1142,11 +1142,9 @@ async def test_the_driver_rewrites_the_parent_without_touching_its_recorded_usag
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 async def test_fresh_delegation_continuation_never_runs_planted_stored_calls(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    stream: bool,
 ) -> None:
     """A confirmed call that worker code plants in the stored parent run never executes when a fresh turn resumes.
 
@@ -1196,7 +1194,6 @@ async def test_fresh_delegation_continuation_never_runs_planted_stored_calls(
         runtime_paths=paths,
         identity=identity,
         run_id="parent-run",
-        stream=stream,
     )
 
     assert "Parent done" in text

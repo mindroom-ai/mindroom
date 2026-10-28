@@ -1,4 +1,4 @@
-"""Tests for the worker protocol check shared by the dedicated worker backends."""
+"""Tests for the worker protocol check shared by the worker backends."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION
 
 def _first_check(response: httpx.Response, **kwargs: str) -> WorkerProtocolMismatch | None:
     """Check a ready worker that replaces no other worker."""
-    return ready_worker_protocol_mismatch(response, backend_label="Docker", replacing=False, **kwargs)
+    return ready_worker_protocol_mismatch(response, replacing=False, **kwargs)
 
 
 def test_worker_health_accepts_matching_protocol() -> None:
@@ -26,8 +26,8 @@ def test_worker_health_accepts_matching_protocol() -> None:
         },
     )
 
-    assert _first_check(response, image="mindroom:2026.8.1") is None
-    assert ready_worker_protocol_mismatch(response, backend_label="Docker", image="mindroom", replacing=True) is None
+    assert _first_check(response, worker="Docker worker image 'mindroom:2026.8.1'") is None
+    assert ready_worker_protocol_mismatch(response, worker="Docker worker image 'mindroom'", replacing=True) is None
 
 
 @pytest.mark.parametrize(
@@ -49,7 +49,7 @@ def test_worker_health_rejects_older_or_invalid_protocol(payload: dict[str, obje
     """Missing and stale worker protocols should fail with image guidance."""
     response = httpx.Response(200, json=payload)
 
-    mismatch = _first_check(response, image="mindroom:stale")
+    mismatch = _first_check(response, worker="Docker worker image 'mindroom:stale'")
 
     assert mismatch is not None
     assert not mismatch.worker_is_newer
@@ -68,7 +68,7 @@ def test_worker_health_sends_a_newer_worker_to_the_primary_release() -> None:
 
     mismatch = _first_check(
         response,
-        image="mindroom:latest",
+        worker="Docker worker image 'mindroom:latest'",
         older_worker_hint="older-worker hint",
         newer_worker_hint="newer-worker hint",
     )
@@ -91,7 +91,7 @@ def test_worker_health_appends_the_older_worker_hint_to_an_older_worker() -> Non
 
     mismatch = _first_check(
         response,
-        image="mindroom:latest",
+        worker="Docker worker image 'mindroom:latest'",
         older_worker_hint="older-worker hint",
         newer_worker_hint="newer-worker hint",
     )
@@ -111,7 +111,7 @@ def test_worker_health_appends_the_older_worker_hint_to_an_older_worker() -> Non
 )
 def test_worker_health_rejects_malformed_payload(response: httpx.Response) -> None:
     """Malformed worker health responses should be treated as incompatible."""
-    mismatch = _first_check(response, image="mindroom:malformed")
+    mismatch = _first_check(response, worker="Docker worker image 'mindroom:malformed'")
 
     assert mismatch is not None
     assert "got missing" in mismatch.error
@@ -124,10 +124,10 @@ def test_a_replacement_worker_that_still_mismatches_fails_instead_of_being_repla
 ) -> None:
     """A backend replaces a mismatched worker once; the replacement's mismatch is the error it reports."""
     response = httpx.Response(200, json={"status": "ok", "mindroom_version": "x", "worker_protocol": reported_protocol})
-    first = _first_check(response, image="mindroom:latest")
+    first = _first_check(response, worker="Docker worker image 'mindroom:latest'")
     assert first is not None
 
     with pytest.raises(WorkerBackendError) as exc_info:
-        ready_worker_protocol_mismatch(response, backend_label="Docker", image="mindroom:latest", replacing=True)
+        ready_worker_protocol_mismatch(response, worker="Docker worker image 'mindroom:latest'", replacing=True)
 
     assert str(exc_info.value) == first.error

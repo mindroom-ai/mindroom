@@ -1262,8 +1262,7 @@ class DockerWorkerBackend:
                 if response is not None and 200 <= response.status_code < 300:
                     mismatch = ready_worker_protocol_mismatch(
                         response,
-                        backend_label="Docker",
-                        image=self.config.image,
+                        worker=f"Docker worker image '{self.config.image}'",
                         replacing=replacing,
                     )
                     if mismatch is not None:

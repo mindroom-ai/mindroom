@@ -41,14 +41,14 @@ class WorkerProtocolMismatch:
 def ready_worker_protocol_mismatch(
     response: httpx.Response,
     *,
-    backend_label: str,
-    image: str,
+    worker: str,
     replacing: bool,
     older_worker_hint: str | None = None,
     newer_worker_hint: str | None = None,
 ) -> WorkerProtocolMismatch | None:
     """Return why a ready worker must be replaced, or None when it speaks this runtime's protocol.
 
+    ``worker`` names the worker in the error, such as ``Docker worker image 'mindroom:dev'``.
     A backend replaces a mismatched worker once: a worker started as that replacement raises its mismatch instead.
     ``older_worker_hint`` is appended only when the worker reports an older or no protocol,
     and ``newer_worker_hint`` only when it reports a newer one.
@@ -71,7 +71,7 @@ def ready_worker_protocol_mismatch(
             return None
         newer_worker = reported_protocol > WORKER_PROTOCOL_VERSION
     mismatch = (
-        f"{backend_label} worker image '{image}' is incompatible with this MindRoom runtime: "
+        f"{worker} is incompatible with this MindRoom runtime: "
         f"expected worker protocol {WORKER_PROTOCOL_VERSION}, got {reported_protocol} "
         f"(worker MindRoom version {reported_version})."
     )

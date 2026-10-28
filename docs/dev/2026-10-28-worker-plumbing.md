@@ -30,7 +30,6 @@ A Docker worker's launch hash covers only what that worker sees (its projected c
 Both sides import one set of request and response models that refuse unknown fields, and every request names its worker protocol.
 Before, the runner's own models ignored fields they did not know, so every protocol bump from 2 to 5 had patched one dropped field after another.
 From protocol 6 on, a worker or shared runner refuses a request naming another protocol with both versions, checked before the request's shape because a newer release's request usually carries fields this worker does not know, and an unknown field in a request of the same protocol fails it instead of being dropped.
-The primary does not health-check a shared runner's protocol: every request already names its protocol, so only a runner from before protocol 6 can drop fields, a one-release window the upgrade notes cover.
 
 The runner prepares every route in one step with one workspace rule, chosen after characterization tests showed that every request whose `base_dir` is the calling agent's workspace gets the same answer from all six former resolvers; the rule changes answers only where the former resolvers disagreed with one another.
 An explicit `base_dir` that fails confinement is refused, never replaced by a fallback.

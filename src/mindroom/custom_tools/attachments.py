@@ -529,13 +529,12 @@ class AttachmentTools(Toolkit):
                     runtime_paths=runtime_paths,
                     runtime_config=context.config,
                     worker_target=self._worker_target,
-                    worker_tools_override=self._worker_tools_override,
                     workspace_root=self._tool_output_workspace_root,
                     path=path,
                 )
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 return media_error(str(exc), metadata=metadata)
-            return result or media_error("Worker workspace is unavailable.", metadata=metadata)
+            return result
         return await asyncio.to_thread(
             view_agent_image,
             path,
@@ -705,7 +704,7 @@ class AttachmentTools(Toolkit):
             return validate_output_path(local_policy, output_path)
         return "mindroom_output_path requires an agent workspace in this runtime path."
 
-    async def _save_attachment_to_output_path(  # noqa: C901, PLR0911
+    async def _save_attachment_to_output_path(  # noqa: PLR0911
         self,
         context: ToolRuntimeContext,
         *,
@@ -757,7 +756,6 @@ class AttachmentTools(Toolkit):
                     runtime_paths=runtime_paths,
                     runtime_config=context.config,
                     worker_target=self._worker_target,
-                    worker_tools_override=self._worker_tools_override,
                     workspace_root=self._tool_output_workspace_root,
                     attachment_id=requested_attachment_id,
                     mindroom_output_path=output_path,
@@ -765,12 +763,6 @@ class AttachmentTools(Toolkit):
                 )
             except Exception as exc:
                 return _attachment_tool_payload("error", attachment_id=requested_attachment_id, message=str(exc))
-            if worker_receipt is None:
-                return _attachment_tool_payload(
-                    "error",
-                    attachment_id=requested_attachment_id,
-                    message="Worker output workspace is unavailable for this attachment save.",
-                )
             attachment_payload.update(
                 {
                     "save_path": worker_receipt.worker_path,

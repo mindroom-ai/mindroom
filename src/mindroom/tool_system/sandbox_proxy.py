@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.tool_system.agno_toolkits import Function, Toolkit
     from mindroom.workers.backend import WorkerBackend
+    from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
     from mindroom.workers.runtime import PrimaryWorkerManagerLease
 
 _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
@@ -339,6 +340,10 @@ def _worker_route(
                 account_id=worker_target.account_id,
             )
             worker_handle = worker_manager.ensure_worker(WorkerSpec(worker_key), progress_sink=progress_sink)
+        else:
+            # The shared runner is the only backend that is not dedicated, and an unscoped call reaches it without a
+            # worker handle, so its protocol check happens here.
+            cast("StaticSandboxRunnerBackend", worker_manager).require_compatible_runner()
     else:
         if worker_target is None or execution_identity is None:
             msg = f"Worker-routed tool '{tool_name}.{function_name}' requires execution identity context."
@@ -459,19 +464,12 @@ def save_attachment_to_worker(
     runtime_paths: RuntimePaths,
     runtime_config: Config | None,
     worker_target: ResolvedWorkerTarget | None,
-    worker_tools_override: list[str] | None = None,
     workspace_root: Path | None,
     attachment_id: str,
     mindroom_output_path: str,
     payload_bytes: bytes,
-) -> WorkerAttachmentSaveReceipt | None:
-    """Write attachment bytes into the calling agent's workspace in its worker, or None when no worker serves it."""
-    if not attachment_save_uses_worker(
-        runtime_paths=runtime_paths,
-        worker_tools_override=worker_tools_override,
-    ):
-        return None
-
+) -> WorkerAttachmentSaveReceipt:
+    """Write attachment bytes into the calling agent's workspace in the worker that serves it."""
     byte_limit = inline_attachment_byte_limit(runtime_paths)
     byte_count = len(payload_bytes)
     if byte_count > byte_limit:
@@ -492,9 +490,6 @@ def save_attachment_to_worker(
             worker_manager=worker_manager,
             base_dir=str(workspace_root) if workspace_root is not None else None,
         )
-        if worker_handle is None and proxy_config.proxy_url is None:
-            return None
-
         attachment_fields = _attachment_save_payload_fields(payload_bytes)
         response = post_worker_proxy_request(
             config=_worker_proxy_client_config(proxy_config, runtime_paths),
@@ -538,17 +533,10 @@ def view_file_from_worker(
     runtime_paths: RuntimePaths,
     runtime_config: Config | None,
     worker_target: ResolvedWorkerTarget | None,
-    worker_tools_override: list[str] | None = None,
     workspace_root: Path | None,
     path: str,
-) -> ToolValue | None:
-    """View one file in the selected worker, returning None when no worker endpoint exists."""
-    if not attachment_save_uses_worker(
-        runtime_paths=runtime_paths,
-        worker_tools_override=worker_tools_override,
-    ):
-        return None
-
+) -> ToolValue:
+    """View one file in the selected worker, for agents whose ``attachment_save_uses_worker`` holds."""
     proxy_config = sandbox_proxy_config(runtime_paths)
     with _lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
         route, worker_handle = _worker_route(
@@ -560,9 +548,6 @@ def view_file_from_worker(
             worker_manager=worker_manager,
             base_dir=str(workspace_root) if workspace_root is not None else None,
         )
-        if worker_handle is None and proxy_config.proxy_url is None:
-            return None
-
         if workspace_root is not None:
             # Translate the mount spelling only; resolve and authorize the path inside the worker.
             with suppress(ValueError):

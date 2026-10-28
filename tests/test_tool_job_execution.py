@@ -31,6 +31,7 @@ from mindroom.tool_jobs.consumption import (
     ConsumptionOwner,
     consume_tool_job,
     consumption_context,
+    job_failure,
     set_consumption_storage,
 )
 from mindroom.tool_jobs.control import pending_human_messages_context
@@ -51,7 +52,13 @@ from mindroom.tool_jobs.results import (
     encode_tool_result,
     read_result_payload,
 )
-from mindroom.tool_jobs.runtime import JobAccessError, job_summary, register_background_runtime
+from mindroom.tool_jobs.runtime import (
+    TERMINAL_STATUSES,
+    BackgroundJob,
+    JobAccessError,
+    job_summary,
+    register_background_runtime,
+)
 from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext
@@ -70,6 +77,7 @@ from tests.tool_job_helpers import (
     call_job_tool,
     cancel_settled,
     job_actor,
+    job_owner,
     job_tool,
     lookup,
     pending_outcomes,
@@ -1429,6 +1437,16 @@ async def test_a_managed_call_that_fails_unexpectedly_finishes_its_record_failed
         ]
     finally:
         await runtime.shutdown()
+
+
+@pytest.mark.parametrize("status", sorted(TERMINAL_STATUSES))
+def test_a_read_of_one_job_fails_every_outcome_but_completion_with_its_reason(status: str) -> None:
+    """The call that started a job and a later wait on it share this rule, so neither reads a denial as a success."""
+    job = BackgroundJob("job", job_owner(), tool_name="slow", depth=0, status=status)  # type: ignore[arg-type]
+
+    failure = job_failure(job, "the reason", ToolResultPayload(value="the reason"))
+
+    assert failure == (None if status == "completed" else "the reason")
 
 
 @pytest.mark.asyncio

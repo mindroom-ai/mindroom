@@ -612,8 +612,7 @@ class KubernetesWorkerBackend:
         """Return whether the ready worker speaks another protocol, refusing a replacement that still does."""
         mismatch = ready_worker_protocol_mismatch(
             self._resources.read_worker_health(worker_id, timeout_seconds=self.config.ready_timeout_seconds),
-            backend_label="Kubernetes",
-            image=self.config.image,
+            worker=f"Kubernetes worker image '{self.config.image}'",
             replacing=is_replacement,
             # Under `Always` kubelet resolves the tag on every start, so no node can serve an older cached copy.
             older_worker_hint=None if self.config.image_pull_policy == "Always" else _CACHED_IMAGE_HINT,

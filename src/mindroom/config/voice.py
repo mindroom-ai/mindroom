@@ -116,6 +116,8 @@ class VoiceSTTConfig(SpeechServiceConfig):
 class _VoiceLLMConfig(BaseModel):
     """Configuration for voice transcript normalization."""
 
+    model_config = ConfigDict(extra="forbid")
+
     model: str = Field(
         default="default",
         description="Model for mention normalization and light ASR cleanup",
@@ -125,6 +127,8 @@ class _VoiceLLMConfig(BaseModel):
 
 class VoiceConfig(BaseModel):
     """Configuration for voice message handling."""
+
+    model_config = ConfigDict(extra="forbid")
 
     enabled: bool = Field(default=False, description="Enable voice message processing")
     visible_router_echo: bool = Field(

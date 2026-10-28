@@ -29,7 +29,7 @@ from collections.abc import (
 )
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
@@ -167,6 +167,7 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
 )
 from mindroom.response_sources import ResponseSources
+from mindroom.response_turn import CompletedAttempt
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import _session_state, _write_session_state, ensure_session_row, persist_to
 from mindroom.thread_utils import decide_agent_response
@@ -180,6 +181,8 @@ from mindroom.user_stop_reconciliation import UserStopReconciler
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
 from mindroom.voice.visible_voice_echo import VisibleVoiceEchoLifecycle, _reset_visible_voice_echo_barriers
 from mindroom.workers import runtime as workers_runtime_module
+from mindroom.workers.backends import static_runner as static_runner_module
+from mindroom.workers.compatibility import worker_health_payload
 from tests.fakes.scripted_model import estimate_only_model
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_helpers import make_test_ca_pem
@@ -2517,6 +2520,36 @@ def create_mock_room(
     return room
 
 
+def completing(respond: Callable[..., Awaitable[str]]) -> Callable[..., Awaitable[str]]:
+    """Return an ``ai_response`` stand-in that answers as ``respond`` does and reports its turn completed.
+
+    A blocking caller reads a turn that reports no completed attempt as failed, so a plain stand-in is a failed turn.
+    """
+
+    async def complete(
+        *args: object,
+        on_completed: Callable[[CompletedAttempt], None] | None = None,
+        **kwargs: object,
+    ) -> str:
+        text = await respond(*args, **kwargs)
+        if on_completed is not None:
+            on_completed(CompletedAttempt(replayable_text=text, has_visible_content=bool(text)))
+        return text
+
+    return complete
+
+
+def completed_ai_response_mock(**kwargs: object) -> AsyncMock:
+    """Return an ``AsyncMock`` ``ai_response`` whose turn completes with its ``return_value``."""
+    mock = AsyncMock(**kwargs)
+
+    async def respond(*_args: object, **_kwargs: object) -> str:
+        return mock.return_value
+
+    mock.side_effect = completing(respond)
+    return mock
+
+
 def make_turn_context(
     entity_label: str = "test_agent",
     *,
@@ -3292,6 +3325,20 @@ def _never_download_stock_avatars(monkeypatch: pytest.MonkeyPatch) -> None:
         _refuse_connection(httpx.Request("GET", url))
 
     monkeypatch.setattr(managed_avatars_module, "_download_stock_avatar", offline)
+
+
+@pytest.fixture
+def current_static_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer the static sandbox runner's health probe as a runner of this release, for tests that fake no runner."""
+
+    def current(runner_root: str) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=asdict(worker_health_payload(mindroom_version="test")),
+            request=httpx.Request("GET", f"{runner_root}/healthz"),
+        )
+
+    monkeypatch.setattr(static_runner_module, "_read_runner_health", current)
 
 
 # Captured before any test patches them, so the offline clients below still start from the production ones.

@@ -19,7 +19,6 @@ from mindroom.history.run_visibility import (
     queued_notice_marker,
 )
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import RunStatus
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -38,7 +37,6 @@ __all__ = [
     "bind_mid_turn_conversation_context",
     "discard_empty_completed_run",
     "finalize_queued_notice_response_turn_async",
-    "is_empty_completed_run",
     "queued_message_signal_context",
     "queued_notice_after_tool_batch",
     "queued_notice_on_resume_entry",
@@ -511,13 +509,6 @@ def scrub_queued_notice_session_context(
             session_id=session.session_id,
             session_type=session.kind,
         )
-
-
-def is_empty_completed_run(record: AnyRunRecord) -> bool:
-    """Return whether one run completed with no tool calls and no visible content."""
-    if record.status is not RunStatus.completed or record.tools:
-        return False
-    return not (record.content or "").strip()
 
 
 def discard_empty_completed_run(
