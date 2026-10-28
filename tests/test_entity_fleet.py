@@ -31,6 +31,7 @@ class _Bot:
     leave_error: BaseException | None = None
     stop_error: BaseException | None = None
     running: bool = False
+    client: object | None = None
     deferred_stop_required: bool = False
     pending_response_owner_count: int = 0
     pending_response_phase_counts: dict[str, int] = field(default_factory=dict)
@@ -41,6 +42,7 @@ class _Bot:
         if self.start_errors:
             raise self.start_errors.pop(0)
         self.running = True
+        self.client = object()
 
     async def _quiesce_matrix_ingestion(self) -> None:
         self.order.append(f"quiesce:{self.agent_name}")
@@ -51,6 +53,9 @@ class _Bot:
             raise self.prepare_error
 
     async def leave_rooms(self) -> None:
+        if self.client is None:
+            msg = "Matrix client is not ready for room lifecycle work"
+            raise RuntimeError(msg)
         self.order.append(f"leave:{self.agent_name}")
         if self.leave_error is not None:
             raise self.leave_error
@@ -367,3 +372,20 @@ async def test_removal_ends_replies_only_for_entities_whose_bot_stopped(fake_syn
 
     assert "end_replies:done" in harness.order
     assert set(harness.fleet.bots) == {"stuck"}
+
+
+@pytest.mark.asyncio
+async def test_removing_a_bot_that_never_started_skips_leaving_and_still_removes_it(fake_sync: list[str]) -> None:
+    """A bot held back by an unavailable required MCP server has no client; removing it must not fail the reload."""
+    del fake_sync
+    harness = _Harness(blocked={"held"})
+    harness.add("held")
+    await harness.fleet.start({"held"})
+    await harness.fleet.cancel_retries()
+
+    assert await harness.fleet.remove({"held"}) == set()
+
+    assert "leave:held" not in harness.order
+    assert f"stop:held:{ENTITY_REMOVED_SHUTDOWN}" in harness.order
+    assert "end_replies:held" in harness.order
+    assert not harness.fleet.bots

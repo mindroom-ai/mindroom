@@ -9,7 +9,7 @@ from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import yaml
@@ -866,6 +866,7 @@ def _reload_lifecycle(config_path: Path) -> ConfigReloadLifecycle:
         apply_update_plan=AsyncMock(return_value=False),
         response_admission_gate=ResponseAdmissionGate(),
         before_runtime_replacement=AsyncMock(),
+        rebind_published_config_consumers=MagicMock(),
     )
 
 

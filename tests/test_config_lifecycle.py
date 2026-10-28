@@ -57,6 +57,7 @@ def _make_lifecycle(
         apply_update_plan=AsyncMock(return_value=True),
         response_admission_gate=gate,
         before_runtime_replacement=AsyncMock(),
+        rebind_published_config_consumers=MagicMock(),
     )
 
 

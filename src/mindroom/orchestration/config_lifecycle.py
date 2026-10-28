@@ -132,6 +132,9 @@ class ConfigReloadLifecycle:
     apply_update_plan: Callable[[Config, ConfigUpdatePlan], Awaitable[bool]]
     response_admission_gate: ResponseAdmissionGate
     before_runtime_replacement: Callable[[], Awaitable[None]]
+    # Rebinds runtime consumers of the published API config: a load that changes no effective
+    # config, such as a comment edit, still advances the API generation they are bound to.
+    rebind_published_config_consumers: Callable[[], None]
     # Shared with manual plugin reloads and MCP catalog-change handling so no
     # two publication flows can interleave their read-plan-apply sequences.
     config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -241,6 +244,7 @@ class ConfigReloadLifecycle:
             ):
                 logger.info("Configuration content unchanged; skipping publication")
                 self._record_applied(new_config)
+                self.rebind_published_config_consumers()
                 return False
             repair_config = self._incomplete_config
             if repair_config is None and runtime_effective_config != current_effective_config:

@@ -6,7 +6,7 @@ import asyncio
 import shutil
 from functools import partial
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -58,6 +58,7 @@ def _lifecycle(tmp_path: Path) -> ConfigReloadLifecycle:
         apply_update_plan=AsyncMock(return_value=True),
         response_admission_gate=ResponseAdmissionGate(),
         before_runtime_replacement=AsyncMock(),
+        rebind_published_config_consumers=MagicMock(),
     )
 
 
@@ -102,6 +103,8 @@ async def test_comment_only_edit_is_acknowledged(tmp_path: Path) -> None:
     await lifecycle._apply_queued_config_reload()
     assert lifecycle.status.status == "applied"
     assert lifecycle.status.fingerprint != current.source_fingerprint
+    # The dashboard's generation advanced with the new bytes, so trigger delivery rebinds to it.
+    lifecycle.rebind_published_config_consumers.assert_called_once_with()
 
 
 @pytest.mark.asyncio

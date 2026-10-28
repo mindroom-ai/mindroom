@@ -298,9 +298,13 @@ class EntityFleet:
         unresolved = await self._hooks.reconcile_removed(set(prepared)) if prepared else set()
         if unresolved:
             logger.warning("removed_entities_keep_rooms_for_approval_recovery", entities=sorted(unresolved))
+        # A bot that never started has no Matrix client to leave with; the router's orphan cleanup removes it later.
         leave_results = await _phase(
             cancellations,
-            *(_leave_then_cancel_sync(slot, leave=name not in unresolved) for name, slot in prepared.items()),
+            *(
+                _leave_then_cancel_sync(slot, leave=name not in unresolved and slot.bot.client is not None)
+                for name, slot in prepared.items()
+            ),
         )
         left = _succeeded(prepared, leave_results, failures)
         stop_results = await _phase(cancellations, *(slot.bot.stop(shutdown_intent=intent) for slot in left.values()))

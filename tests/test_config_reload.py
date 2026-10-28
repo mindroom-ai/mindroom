@@ -348,14 +348,6 @@ async def _noop_stop(self: AgentBot, *, shutdown_intent: object | None = None) -
     self.running = False
 
 
-async def _noop_prepare_for_sync_shutdown(self: AgentBot, *, shutdown_intent: object | None = None) -> None:
-    del self, shutdown_intent
-
-
-async def _noop_leave_rooms(self: AgentBot) -> None:
-    del self
-
-
 def _patch_orchestrator_plugin_update_test_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch bot and orchestrator runtime helpers unrelated to plugin teardown."""
     monkeypatch.setattr(
@@ -387,8 +379,6 @@ def _patch_orchestrator_plugin_update_test_runtime(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr("mindroom.bot.TeamBot.start", _noop_start)
     monkeypatch.setattr("mindroom.bot.AgentBot.stop", _noop_stop)
     monkeypatch.setattr("mindroom.bot.TeamBot.stop", _noop_stop)
-    monkeypatch.setattr("mindroom.bot.AgentBot.prepare_for_sync_shutdown", _noop_prepare_for_sync_shutdown)
-    monkeypatch.setattr("mindroom.bot.AgentBot.leave_rooms", _noop_leave_rooms)
 
 
 @pytest.mark.asyncio
