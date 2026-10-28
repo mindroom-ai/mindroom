@@ -62,13 +62,33 @@ def _write_personal_agent_roster(runtime_paths: RuntimePaths, roster: PersonalAg
     write_json_file_durable(personal_agent_roster_path(runtime_paths), payload, strict_atomic_replace=True)
 
 
-def _replace_roster_entry(runtime_paths: RuntimePaths, entry: _RosterEntry, replacement: _RosterEntry | None) -> None:
-    """Write the roster with one entry swapped for its replacement, or removed; the caller holds the lock."""
+def _refuse_unloadable(config: Config, runtime_paths: RuntimePaths, roster: PersonalAgentRoster) -> None:
+    """Refuse a roster the next load would reject, because that load would leave out every generated agent."""
+    try:
+        authored = config.authored_model_dump()
+        config.validate_with_runtime(authored, runtime_paths, tolerate_plugin_load_errors=True, roster=roster)
+    except ValueError as exc:  # Pydantic and runtime validation errors are both ValueErrors.
+        msg = f"The agent would not load with this change, so nothing was stored: {exc}"
+        raise _GeneratedAgentError(msg) from exc
+
+
+def _replace_roster_entry(
+    runtime_paths: RuntimePaths,
+    entry: _RosterEntry,
+    replacement: _RosterEntry | None,
+    config: Config | None = None,
+) -> None:
+    """Write the roster with one entry swapped for its replacement, or removed; the caller holds the lock.
+
+    Given the live config, it first refuses a roster the next load would reject.
+    """
     roster = read_personal_agent_roster_file(runtime_paths)
     field = "created" if isinstance(entry, CreatedAgentEntry) else "entries"
     kept = [replacement if other == entry else other for other in getattr(roster, field)]
-    update = {field: [other for other in kept if other is not None]}
-    _write_personal_agent_roster(runtime_paths, roster.model_copy(update=update))
+    roster = roster.model_copy(update={field: [other for other in kept if other is not None]})
+    if config is not None:
+        _refuse_unloadable(config, runtime_paths, roster)
+    _write_personal_agent_roster(runtime_paths, roster)
 
 
 def _append_personal_agent_roster_entry(runtime_paths: RuntimePaths, entry: PersonalAgentRosterEntry) -> None:
@@ -373,7 +393,7 @@ def update_generated_agent(
             co_owners = [resolve_human_requester_alias(user_id, config, runtime_paths) for user_id in updated.co_owners]
             updated = updated.model_copy(update={"co_owners": co_owners})
             _refuse_owners([updated.owner, *updated.co_owners], runtime_paths)
-        _replace_roster_entry(runtime_paths, entry, updated)
+        _replace_roster_entry(runtime_paths, entry, updated, config)
 
 
 def delete_created_agent(config: Config, runtime_paths: RuntimePaths, *, agent_name: str, requester_id: str) -> None:
@@ -404,6 +424,8 @@ def _reserve_created_agent(config: Config, runtime_paths: RuntimePaths, entry: C
         if name in _taken_agent_names(config, runtime_paths, roster) or _localpart_taken(name, None, runtime_paths):
             msg = f"{name} is taken; choose another name"
             raise _GeneratedAgentError(msg)
+        active = entry.model_copy(update={"pending": False})
+        _refuse_unloadable(config, runtime_paths, roster.model_copy(update={"created": [*roster.created, active]}))
         _write_personal_agent_roster(runtime_paths, roster.model_copy(update={"created": [*roster.created, entry]}))
 
 

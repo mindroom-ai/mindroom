@@ -131,6 +131,7 @@ if TYPE_CHECKING:
     from collections.abc import Collection
 
     from mindroom.agent_policy import ResolvedAgentPolicy
+    from mindroom.config.personal_agents import PersonalAgentRoster
     from mindroom.tool_system.catalog import ToolValidationInfo
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -1216,10 +1217,15 @@ class Config(BaseModel):
         runtime_paths: RuntimePaths,
         *,
         tolerate_plugin_load_errors: bool = False,
+        roster: PersonalAgentRoster | None = None,
     ) -> Config:
-        """Validate config data against one explicit runtime context, adding the agents of the personal agent roster."""
+        """Validate config data against one explicit runtime context, adding the agents of the personal agent roster.
+
+        A candidate `roster` replaces the stored one, and generated agents it makes invalid raise instead of being left out.
+        """
+        candidate = roster is not None
         try:
-            roster = read_personal_agent_roster_file(runtime_paths)
+            roster = read_personal_agent_roster_file(runtime_paths) if roster is None else roster
             expansion = expand_personal_agents(data, roster.entries)
         except ValueError as exc:
             raise ConfigRuntimeValidationError(str(exc)) from exc
@@ -1259,6 +1265,8 @@ class Config(BaseModel):
                     tolerate_plugin_load_errors=tolerate_plugin_load_errors,
                 )
             except (ValidationError, ConfigRuntimeValidationError) as exc:
+                if candidate:
+                    raise
                 # Edits and created agents wait for a fix; the owners keep their agents and loading never breaks.
                 logger.warning("generated_agents_invalid", error=str(exc))
             config._personal_agent_instances = expansion.instances

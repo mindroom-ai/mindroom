@@ -574,6 +574,30 @@ async def test_a_tool_that_cannot_be_deferred_can_be_chosen(tmp_path: Path, tool
         assert tool in [entry.name for entry in reloaded._get_agent_authored_tool_configs(name)]
 
 
+@pytest.mark.asyncio
+async def test_a_change_the_next_load_would_reject_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Such a change would leave out every generated agent at the next load, so it is refused and nothing is stored."""
+    config = _load(tmp_path, created=[_created()])
+    paths = test_runtime_paths(tmp_path)
+    real = generated_agents._generated_agent_data
+
+    def broken_for_some(*args: Any, created: CreatedAgentEntry | None = None) -> tuple[dict[str, Any], list[str]]:  # noqa: ANN401
+        data, dropped = real(*args, created=created)
+        broken = data.get("role") == "Broken" or (created is not None and created.agent_name == "creator_writer")
+        return ({**data, "display_name": 5} if broken else data), dropped
+
+    monkeypatch.setattr(generated_agents, "_generated_agent_data", broken_for_some)
+    with pytest.raises(_GeneratedAgentError, match="would not load"):
+        _update(config, paths, {"role": "Broken"})
+    register = _register()
+    with pytest.raises(_GeneratedAgentError, match="would not load"):
+        await _create(config, paths, register, name="writer")
+    register.assert_not_awaited()
+    assert read_personal_agent_roster_file(paths).created == [_created()]
+    _update(config, paths, {"role": "Fine"})
+    assert read_personal_agent_roster_file(paths).created[0].edits.role == "Fine"
+
+
 def test_update_refuses_fields_that_are_not_editable(tmp_path: Path) -> None:
     """Only the edit fields, plus co_owners on a created agent, change, and only to values of the right type."""
     roster = PersonalAgentRoster(entries=[_personal()], created=[_created()])
