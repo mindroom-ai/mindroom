@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from mindroom import constants
+from mindroom.background_tasks import retry_delay_seconds
 from mindroom.cancellation import (
     SYNC_RESTART_CANCEL_MSG,
     USER_STOP_CANCEL_MSG,
@@ -107,7 +108,6 @@ __all__ = [
     "matrix_ingestion_grace_seconds",
     "matrix_sync_startup_timeout_seconds",
     "request_task_cancel",
-    "retry_delay_seconds",
     "run_with_retry",
     "stop_entities",
     "sync_forever_with_restart",
@@ -209,17 +209,6 @@ def _matrix_homeserver_startup_timeout_seconds_from_env(
         msg = f"{_MATRIX_HOMESERVER_STARTUP_TIMEOUT_ENV} must be 0 or a positive integer"
         raise ValueError(msg)
     return timeout_seconds
-
-
-def retry_delay_seconds(
-    attempt: int,
-    *,
-    initial_delay_seconds: float,
-    max_delay_seconds: float,
-) -> float:
-    """Return capped exponential backoff delay for a retry attempt."""
-    exponent = max(0, attempt - 1)
-    return min(max_delay_seconds, initial_delay_seconds * (2**exponent))
 
 
 def is_permanent_startup_error(exc: Exception) -> bool:
