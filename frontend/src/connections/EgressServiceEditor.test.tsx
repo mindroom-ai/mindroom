@@ -3667,7 +3667,8 @@ describe("the Account choice", () => {
       },
       toolsPreset: { service: { preset: "google_gmail" }, row: toolsRow },
     };
-    type Step = ["preset" | "login" | "website", string];
+    // `pick` clicks a radio of the Account field: "own" for another account, "tools" for the tools' one.
+    type Step = ["preset" | "login" | "website" | "pick", string];
     type End = {
       choice: "own" | "tools" | null;
       button: "Save and sign in" | "Save service";
@@ -3822,6 +3823,51 @@ describe("the Account choice", () => {
         [...toCustom, ["login", "google_gmail"]],
         tools,
       ],
+      // A detour through a login without an account of its own keeps the pick for the next login that has one.
+      [
+        "own preset to OpenAI, then Calendar",
+        "ownPreset",
+        [
+          ["preset", "openai"],
+          ["preset", "google_calendar"],
+        ],
+        own("Save and sign in", true),
+      ],
+      [
+        "own custom to no login, then a Calendar login",
+        "ownCustom",
+        [
+          ["login", ""],
+          ["login", "google_calendar"],
+        ],
+        own("Save and sign in", true),
+      ],
+      [
+        "own preset to a custom service without a login, then a Calendar login",
+        "ownPreset",
+        [...toCustom, ["login", "google_calendar"]],
+        own("Save and sign in", true),
+      ],
+      [
+        "own preset to GitHub, then Drive",
+        "ownPreset",
+        [
+          ["preset", "github"],
+          ["preset", "google_drive"],
+        ],
+        own("Save and sign in", true),
+      ],
+      // A pick holds across logins, like the saved choice does.
+      [
+        "tools' preset, another account picked, to Calendar and back",
+        "toolsPreset",
+        [
+          ["pick", "own"],
+          ["preset", "google_calendar"],
+          ["preset", "google_gmail"],
+        ],
+        own("Save and sign in", false),
+      ],
     ])("%s", async (_, start, steps, end) => {
       const { service, row } = starts[start];
       const { onSave } = await renderEditor({
@@ -3833,6 +3879,12 @@ describe("the Account choice", () => {
       for (const [kind, value] of steps) {
         if (kind === "preset") type("Preset", value);
         else if (kind === "website") type("Website", value);
+        else if (kind === "pick")
+          fireEvent.click(
+            value === "own"
+              ? screen.getByRole("radio", { name: /^Another / })
+              : toolsAccount(),
+          );
         else {
           if (!screen.queryByLabelText("Account login (optional)"))
             openMoreOptions();

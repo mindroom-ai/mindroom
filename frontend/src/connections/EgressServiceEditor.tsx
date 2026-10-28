@@ -340,8 +340,8 @@ export function EgressServiceEditor({
 
   // A new service starts on an account of its own where another service of
   // the agent already uses the tools' one, again each time its login can
-  // change. An edited one has none where its login cannot have one, gets its
-  // saved choice back on its saved login, and keeps the current one otherwise.
+  // change. An edited one has the account last picked, the saved one until
+  // the user picks, wherever its login can have an account of its own.
   const startsOnOwnAccount = (next: EgressServiceForm) => {
     const fresh = { ...next, separateAccount: false };
     const nextPreset = presetOf(presets, next.preset);
@@ -351,30 +351,20 @@ export function EgressServiceEditor({
         .usedBy !== null
     );
   };
-  const savedLogin =
-    editing && service
-      ? serviceLogin(
-          formFromService("", service),
-          presetOf(presets, service.preset ?? ""),
-        )
-      : null;
+  const pickedOwn = useRef(service?.oauth_separate_account === true);
   const set = (changes: Partial<EgressServiceForm>) => {
     setConfirmingSave(false);
     setForm((previous) => {
       const next = { ...previous, ...changes };
       if ("preset" in changes || "oauthProvider" in changes) {
-        const nextPreset = presetOf(presets, next.preset);
-        if (!editing) next.separateAccount = startsOnOwnAccount(next);
-        else if (
-          !offersSeparateAccount(
-            { ...next, separateAccount: false },
-            options,
-            nextPreset,
-          )
-        )
-          next.separateAccount = false;
-        else if (serviceLogin(next, nextPreset) === savedLogin)
-          next.separateAccount = service?.oauth_separate_account === true;
+        next.separateAccount = !editing
+          ? startsOnOwnAccount(next)
+          : pickedOwn.current &&
+            offersSeparateAccount(
+              { ...next, separateAccount: false },
+              options,
+              presetOf(presets, next.preset),
+            );
       }
       return nameLocked || nameTyped || "name" in changes
         ? next
@@ -431,7 +421,10 @@ export function EgressServiceEditor({
         presets,
       )}
       disabled={disabled}
-      onChange={(separateAccount) => set({ separateAccount })}
+      onChange={(separateAccount) => {
+        pickedOwn.current = separateAccount;
+        set({ separateAccount });
+      }}
     />
   );
   // Shown beside the preset, since it is the preset that brings these variables.
