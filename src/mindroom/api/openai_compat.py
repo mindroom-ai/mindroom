@@ -60,6 +60,7 @@ from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.budgets.monitor import budget_model
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
+from mindroom.error_handling import needs_provider_key
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import ScopeSessionContext, load_bound_scope_session
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access_async
@@ -808,6 +809,7 @@ async def _non_stream_completion(
     """Handle non-streaming chat completion: the streamed turn, collected into one answer."""
     run_metadata: dict[str, Any] = {}
     completed: list[CompletedAttempt] = []
+    failures: list[Exception] = []
     response_text = await ai_response(
         _openai_turn_context(
             agent_name,
@@ -827,10 +829,12 @@ async def _non_stream_completion(
         execution_identity=execution_identity,
         refresh_scheduler=refresh_scheduler,
         on_completed=completed.append,
+        on_failed=failures.append,
     )
 
-    # A failed turn completes no attempt, also when it failed after part of its answer, which its text then holds.
-    if not completed:
+    # A failed turn completes no attempt, also when it failed after part of its answer, which its text then holds. One
+    # that failed for want of a provider key answers with its reply, the setup guidance the user has to read.
+    if not completed and not any(needs_provider_key(error) for error in failures):
         logger.warning("AI response returned error", model=agent_name, session_id=session_id, error=response_text)
         return error_response(500, "Agent execution failed", error_type="server_error")
 

@@ -352,11 +352,16 @@ class ResponseTurnContext:
 
 @dataclass(frozen=True)
 class TurnSinks:
-    """Mutable turn outputs owned by the caller and updated by the drivers."""
+    """Mutable turn outputs owned by the caller and updated by the driver.
+
+    ``on_completed`` receives the attempt that completes the turn; ``on_failed`` the error of a turn that ended with
+    the failure's message instead.
+    """
 
     turn_recorder: TurnRecorder | None = None
     run_metadata_collector: dict[str, Any] | None = None
     on_completed: Callable[[CompletedAttempt], None] | None = None
+    on_failed: Callable[[Exception], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -630,9 +635,10 @@ def _paused_attempt_from_pause(
 
 @dataclass(frozen=True)
 class HandledAttempt:
-    """One streaming error whose user-facing text was already emitted."""
+    """One failed attempt whose user-facing text was already emitted, and the error that text reports."""
 
     metadata_content: dict[str, Any] | None = None
+    error: Exception | None = None
 
 
 @dataclass(frozen=True)
@@ -1130,6 +1136,8 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                     raise ResponsePausedForApproval(replace(resolution, continuation_count=continuation_count))
                 if isinstance(resolution, HandledAttempt):
                     _publish_run_metadata(sinks, resolution.metadata_content)
+                    if resolution.error is not None and sinks.on_failed is not None:
+                        sinks.on_failed(resolution.error)
                     _record_turn_excluded_fallback(
                         ctx,
                         adapter,
@@ -1178,4 +1186,6 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     except Exception as e:
         failure_text = _failed_turn_text(ctx, adapter, sinks, run, e)
         if failure_text is not None:
+            if sinks.on_failed is not None:
+                sinks.on_failed(e)
             yield adapter.make_text_chunk(failure_text)

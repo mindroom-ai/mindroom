@@ -65,7 +65,7 @@ from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.search import AgentKnowledge
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
-from mindroom.llm.errors import ProviderError
+from mindroom.llm.errors import MISSING_API_KEY, AuthenticationFailed, ProviderError
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelIdentity, ModelRequest, StreamEvent, TextDelta, TurnCompleted
@@ -1375,6 +1375,58 @@ class TestChatCompletions:
         )
         assert content.startswith("Checking.")
         assert "provider connection lost" in content
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_a_completion_without_a_provider_key_answers_with_the_setup_guidance(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        stream: bool,
+    ) -> None:
+        """A turn that fails for want of a provider key answers with how to set one up, in either mode.
+
+        That reply is what the user has to read, so a blocking completion sends it as its answer, not a bare error.
+        """
+        config = Config(
+            agents={"general": AgentConfig(display_name="GeneralAgent", role="General-purpose assistant", rooms=[])},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        )
+        runtime_paths = resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "data",
+            process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
+        )
+        app = FastAPI()
+        app.include_router(openai_compat.router)
+        initialize_api_app(app, runtime_paths)
+
+        async def no_key() -> None:
+            msg = "no API key"
+            raise AuthenticationFailed(msg, provider="openai", status_code=401, code=MISSING_API_KEY)
+
+        install_model_providers(monkeypatch, {"default": ScriptedModel([[Await(no_key)]])})
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
+            patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+            TestClient(app, base_url="http://localhost") as client,
+        ):
+            response = client.post(
+                "/v1/chat/completions",
+                json={"model": "general", "messages": [{"role": "user", "content": "Hi"}], "stream": stream},
+            )
+
+        assert response.status_code == 200
+        if stream:
+            content = "".join(
+                chunk["choices"][0]["delta"].get("content", "")
+                for line in response.text.splitlines()
+                if line.startswith("data: {") and (chunk := json.loads(line.removeprefix("data: ")))
+            )
+        else:
+            content = response.json()["choices"][0]["message"]["content"]
+        assert "No AI provider key is set up yet" in content
+        assert "Connect your AI provider" in content
 
     def test_openai_execution_identity_ignores_request_user(self) -> None:
         """OpenAI-compatible execution identity should not trust the request-body user."""

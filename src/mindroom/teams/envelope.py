@@ -593,7 +593,9 @@ class _TeamTurn:
         except Exception as error:
             logger.exception("team_response_failed", agents=attempt.members.display_names)
             yield self.error_text(error)
-            yield AttemptResolved(HandledAttempt(metadata_content=self.run_metadata_content(attempt, RunStatus.error)))
+            yield AttemptResolved(
+                HandledAttempt(metadata_content=self.run_metadata_content(attempt, RunStatus.error), error=error),
+            )
             return
         finally:
             # A failed run's deltas never show why it failed. However the team run ended, finished, failed, or stopped,

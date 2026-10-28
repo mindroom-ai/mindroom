@@ -1254,13 +1254,14 @@ async def ai_response(
     supports_native_tool_approval: bool = False,
     reusable_build: AgentBuild | None = None,
     on_completed: Callable[[CompletedAttempt], None] | None = None,
+    on_failed: Callable[[Exception], None] | None = None,
 ) -> str:
     """Generate one agent response and return its text: ``stream_agent_response``'s turn, collected into one body.
 
     Takes the arguments ``stream_agent_response`` documents, without its resume inputs, plus ``tool_trace_collector``,
     an optional list that receives the reply's tool-trace entries. The body is the text a streamed reply shows, a
     failure's message after any partial answer included; ``on_completed`` receives the turn's completed attempt, which
-    a failed turn never reports.
+    a failed turn never reports, and ``on_failed`` the error a failed turn's message reports.
     """
     return await _collect_response_body_with_trace(
         stream_agent_response(
@@ -1290,6 +1291,7 @@ async def ai_response(
             supports_native_tool_approval=supports_native_tool_approval,
             reusable_build=reusable_build,
             on_completed=on_completed,
+            on_failed=on_failed,
         ),
         show_tool_calls=show_tool_calls,
         tool_trace_collector=tool_trace_collector,
@@ -1438,6 +1440,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     resumed_attempt: ResumedAttempt | None = None,
     initial_continuation_count: int = 0,
     on_completed: Callable[[CompletedAttempt], None] | None = None,
+    on_failed: Callable[[Exception], None] | None = None,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate one streaming agent response on the agent loop.
 
@@ -1481,6 +1484,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         resumed_attempt: Restored attempt to settle before preparing a fresh model request.
         initial_continuation_count: Same-turn attempts consumed before the first fresh request.
         on_completed: Optional sink for the terminal typed attempt, independent of display metadata.
+        on_failed: Optional sink for the error of a turn that ended with the failure's message instead.
 
     Yields:
         Streaming chunks/events as they become available
@@ -1541,7 +1545,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 yield AttemptResolved(skipped)
                 return
             yield get_user_friendly_error_message(e, agent_name, runtime_paths=runtime_paths)
-            yield AttemptResolved(HandledAttempt())
+            yield AttemptResolved(HandledAttempt(error=e))
             return
         prepared_run = run_context.prepared_run
         state = _StreamingAttemptState()
@@ -1600,6 +1604,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                             RunStatus.error,
                             run_id=attempt.run_id,
                         ),
+                        error=state.error,
                     ),
                 )
             return
@@ -1684,6 +1689,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             turn_recorder=turn_recorder,
             run_metadata_collector=run_metadata_collector,
             on_completed=on_completed,
+            on_failed=on_failed,
         ),
         resumed_attempt=resumed_attempt,
         initial_continuation_count=initial_continuation_count,

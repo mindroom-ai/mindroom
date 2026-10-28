@@ -144,15 +144,41 @@ def get_user_friendly_error_message(
     return f"{agent_prefix}{_untyped_error_message(error, safe_error, runtime_paths)}"
 
 
+def needs_provider_key(error: Exception) -> bool:
+    """Return whether ``error`` means no AI provider key is set up, which its reply tells the user how to fix.
+
+    That reply is setup guidance the user reads, unlike the other failure replies, which report an error.
+    """
+    if isinstance(error, ProviderError):
+        return _is_missing_key(error)
+    error_str = failure_text(error).lower()
+    if _MISSING_PROVIDER_KEY_PATTERN.search(error_str):
+        return True
+    typed = _payload_error(error, error_str)
+    return typed is not None and _is_missing_key(typed)
+
+
+def _is_missing_key(error: ProviderError) -> bool:
+    return isinstance(error, AuthenticationFailed) and error.code == MISSING_API_KEY
+
+
+def _payload_error(error: Exception, error_str: str) -> ProviderError | None:
+    """Return the typed error the provider payload ``error_str`` holds, or None when it holds none."""
+    if (payload := _structured_provider_error(error_str)) is None:
+        return None
+    error_type, message = payload
+    return classify_provider_error(message, provider=_extract_provider_from_error(error) or "", error_type=error_type)
+
+
 def _authentication_failed(provider: str | None, safe_error: str) -> str:
     provider_hint = f" ({provider})" if provider else ""
     return f"❌ Authentication failed{provider_hint}: {safe_error}"
 
 
 def _provider_error_message(error: ProviderError, safe_error: str, runtime_paths: RuntimePaths | None) -> str:
+    if _is_missing_key(error):
+        return _missing_provider_key_message(runtime_paths)
     if isinstance(error, AuthenticationFailed):
-        if error.code == MISSING_API_KEY:
-            return _missing_provider_key_message(runtime_paths)
         return _authentication_failed(error.provider, safe_error)
     if isinstance(error, ContextWindowExceeded):
         return (
@@ -170,11 +196,9 @@ def _untyped_error_message(error: Exception, safe_error: str, runtime_paths: Run
     error_str = failure_text(error).lower()
     if _MISSING_PROVIDER_KEY_PATTERN.search(error_str):
         return _missing_provider_key_message(runtime_paths)
-    provider = _extract_provider_from_error(error)
-    if (payload := _structured_provider_error(error_str)) is not None:
-        error_type, message = payload
-        typed = classify_provider_error(message, provider=provider or "", error_type=error_type)
+    if (typed := _payload_error(error, error_str)) is not None:
         return _provider_error_message(typed, safe_error, runtime_paths)
+    provider = _extract_provider_from_error(error)
     if _UNAUTHORIZED_WORDING.search(error_str) or is_credential_error(error_str):
         return _authentication_failed(provider, safe_error)
     if _RATE_LIMIT_WORDING.search(error_str):
