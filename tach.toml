@@ -6614,8 +6614,6 @@ from = ["mindroom.private_storage.private_instance_identity"]
 [[interfaces]]
 expose = [
     "AIStreamChunk",
-    "ResponseTurnContext",
-    "build_matrix_run_metadata",
     "ai_response",
     "stream_agent_response",
     "run_delegated_child_response",

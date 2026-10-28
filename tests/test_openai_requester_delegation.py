@@ -34,8 +34,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
     from pathlib import Path
 
-    from mindroom.ai import ResponseTurnContext
     from mindroom.constants import RuntimePaths
+    from mindroom.response_turn import ResponseTurnContext
 
 
 @dataclass

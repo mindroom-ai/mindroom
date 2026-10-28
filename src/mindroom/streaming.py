@@ -164,13 +164,14 @@ def strip_matching_visible_tool_markers(text: str, tool_trace: Sequence[ToolTrac
 class StreamingDeliveryError(Exception):
     """A stream that stopped on a failure, without writing an ending: the reply's span exit writes it.
 
-    ``failure_reason`` is what the reply's hooks report, the error's text unless the failure has a stable name.
+    ``failure_reason`` is what the reply's hooks report and its note shows: the error's text, unless the failure has a
+    name of its own or the error has no text.
     """
 
     def __init__(self, error: BaseException, *, failure_reason: str | None = None) -> None:
         super().__init__(str(error))
         self.error = error
-        self.failure_reason = failure_reason or str(error)
+        self.failure_reason = failure_reason or str(error) or "stream_finalize_error"
 
 
 def _raise_nonterminal_delivery_error(error: Exception) -> NoReturn:

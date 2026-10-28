@@ -26,7 +26,6 @@ from mindroom.ai import (
     _StreamingAttemptState,
     agent_run_metadata_content,
     ai_response,
-    build_matrix_run_metadata,
     stream_agent_response,
 )
 from mindroom.ai_run_metadata import ReplyUsage, build_ai_run_metadata_content
@@ -80,6 +79,7 @@ from mindroom.response_turn import (
     PausedAttempt,
     ResponsePausedForApproval,
     TurnSinks,
+    build_matrix_run_metadata,
     collect_streamed_response_content,
     stream_with_llm_request_log_context,
 )

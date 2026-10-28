@@ -3126,6 +3126,7 @@ class TestStreamingBehavior:
         # The failed edit is the stream's last write: its span exit, not the stream, notes the failure.
         assert terminal_texts == ["hello"]
         assert str(exc_info.value.error) == "Failed to edit streaming message"
+        assert exc_info.value.failure_reason == "Failed to edit streaming message"
 
     @pytest.mark.asyncio
     async def test_send_or_edit_message_commits_frozen_preawait_snapshot(self) -> None:

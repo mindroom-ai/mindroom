@@ -16,7 +16,7 @@ from mindroom.agent_cli.cli_approval_waits import CliApprovalWaits
 from mindroom.agent_modes import resolve_agent_mode
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
-from mindroom.ai import ResponseTurnContext, stream_agent_response
+from mindroom.ai import stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
 from mindroom.ai_runtime import bind_mid_turn_conversation_context
 from mindroom.approval.execution import AgentApprovalExecution
@@ -118,6 +118,7 @@ from mindroom.response_turn import (
     PausedAnswer,
     PausedAttempt,
     ResponsePausedForApproval,
+    ResponseTurnContext,
     TurnSinks,
     collect_streamed_response_content,
 )
@@ -4263,16 +4264,15 @@ class ResponseRunner:
         except Exception as raised:
             if current_task_is_process_shutdown():
                 raise
-            error = raised.error if isinstance(raised, StreamingDeliveryError) else raised
-            self.deps.logger.exception(f"Error in {label.lower()} streaming response", error=str(error))
+            failed = raised if isinstance(raised, StreamingDeliveryError) else StreamingDeliveryError(raised)
+            self.deps.logger.exception(f"Error in {label.lower()} streaming response", error=str(failed.error))
             # A failure before the participation decision stays quiet, wherever the stream failed.
             if skipped := _skip_unapproved_response(participation):
                 return skipped
-            failure_reason = raised.failure_reason if isinstance(raised, StreamingDeliveryError) else str(error)
             # The span's exit notes the failure below what the reply shows.
             return self.deps.delivery_gateway.terminal_outcome_without_visible_event(
                 terminal_status="error",
-                failure_reason=failure_reason,
+                failure_reason=failed.failure_reason,
             )
 
         if participation is not None and participation.is_silent:

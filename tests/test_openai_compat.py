@@ -27,8 +27,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.spec import RunContext
-    from mindroom.ai import ResponseTurnContext
-    from mindroom.response_turn import TurnSinks
+    from mindroom.response_turn import ResponseTurnContext, TurnSinks
     from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers
     from mindroom.tool_system.tool_function import AdaptedToolkit
 

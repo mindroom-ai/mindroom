@@ -212,6 +212,12 @@ async def test_a_refused_flush_before_an_approval_pause_fails_under_its_stable_r
     assert raised.value.failure_reason == "suspension_presentation_delivery_failed"
 
 
+def test_a_stream_failure_without_text_still_names_its_reason() -> None:
+    """The reply's hooks and note get the error's text as the reason, or a fixed name when the error has none."""
+    assert StreamingDeliveryError(RuntimeError("edit refused")).failure_reason == "edit refused"
+    assert StreamingDeliveryError(RuntimeError()).failure_reason == "stream_finalize_error"
+
+
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_clock")
 async def test_lifecycle_suspension_captures_last_committed_presentation(config: Config) -> None:

@@ -67,7 +67,6 @@ import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom import ai as mindroom_ai
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.ai import ResponseTurnContext
 from mindroom.approval.manager import ApprovalActionResult, ApprovalManager, initialize_approval_store
 from mindroom.authorization import _ReplyAuthorizationDecision
 from mindroom.bot import AgentBot, TeamBot
@@ -162,7 +161,7 @@ from mindroom.response_runner import (
     ResponseRunner,
 )
 from mindroom.response_sources import ResponseSources
-from mindroom.response_turn import CompletedAttempt, TurnSinks
+from mindroom.response_turn import CompletedAttempt, ResponseTurnContext, TurnSinks
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import _session_state, _write_session_state, ensure_session_row, persist_to
 from mindroom.thread_utils import decide_agent_response

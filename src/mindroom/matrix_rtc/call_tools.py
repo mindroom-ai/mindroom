@@ -726,8 +726,8 @@ async def _run_authorized_call_agent(
     reconcile_spoken_response: bool = True,
 ) -> CallAgentResponse:
     """Run one admitted call transcript through the normal MindRoom agent."""
-    from mindroom.ai import ResponseTurnContext, ai_response  # noqa: PLC0415 - heavy optional call path
-    from mindroom.response_turn import TurnSinks  # noqa: PLC0415 - heavy optional call path
+    from mindroom.ai import ai_response  # noqa: PLC0415 - heavy optional call path
+    from mindroom.response_turn import ResponseTurnContext, TurnSinks  # noqa: PLC0415 - heavy optional call path
 
     if active_model_name is not None:
         # Spend can cross the cap during a call, so each reply checks the budget again.

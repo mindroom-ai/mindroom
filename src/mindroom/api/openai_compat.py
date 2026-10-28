@@ -26,7 +26,7 @@ from starlette.background import BackgroundTask
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_run_context import prepend_knowledge_availability_notice
-from mindroom.ai import AIStreamChunk, ResponseTurnContext, ai_response, stream_agent_response
+from mindroom.ai import AIStreamChunk, ai_response, stream_agent_response
 from mindroom.api import config_lifecycle
 from mindroom.api.open_access import open_access_rejection
 from mindroom.api.openai_request_parsing import (
@@ -75,6 +75,7 @@ from mindroom.requester_identity import is_human_requester_id, resolve_human_req
 from mindroom.response_activity import ActiveResponseIdentity  # noqa: TC001 - FastAPI evaluates dependency annotations.
 from mindroom.response_turn import (
     CompletedAttempt,
+    ResponseTurnContext,
     TurnSinks,
     build_llm_request_log_context,
     stream_with_llm_request_log_context,
