@@ -251,8 +251,7 @@ def _dispatch(facts: ContinuationFacts) -> Step:  # noqa: PLR0911 - one return p
             # A claimed reply's acknowledged final is its resume's outcome; a failing one's may be its settlement note.
             return Settle(_failure(facts)) if facts.state == "failing" else Finish(finalize=True)
         case _FinalAnswer.REFUSED:
-            # A refusal settles the FINAL, so the settlement ends the paused reply.
-            return Settle(facts.failure or _SHUTDOWN)
+            return _refused(facts)
         case _FinalAnswer.PENDING:
             # Delivery recovery owns the outcome.
             return Wait()
@@ -272,7 +271,7 @@ def _dispatch(facts: ContinuationFacts) -> Step:  # noqa: PLR0911 - one return p
     return Settle(failure) if facts.claim_outcome in _UNANSWERED_RESUME_OUTCOMES else Release(failure)
 
 
-def _resumed(facts: ContinuationFacts, trigger: Resumed) -> Step:
+def _resumed(facts: ContinuationFacts, trigger: Resumed) -> Step:  # noqa: PLR0911 - one return per row of the rules table
     match trigger.ending:
         case "completed":
             # The resume's own lifecycle finalized its answer.
@@ -281,6 +280,8 @@ def _resumed(facts: ContinuationFacts, trigger: Resumed) -> Step:
             assert trigger.failure is not None
             return Settle(trigger.failure)
         case "suspended":
+            if facts.final is _FinalAnswer.REFUSED:
+                return _refused(facts)
             # A queued or delivered final answer leaves nothing to resume.
             advanced = trigger.advanced and facts.state == "ready" and facts.final is _FinalAnswer.NONE
             return Resume() if advanced else Wait()

@@ -139,7 +139,11 @@ DISPATCH_ROWS: list[tuple[str, ContinuationFacts, Step]] = [
     ("answered_while_failing_finalizes", _facts("failing", final=_FinalAnswer.ANSWERED), Finish(finalize=True)),
     ("ended_claim_finalizes", _facts("claimed", final=_FinalAnswer.ENDED), Finish(finalize=True)),
     ("ended_while_failing_settles", _facts("failing", final=_FinalAnswer.ENDED, failure=_STOP), Settle(_STOP)),
-    ("refused_claim_settles_shutdown", _facts("claimed", final=_FinalAnswer.REFUSED), Settle(_SHUTDOWN)),
+    (
+        "refused_claim_settles_with_the_refusal",
+        _facts("claimed", final=_FinalAnswer.REFUSED),
+        Settle(ApprovalFailure(ApprovalFailureKind.ERROR, _REFUSAL)),
+    ),
     ("refused_while_failing_settles", _facts("failing", final=_FinalAnswer.REFUSED, failure=_STOP), Settle(_STOP)),
     ("pending_waits", _facts("claimed", final=_FinalAnswer.PENDING), Wait()),
     ("pending_while_failing_waits", _facts("failing", final=_FinalAnswer.PENDING), Wait()),
@@ -197,10 +201,16 @@ RESUMED_ROWS: list[tuple[str, ContinuationFacts, Resumed, Step]] = [
     ("not_advanced_ready_waits", _facts("ready"), Resumed("suspended"), Wait()),
     ("suspended_with_queued_answer_waits", _facts("claimed", final=_FinalAnswer.PENDING), Resumed("suspended"), Wait()),
     (
-        "suspended_with_refused_answer_waits",
+        "suspended_with_refused_answer_settles_with_the_refusal",
         _facts("claimed", final=_FinalAnswer.REFUSED),
         Resumed("suspended"),
-        Wait(),
+        Settle(ApprovalFailure(ApprovalFailureKind.ERROR, _REFUSAL)),
+    ),
+    (
+        "suspended_with_refused_answer_while_failing_settles",
+        _facts("failing", final=_FinalAnswer.REFUSED, failure=_STOP),
+        Resumed("suspended"),
+        Settle(_STOP),
     ),
     ("raised_settles", _facts("claimed"), Resumed("raised", _ERROR), Settle(_ERROR)),
     (

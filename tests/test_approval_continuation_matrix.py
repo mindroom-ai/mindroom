@@ -63,6 +63,8 @@ _UNAUTHORIZED = "Current authorization no longer permits this tool approval cont
 _CLI_ENDED = "CLI approval response ended before final delivery."
 # The bot instance a restart replaced, which published or claimed the paused reply before it.
 _PREVIOUS = "previous-runtime"
+# Why Matrix refuses a final answer for good.
+_REFUSAL = "matrix event exceeds the hard size limit"
 _STOP = ApprovalFailure(ApprovalFailureKind.USER_STOP)
 _RESTART = ApprovalFailure(ApprovalFailureKind.RESTART)
 _INTERRUPTED = ApprovalFailure(ApprovalFailureKind.INTERRUPTED)
@@ -263,7 +265,7 @@ async def _final(bot: AgentBot, claimed: ApprovalContinuation, final: str) -> No
         await store.record_permanent_matrix_delivery_failure(
             delivery_id="$source",
             stage=DeliveryStage.FINAL,
-            reason="matrix event exceeds the hard size limit",
+            reason=_REFUSAL,
         )
         return
     await store.acknowledge_matrix_delivery(
@@ -415,7 +417,7 @@ DISPATCH_CASES = (
     _DispatchCase(
         "claimed_with_refused_final_finishes",
         lambda bot: _claimed_with_final(bot, "refused"),
-        Outcome(continuation=None, cards=_SHUTDOWN.reason, source_pending=False, reply=ReplyState.FAILED),
+        Outcome(continuation=None, cards=_REFUSAL, source_pending=False, reply=ReplyState.FAILED),
     ),
     _DispatchCase(
         "failing_user_stop_settles_cancelled",
@@ -714,10 +716,13 @@ async def test_resumed_raised_after_its_answer_finalizes_it_again(tmp_path: Path
     )
 
 
-async def test_resumed_with_refused_final_keeps_its_claim(tmp_path: Path) -> None:
-    """A live resume whose answer Matrix refused for good leaves its claim for the next recovery."""
+async def test_resumed_with_refused_final_finishes_its_paused_reply(tmp_path: Path) -> None:
+    """A live resume whose answer Matrix refused for good finishes its paused reply, as every other path does."""
     bot = _new_bot(tmp_path)
+    runner = _runner(bot)
     store = _store(bot)
+    owned = await _paused(bot)
+    await bot._reply_runtime.start()
 
     async def refused(
         claimed: ApprovalContinuation,
@@ -736,9 +741,18 @@ async def test_resumed_with_refused_final_keeps_its_claim(tmp_path: Path) -> Non
             current,
         )
 
-    with _observed(bot) as observer:
-        assert await _resume(bot, refused) is None
-    assert await _outcome(bot, observer) == Outcome(continuation="claimed", finalized=1, reply=ReplyState.FAILED)
+    with (
+        _observed(bot) as observer,
+        patch.object(runner._approvals, "_execute_claimed_approval", side_effect=refused),
+    ):
+        assert await _dispatch(bot, owned) == "$waiting"
+    assert await _outcome(bot, observer) == Outcome(
+        continuation=None,
+        finalized=1,
+        cards=_REFUSAL,
+        source_pending=False,
+        reply=ReplyState.FAILED,
+    )
 
 
 async def _cancelled_resume(
@@ -1184,7 +1198,7 @@ async def test_owner_unavailable_with_final_recovers_it_as_its_entity(tmp_path: 
             True,
             Outcome(
                 continuation=None,
-                cards="matrix event exceeds the hard size limit",
+                cards=_REFUSAL,
                 source_pending=False,
                 reply=ReplyState.FAILED,
             ),
