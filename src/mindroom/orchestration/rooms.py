@@ -173,7 +173,7 @@ class RoomSetup:
             return {}
         return await reconcile_managed_rooms(router.client, self.config_provider(), self.runtime_paths, room_ids)
 
-    async def link_root_space(self, room_ids: dict[str, str] | None = None) -> None:
+    async def link_root_space(self, room_ids: dict[str, str]) -> None:
         """Ensure the optional root Matrix Space exists and link the current managed rooms."""
         router_bot = self.router_bot()
         if router_bot is None:
@@ -184,13 +184,12 @@ class RoomSetup:
         if not config.matrix_space.enabled:
             return
 
-        normalized_room_ids = room_ids if isinstance(room_ids, dict) else {}
         root_space_user_ids = _root_space_user_ids_to_invite(config, self.runtime_paths)
         root_space_id = await ensure_root_space(
             router_bot.client,
             config,
             self.runtime_paths,
-            normalized_room_ids,
+            room_ids,
             admin_user_ids=set(),
         )
         if root_space_id is None:
@@ -271,7 +270,7 @@ class RoomSetup:
                 failure_message=f"Failed to invite {bot_user_id} to room {room_id}",
             )
 
-    async def _ensure_room_invitations(self, snapshots: dict[str, RoomStateSnapshot] | None = None) -> None:
+    async def _ensure_room_invitations(self, snapshots: dict[str, RoomStateSnapshot]) -> None:
         """Ensure all agents and the internal user are invited to their configured rooms.
 
         The router client performs these invitations because it has admin privileges
@@ -304,7 +303,7 @@ class RoomSetup:
             if not managed and internal_user_id is None:
                 continue
 
-            snapshot = (snapshots or {}).get(room_id)
+            snapshot = snapshots.get(room_id)
             current_members = (
                 snapshot.present_user_ids()
                 if snapshot is not None

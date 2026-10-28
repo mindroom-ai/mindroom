@@ -79,7 +79,6 @@ from mindroom.matrix.users import (
 )
 from mindroom.matrix_rtc.call_manager import preload_matrix_call_dependencies
 from mindroom.mcp.manager import MCPServerManager
-from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushService
 from mindroom.private_storage.legacy_private_storage import migrate_private_storage
@@ -880,7 +879,7 @@ class _MultiAgentOrchestrator:
             return
         running_entities = {entity_name for entity_name, bot in self.agent_bots.items() if bot.running}
         for server_id in sorted(manager.failed_server_ids() - manager.failed_required_server_ids()):
-            degraded_entities = config.get_entities_referencing_tools({mcp_tool_name(server_id)}) & running_entities
+            degraded_entities = mcp_dependents(config, {server_id}) & running_entities
             if not degraded_entities:
                 continue
             logger.warning(
@@ -1521,7 +1520,7 @@ class _MultiAgentOrchestrator:
             config = self.config
             if not self.running or config is None:
                 return
-            if not config.get_entities_referencing_tools({mcp_tool_name(server_id)}):
+            if not catalog_change_restarts(config, {server_id}, self.fleet.names):
                 clear_worker_validation_snapshot_cache()
                 return
             await self.config_reload.apply_with_response_admission(

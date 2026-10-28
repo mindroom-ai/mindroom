@@ -101,7 +101,7 @@ class _DueConversation:
     runs: list[RunRecord]
 
 
-def auto_flush_enabled(config: Config) -> bool:
+def _auto_flush_enabled(config: Config) -> bool:
     """Return whether file-memory auto-flush is enabled."""
     return config.memory.auto_flush.enabled and config.uses_file_memory()
 
@@ -335,7 +335,7 @@ async def _extract_memory_summary(
 
 
 @dataclass
-class MemoryAutoFlushWorker:
+class _MemoryAutoFlushWorker:
     """Periodically flush the new finished turns of every file-memory agent and private instance into daily notes."""
 
     runtime_paths: RuntimePaths
@@ -349,7 +349,7 @@ class MemoryAutoFlushWorker:
         while True:
             config = self.config_provider()
             interval = _DISABLED_POLL_SECONDS
-            if config is not None and auto_flush_enabled(config):
+            if config is not None and _auto_flush_enabled(config):
                 try:
                     await self._run_cycle(config)
                 except Exception:
@@ -602,7 +602,7 @@ class MemoryAutoFlushService:
 
     async def sync(self, config: Config) -> None:
         """Start the worker when ``config`` enables auto-flush, and stop it otherwise."""
-        if auto_flush_enabled(config):
+        if _auto_flush_enabled(config):
             self._loop.start()
         else:
             await self.stop()
@@ -614,7 +614,7 @@ class MemoryAutoFlushService:
         await self._loop.stop()
 
     async def _run_worker(self) -> None:
-        worker = MemoryAutoFlushWorker(
+        worker = _MemoryAutoFlushWorker(
             runtime_paths=self.runtime_paths,
             config_provider=self.config_provider,
             redacted_event_ids=self.redacted_event_ids,

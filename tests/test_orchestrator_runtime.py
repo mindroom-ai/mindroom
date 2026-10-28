@@ -2396,7 +2396,7 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestration.rooms.get_room_members", side_effect=mock_get_room_members),
             patch("mindroom.orchestration.rooms.invite_to_room", mock_invite),
         ):
-            await orchestrator._rooms._ensure_room_invitations()
+            await orchestrator._rooms._ensure_room_invitations({})
 
         invited_users_by_room = {(call.args[1], call.args[2]) for call in mock_invite.await_args_list}
         assert invited_users_by_room == {
@@ -2456,7 +2456,7 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestration.rooms.get_room_members", side_effect=mock_get_room_members),
             patch("mindroom.orchestration.rooms.invite_to_room", mock_invite),
         ):
-            await orchestrator._rooms._ensure_room_invitations()
+            await orchestrator._rooms._ensure_room_invitations({})
 
         invited_users_by_room = {(call.args[1], call.args[2]) for call in mock_invite.await_args_list}
         assert invited_users_by_room == {
@@ -2543,7 +2543,7 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestration.rooms.get_room_members", side_effect=mock_get_room_members),
             patch("mindroom.orchestration.rooms.invite_to_room", mock_invite),
         ):
-            await orchestrator._rooms._ensure_room_invitations()
+            await orchestrator._rooms._ensure_room_invitations({})
 
         invited_users_by_room = {(call.args[1], call.args[2]) for call in mock_invite.await_args_list}
         assert invited_users_by_room == {
@@ -2597,7 +2597,7 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestration.rooms.get_room_members", side_effect=mock_get_room_members),
             patch("mindroom.orchestration.rooms.invite_to_room", mock_invite),
         ):
-            await orchestrator._rooms._ensure_room_invitations()
+            await orchestrator._rooms._ensure_room_invitations({})
 
         invited_users_by_room = {(call.args[1], call.args[2]) for call in mock_invite.await_args_list}
         assert invited_users_by_room == {
@@ -2640,7 +2640,7 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestration.rooms.invite_to_room", mock_invite),
             patch("mindroom.orchestration.rooms.configured_bot_user_ids_for_room", return_value=set()),
         ):
-            await orchestrator._rooms._ensure_room_invitations()
+            await orchestrator._rooms._ensure_room_invitations({})
 
         mock_invite.assert_awaited_once_with(router_bot.client, "!room1:localhost", "@alice:localhost")
 
@@ -2680,7 +2680,7 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestration.rooms.get_room_members", side_effect=mock_get_room_members),
             patch("mindroom.orchestration.rooms.invite_to_room", mock_invite),
         ):
-            await orchestrator._rooms._ensure_room_invitations()
+            await orchestrator._rooms._ensure_room_invitations({})
 
         mock_invite.assert_not_called()
 
@@ -2716,7 +2716,7 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestration.rooms.get_room_members", new=AsyncMock()) as mock_get_room_members,
             patch("mindroom.orchestration.rooms.invite_to_room", AsyncMock()) as mock_invite,
         ):
-            await orchestrator._rooms._ensure_room_invitations()
+            await orchestrator._rooms._ensure_room_invitations({})
 
         mock_get_room_members.assert_not_awaited()
         mock_invite.assert_not_awaited()
@@ -2895,7 +2895,6 @@ class TestMultiAgentOrchestrator:
         orchestrator.config = config
         plan = ConfigUpdatePlan(
             new_config=config,
-            changed_mcp_servers=set(),
             restart=set(),
             start=set(),
             remove=set(),
@@ -2939,7 +2938,6 @@ class TestMultiAgentOrchestrator:
         )
         plan = ConfigUpdatePlan(
             new_config=config,
-            changed_mcp_servers=set(),
             restart=set(),
             start=set(),
             remove=set(),
@@ -2969,7 +2967,6 @@ class TestMultiAgentOrchestrator:
         install_bots(orchestrator, {ROUTER_AGENT_NAME: router_bot})
         plan = ConfigUpdatePlan(
             new_config=config,
-            changed_mcp_servers=set(),
             restart=set(),
             start=set(),
             remove=set(),
@@ -4687,7 +4684,6 @@ class TestMultiAgentOrchestrator:
         orchestrator.config = current_config
         plan = ConfigUpdatePlan(
             new_config=new_config,
-            changed_mcp_servers=set(),
             restart=set(),
             start=set(),
             remove=set(),
@@ -4747,7 +4743,6 @@ class TestMultiAgentOrchestrator:
         orchestrator.config = current_config
         plan = ConfigUpdatePlan(
             new_config=new_config,
-            changed_mcp_servers=set(),
             restart=set(),
             start=set(),
             remove=set(),
@@ -4803,7 +4798,6 @@ class TestMultiAgentOrchestrator:
         orchestrator.config = current_config
         plan = ConfigUpdatePlan(
             new_config=new_config,
-            changed_mcp_servers=set(),
             restart=set(),
             start=set(),
             remove=set(),
@@ -4853,7 +4847,6 @@ class TestMultiAgentOrchestrator:
         orchestrator.config = current_config
         plan = ConfigUpdatePlan(
             new_config=new_config,
-            changed_mcp_servers=set(),
             restart=set(),
             start=set(),
             remove=set(),
@@ -5222,7 +5215,6 @@ class TestMultiAgentOrchestrator:
         install_bots(orchestrator, {"general": bot})
         plan = ConfigUpdatePlan(
             new_config=new_config,
-            changed_mcp_servers=frozenset({"demo-server"}),
         )
 
         with (
@@ -5316,7 +5308,6 @@ class TestMultiAgentOrchestrator:
         orchestrator.hook_registry = old_hook_registry
         plan = ConfigUpdatePlan(
             new_config=new_config,
-            changed_mcp_servers={"demo-server"},
             restart=set(),
             start=set(),
             remove=set(),
@@ -5389,7 +5380,6 @@ class TestMultiAgentOrchestrator:
         orchestrator.hook_registry = HookRegistry.empty()
         plan = ConfigUpdatePlan(
             new_config=new_config,
-            changed_mcp_servers=set(),
             restart=set(),
             start=set(),
             remove=set(),

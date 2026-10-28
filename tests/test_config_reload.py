@@ -1732,7 +1732,6 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
 
     plan = ConfigUpdatePlan(
         new_config=new_config,
-        changed_mcp_servers=set(),
         restart=set(),
         start=set(),
         remove=set(),
@@ -1807,6 +1806,8 @@ async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_cha
     orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
     orchestrator.config = config
     orchestrator.running = True
+    # The catalog change restarts only dependents that have a bot.
+    install_bots(orchestrator, {"agent1": MagicMock(spec=AgentBot, running=True)})
     reloaded_config = _runtime_bound_config(
         Config(
             agents={"agent1": AgentConfig(display_name="Agent 1", tools=["mcp_demo"])},

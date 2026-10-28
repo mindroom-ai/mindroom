@@ -244,7 +244,6 @@ class TestSlidingBot(ThreadingBehaviorTestBase):
         monkeypatch.setattr(orchestrator, "refresh_agent_reply_memberships", AsyncMock())
         plan = ConfigUpdatePlan(
             new_config=bot.config,
-            changed_mcp_servers=set(),
             restart=set(),
             start=set(),
             remove=set(),

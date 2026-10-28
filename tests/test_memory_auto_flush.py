@@ -21,7 +21,8 @@ from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics
-from mindroom.memory import MemoryAutoFlushService, MemoryAutoFlushWorker, add_agent_memory, auto_flush
+from mindroom.memory import MemoryAutoFlushService, add_agent_memory, auto_flush
+from mindroom.memory.auto_flush import _MemoryAutoFlushWorker
 from mindroom.memory.functions import append_agent_daily_memory
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -186,8 +187,8 @@ def _worker(
     config: Config,
     clock: _Clock,
     redacted_event_ids: RedactedEventIds = _no_redactions,
-) -> MemoryAutoFlushWorker:
-    return MemoryAutoFlushWorker(
+) -> _MemoryAutoFlushWorker:
+    return _MemoryAutoFlushWorker(
         runtime_paths=runtime_paths_for(config),
         config_provider=lambda: config,
         redacted_event_ids=redacted_event_ids,
@@ -226,7 +227,7 @@ async def _started(
     config: Config,
     clock: _Clock | None = None,
     redacted_event_ids: RedactedEventIds = _no_redactions,
-) -> MemoryAutoFlushWorker:
+) -> _MemoryAutoFlushWorker:
     """Return a worker whose first pass ran at T0, which starts auto-flush, with its clock moved past every seeded turn."""
     clock = _Clock() if clock is None else clock
     worker = _worker(config, clock, redacted_event_ids)
@@ -1180,14 +1181,14 @@ async def test_service_runs_one_worker_while_auto_flush_is_enabled(tmp_path: Pat
         redacted_event_ids=_no_redactions,
     )
     started = asyncio.Event()
-    workers: list[MemoryAutoFlushWorker] = []
+    workers: list[_MemoryAutoFlushWorker] = []
 
-    async def pass_that_never_ends(worker: MemoryAutoFlushWorker) -> None:
+    async def pass_that_never_ends(worker: _MemoryAutoFlushWorker) -> None:
         workers.append(worker)
         started.set()
         await asyncio.Event().wait()
 
-    with patch.object(MemoryAutoFlushWorker, "run", pass_that_never_ends):
+    with patch.object(_MemoryAutoFlushWorker, "run", pass_that_never_ends):
         await service.sync(config)
         await asyncio.wait_for(started.wait(), timeout=5)
         await service.sync(config)

@@ -9,7 +9,7 @@ from mindroom.memory._file_backend import (
 )
 from mindroom.memory._prompting import redact_memory_text, strip_user_turn_time_prefix
 from mindroom.memory._shared import MemoryResult
-from mindroom.memory.auto_flush import MemoryAutoFlushService, MemoryAutoFlushWorker, auto_flush_enabled
+from mindroom.memory.auto_flush import MemoryAutoFlushService
 from mindroom.memory.functions import (
     MemoryPromptParts,
     MemorySearchOutcome,
@@ -28,13 +28,11 @@ from mindroom.memory.functions import (
 __all__ = [
     "ConversationRef",
     "MemoryAutoFlushService",
-    "MemoryAutoFlushWorker",
     "MemoryPromptParts",
     "MemoryResult",
     "MemorySearchOutcome",
     "add_agent_memory",
     "append_agent_daily_memory",
-    "auto_flush_enabled",
     "build_memory_prompt_parts",
     "conversation_entrypoint_preamble",
     "delete_agent_memory",

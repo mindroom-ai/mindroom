@@ -127,7 +127,6 @@ def test_config_update_plan_restarts_only_entities_using_changed_mcp_server(tmp_
         new_config=new_config,
         bots=dict.fromkeys(configured_entity_names(new_config), MagicMock(running=True)),
     )
-    assert plan.changed_mcp_servers == {"demo"}
     assert "code" in plan.restart
     assert "dev_team" in plan.restart
     assert "plain" not in plan.restart
@@ -638,7 +637,6 @@ async def test_reconcile_post_update_rooms_does_not_bind_trigger_runtime(tmp_pat
     orchestrator.config = config
     plan = ConfigUpdatePlan(
         new_config=config,
-        changed_mcp_servers=set(),
         restart={"code"},
         start=set(),
         remove=set(),
@@ -682,7 +680,6 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
     )
     plan = ConfigUpdatePlan(
         new_config=new_config,
-        changed_mcp_servers=set(),
         restart={"code"},
         start=set(),
         remove=set(),

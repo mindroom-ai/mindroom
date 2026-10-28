@@ -131,7 +131,6 @@ class ConfigUpdatePlan:
     reconcile_rooms: frozenset[str] = frozenset()
     live_updated: frozenset[str] = frozenset()
     plugin_changes: tuple[str, ...] = ()
-    changed_mcp_servers: frozenset[str] = frozenset()
     mindroom_user_changed: bool = False
     room_access_changed: bool = False
     matrix_space_changed: bool = False
@@ -534,7 +533,6 @@ def build_config_update_plan(
         ),
         live_updated=frozenset((_entities_with_live_changes(current_config, new_config) & existing_entities) - restart),
         plugin_changes=plugin_changes,
-        changed_mcp_servers=changed_mcp_servers,
         mindroom_user_changed=current_config.mindroom_user != new_config.mindroom_user,
         room_access_changed=current_config.room_defaults != new_config.room_defaults
         or current_config.rooms != new_config.rooms,

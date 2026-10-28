@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import pytest
@@ -16,8 +17,10 @@ from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.knowledge_graph.runtime import KnowledgeGraphRuntime
 from mindroom.memory import MemoryAutoFlushService
 from mindroom.orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.thread_export.workspace_sync import WorkspaceThreadExportDeps, WorkspaceThreadExportRunner
+from tests.conftest import orchestrator_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -85,3 +88,31 @@ async def test_runtime_services_share_the_sync_and_stop_lifecycle(tmp_path: Path
         "budgets",
         "thread_exports",
     ]
+
+
+@dataclass
+class _RecordingService:
+    name: str
+    calls: list[str]
+
+    async def sync(self, config: Config) -> None:
+        del config
+        self.calls.append(f"sync:{self.name}")
+
+    async def stop(self) -> None:
+        self.calls.append(f"stop:{self.name}")
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_syncs_services_in_order_and_stops_them_in_reverse(tmp_path: Path) -> None:
+    """A later service may use an earlier one, so shutdown stops them in the reverse of their sync order."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    names = [service.name for service in orchestrator._services]
+    calls: list[str] = []
+    orchestrator._services = tuple(_RecordingService(name, calls) for name in names)
+
+    await orchestrator._sync_runtime_support_services(Config())
+    await orchestrator.stop()
+
+    assert len(names) == len(set(names)) > 1
+    assert calls == [*(f"sync:{name}" for name in names), *(f"stop:{name}" for name in reversed(names))]
