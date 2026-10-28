@@ -29,7 +29,7 @@ from mindroom.ai import (
     collect_streamed_response_content,
     stream_agent_response,
 )
-from mindroom.ai_run_metadata import _ReplyUsage, build_ai_run_metadata_content
+from mindroom.ai_run_metadata import ReplyUsage, build_ai_run_metadata_content
 from mindroom.bot import AgentBot
 from mindroom.budgets.pricing import PricedModel
 from mindroom.config.agent import AgentConfig
@@ -286,9 +286,14 @@ def _model_runtime_context(
 def test_reply_usage_publishes_its_keys_in_order_with_fractions_as_decimal_strings() -> None:
     """The ``usage`` object lists the counters, then cost and timing, then the uncached input, zero included."""
     counts = TokenCounts(**{name: index for index, name in enumerate(TokenCounts().to_dict(), start=1)})
-    metrics = RunMetrics(tokens=counts, cost=0.5, time_to_first_token=0.25, duration=1 / 3)
 
-    payload = _ReplyUsage.of(metrics, uncached_input_tokens=0).to_wire()
+    payload = ReplyUsage(
+        tokens=counts,
+        cost=0.5,
+        time_to_first_token=0.25,
+        duration=1 / 3,
+        uncached_input_tokens=0,
+    ).to_wire()
 
     assert list(payload.items()) == [
         ("input_tokens", 1),
@@ -305,7 +310,14 @@ def test_reply_usage_publishes_its_keys_in_order_with_fractions_as_decimal_strin
         ("duration", "0.333333333333"),
         ("uncached_input_tokens", 0),
     ]
-    assert _ReplyUsage.of(RunMetrics(), uncached_input_tokens=5).to_wire() == {}
+    nothing_reported = ReplyUsage(
+        tokens=TokenCounts(),
+        cost=None,
+        time_to_first_token=None,
+        duration=None,
+        uncached_input_tokens=5,
+    )
+    assert nothing_reported.to_wire() == {}
 
 
 def test_reply_usage_publishes_a_counter_its_order_omits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -316,8 +328,11 @@ def test_reply_usage_publishes_a_counter_its_order_omits(monkeypatch: pytest.Mon
         tuple(name for name in ai_run_metadata._PUBLISHED_COUNTERS if name != "input_tokens"),
     )
 
-    payload = _ReplyUsage.of(
-        RunMetrics(tokens=TokenCounts(input_tokens=5, output_tokens=2), cost=0.5),
+    payload = ReplyUsage(
+        tokens=TokenCounts(input_tokens=5, output_tokens=2),
+        cost=0.5,
+        time_to_first_token=None,
+        duration=None,
         uncached_input_tokens=None,
     ).to_wire()
 
@@ -326,8 +341,11 @@ def test_reply_usage_publishes_a_counter_its_order_omits(monkeypatch: pytest.Mon
 
 def test_reply_usage_preserves_zero_usage_fields_from_metrics() -> None:
     """Run metrics publish only the counters the provider reported."""
-    payload = _ReplyUsage.of(
-        RunMetrics(tokens=TokenCounts(input_tokens=6, output_tokens=0, cache_read_tokens=46449)),
+    payload = ReplyUsage(
+        tokens=TokenCounts(input_tokens=6, output_tokens=0, cache_read_tokens=46449),
+        cost=None,
+        time_to_first_token=None,
+        duration=None,
         uncached_input_tokens=None,
     ).to_wire()
 
@@ -656,6 +674,24 @@ def test_ai_run_metadata_splits_uncached_input_from_streamed_counters() -> None:
     )
 
     assert metadata[AI_RUN_METADATA_KEY]["usage"]["uncached_input_tokens"] == 266
+
+
+def test_ai_run_metadata_counts_a_configured_vertex_claude_models_cache_writes_as_new_input() -> None:
+    """A model configured as Claude on Vertex AI counts its cache tokens outside its input, whatever its ID says."""
+    metadata = build_ai_run_metadata_content(
+        prices={},
+        config=_metadata_config("vertexai_claude", "custom-sonnet"),
+        model_name="default",
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        model="custom-sonnet",
+        model_provider="VertexAI",
+        tool_count=0,
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=8, cache_read_tokens=100, cache_write_tokens=20)),
+    )
+
+    assert metadata[AI_RUN_METADATA_KEY]["usage"]["uncached_input_tokens"] == 28
 
 
 def test_append_knowledge_availability_notice_rendering() -> None:

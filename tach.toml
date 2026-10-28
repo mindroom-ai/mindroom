@@ -7954,6 +7954,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.delegation.audit"
 depends_on = [
+    "mindroom.ai_run_metadata",
     "mindroom.delegation.records",
     "mindroom.delegation.state",
     "mindroom.llm",
