@@ -274,6 +274,23 @@ class ToolRuntimeContext:
             execution_identity=build_execution_identity_from_runtime_context(self),
         ).worker_target
 
+    def agent_workspace_root(self, *, create: bool = False) -> Path:
+        """Return the workspace of the agent this dispatch runs as, at the primary's path for it.
+
+        A private agent's workspace is its requester's. ``create`` makes the workspace, and a private instance's owner
+        record, when they do not exist yet.
+        """
+        # why-lazy: runtime resolution loads the config and credential modules, which slim tool authoring must not.
+        from mindroom.runtime_resolution import resolve_agent_runtime  # noqa: PLC0415
+
+        return resolve_agent_runtime(
+            self.agent_name,
+            self.config,
+            self.runtime_paths,
+            execution_identity=build_execution_identity_from_runtime_context(self),
+            create=create,
+        ).workspace.root
+
 
 @dataclass(frozen=True)
 class ToolDispatchContext:
@@ -626,12 +643,9 @@ def build_scheduling_runtime_from_tool_runtime_context(context: ToolRuntimeConte
         runtime_paths=context.runtime_paths,
         room=context.room,
         conversation_reader=context.conversation_reader,
-        matrix_admin=context.matrix_admin,
         agent_reply_memberships=context.require_agent_reply_memberships(),
         responder_candidates_for_room=context.responder_candidates_for_current_room,
-        config_provider=lambda: (
-            context.orchestrator.config if context.orchestrator is not None else context.current_config
-        ),
+        task_runtime=context.orchestrator.scheduled_tasks if context.orchestrator is not None else None,
         agent_name=context.agent_name,
     )
 

@@ -1,0 +1,248 @@
+{
+ "scenario": {
+  "actions": [
+   {
+    "op": "reopen"
+   },
+   {
+    "days": 31,
+    "op": "cleanup"
+   },
+   {
+    "op": "reopen"
+   }
+  ],
+  "ids": [
+   "$a1",
+   "$e4",
+   "$m1",
+   "$m2",
+   "$m3",
+   "$m4",
+   "$m5",
+   "$m6",
+   "$m7",
+   "$r1",
+   "$r2",
+   "$r2-db",
+   "$r6",
+   "$thread-a"
+  ],
+  "input": "pre_journal_ledger"
+ },
+ "steps": [
+  {
+   "action": null,
+   "changes": {
+    "is_handled": {
+     "$a1": true,
+     "$m1": true,
+     "$m2": true,
+     "$m3": true,
+     "$m5": true,
+     "$m6": true
+    },
+    "pending_intent": {
+     "$m4": true
+    },
+    "record_for_response": {
+     "$r1": {
+      "anchor": "$m1",
+      "completed": true,
+      "response": "$r1",
+      "sources": [
+       "$m1"
+      ]
+     },
+     "$r2": {
+      "anchor": "$m3",
+      "completed": true,
+      "prompts": {
+       "$m2": "a",
+       "$m3": "b"
+      },
+      "response": "$r2",
+      "sources": [
+       "$m2",
+       "$m3"
+      ]
+     },
+     "$r2-db": {
+      "anchor": "$m3",
+      "completed": true,
+      "response": "$r2-db",
+      "sources": [
+       "$m2",
+       "$m3"
+      ]
+     },
+     "$r6": {
+      "aliases": [
+       "$a1"
+      ],
+      "anchor": "$m6",
+      "completed": true,
+      "response": "$r6",
+      "sources": [
+       "$m6"
+      ]
+     }
+    },
+    "redacted_event_ids": {
+     "a": [
+      "$m5"
+     ],
+     "b": [
+      "$m5"
+     ]
+    },
+    "turn_record": {
+     "$a1": {
+      "aliases": [
+       "$a1"
+      ],
+      "anchor": "$m6",
+      "completed": true,
+      "response": "$r6",
+      "sources": [
+       "$m6"
+      ]
+     },
+     "$m1": {
+      "anchor": "$m1",
+      "completed": true,
+      "response": "$r1",
+      "sources": [
+       "$m1"
+      ]
+     },
+     "$m2": {
+      "anchor": "$m3",
+      "completed": true,
+      "response": "$r2-db",
+      "sources": [
+       "$m2",
+       "$m3"
+      ]
+     },
+     "$m3": {
+      "anchor": "$m3",
+      "completed": true,
+      "prompts": {
+       "$m2": "a",
+       "$m3": "b"
+      },
+      "response": "$r2",
+      "sources": [
+       "$m2",
+       "$m3"
+      ]
+     },
+     "$m4": {
+      "anchor": "$m4",
+      "completed": false,
+      "history_scope": "agent:agent",
+      "replay": {
+       "$e4": {
+        "legacy_summary_provenance": true,
+        "redacted": false,
+        "response_event_id": null,
+        "source_event_id": "$m4",
+        "timestamp_ms": 40
+       }
+      },
+      "requester": "@alice:example.org",
+      "response_owner": "agent",
+      "revisions": {
+       "$m4": [
+        40,
+        "$e4"
+       ]
+      },
+      "sources": [
+       "$m4"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-a",
+       "room_id": "!a:example.org",
+       "session_id": "!a:example.org:$thread-a",
+       "source_thread_id": "$thread-a"
+      }
+     },
+     "$m5": {
+      "anchor": "$m5",
+      "completed": false,
+      "redacted": [
+       "$m5"
+      ],
+      "sources": [
+       "$m5"
+      ]
+     },
+     "$m6": {
+      "aliases": [
+       "$a1"
+      ],
+      "anchor": "$m6",
+      "completed": true,
+      "response": "$r6",
+      "sources": [
+       "$m6"
+      ]
+     }
+    }
+   },
+   "outcome": null
+  },
+  {
+   "action": {
+    "op": "reopen"
+   },
+   "changes": {},
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "days": 31,
+    "op": "cleanup"
+   },
+   "changes": {
+    "is_handled": {
+     "$a1": null,
+     "$m1": null,
+     "$m2": null,
+     "$m3": null,
+     "$m5": null,
+     "$m6": null
+    },
+    "record_for_response": {
+     "$r1": null,
+     "$r2": null,
+     "$r2-db": null,
+     "$r6": null
+    },
+    "redacted_event_ids": {
+     "a": null,
+     "b": null
+    },
+    "turn_record": {
+     "$a1": null,
+     "$m1": null,
+     "$m2": null,
+     "$m3": null,
+     "$m5": null,
+     "$m6": null
+    }
+   },
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "op": "reopen"
+   },
+   "changes": {},
+   "outcome": "ok"
+  }
+ ]
+}

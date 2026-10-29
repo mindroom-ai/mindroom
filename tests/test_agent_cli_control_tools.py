@@ -24,7 +24,7 @@ from mindroom.agent_cli.lifetime import cli_control_calls, response_cli_lifetime
 from mindroom.agent_cli.protocol import ContextReadOperation, ToolCallOperation, ToolDescribeOperation
 from mindroom.agent_cli.session import CliBashWindowRequiredError, CliTurnOwner, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
-from mindroom.ai import collect_streamed_response_content, run_delegated_child_response
+from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -39,9 +39,14 @@ from mindroom.mcp.registry import sync_mcp_tool_registry
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import search_agent_memories
 from mindroom.prompts import INTERACTIVE_QUESTION_PROMPT
-from mindroom.response_turn import PausedAnswer, PausedAttempt, apply_exact_approval_decisions
+from mindroom.response_turn import (
+    PausedAnswer,
+    PausedAttempt,
+    apply_exact_approval_decisions,
+    collect_streamed_response_content,
+)
 from mindroom.run_storage import RunStorage
-from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage, create_session_storage
 from mindroom.tool_system.agent_tool_calls import AgentToolCallWaiting, DeferredAgentToolkit, execute_agent_tool_call
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.events import CollectedStreamPresentation
@@ -178,7 +183,7 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
         tmp_path,
         [_toolkit("shell", run_shell_command), adapt_toolkit(Toolkit(name="control", tools=[switch, mutate]))],
     )
-    catalog.store = create_state_storage("helper", tmp_path)
+    catalog.store = create_agent_state_storage("helper", tmp_path)
     receipts = []
     owner = _owner(catalog)
     owner.shell_env = AgentCliShellEnv("http://127.0.0.1:9", "test-grant")
@@ -581,7 +586,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
             )
             assert catalog.store is not None
             persisted = catalog.store.get_run("run")
-            session = catalog.store.load_session("session", "agent")
+            session = catalog.store.load_session("session")
             assert isinstance(persisted, RunRecord)
             assert session is not None
             build = agents.create_agent(

@@ -6,29 +6,21 @@ import asyncio
 import random
 import time
 from contextvars import Context
-from dataclasses import replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 
 import nio
 from nio import AuthenticatedToDeviceEvent
-from tenacity import retry, retry_if_exception_type, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
-from mindroom.approval.inbound import (
-    handle_tool_approval_action,
-    maybe_handle_tool_approval_reply,
-    parse_approval_response_event,
-)
-from mindroom.approval.tool_approval import is_process_active_approval_card
+from mindroom.approval.inbound import handle_tool_approval_action, parse_approval_response_event
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.resolution import entity_timezone
 from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_live_bot
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
-from mindroom.entity_resolution import entity_identity_registry, persisted_bot_user_ids
-from mindroom.event_journal.matrix_delivery import TurnHandoff
-from mindroom.handled_turns import TurnRecord
+from mindroom.event_journal.identity import journal_principal_id
+from mindroom.event_journal.legacy_turn_rows import legacy_responses_file_path
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -46,18 +38,16 @@ from mindroom.hooks import (
     emit,
     send_hook_message,
 )
+from mindroom.hooks.ingress import IngressHookRunner
 from mindroom.integrations import reply_mirror_for
-from mindroom.legacy_handled_turns import legacy_responses_file_path
 from mindroom.matrix.decrypt_diagnostics import DecryptionDiagnostics
 from mindroom.matrix.durable_ingestion import run_ingestion_pump
 from mindroom.matrix.durable_membership import change_local_membership
-from mindroom.matrix.event_info import EventInfo, origin_server_ts_from_event_source
 from mindroom.matrix.health import (
     clear_matrix_sync_state,
     mark_matrix_sync_loop_started,
     mark_matrix_sync_success,
 )
-from mindroom.matrix.journal_ingress import replayable_redaction_target
 from mindroom.matrix.personal_rooms import PersonalRoomService
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
@@ -82,14 +72,11 @@ from mindroom.runtime_shutdown import (
     ShutdownBudget,
     restart_reason_category_for,
 )
-from mindroom.teams.formation import TeamOutcome, resolve_configured_team
-from mindroom.teams.spec import TeamMode
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 
 from . import constants
 from .background_tasks import create_background_task, wait_for_background_tasks
-from .coalescing.batch import CoalescingKey, PendingEvent, is_active_follow_up_coalescing_key
 from .coalescing.gate import CoalescingGate
 from .command_turn_executor import CommandTurnExecutor, CommandTurnExecutorDeps
 from .commands import config_confirmation
@@ -102,7 +89,6 @@ from .delivery_gateway import (
     ResponseHookService,
     SendTextRequest,
 )
-from .dispatch_callback_outcome import TurnDispatchOutcome
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .entity_rooms import get_rooms_for_entity
 from .event_journal import (
@@ -110,7 +96,6 @@ from .event_journal import (
     EventKind,
     HistoryRecoveryState,
     PrincipalStore,
-    SemanticConsumer,
 )
 from .event_journal.opening import OpenEventJournal, open_event_journal
 from .inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
@@ -134,38 +119,24 @@ from .matrix.room_member_joins import (
     emit_room_member_join_at_least_once,
     room_member_left_from_event,
 )
-from .media_inputs import MediaInputs
 from .reaction_dispatch import ReactionDispatcher, ReactionDispatcherDeps
 from .reply_scope import ReplyRuntime
 from .response_admission import admitted_response_decision
 from .response_payload_preparation import ResponsePayloadPreparer
-from .response_runner import (
-    ResponseRequest,
-    ResponseRunner,
-    ResponseRunnerDeps,
-)
+from .response_runner import ResponseRunner, ResponseRunnerDeps
 from .response_shutdown_diagnostics import DeferredStopPhase
-from .scheduling.tasks import (
-    ScheduledTaskRunnerOwner,
-    cancel_all_running_scheduled_tasks,
-    clear_deferred_overdue_tasks,
-    clear_scheduled_task_runner_owner,
-    drain_deferred_overdue_tasks,
-    has_deferred_overdue_tasks,
-    register_scheduled_task_state_writer,
-    restore_scheduled_tasks,
-    set_scheduled_task_runner_owner,
-    unregister_scheduled_task_state_writer,
-)
-from .startup_errors import PermanentStartupError
 from .tool_jobs.client_cancel import cancel_room_jobs, handle_job_cancel_event, person_may_cancel
 from .tool_jobs.follow_ups import follow_up_event
 from .tool_jobs.runtime import get_background_runtime
-from .turn_controller import TurnController, TurnControllerDeps
-from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
+from .turn_policy import TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
+from .turns.dispatch import TurnDispatchDeps, TurnDispatcher
+from .turns.ingress import TurnIngress, TurnIngressDeps
+from .turns.interactive_selection import InteractiveSelections, InteractiveSelectionsDeps
 from .user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
 from .visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
+from .voice.ingress import VoiceIngress, VoiceIngressDeps
+from .voice.readiness import VoiceReadiness
 from .voice.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 
 if TYPE_CHECKING:
@@ -178,17 +149,17 @@ if TYPE_CHECKING:
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync, ReplyMembershipPreAdmission
-    from mindroom.coalescing.batch import PreparedTurn
     from mindroom.config.main import Config
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import AdmissionFacts, IngestionRecordAdmission
-    from mindroom.event_journal.models import ResponseRecoveryState
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.tool_jobs.conversation import ConversationKey
+
+    from .dispatch_callback_outcome import TurnDispatchOutcome
 
 
 class _ProcessShutdownMatrixClient(Protocol):
@@ -202,7 +173,7 @@ type _MatrixEventId = str
 
 logger = get_logger(__name__)
 
-__all__ = ["AgentBot", "TeamBot", "create_bot_for_entity"]
+__all__ = ["AgentBot", "create_bot_for_entity"]
 
 
 # Constants
@@ -212,8 +183,8 @@ __all__ = ["AgentBot", "TeamBot", "create_bot_for_entity"]
 _SYNC_TIMEOUT_MS = 5_000
 _DELIVERY_RECOVERY_RETRY_INITIAL_DELAY_SECONDS = 1.0
 _DELIVERY_RECOVERY_RETRY_MAX_DELAY_SECONDS = 30.0
-# Startup recovery prunes the handled-turn ledger once. A running bot repeats
-# that pass this often so its in-memory records stay near the retention bound.
+# Startup recovery applies turn retention once. A running bot repeats that pass
+# this often so the turn tables stay near the retention bound between restarts.
 _HANDLED_TURN_CLEANUP_INTERVAL_SECONDS = 60 * 60
 
 
@@ -268,8 +239,8 @@ def create_bot_for_entity(
     agent_reply_memberships: AgentReplyMembershipIndex,
     agent_reply_membership_sync: AgentReplyMembershipSync | None = None,
     room_activity_observer: Callable[[str], None] | None = None,
-) -> AgentBot | TeamBot | None:
-    """Create appropriate bot instance for an entity (agent, team, or router).
+) -> AgentBot:
+    """Create the bot for one entity: the router, a configured team, or an agent.
 
     Args:
         entity_name: Name of the entity to create a bot for
@@ -283,65 +254,34 @@ def create_bot_for_entity(
         agent_reply_membership_sync: Shared router receive-lifecycle coordinator
         room_activity_observer: Called with a room ID whenever this bot admits a conversation event there
 
-    Returns:
-        Bot instance or None if entity not found in config
+    Raises:
+        ValueError: The entity is not configured, or the router lacks its reply-membership sync coordinator.
 
     """
-    enable_streaming = config.defaults.enable_streaming
     if entity_name == ROUTER_AGENT_NAME:
         if agent_reply_membership_sync is None:
             msg = "The managed router requires the orchestrator-owned reply-membership sync coordinator."
             raise ValueError(msg)
-        all_room_aliases = config.get_all_configured_rooms()
-        rooms = resolve_room_aliases(list(all_room_aliases), runtime_paths)
-        return AgentBot(
-            agent_user,
-            storage_path,
-            config,
-            runtime_paths,
-            rooms,
-            config_path=config_path,
-            enable_streaming=enable_streaming,
-            journal_store=journal_store,
-            agent_reply_memberships=agent_reply_memberships,
-            agent_reply_membership_sync=agent_reply_membership_sync,
-            room_activity_observer=room_activity_observer,
-        )
-
-    if entity_name in config.teams:
-        team_config = config.teams[entity_name]
-        rooms = resolve_room_aliases(team_config.rooms, runtime_paths)
-        return TeamBot(
-            agent_user=agent_user,
-            storage_path=storage_path,
-            config=config,
-            runtime_paths=runtime_paths,
-            rooms=rooms,
-            config_path=config_path,
-            enable_streaming=enable_streaming,
-            journal_store=journal_store,
-            agent_reply_memberships=agent_reply_memberships,
-            room_activity_observer=room_activity_observer,
-        )
-
-    if entity_name in config.agents:
-        agent_config = config.agents[entity_name]
-        rooms = resolve_room_aliases(agent_config.rooms, runtime_paths)
-        return AgentBot(
-            agent_user,
-            storage_path,
-            config,
-            runtime_paths,
-            rooms,
-            config_path=config_path,
-            enable_streaming=enable_streaming,
-            journal_store=journal_store,
-            agent_reply_memberships=agent_reply_memberships,
-            room_activity_observer=room_activity_observer,
-        )
-
-    msg = f"Entity '{entity_name}' not found in configuration."
-    raise ValueError(msg)
+        room_aliases = list(config.get_all_configured_rooms())
+    elif entity_name in config.teams:
+        room_aliases = config.teams[entity_name].rooms
+    elif entity_name in config.agents:
+        room_aliases = config.agents[entity_name].rooms
+    else:
+        msg = f"Entity '{entity_name}' not found in configuration."
+        raise ValueError(msg)
+    return AgentBot(
+        agent_user,
+        storage_path,
+        config,
+        runtime_paths,
+        resolve_room_aliases(room_aliases, runtime_paths),
+        config_path=config_path,
+        journal_store=journal_store,
+        agent_reply_memberships=agent_reply_memberships,
+        agent_reply_membership_sync=agent_reply_membership_sync,
+        room_activity_observer=room_activity_observer,
+    )
 
 
 class AgentBot:
@@ -389,18 +329,19 @@ class AgentBot:
     _request_payload_preparer: ResponsePayloadPreparer
     _hook_context_support: HookContextSupport
     _knowledge_access_support: KnowledgeAccessSupport
-    _deferred_overdue_task_drain_task: asyncio.Task[None] | None
     _call_manager: CallManager | None
     _calls_full_reconcile_pending: bool
     _call_rooms_reconcile_pending: set[str]
     _reply_membership_sync: AgentReplyMembershipSync | None
-    _turn_controller: TurnController
+    _interactive_selections: InteractiveSelections
+    _voice_ingress: VoiceIngress
+    _turn_dispatcher: TurnDispatcher
+    _turn_ingress: TurnIngress
     _room_lifecycle: BotRoomLifecycle
     _decryption_diagnostics: DecryptionDiagnostics
     _local_membership_lock: asyncio.Lock
     _ingestion_admission_progress: asyncio.Event
     _sync_continuity_store: SyncContinuityStore
-    _response_recovery_diagnostic_classes: set[tuple[str, tuple[str, ...], str | None]]
 
     def __init__(
         self,
@@ -410,7 +351,6 @@ class AgentBot:
         runtime_paths: RuntimePaths,
         rooms: list[str] | None = None,
         config_path: Path | None = None,
-        enable_streaming: bool = True,
         journal_store: EventJournalStore | None = None,
         *,
         agent_reply_memberships: AgentReplyMembershipIndex,
@@ -475,17 +415,14 @@ class AgentBot:
             config=config,
             runtime_paths=self.runtime_paths,
             agent_reply_memberships=agent_reply_memberships,
-            enable_streaming=enable_streaming,
             orchestrator=None,
         )
         self._sync_continuity_store = SyncContinuityStore(self.storage_path, self.agent_name)
-        self._deferred_overdue_task_drain_task = None
         self._call_manager: CallManager | None = None
         self._calls_full_reconcile_pending = False
         self._call_rooms_reconcile_pending = set()
         self._local_membership_lock = asyncio.Lock()
         self._ingestion_admission_progress = asyncio.Event()
-        self._response_recovery_diagnostic_classes = set()
 
         async def send_room_lifecycle_response(
             *,
@@ -514,7 +451,6 @@ class AgentBot:
             self.runtime_paths,
             self.personal_rooms,
             self._lookup_personal_room_target,
-            lambda event: self._ingress_validator.requester_user_id(sender=event.sender, source=event.source),
             self._provision_personal_agent,
         )
         self._room_lifecycle = BotRoomLifecycle(
@@ -535,6 +471,7 @@ class AgentBot:
                     self.wait_for_admission_or_shutdown,
                 ),
                 on_configured_room_joined=self._post_join_room_setup,
+                on_room_joined=self._restore_scheduled_tasks,
                 get_conversation_reader=lambda: self._conversation_reader,
             ),
         )
@@ -542,7 +479,7 @@ class AgentBot:
 
     def journal_principal(self) -> PrincipalStore:
         """Return this bot's principal-bound projection view, once the journal is open."""
-        return self._journal_store.principal(self._journal_principal_id)
+        return self._journal_principal
 
     async def redacted_event_ids(self, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
         """Return which of a room's events this bot saw redacted, for readers of its stored conversations.
@@ -575,7 +512,7 @@ class AgentBot:
             msg = f"Missing Matrix ID for {self.agent_name!r} during runtime initialization"
             raise PermanentMatrixStartupError(msg)
         runtime_matrix_id = self.matrix_id
-        self._journal_principal_id = f"{self.agent_name}@{runtime_matrix_id.full_id}"
+        self._journal_principal_id = journal_principal_id(self.agent_name, runtime_matrix_id.full_id)
         borrowed = self._borrowed_journal_store
         if borrowed is not None:
             self._journal_store = borrowed
@@ -588,29 +525,12 @@ class AgentBot:
             if self._own_journal is None:
                 self._own_journal = self._open_own_journal()
             self._journal_store = self._own_journal.store
-        self._coalescing_gate = CoalescingGate(
-            dispatch_turn=self._dispatch_prepared_turn,
-            debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
-            is_shutting_down=lambda: self._sync_shutting_down,
-            wait_until_dispatch_allowed=self._wait_until_coalesced_dispatch_allowed,
-            room_scope_is_single_conversation=self._room_scope_is_single_conversation,
-            dispatch_allowed_now=self._coalesced_dispatch_allowed_now,
-            timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
-                timestamp_ms,
-                timezone=entity_timezone(self.config, self.agent_name),
-            ),
-            on_dispatch_failure=self._retry_failed_coalesced_dispatch,
-            on_undelivered_source=self._retry_pending_dispatch_source,
-            on_intentionally_ignored_source=self._settle_ignored_dispatch_source,
-        )
-        self._hook_context_support = HookContextSupport(
-            runtime=self._runtime_view,
-            runtime_paths=self.runtime_paths,
-            agent_name=self.agent_name,
-            hook_registry_state=self._hook_registry_state,
-            hook_send_message=self._hook_send_message,
-            agent_message_snapshot_reader=self._hook_agent_message_snapshot,
-        )
+        principal = self._journal_store.principal(self._journal_principal_id)
+        self._journal_principal = principal
+
+        def format_local_timestamp(timestamp_ms: float | None) -> str | None:
+            return format_timestamp_ms(timestamp_ms, timezone=entity_timezone(self.config, self.agent_name))
+
         self._knowledge_access_support = KnowledgeAccessSupport(
             runtime=self._runtime_view,
             runtime_paths=self.runtime_paths,
@@ -624,13 +544,13 @@ class AgentBot:
             ),
         )
         self._relations = RelationLookup(
-            store=self._journal_store.principal(self._journal_principal_id),
+            store=principal,
             runtime=self._runtime_view,
         )
         self._conversation_reader = ConversationReader(
-            store=self._journal_store.principal(self._journal_principal_id),
+            store=principal,
             hydrator=ConversationHydrator(
-                store=self._journal_store.principal(self._journal_principal_id),
+                store=principal,
                 runtime=self._runtime_view,
                 self_sender=runtime_matrix_id.full_id,
             ),
@@ -654,13 +574,81 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
             ),
         )
+        self._turn_policy = TurnPolicy(
+            TurnPolicyDeps(
+                runtime=self._runtime_view,
+                logger=self.logger,
+                runtime_paths=self.runtime_paths,
+                agent_name=self.agent_name,
+                matrix_id=runtime_matrix_id,
+                agent_reply_memberships=self._runtime_view.agent_reply_memberships,
+            ),
+        )
+        self._hook_context_support = HookContextSupport(
+            runtime=self._runtime_view,
+            runtime_paths=self.runtime_paths,
+            agent_name=self.agent_name,
+            hook_registry_state=self._hook_registry_state,
+            hook_send_message=self._hook_send_message,
+            agent_message_snapshot_reader=self._hook_agent_message_snapshot,
+        )
+        self._tool_runtime_support = ToolRuntimeSupport(
+            runtime=self._runtime_view,
+            logger=self.logger,
+            runtime_paths=self.runtime_paths,
+            storage_path=self.storage_path,
+            agent_name=self.agent_name,
+            matrix_id=runtime_matrix_id,
+            resolver=self._conversation_resolver,
+            hook_context=self._hook_context_support,
+            membership=principal,
+        )
+        self._journal_dispatcher = JournalDispatcher(
+            store=principal,
+            # Every callback reaches an owner built below, which hands its sources back through this dispatcher, so
+            # each callback is a bot routing method or resolves its owner when it runs.
+            callbacks=JournalCallbacks(
+                on_message=self._on_message,
+                on_media=self._on_media_message,
+                on_reaction=self._on_reaction,
+                on_approval=self._on_unknown_event,
+                on_job_cancel=self._on_job_cancel,
+                on_room_lifecycle=self._on_room_member,
+                on_rtc=self._on_rtc_event,
+                on_redaction=self._on_redaction,
+                on_approval_continuation=lambda event_id: self._response_runner.handoff_approval_source(event_id),
+                source_has_live_owner=lambda event_id: (
+                    self._coalescing_gate.has_pending_source_event(event_id)
+                    or self._response_runner.inbox.has_live_inbox_response(event_id)
+                ),
+                turn_has_live_claim=lambda event_id: self._turn_store.has_live_turn_claim(event_id),
+                replies_ended=self._replies_ended,
+                on_job_follow_up=lambda event: self._response_runner.handoff_job_follow_up(event),
+            ),
+            room_for_id=self._room_for_journal_event,
+            # Resolved late: the ingress validator, which owns the trust rule, is built after the dispatcher.
+            schedule_trigger_sender_is_managed=lambda sender: (
+                self._ingress_validator.sender_is_trusted_for_ingress_metadata(sender)
+            ),
+            runtime_generation=self._approval_runtime_generation,
+        )
+        self._turn_store = TurnStore(
+            TurnStoreDeps(
+                turn_records=self._journal_store.turn_records(self.agent_name),
+                legacy_responses_file=legacy_responses_file_path(self.storage_path, self.agent_name),
+                state_writer=self._conversation_state_writer,
+                tool_runtime=self._tool_runtime_support,
+                response_recovery_state=principal.response_recovery_state,
+                retry_dispatch_sources=self._journal_dispatcher.retry_turn_sources,
+            ),
+        )
         self._reply_runtime = ReplyRuntime(
-            store=self._journal_store.principal(self._journal_principal_id),
+            store=principal,
             entity_name=self.agent_name,
             generation=self._approval_runtime_generation,
-            # Resolved late: the dispatcher is built after the reply runtime.
-            retry_sources=lambda room_id, event_ids: self._journal_dispatcher.retry_turn_sources(room_id, event_ids),
-            complete_turn=lambda record: self._turn_store.publish_completed_turn(record),
+            retry_sources=self._journal_dispatcher.retry_turn_sources,
+            # The reply runtime and the delivery gateway hold each other through the reply-debt methods
+            # `_settle_reply_debt_later` and `_reply_row_resolved`.
             approval_ended=self._settle_reply_debt_later,
         )
         self._delivery_gateway = DeliveryGateway(
@@ -681,89 +669,22 @@ class AgentBot:
                         runtime_paths=self.runtime_paths,
                     ),
                 ),
-                outbox=self._journal_store.principal(self._journal_principal_id),
-                turn_handoff=TurnHandoff(
-                    sources_for_turn=self._delivered_turn_source_ids,
-                    # Resolved late: the dispatcher is built after the gateway.
-                    released=lambda event_ids: self._journal_dispatcher.release_delivered_turn_sources(event_ids),
-                ),
-                # Resolved late for the same reason: this gateway is built
-                # before the bot has logged in, and a re-login replaces the
-                # device that the frozen transaction IDs belong to.
+                outbox=principal,
+                turn_handoff=self._journal_dispatcher.release_delivered_turn_sources,
+                # Read when each send is claimed: this gateway is built before
+                # the bot has logged in, and a re-login replaces the device
+                # that the frozen transaction IDs belong to.
                 sending_device_id=lambda: self._sending_device_id,
-                # Deferred for the same reason as the device: the turn store is
-                # built after this gateway. Consulted only once a FINAL send has
-                # produced an event ID, so the acknowledgement can carry the
-                # record that needs to know it.
-                terminal_turn_for=lambda turn_id, event_id: self._turn_store.terminal_turn_record(turn_id, event_id),
-                terminal_turn_committed=lambda record: self._turn_store.publish_completed_turn(record),
                 reply_effects=self._reply_runtime.run_effects,
                 reply_row_resolved=self._reply_row_resolved,
             ),
-        )
-        self._tool_runtime_support = ToolRuntimeSupport(
-            runtime=self._runtime_view,
-            logger=self.logger,
-            runtime_paths=self.runtime_paths,
-            storage_path=self.storage_path,
-            agent_name=self.agent_name,
-            matrix_id=runtime_matrix_id,
-            resolver=self._conversation_resolver,
-            hook_context=self._hook_context_support,
-            membership=self._journal_store.principal(self._journal_principal_id),
-        )
-        self._turn_store = TurnStore(
-            TurnStoreDeps(
-                agent_name=self.agent_name,
-                turn_records=self._journal_store.turn_records(self.agent_name),
-                redacted_event_ids=self._journal_store.principal(self._journal_principal_id).redacted_event_ids,
-                relations=self._journal_store.principal(self._journal_principal_id),
-                legacy_responses_file=legacy_responses_file_path(self.storage_path, self.agent_name),
-                state_writer=self._conversation_state_writer,
-                resolver=self._conversation_resolver,
-                tool_runtime=self._tool_runtime_support,
-            ),
-        )
-        self._journal_dispatcher = JournalDispatcher(
-            store=self._journal_store.principal(self._journal_principal_id),
-            callbacks=JournalCallbacks(
-                on_message=self._on_message,
-                on_media=self._on_media_message,
-                on_reaction=self._on_reaction,
-                on_approval=self._on_unknown_event,
-                on_job_cancel=self._on_job_cancel,
-                on_room_lifecycle=self._on_room_member,
-                on_rtc=self._on_rtc_event,
-                on_redaction=self._on_redaction,
-                on_approval_continuation=lambda event_id: self._response_runner.handoff_approval_source(event_id),
-                source_has_live_owner=lambda event_id: (
-                    self._coalescing_gate.has_pending_source_event(event_id)
-                    or self._response_runner.has_live_inbox_response(event_id)
-                ),
-                turn_has_live_claim=self._turn_store.has_live_turn_claim,
-                replies_ended=self._replies_ended,
-                on_job_follow_up=lambda event: self._response_runner.handoff_job_follow_up(event),
-            ),
-            room_for_id=self._room_for_journal_event,
-            schedule_trigger_sender_is_managed=lambda sender: (
-                self._ingress_validator.sender_is_trusted_for_ingress_metadata(sender)
-            ),
-            runtime_generation=self._approval_runtime_generation,
-        )
-        self._decryption_diagnostics = DecryptionDiagnostics(
-            agent_name=self.agent_name,
-            runtime=self._runtime_view,
-            runtime_paths=self.runtime_paths,
-            read_position=lambda room_id: self.journal_principal().ingestion_membership_position(room_id),
-            admit_response=lambda: admitted_response_decision(self.admission_gate, self.wait_for_admission_or_shutdown),
-            notice_is_fenced=self._room_lifecycle.decrypt_notice_is_fenced,
         )
         self._post_response_effects_support = PostResponseEffectsSupport(
             runtime=self._runtime_view,
             logger=self.logger,
             runtime_paths=self.runtime_paths,
             conversation_reader=self._conversation_reader,
-            membership=self._journal_store.principal(self._journal_principal_id),
+            membership=principal,
             agent_name=self.agent_name,
         )
         self._ingress_hook_runner = IngressHookRunner(
@@ -790,12 +711,23 @@ class AgentBot:
                 post_response_effects=self._post_response_effects_support,
                 state_writer=self._conversation_state_writer,
                 request_preparer=self._request_payload_preparer,
-                approval_store=self._journal_store.principal(self._journal_principal_id).approvals,
+                approval_store=principal.approvals,
                 retry_approval_sources=self.retry_approval_sources,
                 approval_runtime_generation=self._approval_runtime_generation,
                 redacted_history_events=self._turn_store.redacted_history_events,
                 replies=self._reply_runtime,
             ),
+        )
+        self._decryption_diagnostics = DecryptionDiagnostics(
+            agent_name=self.agent_name,
+            runtime=self._runtime_view,
+            runtime_paths=self.runtime_paths,
+            read_position=principal.ingestion_membership_position,
+            admit_response=lambda: admitted_response_decision(
+                self.admission_gate,
+                self._response_runner.wait_for_admission_or_shutdown,
+            ),
+            notice_is_fenced=self._room_lifecycle.decrypt_notice_is_fenced,
         )
         self._edit_regenerator = EditRegenerator(
             EditRegeneratorDeps(
@@ -805,33 +737,16 @@ class AgentBot:
                 resolver=self._conversation_resolver,
                 turn_store=self._turn_store,
                 ingress_hook_runner=self._ingress_hook_runner,
-                generate_response=self._run_regenerated_response,
-                track_inbox_response=lambda response, **ownership: self._response_runner.track_inbox_response(
-                    response,
-                    **ownership,
-                ),
+                response_runner=self._response_runner,
+                turn_policy=self._turn_policy,
                 settle_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
                 stop_reply=lambda reply, receipt_order: self._delivery_gateway.stop_reply_by_id(
                     reply.reply_id,
                     receipt_order,
                 ),
                 receipt_order=self._journal_dispatcher.receipt_order,
-                timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
-                    timestamp_ms,
-                    timezone=entity_timezone(self.config, self.agent_name),
-                ),
-                reply_for_sources=self._reply_runtime.store.replies.for_sources,
-                later_human_message=self._later_human_message,
-            ),
-        )
-        self._turn_policy = TurnPolicy(
-            TurnPolicyDeps(
-                runtime=self._runtime_view,
-                logger=self.logger,
-                runtime_paths=self.runtime_paths,
-                agent_name=self.agent_name,
-                matrix_id=runtime_matrix_id,
-                agent_reply_memberships=self._runtime_view.agent_reply_memberships,
+                timestamp_formatter=format_local_timestamp,
+                store=principal,
             ),
         )
         self._ingress_validator = IngressValidator(
@@ -841,6 +756,8 @@ class AgentBot:
                 matrix_id=runtime_matrix_id,
                 turn_store=self._turn_store,
                 turn_policy=self._turn_policy,
+                wait_for_admission_or_shutdown=self._response_runner.wait_for_admission_or_shutdown,
+                settle_ignored_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
             ),
         )
         self._visible_voice_echo = VisibleVoiceEchoLifecycle(
@@ -887,16 +804,47 @@ class AgentBot:
                 delivery_gateway=self._delivery_gateway,
             ),
         )
-        self._turn_controller = TurnController(
-            TurnControllerDeps(
+        self._interactive_selections = InteractiveSelections(
+            InteractiveSelectionsDeps(
+                logger=self.logger,
+                runtime_paths=self.runtime_paths,
+                agent_name=self.agent_name,
+                resolver=self._conversation_resolver,
+                normalizer=self._inbound_turn_normalizer,
+                ingress=self._ingress_validator,
+                response_runner=self._response_runner,
+                delivery_gateway=self._delivery_gateway,
+                turn_store=self._turn_store,
+                visible_responses=self._visible_responses,
+                retry_dispatch_sources=self._journal_dispatcher.retry_turn_sources,
+                settle_dispatch_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
+                dispatch_source_is_terminal=self._journal_dispatcher.source_is_terminal,
+            ),
+        )
+        self._voice_ingress = VoiceIngress(
+            VoiceIngressDeps(
+                runtime=self._runtime_view,
+                logger=self.logger,
+                runtime_paths=self.runtime_paths,
+                matrix_id=runtime_matrix_id,
+                resolver=self._conversation_resolver,
+                response_runner=self._response_runner,
+                delivery_gateway=self._delivery_gateway,
+                readiness=VoiceReadiness(
+                    normalizer=self._inbound_turn_normalizer,
+                    turn_store=self._turn_store,
+                    visible_echo=self._visible_voice_echo,
+                    logger=self.logger,
+                ),
+            ),
+        )
+        self._turn_dispatcher = TurnDispatcher(
+            TurnDispatchDeps(
                 runtime=self._runtime_view,
                 logger=self.logger,
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,
-                matrix_id=runtime_matrix_id,
-                relations=self._relations,
-                pending_turns=self._journal_store.principal(self._journal_principal_id),
-                interactive_questions=self._journal_store.principal(self._journal_principal_id),
+                pending_turns=principal,
                 resolver=self._conversation_resolver,
                 normalizer=self._inbound_turn_normalizer,
                 command_executor=self._command_turn_executor,
@@ -904,17 +852,49 @@ class AgentBot:
                 ingress_hook_runner=self._ingress_hook_runner,
                 response_runner=self._response_runner,
                 delivery_gateway=self._delivery_gateway,
-                tool_runtime=self._tool_runtime_support,
+                turn_store=self._turn_store,
+                ingress=self._ingress_validator,
+                visible_responses=self._visible_responses,
+                retry_dispatch_sources=self._journal_dispatcher.retry_turn_sources,
+                selections=self._interactive_selections,
+            ),
+        )
+        self._coalescing_gate = CoalescingGate(
+            dispatch_turn=self._turn_dispatcher.handle_prepared_turn,
+            debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
+            is_shutting_down=lambda: self._sync_shutting_down,
+            wait_for_thread_response_idle=self._response_runner.wait_for_thread_response_idle,
+            room_scope_is_single_conversation=self._conversation_resolver.room_is_one_conversation,
+            active_thread_ids_for_room=self._response_runner.active_thread_ids_for_room,
+            timestamp_formatter=format_local_timestamp,
+            on_dispatch_failure=self._journal_dispatcher.retry_turn_sources,
+            on_undelivered_source=self._journal_dispatcher.retry_turn_source,
+            on_intentionally_ignored_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
+        )
+        self._turn_ingress = TurnIngress(
+            TurnIngressDeps(
+                runtime=self._runtime_view,
+                logger=self.logger,
+                runtime_paths=self.runtime_paths,
+                agent_name=self.agent_name,
+                matrix_id=runtime_matrix_id,
+                interactive_questions=principal,
+                resolver=self._conversation_resolver,
+                normalizer=self._inbound_turn_normalizer,
+                turn_policy=self._turn_policy,
+                response_runner=self._response_runner,
+                delivery_gateway=self._delivery_gateway,
                 turn_store=self._turn_store,
                 coalescing_gate=self._coalescing_gate,
                 edit_regenerator=self._edit_regenerator,
                 ingress=self._ingress_validator,
-                visible_voice_echo=self._visible_voice_echo,
                 visible_responses=self._visible_responses,
-                retry_dispatch_sources=self._journal_dispatcher.retry_turn_sources,
-                response_recovery_ready=self._response_recovery_ready,
-                settle_dispatch_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
-                dispatch_source_is_terminal=self._journal_dispatcher.source_is_terminal,
+                dispatcher=self._turn_dispatcher,
+                selections=self._interactive_selections,
+                voice=self._voice_ingress,
+                semantic_consumer=self._journal_dispatcher.semantic_consumer,
+                claim_semantic_consumer=self._journal_dispatcher.claim_semantic_consumer,
+                personal_room_command=self._personal_room_lifecycle.handle_command,
             ),
         )
         self._reaction_dispatcher = ReactionDispatcher(
@@ -925,13 +905,11 @@ class AgentBot:
                 agent_name=self.agent_name,
                 journal_dispatcher=self._journal_dispatcher,
                 agent_reply_memberships=self._runtime_view.agent_reply_memberships,
-                turn_policy=self._turn_policy,
                 user_stop_reconciler=self._user_stop_reconciler,
                 ingress=self._ingress_validator,
-                reserve_prompt_ingress_order=self._turn_controller.reserve_prompt_ingress_order,
-                enqueue_interactive_selection=self._turn_controller.enqueue_interactive_selection,
+                reserve_prompt_ingress_order=self._turn_ingress.reserve_prompt_ingress_order,
+                enqueue_interactive_selection=self._interactive_selections.enqueue_interactive_selection,
                 emit_reaction_received_hooks=self._emit_reaction_received_hooks,
-                wait_for_admission_or_shutdown=self._response_runner.wait_for_admission_or_shutdown,
                 config_confirmation=config_confirmation.ConfigConfirmationContext(
                     runtime=self._runtime_view,
                     runtime_paths=self.runtime_paths,
@@ -950,27 +928,6 @@ class AgentBot:
             self.client,
             room_id,
             preview_event_id,
-        )
-
-    async def _wait_until_coalesced_dispatch_allowed(self, key: CoalescingKey) -> None:
-        """Hold active follow-up dispatch until the response lock for its target is idle."""
-        if not is_active_follow_up_coalescing_key(key):
-            return
-        await self._response_runner.wait_for_thread_response_idle(key.room_id, key.thread_id)
-
-    def _coalesced_dispatch_allowed_now(self, key: CoalescingKey) -> bool:
-        """Return whether one coalescing key's target has no active response right now."""
-        return key.thread_id not in self._response_runner.active_thread_ids_for_room(key.room_id)
-
-    def _room_scope_is_single_conversation(self, room_id: str) -> bool:
-        """Return whether this agent treats the whole room as one conversation."""
-        return (
-            self.config.get_entity_thread_mode(
-                self.agent_name,
-                self.runtime_paths,
-                room_id=room_id,
-            )
-            == "room"
         )
 
     def _reply_row_resolved(self, reply_id: str) -> None:
@@ -1031,16 +988,6 @@ class AgentBot:
             self._call_manager.update_config(value)
 
     @property
-    def enable_streaming(self) -> bool:
-        """Return whether streaming is enabled for this bot."""
-        return self._runtime_view.enable_streaming
-
-    @enable_streaming.setter
-    def enable_streaming(self, value: bool) -> None:
-        """Update whether streaming is enabled for this bot."""
-        self._runtime_view.enable_streaming = value
-
-    @property
     def orchestrator(self) -> OrchestratorRuntime | None:
         """Return the current orchestrator."""
         return self._runtime_view.orchestrator
@@ -1053,7 +1000,7 @@ class AgentBot:
     @property
     def approval_store(self) -> PrincipalStore:
         """Return this bot principal's complete event-journal view."""
-        return self._journal_store.principal(self._journal_principal_id)
+        return self._journal_principal
 
     @property
     def runtime_started_at(self) -> float:
@@ -1086,12 +1033,12 @@ class AgentBot:
     @property
     def pending_response_owner_count(self) -> int:
         """Return response tasks that still own runtime resources."""
-        return self._response_runner.pending_inbox_response_count
+        return self._response_runner.inbox.pending_inbox_response_count
 
     @property
     def pending_response_phase_counts(self) -> dict[str, int]:
         """Return non-sensitive fixed-phase counts for retained response owners."""
-        return self._response_runner.pending_response_phase_counts
+        return self._response_runner.inbox.pending_response_phase_counts
 
     @property
     def deferred_stop_required(self) -> bool:
@@ -1277,23 +1224,12 @@ class AgentBot:
         await self._room_lifecycle.join_configured_rooms()
 
     async def _post_join_room_setup(self, room_id: str) -> None:
-        """Run room setup that should happen after joins and across restarts."""
+        """Run room setup that should happen after configured joins and across restarts."""
         self._request_call_reconciliation(room_id)
         if self.agent_name != ROUTER_AGENT_NAME:
             return
 
         assert self.client is not None
-
-        restored_tasks = await restore_scheduled_tasks(
-            self.client,
-            room_id,
-            self.config,
-            self.runtime_paths,
-            self._conversation_reader,
-            config_provider=lambda: self.orchestrator.config if self.orchestrator is not None else self.config,
-        )
-        if restored_tasks > 0:
-            self.logger.info("restored_scheduled_tasks", room_id=room_id, restored_task_count=restored_tasks)
 
         restored_configs = await config_confirmation.restore_pending_changes(self.client, room_id)
         if restored_configs > 0:
@@ -1305,8 +1241,11 @@ class AgentBot:
 
         await self._send_welcome_message_if_empty(room_id)
 
-        if self._first_sync_done:
-            self._maybe_start_deferred_overdue_task_drain()
+    async def _restore_scheduled_tasks(self, room_id: str) -> None:
+        """Hand the schedules this bot owns in a room it joined to the runtime's scheduled-task owner."""
+        orchestrator = self.orchestrator
+        if orchestrator is not None:
+            await orchestrator.scheduled_tasks.restore_room(self, room_id)
 
     async def change_local_membership(
         self,
@@ -1652,9 +1591,6 @@ class AgentBot:
             await orchestrator.handle_bot_ready(self)
             self._orchestrator_ready_handled = True
 
-        if first_sync_response or has_deferred_overdue_tasks():
-            self._maybe_start_deferred_overdue_task_drain()
-
     def _apply_reply_membership_pre_admission(self, effects: ReplyMembershipPreAdmission) -> None:
         """Publish one router sync batch's fail-closed effects."""
         if effects.invalidate_reason is not None:
@@ -1769,15 +1705,14 @@ class AgentBot:
     def _invited_call_rooms_by_agent(self) -> dict[str, frozenset[str]]:
         """Return live accepted-invite state for the configured call agents."""
         orchestrator = self.orchestrator
-        agent_bots_value = orchestrator.agent_bots if orchestrator is not None else None
-        if not isinstance(agent_bots_value, dict):
+        if orchestrator is None:
             return {self.agent_name: frozenset(self._room_lifecycle.invited_rooms)}
-        agent_bots = cast("dict[str, object]", agent_bots_value)
+        agent_bots = orchestrator.agent_bots
 
         invited_rooms: dict[str, frozenset[str]] = {}
         for agent_name in self.config.calls.agents:
             bot = agent_bots.get(agent_name)
-            if isinstance(bot, AgentBot):
+            if bot is not None:
                 invited_rooms[agent_name] = frozenset(bot._room_lifecycle.invited_rooms)
         return invited_rooms
 
@@ -1953,9 +1888,6 @@ class AgentBot:
             # Note: Room joining is deferred until after invitations are handled
             self.logger.info("agent_setup_complete", user_id=self.agent_user.user_id)
             await self._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
-            if self.agent_name == ROUTER_AGENT_NAME:
-                set_scheduled_task_runner_owner(ScheduledTaskRunnerOwner(client, self._conversation_reader))
-            register_scheduled_task_state_writer(client)
         except BaseException:
             await self._close_owned_matrix_after_start_failure()
             raise
@@ -2029,182 +1961,6 @@ class AgentBot:
             context=Context(),
         )
 
-    async def _response_recovery_ready(self, turn_record: TurnRecord) -> bool:
-        """Prove that a terminal response is complete or still durably owned."""
-        if any(self._turn_store.has_live_turn_claim(event_id) for event_id in turn_record.indexed_event_ids):
-            self._record_response_recovery_not_ready(
-                reason="live_turn_claim",
-                turn_record=turn_record,
-                pending_source_count=None,
-            )
-            return False
-        principal = self._journal_store.principal(self._journal_principal_id)
-        turn_id = turn_record.anchor_event_id
-        recovery_state = await principal.response_recovery_state(
-            turn_record=turn_record,
-            agent_name=self._turn_store.deps.agent_name,
-            redaction_target=replayable_redaction_target,
-        )
-        pending_sources = recovery_state.pending_sources
-        if all(
-            pending or redacted
-            for pending, redacted in zip(pending_sources, recovery_state.redacted_sources, strict=True)
-        ) or (turn_id is not None and recovery_state.sources_settled_by_departure):
-            return True
-        if any(pending_sources):
-            self._record_response_recovery_not_ready(
-                reason="mixed_source_pending",
-                turn_record=turn_record,
-                pending_source_count=sum(pending_sources),
-            )
-            return False
-        reply = recovery_state.reply
-        if reply is not None:
-            # The reply's records own an AI turn's outcome, and recovery sends any row it still owes.
-            if not reply.terminal:
-                self._record_response_recovery_not_ready(
-                    reason="reply_unfinished",
-                    turn_record=turn_record,
-                    pending_source_count=0,
-                )
-            return reply.terminal
-        return self._ledger_turn_recovery_ready(turn_record, recovery_state)
-
-    def _ledger_turn_recovery_ready(self, turn_record: TurnRecord, recovery_state: ResponseRecoveryState) -> bool:
-        """Prove that a turn no reply answers is complete or still owned by its outbox row."""
-        turn_id = turn_record.anchor_event_id
-        if turn_id is None:
-            self._record_response_recovery_not_ready(
-                reason="missing_turn_anchor",
-                turn_record=turn_record,
-                pending_source_count=0,
-            )
-            return False
-        final_delivery = recovery_state.final_delivery
-        if final_delivery is None:
-            self._record_response_recovery_not_ready(
-                reason="missing_final_delivery",
-                turn_record=turn_record,
-                pending_source_count=0,
-            )
-            return False
-        completed_response_event_ids = {
-            event_id
-            for event_id in (
-                final_delivery.acknowledged_event_id,
-                final_delivery.edits_event_id,
-            )
-            if event_id is not None
-        }
-        completed_turns = recovery_state.turn_records
-        missing_completed_turn_count = sum(completed_turn is None for completed_turn in completed_turns)
-        incomplete_completed_turn_count = sum(
-            completed_turn is not None and not completed_turn.completed for completed_turn in completed_turns
-        )
-        source_identity_mismatch_count = sum(
-            completed_turn is not None and completed_turn.source_event_ids != turn_record.source_event_ids
-            for completed_turn in completed_turns
-        )
-        anchor_mismatch_count = sum(
-            completed_turn is not None and completed_turn.anchor_event_id != turn_record.anchor_event_id
-            for completed_turn in completed_turns
-        )
-        response_event_mismatch_count = sum(
-            completed_turn is not None and completed_turn.response_event_id not in completed_response_event_ids
-            for completed_turn in completed_turns
-        )
-        ready = final_delivery.acknowledged_event_id is None or not any(
-            (
-                missing_completed_turn_count,
-                incomplete_completed_turn_count,
-                source_identity_mismatch_count,
-                anchor_mismatch_count,
-                response_event_mismatch_count,
-            ),
-        )
-        if not ready:
-            self._record_response_recovery_not_ready(
-                reason="terminal_turn_mismatch",
-                turn_record=turn_record,
-                pending_source_count=0,
-                missing_completed_turn_count=missing_completed_turn_count,
-                incomplete_completed_turn_count=incomplete_completed_turn_count,
-                source_identity_mismatch_count=source_identity_mismatch_count,
-                anchor_mismatch_count=anchor_mismatch_count,
-                response_event_mismatch_count=response_event_mismatch_count,
-            )
-        return ready
-
-    def _record_response_recovery_not_ready(
-        self,
-        *,
-        reason: str,
-        turn_record: TurnRecord,
-        pending_source_count: int | None,
-        missing_completed_turn_count: int | None = None,
-        incomplete_completed_turn_count: int | None = None,
-        source_identity_mismatch_count: int | None = None,
-        anchor_mismatch_count: int | None = None,
-        response_event_mismatch_count: int | None = None,
-    ) -> None:
-        """Log each non-sensitive recovery boundary once per bot lifetime."""
-        identity = (reason, turn_record.source_event_ids, turn_record.anchor_event_id)
-        if identity in self._response_recovery_diagnostic_classes:
-            return
-        self._response_recovery_diagnostic_classes.add(identity)
-        mismatch_counts = {}
-        if missing_completed_turn_count is not None:
-            assert incomplete_completed_turn_count is not None
-            assert source_identity_mismatch_count is not None
-            assert anchor_mismatch_count is not None
-            assert response_event_mismatch_count is not None
-            mismatch_counts = {
-                "missing_completed_turn_count": missing_completed_turn_count,
-                "incomplete_completed_turn_count": incomplete_completed_turn_count,
-                "source_identity_mismatch_count": source_identity_mismatch_count,
-                "anchor_mismatch_count": anchor_mismatch_count,
-                "response_event_mismatch_count": response_event_mismatch_count,
-            }
-        self.logger.info(
-            "response_recovery_proof_not_ready",
-            reason=reason,
-            source_count=len(turn_record.source_event_ids),
-            source_event_ids=turn_record.source_event_ids,
-            anchor_event_id=turn_record.anchor_event_id,
-            pending_source_count=pending_source_count,
-            **mismatch_counts,
-        )
-
-    async def try_start(self) -> bool:
-        """Try to start the agent bot with smart retry logic.
-
-        Retries transient failures but stops immediately on permanent startup errors.
-
-        Returns:
-            True if the bot started successfully, False otherwise.
-
-        """
-
-        @retry(
-            stop=stop_after_attempt(3),
-            wait=wait_exponential(multiplier=1, min=2, max=10),
-            # Tenacity sees BaseException too; never retry a cancelled start.
-            retry=retry_if_exception_type(Exception) & retry_if_not_exception_type(PermanentStartupError),
-            reraise=True,
-        )
-        async def _start_with_retry() -> None:
-            await self.start()
-
-        try:
-            await _start_with_retry()
-            return True  # noqa: TRY300
-        except Exception as exc:
-            if isinstance(exc, PermanentStartupError):
-                logger.error("agent_start_failed_permanently", agent=self.agent_name, error=str(exc))  # noqa: TRY400
-                raise
-            logger.exception("agent_start_failed", agent=self.agent_name)
-            return False
-
     async def leave_rooms(self) -> None:
         """Leave rooms for entity removal while the orchestrator keeps sync alive."""
         await self._room_lifecycle.leave_all_rooms(timeout_seconds=SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS)
@@ -2240,7 +1996,7 @@ class AgentBot:
             failures,
             defer_expected_response_timeout=shutdown_intent.stop_reason == "shutdown",
         )
-        pending_response_count = self._response_runner.pending_inbox_response_count
+        pending_response_count = self._response_runner.inbox.pending_inbox_response_count
         pending_callback_count = (
             self._journal_dispatcher.pending_task_count if shutdown_intent.stop_reason == "shutdown" else 0
         )
@@ -2257,8 +2013,8 @@ class AgentBot:
         await self._release_stopped_resources(failures, shutdown_intent=shutdown_intent)
         if failures:
             # Every step ran, and the caller still has to hear about it.
-            # `stop_entities` pops from the runtime map only after its gather
-            # returns, so raising keeps this bot registered and stops the reload
+            # The fleet drops a stopped slot only after every stop phase
+            # succeeded, so raising keeps this bot registered and stops the reload
             # before it creates a replacement on a store that never closed.
             # Swallowing is what would certify a partial stop as a clean one.
             # A restart still replaces a bot whose only failure is a reply that
@@ -2289,7 +2045,7 @@ class AgentBot:
                 msg = "journal callback cleanup exceeded bounded finalization"
                 raise ResponseShutdownTimeoutError(msg)
             self._deferred_stop_phase = DeferredStopPhase.RECOVERY_PROOF
-            recoverable = await self._response_runner.finish_process_shutdown_recovery(
+            recoverable = await self._response_runner.inbox.finish_process_shutdown_recovery(
                 timeout_seconds=shutdown_budget.remaining_seconds(),
             )
             if not recoverable:
@@ -2314,18 +2070,6 @@ class AgentBot:
         try:
             # Its replacement follows this principal's approvals from here on.
             self._response_runner.stop_following_approval_holds()
-            if self.client is not None:
-                unregister_scheduled_task_state_writer(self.client)
-            if self.agent_name == ROUTER_AGENT_NAME:
-                self._mark_deferred_stop_phase(DeferredStopPhase.ROUTER_OVERDUE_TASKS)
-                clear_scheduled_task_runner_owner()
-                cleared_queued_tasks = clear_deferred_overdue_tasks()
-                if cleared_queued_tasks > 0:
-                    self.logger.info("Cleared queued overdue scheduled tasks", count=cleared_queued_tasks)
-                cancelled_tasks = await cancel_all_running_scheduled_tasks()
-                if cancelled_tasks > 0:
-                    self.logger.info("Cancelled running scheduled tasks", count=cancelled_tasks)
-
             # Each of these owns a resource this bot alone holds, and none of them
             # may skip the others. A lane that already faulted makes dispatcher stop
             # raise, and before this isolation that exception skipped the store and
@@ -2339,7 +2083,7 @@ class AgentBot:
                 failures,
             )
             if shutdown_intent.stop_reason == "restart":
-                await self._response_runner.wait_for_source_owned_inbox_responses()
+                await self._response_runner.inbox.wait_for_source_owned_inbox_responses()
             if self._ingestion_session is not None:
                 self._mark_deferred_stop_phase(DeferredStopPhase.INGESTION_SESSION)
                 await self._release("ingestion session", self._ingestion_session.close(), failures)
@@ -2392,51 +2136,6 @@ class AgentBot:
         """
         await self._room_lifecycle.send_welcome_message_if_empty(room_id, visible_to_sender_id)
 
-    def _maybe_start_deferred_overdue_task_drain(self) -> None:
-        """Start draining queued overdue tasks once Matrix sync is ready."""
-        if self.agent_name != ROUTER_AGENT_NAME or self.client is None or self._sync_shutting_down:
-            return
-
-        existing_task = self._deferred_overdue_task_drain_task
-        if existing_task is not None and not existing_task.done():
-            return
-
-        self._deferred_overdue_task_drain_task = asyncio.create_task(
-            self._drain_deferred_overdue_task_queue(),
-            name=f"deferred_overdue_task_drain_{self.agent_name}",
-        )
-
-    async def _drain_deferred_overdue_task_queue(self) -> None:
-        """Drain queued overdue tasks without blocking sync callbacks."""
-        assert self.client is not None
-
-        try:
-            drained_count = await drain_deferred_overdue_tasks(
-                self.client,
-                self.config,
-                self.runtime_paths,
-                self._conversation_reader,
-                config_provider=lambda: self.orchestrator.config if self.orchestrator is not None else self.config,
-            )
-            if drained_count > 0:
-                self.logger.info("Started deferred overdue scheduled tasks", count=drained_count)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            self.logger.exception("Failed to drain deferred overdue scheduled tasks")
-
-    async def _cancel_deferred_overdue_task_drain(self) -> None:
-        """Cancel the background overdue-task drain task if one exists."""
-        drain_task = self._deferred_overdue_task_drain_task
-        self._deferred_overdue_task_drain_task = None
-        if drain_task is None:
-            return
-
-        if not drain_task.done():
-            drain_task.cancel()
-
-        await asyncio.gather(drain_task, return_exceptions=True)
-
     def begin_process_shutdown(self) -> None:
         """Close response and callback admission before any shutdown teardown yields."""
         self._matrix_ingestion_quiesce_requested = True
@@ -2444,7 +2143,7 @@ class AgentBot:
         self._delivery_recovery_wake.set()
         self._response_runner.refuse_pending_admissions()
         self._journal_dispatcher.begin_shutdown(shutdown_intent=ORDERLY_SHUTDOWN)
-        self._response_runner.begin_process_shutdown()
+        self._response_runner.inbox.begin_process_shutdown()
 
     async def prepare_for_sync_shutdown(
         self,
@@ -2474,8 +2173,6 @@ class AgentBot:
             shutdown_budget = ShutdownBudget.start(SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS)
             self._sync_shutdown_budget = shutdown_budget
         await self._personal_room_lifecycle.cancel_reconciliation(timeout_seconds=shutdown_budget.remaining_seconds())
-        if self.agent_name == ROUTER_AGENT_NAME:
-            await self._cancel_deferred_overdue_task_drain()
         background_tasks_completed = await wait_for_background_tasks(
             timeout=shutdown_budget.remaining_seconds(),
             owner=self._runtime_view,
@@ -2494,18 +2191,18 @@ class AgentBot:
                 agent_name=self.agent_name,
                 admission_deferred_count=drain_result.admission_deferred_count,
             )
-        responses_drained = await self._response_runner.drain_inbox_responses(
+        responses_drained = await self._response_runner.inbox.drain_inbox_responses(
             cancel_after_seconds=shutdown_budget.per_window_seconds(windows=2),
             shutdown_intent=shutdown_intent,
         )
-        pending_response_count = self._response_runner.pending_inbox_response_count
+        pending_response_count = self._response_runner.inbox.pending_inbox_response_count
         if not responses_drained:
             self.logger.warning(
                 "matrix_agent_response_drain_incomplete",
                 agent_name=self.agent_name,
                 active_response_count=self.in_flight_response_count,
                 pending_response_count=pending_response_count,
-                response_recovery_complete=self._response_runner.incomplete_inbox_responses_recoverable,
+                response_recovery_complete=self._response_runner.inbox.incomplete_inbox_responses_recoverable,
                 restart_reason_category=restart_reason_category_for(shutdown_intent),
             )
         post_drain_background_tasks_completed = await wait_for_background_tasks(
@@ -2527,7 +2224,7 @@ class AgentBot:
                 callbacks_drained=callbacks_drained,
                 coalescing_drain_completed=drain_result.completed,
                 responses_drained=responses_drained,
-                response_recovery_complete=self._response_runner.incomplete_inbox_responses_recoverable,
+                response_recovery_complete=self._response_runner.inbox.incomplete_inbox_responses_recoverable,
                 post_drain_background_tasks_completed=post_drain_background_tasks_completed,
                 released_reservation_count=drain_result.released_reservation_count,
                 cancelled_unready_count=drain_result.cancelled_unready_count,
@@ -2630,47 +2327,6 @@ class AgentBot:
             return client.rooms[room_id]
         return nio.MatrixRoom(room_id, self.matrix_id.full_id)
 
-    async def _dispatch_prepared_turn(self, turn: PreparedTurn) -> None:
-        """Delegate one prepared turn to the turn engine."""
-        await self._turn_controller.handle_prepared_turn(turn)
-
-    def _retry_failed_coalesced_dispatch(self, pending_events: tuple[PendingEvent, ...]) -> None:
-        """Return failed gate sources to their exact durable callback owner."""
-        for pending_event in pending_events:
-            self._retry_pending_dispatch_source(pending_event.room.room_id, pending_event.event.event_id)
-
-    def _retry_pending_dispatch_source(self, room_id: str, source_event_id: str) -> None:
-        """Return one undelivered source to its exact durable callback owner."""
-        self._journal_dispatcher.retry_turn_source(room_id, source_event_id)
-
-    async def _settle_ignored_dispatch_source(self, source_event_id: str) -> None:
-        """Settle one asynchronously normalized source that produced no dispatch payload."""
-        await self._journal_dispatcher.settle_intentionally_ignored_turn_sources(
-            (source_event_id,),
-        )
-
-    def _log_matrix_event_callback_started(
-        self,
-        room: nio.MatrixRoom,
-        event: nio.RoomMessageFormatted | MatrixMediaEvent,
-        *,
-        callback_name: str,
-    ) -> None:
-        """Log Matrix ingress timing without message content."""
-        receive_timestamp_ms = int(time.time() * 1000)
-        origin_server_ts = origin_server_ts_from_event_source(event.source)
-        log_context: dict[str, object] = {
-            "callback": callback_name,
-            "event_id": event.event_id,
-            "room_id": room.room_id,
-            "agent_name": self.agent_name,
-            "receive_timestamp_ms": receive_timestamp_ms,
-        }
-        if origin_server_ts is not None:
-            log_context["origin_server_ts_ms"] = origin_server_ts
-            log_context["matrix_event_receive_lag_ms"] = round(receive_timestamp_ms - float(origin_server_ts), 1)
-        self.logger.info("matrix_event_callback_started", **log_context)
-
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
         """Delegate one inbound text event to the turn engine.
 
@@ -2680,68 +2336,17 @@ class AgentBot:
         mentions, commands, and routing apply to `/me asks the bot to X` as to
         the sentence typed without the `/me`.
         """
-        receipt_time = time.monotonic()
-        if await self._personal_room_lifecycle.handle_command(room, event):
-            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-        self._log_matrix_event_callback_started(room, event, callback_name="message")
-        semantic_consumer = self._journal_dispatcher.semantic_consumer()
-        approval_reply_claimed = semantic_consumer is SemanticConsumer.APPROVAL_REPLY
+        return await self._turn_ingress.handle_text_event(room, event)
 
-        async def claim_approval_reply() -> None:
-            nonlocal approval_reply_claimed
-            await self._journal_dispatcher.claim_semantic_consumer(
-                SemanticConsumer.APPROVAL_REPLY,
-            )
-            approval_reply_claimed = True
+    async def _on_redaction(self, room: nio.MatrixRoom, event: nio.RedactionEvent) -> None:  # noqa: ARG002
+        """Run what the redaction's admission left for the bot.
 
-        early_reservation_owner = None
-        approval_reply_to_event_id = EventInfo.from_event(event.source).reply_to_event_id
-        if approval_reply_to_event_id is not None and is_process_active_approval_card(approval_reply_to_event_id):
-            requester_user_id = self._ingress_validator.requester_user_id(
-                sender=event.sender,
-                source=event.source,
-            )
-            early_reservation_owner = self._turn_controller.reserve_prompt_ingress_order(
-                room,
-                requester_user_id,
-                receipt_time=receipt_time,
-            )
-        try:
-            approval_reply_handled = await maybe_handle_tool_approval_reply(
-                room=room,
-                event=event,
-                config=self.config,
-                runtime_paths=self.runtime_paths,
-                orchestrator=self.orchestrator,
-                logger=self.logger,
-                before_consume=None if approval_reply_claimed else claim_approval_reply,
-                membership_index=self._runtime_view.agent_reply_memberships,
-            )
-            if approval_reply_claimed or approval_reply_handled:
-                # Its card answers it, so a message that waited for the approval is not skipped as older than it.
-                await self._turn_store.record_turn(TurnRecord.create([event.event_id]))
-                return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-            return await self._turn_controller.handle_text_event(
-                room,
-                event,
-                receipt_time=receipt_time,
-                reservation_owner=early_reservation_owner,
-            )
-        finally:
-            if early_reservation_owner is not None:
-                await early_reservation_owner.release()
-
-    async def _on_redaction(self, room: nio.MatrixRoom, event: nio.Event) -> None:
-        """Tombstone the redacted source so no replay reruns the turn it started.
-
-        The projection learns about the redaction through journal admission and
-        ends the replies that lost every source with it, so this owes only the
-        durable tombstone and those replies' effects: their running spans stop
-        and what they showed is redacted. Raising leaves the callback
+        Admission recorded the redaction for the agent, removed its text, and
+        ended the replies that lost every source with it, all in one
+        transaction, so this owes only those replies' effects: their running
+        spans stop and what they showed is redacted. Raising leaves the callback
         unaccepted and the source available for sync to redeliver.
         """
-        assert isinstance(event, nio.RedactionEvent)
-        await self._turn_store.mark_source_redacted(event.redacts, room_id=room.room_id)
         self._replies_ended(await self._reply_runtime.deletions_ended())
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> TurnDispatchOutcome:
@@ -2790,11 +2395,8 @@ class AgentBot:
     def _lookup_personal_room_target(self, agent_name: str) -> PersonalRoomTarget | None:
         """Project a connected fleet member into its service and sync readiness."""
         orchestrator = self.orchestrator
-        bots = orchestrator.agent_bots if orchestrator is not None else None
-        if not isinstance(bots, dict):
-            return None
-        target = cast("dict[str, object]", bots).get(agent_name)
-        if not isinstance(target, AgentBot) or target.client is None:
+        target = orchestrator.agent_bots.get(agent_name) if orchestrator is not None else None
+        if target is None or target.client is None:
             return None
         return PersonalRoomTarget(target.personal_rooms, target.first_sync_complete)
 
@@ -2875,18 +2477,6 @@ class AgentBot:
             reconcile_effects=self._reconcile_reply_membership_effects,
         )
 
-    def _delivered_turn_source_ids(self, turn_id: str) -> tuple[str, ...]:
-        """Return every journal source one turn's answer discharges.
-
-        The turn is named by its anchor event, which is what the outbox keys
-        on, but a coalesced batch answers several sources at once and all of
-        them are handed over together. Without the ledger's own record of that
-        set, the anchor would settle and its siblings would replay into a turn
-        that has already been answered.
-        """
-        record = self._turn_store.get_turn_record(turn_id)
-        return record.indexed_event_ids if record is not None else (turn_id,)
-
     async def _on_job_cancel(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Cancel this entity's background jobs a person asked to stop from their client."""
         runtime = get_background_runtime(self.runtime_paths)
@@ -2940,26 +2530,7 @@ class AgentBot:
         event: MatrixMediaEvent,
     ) -> TurnDispatchOutcome:
         """Delegate one inbound media event to the turn engine."""
-        receipt_time = time.monotonic()
-        self._log_matrix_event_callback_started(room, event, callback_name="media")
-        return await self._turn_controller.handle_media_event(room, event, receipt_time=receipt_time)
-
-    async def _run_regenerated_response(self, request: ResponseRequest) -> str | None:
-        """Run one edit-regenerated turn through this bot's response path."""
-        return await self._response_runner.generate_response(request)
-
-    async def _later_human_message(self, record: TurnRecord) -> bool:
-        """Return whether a human wrote in the turn's conversation after it, so an edit of it regenerates nothing."""
-        target = record.conversation_target
-        assert target is not None, "an edit regenerates only a turn with a conversation"
-        return await self._reply_runtime.store.later_message_exists(
-            room_id=target.room_id,
-            thread_id=target.resolved_thread_id,
-            source_event_ids=record.source_event_ids,
-            excluded_senders=persisted_bot_user_ids(self.runtime_paths),
-            # In room mode the room is one conversation, threads included.
-            whole_room=self._room_scope_is_single_conversation(target.room_id),
-        )
+        return await self._turn_ingress.handle_media_event(room, event)
 
     async def _hook_send_message(
         self,
@@ -3026,55 +2597,3 @@ class AgentBot:
             self.logger.error("Failed to redact message", event_id=event_id, error=str(response))
             return False
         return True
-
-
-class TeamBot(AgentBot):
-    """A bot that represents a team of agents working together."""
-
-    def current_configured_team_agents(self) -> list[MatrixID]:
-        """Return this configured team's current persisted member Matrix IDs."""
-        team_config = self.config.teams[self.agent_name]
-        registry = entity_identity_registry(self.config, self.runtime_paths)
-        return [registry.current_id(agent_name) for agent_name in team_config.agents]
-
-    async def _run_regenerated_response(self, request: ResponseRequest) -> str | None:
-        """Run one edit-regenerated turn through the configured team path."""
-        target = request.response_envelope.target
-        if not request.prompt.strip():
-            return await self._response_runner.generate_response_for_empty_prompt(
-                request,
-                response_kind="team",
-            )
-        assert self.client is not None
-        team_config = self.config.teams[self.agent_name]
-        configured_mode = TeamMode(team_config.mode)
-        availability = self._turn_policy.responder_availability()
-        team_resolution = resolve_configured_team(
-            self.agent_name,
-            self.current_configured_team_agents(),
-            configured_mode,
-            self.config,
-            self.runtime_paths,
-            materializable_agent_names=availability.materializable_agent_names,
-        )
-        if team_resolution.outcome is not TeamOutcome.TEAM:
-            assert team_resolution.reason is not None
-            return await self._response_runner.generate_team_response_helper(
-                request,
-                member_names=team_config.agents,
-                team_mode=configured_mode.value,
-                resolution_reason=team_resolution.reason,
-            )
-        assert team_resolution.mode is not None
-
-        return await self._response_runner.generate_team_response_helper(
-            replace(
-                request,
-                media=request.media or MediaInputs(),
-                user_id=request.user_id or "",
-                correlation_id=request.correlation_id or target.reply_to_event_id,
-            ),
-            member_names=team_resolution.eligible_member_names,
-            team_mode=team_resolution.mode.value,
-            reason_prefix=f"Team '{self.agent_name}'",
-        )

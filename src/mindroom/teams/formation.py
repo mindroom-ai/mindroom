@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
 
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
-    from mindroom.runtime_protocols import OrchestratorRuntime, SupportsRunningState
+    from mindroom.runtime_protocols import OrchestratorRuntime
 
 logger = get_logger(__name__)
 
@@ -186,17 +186,13 @@ def resolve_live_shared_agent_names(
     orchestrator: OrchestratorRuntime,
     *,
     config: Config | None = None,
-) -> set[str] | None:
-    """Return running shared agent names when runtime availability is known."""
+) -> set[str]:
+    """Return the running shared agent names."""
     active_config = config or orchestrator.config
     assert active_config is not None
-    orchestrator_agent_bots = orchestrator.agent_bots
-    if not isinstance(orchestrator_agent_bots, dict):
-        return None
-    running_agent_bots = cast("dict[str, SupportsRunningState]", orchestrator_agent_bots)
     return {
         name
-        for name, bot in running_agent_bots.items()
+        for name, bot in orchestrator.agent_bots.items()
         if name != ROUTER_AGENT_NAME and name in active_config.agents and bot.running
     }
 

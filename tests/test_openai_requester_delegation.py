@@ -35,9 +35,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
     from pathlib import Path
 
-    from mindroom.ai import ResponseTurnContext
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.response_turn import ResponseTurnContext
 
 
 @dataclass
@@ -102,21 +101,18 @@ def test_mapped_request_delegates_with_canonical_identity(api: _ApiHarness, stre
     """Run the real delegate tool from both API drivers, including after an SSE yield."""
     child_calls: list[ResponseTurnContext] = []
 
-    async def child(ctx: ResponseTurnContext, **kwargs: object) -> str:
+    async def child(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
         child_calls.append(ctx)
         assert ctx.requester_id == "@alice:example.org"
         assert ctx.room_id is None
-        assert kwargs["include_openai_compat_guidance"] is True
+        assert ctx.include_openai_compat_guidance is True
         assert get_tool_runtime_context() is None
         assert get_detached_requester_context() is not None
         return "specialist result"
 
-    async def delegate(
-        ctx: ResponseTurnContext,
-        *,
-        execution_identity: ToolExecutionIdentity,
-        **_kwargs: object,
-    ) -> str:
+    async def delegate(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+        execution_identity = ctx.execution_identity
+        assert execution_identity is not None
         assert ctx.requester_id == "@alice:example.org"
         assert execution_identity.requester_id == ctx.requester_id
         (identity,) = config_lifecycle.app_state(api.client.app).openai_responses
@@ -131,14 +127,9 @@ def test_mapped_request_delegates_with_canonical_identity(api: _ApiHarness, stre
         )
         return await tool.run_subagent(agent_name="specialist", task="help")
 
-    async def streaming(
-        ctx: ResponseTurnContext,
-        *,
-        execution_identity: ToolExecutionIdentity,
-        **_kwargs: object,
-    ) -> AsyncIterator[str]:
+    async def streaming(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[str]:
         yield "Working: "
-        yield await delegate(ctx, execution_identity=execution_identity)
+        yield await delegate(ctx)
 
     with (
         patch.object(openai_compat, "ai_response", side_effect=completing(delegate)),
@@ -173,16 +164,13 @@ def test_mapped_request_delegates_on_the_fallback_once_over_budget(api: _ApiHarn
     )
     child_models: list[str | None] = []
 
-    async def child(ctx: ResponseTurnContext, **_kwargs: object) -> str:
+    async def child(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
         child_models.append(ctx.active_model_name)
         return "specialist result"
 
-    async def delegate(
-        _ctx: ResponseTurnContext,
-        *,
-        execution_identity: ToolExecutionIdentity,
-        **_kwargs: object,
-    ) -> str:
+    async def delegate(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+        execution_identity = ctx.execution_identity
+        assert execution_identity is not None
         tool = DelegateTools(
             "leader",
             ["specialist"],
@@ -211,12 +199,9 @@ def test_mapped_request_delegates_on_the_fallback_once_over_budget(api: _ApiHarn
 def test_delegation_fails_closed(api: _ApiHarness, key: str, target: str) -> None:
     """Unmapped callers and forbidden targets never reach child execution."""
 
-    async def delegate(
-        _ctx: ResponseTurnContext,
-        *,
-        execution_identity: ToolExecutionIdentity,
-        **_kwargs: object,
-    ) -> str:
+    async def delegate(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+        execution_identity = ctx.execution_identity
+        assert execution_identity is not None
         tool = DelegateTools(
             "leader",
             [target],
@@ -298,7 +283,9 @@ def test_nested_delegation_retains_authority_and_denies_forbidden_target(api: _A
     """A specialist can delegate again but cannot acquire another requester's grants."""
     api.config.agents["specialist"].delegate_to = ["forbidden"]
 
-    async def parent(_ctx: ResponseTurnContext, *, execution_identity: ToolExecutionIdentity, **_kwargs: object) -> str:
+    async def parent(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+        execution_identity = ctx.execution_identity
+        assert execution_identity is not None
         tool = DelegateTools(
             "leader",
             ["specialist"],
@@ -309,7 +296,9 @@ def test_nested_delegation_retains_authority_and_denies_forbidden_target(api: _A
         )
         return await tool.run_subagent(agent_name="specialist", task="help")
 
-    async def child(ctx: ResponseTurnContext, *, execution_identity: ToolExecutionIdentity, **_kwargs: object) -> str:
+    async def child(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+        execution_identity = ctx.execution_identity
+        assert execution_identity is not None
         assert ctx.requester_id == "@alice:example.org"
         assert execution_identity.agent_name == "specialist"
         tool = DelegateTools(
@@ -341,7 +330,9 @@ def test_nested_delegation_retains_authority_and_denies_forbidden_target(api: _A
 def test_delegation_rechecks_current_authorization(api: _ApiHarness, policy: str, tmp_path: Path) -> None:
     """Changed policy and absent room state cannot reuse authority from request admission."""
 
-    async def parent(_ctx: ResponseTurnContext, *, execution_identity: ToolExecutionIdentity, **_kwargs: object) -> str:
+    async def parent(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+        execution_identity = ctx.execution_identity
+        assert execution_identity is not None
         replacement = api.config.model_copy(deep=True)
         replacement.agents["specialist"].access = ResponderAccessConfig(
             current_room_members=True,
@@ -378,7 +369,9 @@ def test_delegation_rechecks_current_authorization(api: _ApiHarness, policy: str
 def test_delegation_rechecks_current_caller_allowlist(api: _ApiHarness) -> None:
     """Hot reload revoking a caller's delegation edge stops an active API run."""
 
-    async def parent(_ctx: ResponseTurnContext, *, execution_identity: ToolExecutionIdentity, **_kwargs: object) -> str:
+    async def parent(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+        execution_identity = ctx.execution_identity
+        assert execution_identity is not None
         replacement = api.config.model_copy(deep=True)
         replacement.agents["leader"].delegate_to = []
         config_lifecycle.require_api_state(api.client.app).snapshot.runtime_config = replacement
@@ -429,7 +422,7 @@ def test_rebound_key_has_a_separate_session(api: _ApiHarness) -> None:
     """Reassigning a key's canonical requester cannot open its former conversation."""
     sessions: list[str] = []
 
-    async def parent(ctx: ResponseTurnContext, **_kwargs: object) -> str:
+    async def parent(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
         sessions.append(ctx.session_id)
         return "done"
 

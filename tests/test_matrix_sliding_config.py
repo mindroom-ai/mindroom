@@ -20,6 +20,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.sync_loop import bot_ingestion_config, subscribe_sliding_rooms
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from tests.conftest import install_bots
 from tests.threading_helpers import ThreadingBehaviorTestBase
 
 if TYPE_CHECKING:
@@ -226,7 +227,7 @@ class TestSlidingBot(ThreadingBehaviorTestBase):
         bot.running = True
         orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
         orchestrator.config = bot.config
-        orchestrator.agent_bots = {"general": bot}
+        install_bots(orchestrator, {"general": bot})
         client = nio.AsyncClient("https://example.org", bot.agent_user.user_id, device_id="DEVICE")
         client.restore_login(bot.agent_user.user_id, "DEVICE", "token")
         session = open_durable_sync(
@@ -238,25 +239,19 @@ class TestSlidingBot(ThreadingBehaviorTestBase):
         bot._ingestion_session = session
         monkeypatch.setattr(bot, "join_configured_rooms", AsyncMock())
         monkeypatch.setattr(bot, "leave_unconfigured_rooms", AsyncMock())
-        for method in (
-            "_ensure_rooms_exist",
-            "_ensure_root_space",
-            "_ensure_room_invitations",
-            "refresh_agent_reply_memberships",
-        ):
-            monkeypatch.setattr(orchestrator, method, AsyncMock())
+        for method in ("ensure_rooms_exist", "link_root_space", "_ensure_room_invitations"):
+            monkeypatch.setattr(orchestrator._rooms, method, AsyncMock())
+        monkeypatch.setattr(orchestrator, "refresh_agent_reply_memberships", AsyncMock())
         plan = ConfigUpdatePlan(
             new_config=bot.config,
-            changed_mcp_servers=set(),
-            configured_entities={"general"},
-            entities_to_restart=set(),
-            new_entities=set(),
-            removed_entities=set(),
+            restart=set(),
+            start=set(),
+            remove=set(),
             mindroom_user_changed=False,
             room_access_changed=False,
             matrix_space_changed=False,
             authorization_changed=False,
-            entities_to_reconcile_rooms={"general"},
+            reconcile_rooms={"general"},
         )
         try:
             await orchestrator._reconcile_post_update_rooms(plan, changed_entities=set())

@@ -22,7 +22,7 @@ from mindroom.config.main import Config
 from mindroom.constants import HOOK_SOURCE_KEY, ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SOURCE_KIND_KEY
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.delivery_replay import DeliveryEventClaim, DeliveryReplayStore
+from mindroom.delivery_replay import DeliveryEventClaim, DeliveryReplayStore, DeliveryReplayStoreError
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.logging_config import get_logger
@@ -190,6 +190,24 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
 
 def _dm(text: str = "are you free at 3?", *, ts: str = ROOT_TS) -> dict[str, Any]:
     return event_payload("message", author="dana", text=text, ts=ts, channel=DM, channel_type="im")
+
+
+@pytest.mark.asyncio
+async def test_a_store_error_after_the_post_still_counts_as_delivered(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once the Matrix post went out, a replay-store fault must not make Slack resend and the agent answer twice."""
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        msg = "delivery replay store is unavailable"
+        raise DeliveryReplayStoreError(msg)
+
+    monkeypatch.setattr(DeliveryReplayStore, "bind_thread_root", fail)
+
+    assert await harness.deliver(event_payload()) == "delivered"
+    await harness.settle()
+    assert len(harness.matrix.sent) == 1
 
 
 @pytest.mark.asyncio
@@ -1041,7 +1059,6 @@ async def test_slack_turn_reaches_the_agent_with_its_hook_source_and_requester(h
         config=harness.config,
         runtime_paths=harness.paths,
         agent_reply_memberships=AgentReplyMembershipIndex(),
-        enable_streaming=False,
         orchestrator=None,
     )
     validator = IngressValidator(
@@ -1051,6 +1068,8 @@ async def test_slack_turn_reaches_the_agent_with_its_hook_source_and_requester(h
             matrix_id=matrix_id,
             turn_store=MagicMock(),
             turn_policy=MagicMock(),
+            wait_for_admission_or_shutdown=AsyncMock(return_value=True),
+            settle_ignored_sources=AsyncMock(),
         ),
     )
     resolver = ConversationResolver(
@@ -1065,14 +1084,14 @@ async def test_slack_turn_reaches_the_agent_with_its_hook_source_and_requester(h
         ),
     )
 
-    requester_id = validator.requester_user_id(sender=matrix_id.full_id, source=event.source)
-    envelope = resolver.build_ingress_envelope(
+    facts = validator.classify(event)
+    envelope = resolver.build_envelope(
         event=event,
-        requester_user_id=requester_id,
+        facts=facts,
         target=MessageTarget.resolve(room_id, None, event.event_id),
     )
 
-    assert requester_id == requester
+    assert facts.run_requester_id == requester
     assert envelope.requester_id == requester
     assert envelope.hook_source == hook_source
     assert envelope.source_kind == "hook_dispatch"

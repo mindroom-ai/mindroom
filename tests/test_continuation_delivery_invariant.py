@@ -1,7 +1,7 @@
 """A turn that runs the model more than once still owes the room one answer.
 
 A next-turn model switch makes the turn continue: the model runs again with a
-continuation prompt, and the turn's one answer is due only after the last attempt.
+continuation prompt, and only the last attempt has an answer worth showing.
 The outbox is where that has to hold, and it holds asymmetrically. An
 unattempted ``FINAL`` row is overwritten by whatever comes next, so an early
 enqueue is harmless; an *attempted* one is kept, and the later enqueue is
@@ -42,11 +42,11 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.event_journal import (
         DeliveryAcknowledgement,
+        FinalAnswerEnqueue,
         MatrixDelivery,
         MatrixDeliveryView,
         PermanentDeliveryFailure,
         ProjectedEvent,
-        TerminalTurnWrite,
     )
     from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowEnqueue, ReplyRowRequest, ReplyStore
     from mindroom.llm.provider import ModelRequest, StreamEvent
@@ -121,7 +121,6 @@ class _WatchedOutbox:
         payload: Mapping[str, object],
         result: Mapping[str, object] | None = None,
         edits_event_id: str | None = None,
-        settle_source_event_ids: tuple[str, ...] = (),
         permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Record intent, noting the stage on the timeline first."""
@@ -135,7 +134,33 @@ class _WatchedOutbox:
             payload=payload,
             result=result,
             edits_event_id=edits_event_id,
-            settle_source_event_ids=settle_source_event_ids,
+            permanent_failure_reason=permanent_failure_reason,
+        )
+
+    async def enqueue_final_answer(
+        self,
+        *,
+        delivery_id: str,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+        turn_key: str | None,
+        result: Mapping[str, object] | None = None,
+        event_type: str = "m.room.message",
+        edits_event_id: str | None = None,
+        permanent_failure_reason: str | None = None,
+    ) -> FinalAnswerEnqueue | None:
+        """Record a FINAL answer and its handoff, noting the stage on the timeline first."""
+        self.timeline.append(f"enqueue:{DeliveryStage.FINAL.value}")
+        return await self.inner.enqueue_final_answer(
+            delivery_id=delivery_id,
+            room_id=room_id,
+            thread_id=thread_id,
+            payload=payload,
+            turn_key=turn_key,
+            result=result,
+            event_type=event_type,
+            edits_event_id=edits_event_id,
             permanent_failure_reason=permanent_failure_reason,
         )
 
@@ -216,7 +241,7 @@ class _WatchedOutbox:
         stage: DeliveryStage,
         event_id: str,
         delivered_projections: tuple[ProjectedEvent, ...],
-        terminal_turn: TerminalTurnWrite | None = None,
+        terminal_response_event_id: str | None = None,
     ) -> DeliveryAcknowledgement:
         """Record the Matrix event one claimed delivery produced, and the turn it completes."""
         return await self.inner.acknowledge_matrix_delivery(
@@ -224,7 +249,7 @@ class _WatchedOutbox:
             stage=stage,
             event_id=event_id,
             delivered_projections=delivered_projections,
-            terminal_turn=terminal_turn,
+            terminal_response_event_id=terminal_response_event_id,
         )
 
     async def unacknowledged_matrix_deliveries(
@@ -243,6 +268,7 @@ class _Homeserver:
     """A Matrix server that deduplicates by transaction ID, like a real one."""
 
     events: dict[str, str] = field(default_factory=dict)
+    bodies: list[str] = field(default_factory=list)
 
     async def room_send(
         self,
@@ -255,8 +281,8 @@ class _Homeserver:
     ) -> nio.RoomSendResponse:
         """Accept one send, collapsing a repeated transaction ID onto one event."""
         del message_type
-        del content
         event_id = self.events.setdefault(tx_id or f"anon-{len(self.events)}", f"$sent{len(self.events)}")
+        self.bodies.append(_visible_body(content))
         return nio.RoomSendResponse(event_id=event_id, room_id=room_id)
 
 
@@ -304,6 +330,10 @@ class _Turn:
         if "claim:final" not in self.timeline:
             return False
         return self.timeline.index("claim:final") > _last_index(self.timeline, "attempt")
+
+    def room_showed(self, text: str) -> bool:
+        """Return whether any send would have put *text* in front of a reader."""
+        return any(text in body for body in self.homeserver.bodies)
 
 
 def _last_index(timeline: list[str], entry: str) -> int:
@@ -356,15 +386,13 @@ def _one_continuation() -> list[list[ScriptStep]]:
     return [_switch(1, content=_INTERMEDIATE), answer(_ANSWER)]
 
 
-async def _run_blocking_agent_turn(
+async def _run_non_streaming_agent_turn(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     turns: list[list[ScriptStep]],
 ) -> _Turn:
-    """Drive one blocking agent turn whose model plays *turns* in order."""
+    """Drive one agent turn, delivered without streaming, whose model plays *turns* in order."""
     bot = _bot(tmp_path)
-    # Visible tool calls route the "non-streaming" agent turn through the
-    # collected-stream driver instead; the blocking driver is the one here.
     bot.config.agents["general"].show_tool_calls = False
     turn = _watch(bot, monkeypatch, turns, streaming=False)
     await turn.runner.generate_response(_plain_request(_target()))
@@ -372,26 +400,24 @@ async def _run_blocking_agent_turn(
 
 
 class TestAgentContinuation:
-    """The blocking agent reply: one answer, collected from every attempt once the last one ends."""
+    """An agent turn delivered without streaming: one answer, sent after its last attempt."""
 
     async def test_one_final_delivery_carries_the_last_attempt(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Two attempts, one `FINAL`, and it ends with what the second attempt said.
+        """Two attempts, one `FINAL`, and it holds what the attempts streamed, ending with the second's answer.
 
-        A blocking reply collects the streamed turn, so it holds the narration before the tool call once, as a
-        streamed reply does.
+        The collected reply is the text the turn streamed, as a streamed reply shows it: the narration before the
+        tool call, once, then the answer a paragraph below it, where the hidden call sat.
         """
-        turn = await _run_blocking_agent_turn(tmp_path, monkeypatch, _one_continuation())
+        turn = await _run_non_streaming_agent_turn(tmp_path, monkeypatch, _one_continuation())
 
         assert turn.attempts == 2, "the model switch did not force a second attempt"
         assert turn.timeline.count("enqueue:final") == 1
         assert turn.timeline.count("claim:final") == 1
-        answer_body = _last_answer(await turn.final())
-        assert answer_body.count(_INTERMEDIATE) == 1
-        assert answer_body.endswith(_ANSWER)
+        assert _last_answer(await turn.final()) == f"{_INTERMEDIATE}\n\n{_ANSWER}"
         # A claim is what freezes the payload, so a claim taken while attempts
         # remain is the defect -- not merely an early enqueue.
         assert turn.final_claim_follows_every_attempt
@@ -402,7 +428,7 @@ class TestAgentContinuation:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The `INITIAL` stage belongs to the turn, not to an attempt."""
-        turn = await _run_blocking_agent_turn(tmp_path, monkeypatch, _one_continuation())
+        turn = await _run_non_streaming_agent_turn(tmp_path, monkeypatch, _one_continuation())
 
         assert turn.attempts == 2
         assert turn.timeline.count("enqueue:initial") == 1
@@ -423,7 +449,7 @@ class TestAgentContinuation:
         """
         never_converges = [_switch(index, content=None) for index in range(TURN_CONTINUATION_LIMIT + 1)]
 
-        turn = await _run_blocking_agent_turn(tmp_path, monkeypatch, never_converges)
+        turn = await _run_non_streaming_agent_turn(tmp_path, monkeypatch, never_converges)
 
         assert turn.attempts == TURN_CONTINUATION_LIMIT + 1
         assert turn.timeline.count("enqueue:final") == 1

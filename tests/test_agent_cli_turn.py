@@ -42,7 +42,7 @@ from mindroom.agent_cli.shell_contract import AgentCliShellEnv, current_agent_cl
 from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.cancellation import request_task_cancel
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import ConversationStore
 from mindroom.tool_jobs.control import JobControl, job_control_context, job_owns_execution
 from mindroom.tool_jobs.resources import execution_resources
@@ -123,7 +123,7 @@ async def test_outer_shell_cli_nested_shell_cli_mutation_and_late_rejection(
         [_toolkit("shell", run_shell_command), _toolkit("state", mutate)],
         middleware=(hook,),
     )
-    catalog.store = create_state_storage("helper", tmp_path)
+    catalog.store = create_agent_state_storage("helper", tmp_path)
 
     async def authorize(key, arguments) -> None:
         return None
@@ -171,7 +171,7 @@ async def test_native_shell_call_admits_cli_calls_only_while_it_runs(tmp_path: P
         return "mutated"
 
     catalog = await _catalog(tmp_path, [_toolkit("state", mutate)])
-    catalog.store = create_state_storage("helper", tmp_path)
+    catalog.store = create_agent_state_storage("helper", tmp_path)
 
     async def authorize(key, arguments) -> None:
         return None
@@ -219,7 +219,7 @@ async def test_native_shell_result_carries_media_from_its_cli_calls(tmp_path: Pa
 
     catalog = await _catalog(tmp_path, [_toolkit("media", produce)])
     catalog.runtime_context = replace(catalog.runtime_context, storage_path=tmp_path / "storage")
-    catalog.store = create_state_storage("helper", tmp_path)
+    catalog.store = create_agent_state_storage("helper", tmp_path)
     (tmp_path / "workspace").mkdir()
 
     async def authorize(key, arguments) -> None:
@@ -254,7 +254,7 @@ async def test_native_shell_result_carries_media_from_its_cli_calls(tmp_path: Pa
 async def _native_owner(tmp_path: Path, tools: list, authorize, middleware: tuple = ()) -> LiveTurnTools:
     catalog = await _catalog(tmp_path, [_toolkit("calls", *tools)], middleware=middleware)
     catalog.runtime_context = replace(catalog.runtime_context, storage_path=tmp_path / "storage")
-    catalog.store = create_state_storage("helper", tmp_path)
+    catalog.store = create_agent_state_storage("helper", tmp_path)
     (tmp_path / "workspace").mkdir(exist_ok=True)
     owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
@@ -337,7 +337,7 @@ async def test_a_cli_call_approved_after_its_commands_timeout_still_runs(tmp_pat
         tmp_path,
         [_toolkit("shell", run_shell_command), _function(action, requires_confirmation=True)],
     )
-    catalog.store = create_state_storage("helper", tmp_path)
+    catalog.store = create_agent_state_storage("helper", tmp_path)
 
     async def decide_later(paused):
         assert (await owner.get_call(call_ids[0]))["status"] == "waiting"
@@ -386,7 +386,7 @@ async def test_a_cli_approval_pause_records_its_run_and_that_run_s_model(tmp_pat
         tmp_path,
         [_toolkit("shell", run_shell_command), _function(action, requires_confirmation=True)],
     )
-    catalog.store = create_state_storage("helper", tmp_path)
+    catalog.store = create_agent_state_storage("helper", tmp_path)
     catalog.run = replace(catalog.run, model_name="run-model")
 
     async def approve(paused):
@@ -630,7 +630,7 @@ async def test_nested_cli_shell_keeps_its_parent_window_while_a_newer_window_is_
         return None
 
     catalog = await _catalog(tmp_path, [_toolkit("shell", run_shell_command)])
-    catalog.store = create_state_storage("helper", tmp_path)
+    catalog.store = create_agent_state_storage("helper", tmp_path)
     owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
@@ -967,7 +967,7 @@ async def test_a_shell_window_keeps_its_cli_while_its_reply_rebuilds_the_catalog
         await owner.retire_binding()
         assert (await owner.operation(window=None, operation=ToolListOperation(operation="tools.list")))["items"]
         new = await _catalog(tmp_path, [_toolkit("calls", ping)])
-        new.store = create_state_storage("helper", tmp_path)
+        new.store = create_agent_state_storage("helper", tmp_path)
         owner.bind_catalog(new)
         rebuilt.set()
         assert await window == "completed"
@@ -1034,7 +1034,7 @@ async def test_write_failure_prevents_shell_and_inner_effects(
         return args
 
     catalog = await _catalog(tmp_path, [_toolkit("shell", run_shell_command)])
-    catalog.store = create_state_storage("helper", tmp_path)
+    catalog.store = create_agent_state_storage("helper", tmp_path)
 
     async def authorize(key, arguments) -> None:
         effects.append("authorize")
@@ -1089,7 +1089,7 @@ async def test_a_failed_shell_call_answers_its_bash_call_as_failed(
         return args
 
     catalog = await _catalog(tmp_path, [_toolkit("shell", run_shell_command)], max_tool_calls_per_turn=limit)
-    catalog.store = create_state_storage("helper", tmp_path)
+    catalog.store = create_agent_state_storage("helper", tmp_path)
     owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
@@ -1176,7 +1176,7 @@ async def test_real_cli_call_wait_completes_inside_outer_bash(
 
     if approval:
         catalog.runtime_context = replace(catalog.runtime_context, cli_approval_handler=pause)
-    catalog.store = create_state_storage("helper", tmp_path)
+    catalog.store = create_agent_state_storage("helper", tmp_path)
 
     async def authorize(key, arguments) -> None:
         return None
@@ -1259,7 +1259,7 @@ async def test_provider_batch_serializes_bash_but_independent_turns_progress(
             return args
 
         catalog = await _catalog(tmp_path / name, [_toolkit("shell", run_shell_command)])
-        catalog.store = create_state_storage("helper", tmp_path / name)
+        catalog.store = create_agent_state_storage("helper", tmp_path / name)
         owner = live_turn_tools_for_test(
             CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), name, "run"),
             catalog=catalog,
@@ -1337,7 +1337,7 @@ async def test_catalog_rebind_retains_shell_env_and_rejects_between_attempt_call
         tmp_path,
         [_toolkit("shell", run_shell_command), _toolkit("state", change)],
     )
-    new.store = create_state_storage("helper", tmp_path)
+    new.store = create_agent_state_storage("helper", tmp_path)
     owner.bind_catalog(new)
 
     async with response_cli_lifetime():
@@ -1383,7 +1383,7 @@ async def test_cancelling_outer_io_cancels_and_joins_admitted_work(
         tmp_path,
         [_toolkit("shell", run_shell_command), _toolkit("state", wait)],
     )
-    catalog.store = create_state_storage("helper", tmp_path)
+    catalog.store = create_agent_state_storage("helper", tmp_path)
     owner = live_turn_tools_for_test(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
@@ -1816,7 +1816,7 @@ async def test_nested_shell_submits_child_after_outer_shell_returns(
         [_toolkit("shell", run_shell_command), _toolkit("state", change)],
         middleware=(hook,),
     )
-    catalog.store = create_state_storage("helper", tmp_path)
+    catalog.store = create_agent_state_storage("helper", tmp_path)
 
     async def authorize(key, arguments):
         return None
@@ -1942,7 +1942,7 @@ async def test_bash_waits_for_exact_native_approval_without_holding_catalog(tmp_
         tmp_path,
         [_toolkit("shell", run_shell_command), _function(action, requires_confirmation=True)],
     )
-    catalog.store = create_state_storage("helper", tmp_path)
+    catalog.store = create_agent_state_storage("helper", tmp_path)
 
     async def pause(paused):
         assert not catalog._lock.locked()

@@ -59,9 +59,8 @@ type _MetricValue = int | float | str | None
 _MAX_STRING_LENGTH = 512
 _IDENTIFIER = re.compile(r"[A-Za-z0-9_]+\Z")
 _WORKER_DIRECTORY = re.compile(r"[A-Za-z0-9._@+-]+-[0-9a-f]{16}\Z")
-_REQUIRED_COLUMNS = frozenset(
-    {"session_id", "session_type", "agent_id", "team_id", "user_id", "session_data"},
-)
+_REQUIRED_COLUMNS = frozenset({"session_id", "user_id", "session_data"})
+_OWNER_COLUMNS = frozenset({"owner_kind", "owner_id"})
 _USAGE_REQUIRED_COLUMNS = frozenset({"id", "session_id", "run_id", "usage_data"})
 # A dated read keeps snapshots last written in range, so a run resumed after ``since`` keeps its new requests.
 # Malformed snapshots stay in a dated read, so the reader reports them instead of SQLite failing the whole store.
@@ -476,32 +475,43 @@ def iter_usage_storage_rows(
             if diagnostic is not None:
                 yield diagnostic
                 return
-            table = quote_identifier(source.names.sessions)
-            usage_table = source.names.usage
-            has_usage = usage_table in table_names(connection)
-            # Session counters cover all history, so a run-only read skips their payload.
-            session_data = "session_data" if mode == "both" else "NULL AS session_data"
-            query = (
-                f"SELECT session_id, session_type, agent_id, team_id, user_id, {session_data} "  # noqa: S608
-                f"FROM {table}"
-            )
-            parameters: tuple[object, ...] = ()
-            if since is not None and has_usage:
-                # A dated read visits only sessions with a usage snapshot in range.
-                query += (
-                    f" WHERE session_id IN (SELECT session_id FROM {quote_identifier(usage_table)} "  # noqa: S608
-                    f"WHERE {_USAGE_SINCE_CONDITION})"
-                )
-                parameters = (since,)
-            for row in connection.execute(query, parameters):
+            has_usage = source.names.usage in table_names(connection)
+            owner: tuple[object, object] | None = None
+            for row in connection.execute(*_session_rows_query(source, mode=mode, has_usage=has_usage, since=since)):
+                # Read once a row needs it, so a database without sessions reads alike in every layout.
+                owner = owner or _database_owner(connection, source)
+                if owner is None:
+                    yield _source_diagnostic(source, "unsupported_schema", "session owner unavailable")
+                    return
                 try:
-                    yield _extract_row(source, row, connection, mode=mode, has_usage=has_usage, since=since)
+                    yield _extract_row(source, row, owner, connection, mode=mode, has_usage=has_usage, since=since)
                 except (RecursionError, TypeError, ValueError):
                     yield _source_diagnostic(source, "partial", "malformed retained session")
     except sqlite3.Error as error:
         yield _sqlite_diagnostic(source, error)
     except OSError:
         yield _source_diagnostic(source, "partial", "database unavailable")
+
+
+def _session_rows_query(
+    source: UsageStorageSource,
+    *,
+    mode: _UsageReadMode,
+    has_usage: bool,
+    since: float | None,
+) -> tuple[str, tuple[object, ...]]:
+    """Return the query of the session rows a read visits and its parameters."""
+    # Session counters cover all history, so a run-only read skips their payload.
+    session_data = "session_data" if mode == "both" else "NULL AS session_data"
+    query = f"SELECT session_id, user_id, {session_data} FROM {quote_identifier(source.names.sessions)}"  # noqa: S608
+    if since is None or not has_usage:
+        return query, ()
+    # A dated read visits only sessions with a usage snapshot in range.
+    return (
+        f"{query} WHERE session_id IN (SELECT session_id FROM {quote_identifier(source.names.usage)} "  # noqa: S608
+        f"WHERE {_USAGE_SINCE_CONDITION})",
+        (since,),
+    )
 
 
 def _validate_schema(connection: sqlite3.Connection, source: UsageStorageSource) -> UsageStorageDiagnostic | None:
@@ -519,6 +529,14 @@ def _validate_schema(connection: sqlite3.Connection, source: UsageStorageSource)
     return None
 
 
+def _database_owner(connection: sqlite3.Connection, source: UsageStorageSource) -> tuple[object, object] | None:
+    """Return the kind and id of the database's owner as its meta row records them, or None when it records none."""
+    meta = source.names.log_meta
+    if meta not in table_names(connection) or not _OWNER_COLUMNS.issubset(_table_columns(connection, meta)):
+        return None
+    return connection.execute(f"SELECT owner_kind, owner_id FROM {quote_identifier(meta)} WHERE id = 1").fetchone()  # noqa: S608
+
+
 def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in connection.execute(f"PRAGMA table_info({quote_identifier(table)})")}
 
@@ -526,16 +544,16 @@ def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
 def _extract_row(
     source: UsageStorageSource,
     row: sqlite3.Row,
+    owner: tuple[object, object],
     connection: sqlite3.Connection,
     *,
     mode: _UsageReadMode,
     has_usage: bool,
     since: float | None,
 ) -> UsageSessionRow:
-    entity_kind = row["session_type"]
+    entity_kind, entity_id = owner
     if entity_kind not in {"agent", "team"}:
         raise ValueError
-    entity_id = row["agent_id"] if entity_kind == "agent" else row["team_id"]
     if source.scope == "system" and (entity_kind != "agent" or entity_id != SYSTEM_USAGE_ENTITY):
         raise ValueError
     row_key = row["session_id"]

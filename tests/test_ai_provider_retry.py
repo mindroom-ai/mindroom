@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar
 
@@ -91,11 +92,13 @@ def _install_agent(
 
 def _stream(config: Config, run_id: str) -> AsyncIterator[AIStreamChunk]:
     return stream_agent_response(
-        make_turn_context("worker", session_id=SESSION_ID, run_id=run_id, requester_id="@user:localhost"),
-        prompt="Perform both steps." if run_id == "first" else "Give a follow-up answer.",
-        runtime_paths=runtime_paths_for(config),
-        config=config,
-        show_tool_calls=False,
+        replace(
+            make_turn_context("worker", session_id=SESSION_ID, run_id=run_id, requester_id="@user:localhost"),
+            prompt="Perform both steps." if run_id == "first" else "Give a follow-up answer.",
+            show_tool_calls=False,
+        ),
+        runtime_paths_for(config),
+        config,
     )
 
 

@@ -12,7 +12,8 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
-from mindroom.event_journal import AdmissionResult, EventClass, EventKind, InboundEvent, ProjectedEvent
+from mindroom.event_journal import AdmissionResult, EventClass, EventKind, InboundEvent, ProjectedEvent, turn_rows
+from mindroom.event_journal.identity import agent_of_principal
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -285,7 +286,11 @@ class JournalFuzzRunner:
                 ), "pending event provenance"
             snapshot.append(tuple(pending))
             for room in _ROOMS:
-                deleted = await principal.redacted_event_ids(room, _EVENT_IDS)
+                deleted = await self.store.turn_records(agent_of_principal(self._principals[index])).read(
+                    turn_rows.redacted_events,
+                    room,
+                    _EVENT_IDS,
+                )
                 assert deleted == model.tombstones(room), "redaction tombstone authority"
                 snapshot.append(deleted)
             for room, thread in _SCOPES:

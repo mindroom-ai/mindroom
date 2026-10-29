@@ -27,7 +27,6 @@ __all__ = [
     "StopReason",
     "gather_shutdown_phase",
     "restart_reason_category_for",
-    "shutdown_intent_for_entity",
 ]
 
 StopReason = Literal["restart", "entity_removed", "shutdown"]
@@ -130,14 +129,3 @@ SYNC_RESTART_SHUTDOWN = RuntimeShutdownIntent(stop_reason="restart", cancel_sour
 def restart_reason_category_for(shutdown_intent: RuntimeShutdownIntent) -> RestartReasonCategory:
     """Return the log category describing why one response runtime is shutting down."""
     return _STOP_REASON_CATEGORIES[shutdown_intent.stop_reason]
-
-
-def shutdown_intent_for_entity(
-    entity_name: str,
-    *,
-    restart_entities: set[str],
-) -> RuntimeShutdownIntent:
-    """Return shutdown intent for one stopped entity."""
-    if entity_name in restart_entities:
-        return SYNC_RESTART_SHUTDOWN
-    return ENTITY_REMOVED_SHUTDOWN

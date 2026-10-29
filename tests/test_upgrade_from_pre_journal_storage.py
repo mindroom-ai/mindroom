@@ -26,14 +26,14 @@ import yaml
 
 from mindroom.config.main import load_config
 from mindroom.constants import resolve_primary_runtime_paths
+from mindroom.event_journal import turn_rows
+from mindroom.event_journal.legacy_turn_rows import import_legacy_ledger_file, legacy_responses_file_path
 from mindroom.event_journal.opening import (
     bind_event_journal,
     event_journal_binding_path,
     open_event_journal,
     read_event_journal_binding,
 )
-from mindroom.handled_turns import HandledTurnLedger
-from mindroom.legacy_handled_turns import legacy_responses_file_path
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -176,7 +176,6 @@ async def test_a_storage_root_with_no_binding_is_adopted_rather_than_refused(
     assert event_journal_binding_path(storage).exists()
 
 
-@pytest.mark.ledger_loads_from_disk
 @pytest.mark.asyncio
 async def test_the_pre_journal_handled_turns_are_imported_from_the_path_that_version_wrote(
     pre_journal_storage: tuple[Path, RuntimePaths],
@@ -203,15 +202,11 @@ async def test_the_pre_journal_handled_turns_are_imported_from_the_path_that_ver
             runtime_paths=runtime_paths,
             storage_path=storage,
         )
-        ledger = HandledTurnLedger(
-            AGENT,
-            records=opened.store.turn_records(AGENT),
-            legacy_responses_file=legacy_file,
-        )
-        await ledger.load()
+        records = opened.store.turn_records(AGENT)
+        await import_legacy_ledger_file(records, path=legacy_file)
 
-        assert ledger.has_responded("$source")
-        record = ledger.get_turn_record("$source")
+        assert await records.read(turn_rows.is_answered, "$source")
+        record = await records.read(turn_rows.get_turn_record, "$source")
         assert record is not None
         assert record.response_event_id == "$answer"
     finally:

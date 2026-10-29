@@ -63,7 +63,7 @@ def _collect_leads(ctx: AutomationContext, *, since: int, limit: int) -> tuple[l
     automation_thread_ids = automation_threads(ctx.runtime_paths)
     seen: dict[tuple[str, str], tuple[int, int]] = {}
     active = False
-    for session_id, _updated_at in updated_sessions(storage, ctx.agent_name, since=since):
+    for session_id, _updated_at in updated_sessions(storage, since=since):
         try:
             runs = session_runs(storage, session_id)
         except Exception as exc:

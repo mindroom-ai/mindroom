@@ -61,7 +61,8 @@ async def fetch_file(client: httpx.AsyncClient, token: str, file: Mapping[str, A
     if parts.scheme != "https" or parts.hostname != _DOWNLOAD_HOST:
         msg = "Slack returned no download link for this file"
         raise SlackFileError(msg)
-    headers = {"Authorization": f"Bearer {token}"}
+    # Ask for the stored bytes, so the saved file is exactly Slack's and the stream is not decoded on the way.
+    headers = {"Authorization": f"Bearer {token}", "Accept-Encoding": "identity"}
     async with client.stream("GET", url, headers=headers) as response:
         if not response.is_success:
             msg = f"Slack refused the download with HTTP {response.status_code}"

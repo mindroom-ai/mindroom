@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
     import nio
 
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
@@ -50,7 +50,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 type DeliveryResult = Literal["delivered", "ignored", "retry"]
-type _Bot = AgentBot | TeamBot
 
 # A claim is a processing lease: a delivery that dies holding it is redelivered once it lapses.
 _CLAIM_SECONDS = 60
@@ -172,7 +171,7 @@ async def conversation_label(attempt: SlackAttempt) -> str:
     return f"#{name}" if isinstance(name, str) and name else f"#{event.channel_id}"
 
 
-def running_bot(runtime: SlackRuntime, agent: str) -> tuple[_Bot, nio.AsyncClient] | None:
+def running_bot(runtime: SlackRuntime, agent: str) -> tuple[AgentBot, nio.AsyncClient] | None:
     """Return an agent's bot and Matrix client while it runs."""
     bot = runtime.bots.get(agent)
     if bot is None or not bot.running or bot.client is None:
@@ -193,7 +192,12 @@ async def is_bound(attempt: SlackAttempt, scope: str, thread_key: str, room_id: 
     return bound is not None and bound[0] == room_id
 
 
-async def claim_and_send(attempt: SlackAttempt, bot: _Bot, client: nio.AsyncClient, turn: SlackTurn) -> DeliveryResult:
+async def claim_and_send(
+    attempt: SlackAttempt,
+    bot: AgentBot,
+    client: nio.AsyncClient,
+    turn: SlackTurn,
+) -> DeliveryResult:
     """Post the message once in the turn's scope, opening its Matrix thread or continuing the bound one."""
     store, now = attempt.store, attempt.now
     message_key = f"{attempt.event.channel_id}:{attempt.event.ts}"
@@ -282,7 +286,7 @@ async def _release(attempt: SlackAttempt, turn: SlackTurn, message_key: str, res
 
 async def _send_slack_turn(
     attempt: SlackAttempt,
-    bot: _Bot,
+    bot: AgentBot,
     client: nio.AsyncClient,
     turn: SlackTurn,
     thread_id: str | None,

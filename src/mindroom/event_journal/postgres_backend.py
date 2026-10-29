@@ -16,7 +16,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from .offloading import ThreadOffload, settled
-from .schema import POSTGRES_DIALECT, SchemaDialect, render, schema_statements
+from .schema import POSTGRES_DIALECT, SchemaDialect, render
 from .upgrades import upgrade_schema
 from .write_queue import CLOSED_MESSAGE, WriteOutcome, WriteQueue
 
@@ -184,8 +184,6 @@ class PostgresBackend:
             # statements are all no-ops once the schema exists.
             cursor.execute(cast("LiteralString", f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK_KEY})"))
             upgrade_schema(_PostgresTransaction(cursor), _PostgresSchemaInspector(cursor))
-            for statement in schema_statements(POSTGRES_DIALECT):
-                cursor.execute(cast("LiteralString", statement))
         self._writer.commit()
 
     async def write[T](self, operation: Operation[T]) -> T:

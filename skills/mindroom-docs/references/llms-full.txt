@@ -1446,6 +1446,8 @@ Every section rejects keys MindRoom does not define, except free-form maps such 
 Edits to `config.yaml` apply by hot reload without restarting MindRoom, except [event journal](https://docs.mindroom.chat/deployment/storage/#event-journal) changes and turning [background tool jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) on or off or changing their excluded toolkits, which need a restart.
 Edits to an agent's or team's own settings, such as `instructions`, `model`, `tools`, or a team's `mode`, apply from its next reply without restarting it.
 Changing `display_name` or `accept_invites`, an agent's `private` settings, whether an agent has the `desktop` tool, or which MCP tools it has restarts that agent or team.
+Removing an agent or team makes it leave its rooms, except direct messages, when the reload applies.
+An edit saved while MindRoom is still starting applies once startup finishes.
 An edit that restarts no agent, team, or router and changes no access, room, or authorization setting, such as a model definition, knowledge base, or agent instruction change, applies within seconds even while agents are replying.
 Other edits, including ones that restart an agent or team, an agent's or team's `access` or `rooms`, `administrators`, `authorization`, `room_defaults`, `rooms`, or `router.access`, first wait for active responses to finish, for at most 600 seconds.
 To confirm that a reload finished, use [`mindroom config check-applied`](https://docs.mindroom.chat/deployment/config-bundles/#config-fingerprint-and-config-check-applied).
@@ -2828,7 +2830,7 @@ After accepting an invitation into a room with no message history, the router po
 At startup, empty configured rooms get a welcome listing their configured responders.
 Send [`!hi`](https://docs.mindroom.chat/chat-commands/#hi) to see the welcome again, limited to responders visible to you.
 
-The router's other duties are documented on their own pages: [command handling](https://docs.mindroom.chat/chat-commands/#command-handling), [room management](https://docs.mindroom.chat/rooms/#room-management), [voice message processing](https://docs.mindroom.chat/voice/#voice-message-processing), [configuration confirmations](https://docs.mindroom.chat/chat-commands/#configuration-confirmations), and [scheduled task restoration](https://docs.mindroom.chat/scheduling/#scheduled-task-restoration).
+The router's other duties are documented on their own pages: [command handling](https://docs.mindroom.chat/chat-commands/#command-handling), [room management](https://docs.mindroom.chat/rooms/#room-management), [voice message processing](https://docs.mindroom.chat/voice/#voice-message-processing), [configuration confirmations](https://docs.mindroom.chat/chat-commands/#configuration-confirmations), and [running scheduled tasks](https://docs.mindroom.chat/scheduling/#scheduled-task-restoration).
 
 # Threads, Replies & Participation
 
@@ -4761,8 +4763,12 @@ The homeserver must support `GET /_matrix/client/v3/rooms/{roomId}/state/{eventT
 
 ### Scheduled Task Restoration
 
-The router restores a room's schedules and pending configuration changes when it joins the room after startup.
-A one-time task missed by less than 24 hours runs once Matrix sync is ready; an older one is marked failed instead.
+The router runs a schedule when, at the time the schedule is saved, it may post its trigger and save schedule state in the room; otherwise the agent that saved the schedule runs it, as in a DM or an agent's personal room.
+Every agent restores the schedules it runs in a room when it joins that room, at startup or when it accepts an invitation, and the router also restores the room's pending configuration changes.
+Schedules keep running when their agent restarts, for example after a config edit: a one-time task that came due during the restart runs once the agent is back, and a recurring task runs the occurrence that came due if it is still within the catch-up window.
+A one-time task missed by less than 24 hours runs once its agent's Matrix sync is ready; an older one is marked failed instead.
+When an agent is removed from the config while MindRoom runs, each schedule it runs is marked failed and the agent says so in the schedule's thread, or in the room for a schedule without one; its schedules never move to another agent.
+When it is removed while MindRoom is stopped, a bot that may save schedule state in a room marks the agent's schedules there failed and says so when it rejoins that room, and schedules in the agent's DMs stay pending.
 
 ### Recurring task recovery
 
@@ -7152,7 +7158,6 @@ A template or override that would produce an invalid agent fails validation as s
 ## Generated Agents
 
 Generated agents are ordinary agents in the running config, and workers receive them too.
-Docker workers take them from the config the runtime last accepted, and every other setting from `config.yaml`, so a rejected `config.yaml` edit can give a worker a mix of the two until you fix the file.
 They never appear in the saved config file, and the dashboard and `config_manager` edit only what you authored.
 
 - Editing the template changes every user's agent at the next reload.
@@ -13209,7 +13214,7 @@ With `room`, the agent answers Slack:
 
 Who can wake the agent:
 
-- The author's Slack email must be in `slack.email_domain`, and its localpart maps to a Matrix account through `slack.matrix_user_id_template`.
+- The author's Slack email must be confirmed and in `slack.email_domain`, and its localpart maps to a Matrix account through `slack.matrix_user_id_template`.
 - Guests, bots and other apps, deactivated accounts, and people from other workspaces never wake an agent.
 - The mapped account must also pass the agent's [`access`](https://docs.mindroom.chat/authorization/#responder-access) check in `room`.
 - Anyone else sees a message in Slack that only they can see, `MindRoom can't answer you here.`, at most once a day per thread, and nothing reaches Matrix.
@@ -16047,7 +16052,7 @@ The config sent to runners with each request, and the config file projected into
 Of the agents' data, dedicated Docker and Kubernetes workers mount only workspaces and shared directories, never the agent state roots around them, so sessions, memory, Mem0 data, and private-instance identity records stay out of every worker.
 The Kubernetes `static_runner` sidecar still mounts `agents`, `private_instances`, and `shared_directories` read-write, so records the primary treats as authority live below the primary-only `tracking/` directory instead: the invited-room and pending-invite ledgers, personal-room records, conversation modes, auto-approve windows, the shared-directory membership ledger, and the primary's copy of each private-instance owner record, together with their locks.
 Agent and private-instance conversation databases stay in those directories, so opening a conversation store refuses a `sessions` directory or database file that is a link; the store's later operations do not check again (see [Known gaps](#known-gaps)).
-The one-time conversion of a database from an earlier release reads its rows as untrusted input and writes its `.pre-storage-v2` backup without following links, so a database worker code changed fails only its own agent's or team's history.
+The one-time conversions of a database from an earlier release read its rows as untrusted input and write its `.pre-storage-v2` or `.pre-storage-v4` backup without following links, so worker code that tampers with a database can break only that agent's or team's history.
 The thread exporter writes into a private instance only for the requester that the primary's owner record names, so an owner record planted in `private_instances` gets no export.
 Automations likewise run for a private instance only as the requester that record names, and post only in that requester's personal room, so their replies quoting private files never reach another room.
 The knowledge graph database lives in the primary-only `knowledge_graph/` storage directory, and its embedded server opens no TCP port and listens on a Unix socket in a private temporary directory of the primary, so no worker can reach it.
@@ -17528,6 +17533,7 @@ Custom events default to 1000 ms.
   Streamed replies usually show text before they finish, so this hook does not see them; set `defaults.enable_streaming: false` when every reply must pass through it, as with the disclaimer and redaction examples above.
   Once a streamed reply is visible it cannot be suppressed; use `message:final_response_transform` for one text-only replacement after a streamed reply succeeds.
   `message:final_response_transform` cannot suppress, redact, or delete the reply, or change its metadata.
+  A reply resumed after a tool approval runs `message:before_response` on its final text, not `message:final_response_transform`; when the reply streams, its resumed text can show before that hook runs.
 - **`message:cancelled`**: `ctx.info.failure_reason` tells cancellation, interruption, suppression, and delivery failure apart.
 - **`agent:started` with `required=True`**: use a short, separate required hook for initialization the bot must not run without, and keep optional work such as backfill or welcome messages in ordinary hooks.
   A failure or timeout stops the remaining startup hooks and fails that bot's startup like any other startup error.
@@ -17833,8 +17839,9 @@ ResponseResult(
 - In `schedule:fired`, omitting `thread_id` posts to `ctx.thread_id`, while an explicit `thread_id=None` posts at room level.
 - A plain send triggers agents only when it would as a normal message, for example when it mentions an agent.
 - `trigger_dispatch=True` sends the message as `source_kind` `"hook_dispatch"`, which agents may answer without a mention, subject to normal permissions and routing.
+- Hook-sent text never runs as a chat command, even when it starts with `!`; agents receive it as conversation.
 - A hook-sent message passes through `message:received` once, skipping the plugin that sent it if the send came from `message:received`.
-  Messages sent by hooks in response to hook-sent messages are still posted, but they skip `message:received` and do not trigger commands or agent replies, which prevents feedback loops.
+  Messages sent by hooks in response to hook-sent messages are still posted, but they skip `message:received` and do not trigger agent replies, which prevents feedback loops.
 
 ### Room state and recent messages
 
@@ -18190,6 +18197,8 @@ Callbacks follow `external_trigger_policy` and count toward `max_triggers_per_ow
 When finished, run: bash /path/to/callback_1234.sh "<short result summary>"
 ```
 
+The script lives in the agent's workspace, and the path is where the agent's shell finds it in MindRoom, in a dedicated worker, or in a `static_runner` sandbox that mounts the agent workspaces, as the Kubernetes sidecar does.
+The [Docker Compose `static_runner` sandbox](https://docs.mindroom.chat/deployment/sandbox-proxy/#sandbox-proxy-isolation_1) cannot see agent workspaces, so a background task started from a shell there cannot run the script.
 The script needs only Bash and curl.
 It posts the summary to the room and thread where the callback was minted, which wakes the agent.
 After a successful delivery the callback is used up and the script deletes itself; if delivery fails, the script remains so it can be run again.
@@ -21246,6 +21255,7 @@ Set `MINDROOM_SESSION_STORAGE_PATH` to move agent and team session databases to 
 Back up the whole storage directory, and keep `tracking/` on persistent storage.
 When `MINDROOM_SESSION_STORAGE_PATH` is set in a container, mount that path on persistent storage and back it up too.
 The [conversation storage v2 upgrade notes](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-conversation-storage-v2) cover the `<name>.db.pre-storage-v2` backups it leaves beside each conversation database and what a database restored from a backup taken before that upgrade needs when it converts again.
+The [one-owner upgrade notes](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-one-owner-per-conversation-database) cover the `<name>.db.pre-storage-v4` backups that upgrade leaves.
 
 `tracking/` keeps a small record of every handled event so restarts and resyncs never answer the same message twice.
 These records are never pruned automatically, so size and monitor the volume for growth over the install's lifetime.
@@ -21682,7 +21692,7 @@ Failures from one `sender_device_id` point at that client, while failures across
 
 ### `conversation_converted`
 
-Logged once for each conversation database the first start after [upgrading to conversation storage v2](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-conversation-storage-v2) converts, or that converts at its first use later, such as a restored backup.
+Logged once for each conversation database the first start after [upgrading to conversation storage v2](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-conversation-storage-v2) or [to one owner per conversation database](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-one-owner-per-conversation-database) converts, or that converts at its first use later, such as a restored backup.
 
 | Field | Meaning |
 |-------|---------|
@@ -21845,6 +21855,31 @@ Unset or `0` disables the probe (the default), and any other value below `60` fa
 Use this page when upgrading an existing deployment across a release that needs operator action.
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
+
+## Upgrading to one owner per conversation database
+
+The first start after this upgrade converts every conversation database once more before any agent comes online, as the [conversation storage v2](#upgrading-to-conversation-storage-v2) upgrade did, so that each records the agent, team, or internal usage store it belongs to.
+A team's database that holds no conversation yet converts when that team next uses it instead.
+Each converted database logs one `conversation_converted` record (see [Events](https://docs.mindroom.chat/deployment/operational-log-events/#conversation_converted)).
+Conversation history, compaction summaries, session state, pending tool approvals, and usage records carry over.
+
+### Before upgrading to one owner per database
+
+Make sure each disk that holds conversation databases has free space of about twice the total size of their `.db` files.
+A database still in the Agno layout, which the [conversation storage v2](#upgrading-to-conversation-storage-v2) upgrade never converted, converts straight to this layout and needs the free space that section gives instead.
+A database whose directory lacks the space it needs is not converted: startup logs `conversation_conversion_skipped_store` for it, and every use of it fails with an error naming the database and the bytes it needs until you free the space.
+A deploy that rolls back on its own, such as `helm upgrade --atomic`, starts the older release on converted databases, which then moves them aside (see the next section).
+
+### Going back to an older release
+
+Before converting a database, MindRoom copies it byte for byte beside it and never deletes that copy: to `<name>.db.pre-storage-v4` for a database the conversation storage v2 upgrade already converted, and to `<name>.db.pre-storage-v2` for one still in the Agno layout.
+A crash or restart during the upgrade leaves the database being converted unchanged, and the next start converts it.
+The only way back is to stop MindRoom, replace each `<name>.db` with the copy this upgrade made of it, delete any `<name>.db-journal` beside it, and start the older release.
+When a database has both backups, the copy this upgrade made is the newer file.
+Everything written since the upgrade is lost: replies, summaries, session state, approvals requested since then, and usage records for that period.
+An older release started on converted databases without restoring the backups archives each agent's or team's `sessions/` directory, backups included, as [Incompatible session databases](https://docs.mindroom.chat/deployment/storage/#incompatible-session-databases) describes; move the backups back out of that archive and restore them as above.
+Going back below conversation storage v2 from a database that has both restores its `.pre-storage-v2` backup instead, as [Downgrading](#downgrading) describes.
+Once you are sure you will not downgrade, delete these backups.
 
 ## Upgrading to checked model references and per-agent workspaces
 
@@ -23381,7 +23416,7 @@ Collect everything the backend stored about one conversation into a single JSON 
 The input is the JSON file a MindRoom Chat **Report a bug** message carries, or plain identifiers.
 See [Bug Reports](https://docs.mindroom.chat/bug-reports/) for how users send those reports and how administrators receive them.
 
-The report includes the event journal's turn records, admitted events, and outbound deliveries, the conversation's stored runs of agents, teams, private instances, and system usage, `tracking/tool_calls.jsonl` and its rotations, the LLM request logs, and the `mindroom_*.log` files.
+The report includes the event journal's turn records, message deletions, admitted events, and outbound deliveries, the conversation's stored runs of agents, teams, private instances, and system usage, `tracking/tool_calls.jsonl` and its rotations, the LLM request logs, and the `mindroom_*.log` files.
 Each source lists the files it read under `paths` and has a `status` of `ok`, `missing` (nothing to read there), or `error` with the message under `error`; a source that cannot be read, such as a locked or corrupt database, does not stop the others.
 Successful tool calls and LLM requests are only logged when `debug.log_llm_requests` is enabled.
 Nothing is redacted, and the newest matches are kept: up to 100 runs, 1,000 records per JSONL source, and 2,000 log lines of 4,000 characters each, with `dropped` and `truncated` counting what was left out or shortened.

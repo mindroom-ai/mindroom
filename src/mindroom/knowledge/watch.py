@@ -155,17 +155,18 @@ def _changes_include_indexable_path(
 class KnowledgeSourceWatcher:
     """Own source watchers that schedule atomic published index refreshes."""
 
-    def __init__(self, refresh_scheduler: KnowledgeRefreshScheduler) -> None:
+    name = "knowledge_source_watchers"
+
+    def __init__(self, refresh_scheduler: KnowledgeRefreshScheduler, runtime_paths: RuntimePaths) -> None:
         self._refresh_scheduler = refresh_scheduler
+        self._runtime_paths = runtime_paths
         self._filesystem_tasks: dict[KnowledgeSourceRoot, _WatchTask] = {}
         self._poll_tasks: dict[KnowledgeRefreshTarget, _WatchTask] = {}
 
-    async def sync(self, *, config: Config | None, runtime_paths: RuntimePaths) -> None:
+    async def sync(self, config: Config) -> None:
         """Replace watcher tasks so they match the current shared knowledge config, and start Chroma-era conversions."""
-        await self.shutdown()
-        if config is None:
-            return
-
+        await self.stop()
+        runtime_paths = self._runtime_paths
         for watch_target in _shared_local_watch_targets(config, runtime_paths).values():
             stop_event = asyncio.Event()
             task = asyncio.create_task(
@@ -195,7 +196,7 @@ class KnowledgeSourceWatcher:
             if not self._refresh_scheduler.is_refreshing(base_id, config=config, runtime_paths=runtime_paths):
                 self._refresh_scheduler.schedule_refresh(base_id, config=config, runtime_paths=runtime_paths)
 
-    async def shutdown(self) -> None:
+    async def stop(self) -> None:
         """Stop all source watchers owned by this instance."""
         tasks = list(self._filesystem_tasks.values())
         tasks.extend(self._poll_tasks.values())

@@ -327,7 +327,7 @@ class KnowledgeGraphIngestionWorker:
         due: list[_DueSession] = []
         changed = False
         unreadable: list[Exception] = []
-        for session_id, updated_at in updated_sessions(storage, scope.agent_name, since=since):
+        for session_id, updated_at in updated_sessions(storage, since=since):
             if len(due) >= limit:
                 break
             entry = state["sessions"].get(session_id)

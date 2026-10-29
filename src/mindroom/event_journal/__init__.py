@@ -15,6 +15,7 @@ from mindroom.event_journal.history_recovery import (
 from mindroom.interactive_models import InteractiveSelection
 
 from .approval_calls import (
+    DEFAULT_ROUTER_MANAGED_ROOM_REASON,
     JOB_ENDED_REASON,
     ApprovalCall,
     ApprovalDecision,
@@ -51,6 +52,7 @@ from .models import (
     DepartureSource,
     EventClass,
     EventKind,
+    FinalAnswerEnqueue,
     HydrationCoverage,
     HydrationPolicy,
     InboundEvent,
@@ -69,7 +71,6 @@ from .models import (
     RefreshRequest,
     RoomMembershipPosition,
     SemanticConsumer,
-    TerminalTurnWrite,
     UnreadableMatrixDelivery,
     VisibleMessage,
 )
@@ -85,8 +86,9 @@ from .scheduled_approvals import (
     ScheduledCallRefusal,
     scheduled_call_run_id,
 )
-from .store import EventJournalStore, PrincipalStore, ToolJobStore, TurnRecordStore
+from .store import EventJournalStore, PrincipalStore, ToolJobStore
 from .tool_jobs import SavedToolJob, ToolJobExistsError, ToolJobOwnershipLostError
+from .turn_rows import TurnRecordStore
 from .views import (
     AdmissionView,
     ApprovalDeliveryView,
@@ -101,6 +103,7 @@ from .views import (
 )
 
 __all__ = [
+    "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
     "JOB_ENDED_REASON",
     "SCHEDULED_APPROVAL_WINDOW_NS",
     "TIMEOUT_REASON",
@@ -132,6 +135,7 @@ __all__ = [
     "EventClass",
     "EventJournalStore",
     "EventKind",
+    "FinalAnswerEnqueue",
     "HistoryRecoveryOutcome",
     "HistoryRecoveryRecordView",
     "HistoryRecoveryState",
@@ -170,7 +174,6 @@ __all__ = [
     "ScheduledCallOutcome",
     "ScheduledCallRefusal",
     "SemanticConsumer",
-    "TerminalTurnWrite",
     "ToolJobExistsError",
     "ToolJobOwnershipLostError",
     "ToolJobStore",

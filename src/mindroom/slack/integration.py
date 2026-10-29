@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from fastapi import APIRouter, FastAPI
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import MessageEnvelope
@@ -42,7 +42,7 @@ def _events_router() -> APIRouter:
 
 def _bind(
     api_app: FastAPI,
-    bots: Mapping[str, AgentBot | TeamBot],
+    bots: Mapping[str, AgentBot],
     agent_reply_memberships: AgentReplyMembershipIndex,
 ) -> None:
     """Let Slack events reach the orchestrator's live bots; binding the same bots again keeps the runtime."""

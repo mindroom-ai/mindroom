@@ -1,11 +1,9 @@
-"""Test that scheduled task restoration only happens once after restart."""
+"""Every bot hands the rooms it joins to the scheduled-task runtime, which restores the schedules it owns."""
 
 from __future__ import annotations
 
-import asyncio
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -14,7 +12,6 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.scheduling import tasks as scheduling
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
@@ -30,523 +27,97 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
 
 
-async def _complete_frame(bot: AgentBot, index: int = 0) -> None:
-    """Drive runtime side effects through the durable completion owner."""
-    del index
-    await bot._on_ingestion_frame_completion()
+def _bind_runtime(config: Config, tmp_path: Path) -> Config:
+    return bind_runtime_paths(config, orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"))
 
 
-class TestScheduledTaskRestoration:
-    """Test scheduled task restoration behavior after bot restart."""
+def _bot_with_scheduled_task_runtime(
+    agent_name: str,
+    config: Config,
+    tmp_path: Path,
+    joined_rooms: dict[str, object],
+) -> tuple[AgentBot, AsyncMock]:
+    """Return a bot whose orchestrator's scheduled-task runtime records each restored room."""
+    user = AgentMatrixUser(
+        agent_name=agent_name,
+        user_id=f"@{agent_name}:mindroom.com",
+        password="test",  # noqa: S106
+        display_name=agent_name,
+    )
+    bot = make_test_agent_bot(
+        agent_user=user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["lobby"],
+    )
+    bot.client = make_matrix_client_mock(user_id=user.user_id)
+    bot.client.rooms = joined_rooms
+    if agent_name == ROUTER_AGENT_NAME:
+        bot._reply_membership_sync = AgentReplyMembershipSync(bot._runtime_view.agent_reply_memberships)
+    install_runtime_journal_support(bot)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.scheduled_tasks.restore_room = AsyncMock(return_value=2)
+    bot.orchestrator = orchestrator
+    return bot, orchestrator.scheduled_tasks.restore_room
 
-    @staticmethod
-    def _bind_runtime(config: Config, tmp_path: Path) -> Config:
-        return bind_runtime_paths(
-            config,
-            orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"),
-        )
 
-    @staticmethod
-    def _install_runtime_support(bot: AgentBot) -> AgentBot:
-        if bot.agent_name == ROUTER_AGENT_NAME:
-            bot._reply_membership_sync = AgentReplyMembershipSync(bot._runtime_view.agent_reply_memberships)
-        return install_runtime_journal_support(bot)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_name", [ROUTER_AGENT_NAME, "general"])
+async def test_configured_join_restores_schedules_for_every_bot(tmp_path: Path, agent_name: str) -> None:
+    """Router and agents restore the schedules they own; only the router restores config changes and welcomes."""
+    config = _bind_runtime(
+        Config(
+            agents={"general": {"display_name": "GeneralAgent", "role": "General assistant", "rooms": ["lobby"]}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
+        ),
+        tmp_path,
+    )
+    bot, restore_room = _bot_with_scheduled_task_runtime(agent_name, config, tmp_path, {})
 
-    @pytest.mark.asyncio
-    async def test_only_router_restores_tasks(self, tmp_path: Path) -> None:
-        """Test that only the router agent restores scheduled tasks."""
-        # Create a mock config with multiple agents
-        config = self._bind_runtime(
-            Config(
-                agents={
-                    "general": {
-                        "display_name": "GeneralAgent",
-                        "role": "General assistant",
-                        "model": "default",
-                        "rooms": ["lobby"],
-                    },
-                    "email_assistant": {
-                        "display_name": "EmailAssistant",
-                        "role": "Email assistant",
-                        "model": "default",
-                        "rooms": ["lobby"],
-                    },
-                },
-                models={"default": {"provider": "openai", "id": "test-model"}},
-            ),
-            tmp_path,
-        )
+    with (
+        patch("mindroom.bot_room_lifecycle.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
+        patch(
+            "mindroom.matrix.client_room_admin.join_room",
+            new_callable=AsyncMock,
+            return_value=RoomJoinOutcome.JOINED,
+        ) as mock_join,
+        patch(
+            "mindroom.bot.config_confirmation.restore_pending_changes",
+            new_callable=AsyncMock,
+            return_value=0,
+        ) as mock_restore_configs,
+        patch("mindroom.bot.AgentBot._send_welcome_message_if_empty", new_callable=AsyncMock) as mock_welcome,
+    ):
+        await bot.join_configured_rooms()
 
-        # Test with RouterAgent
-        router_user = AgentMatrixUser(
-            agent_name=ROUTER_AGENT_NAME,
-            user_id=f"@{ROUTER_AGENT_NAME}:mindroom.com",
-            password="test",  # noqa: S106
-            display_name="RouterAgent",
-        )
-        router_bot = make_test_agent_bot(
-            agent_user=router_user,
-            storage_path=tmp_path,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            rooms=["lobby"],
-        )
+    mock_join.assert_awaited_once_with(bot.client, "lobby")
+    restore_room.assert_awaited_once_with(bot, "lobby")
+    is_router = agent_name == ROUTER_AGENT_NAME
+    assert mock_restore_configs.await_count == int(is_router)
+    assert mock_welcome.await_count == int(is_router)
 
-        # Mock the client and join_room
-        router_bot.client = make_matrix_client_mock(user_id=router_user.user_id)
-        router_bot.client.rooms = {}
-        self._install_runtime_support(router_bot)
 
-        with (
-            patch("mindroom.bot_room_lifecycle.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
-            patch(
-                "mindroom.matrix.client_room_admin.join_room",
-                new_callable=AsyncMock,
-                return_value=RoomJoinOutcome.JOINED,
-            ) as mock_join,
-            patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock, return_value=2) as mock_restore,
-            patch(
-                "mindroom.bot.config_confirmation.restore_pending_changes",
-                new_callable=AsyncMock,
-                return_value=0,
-            ),
-            patch("mindroom.bot.AgentBot._send_welcome_message_if_empty", new_callable=AsyncMock),
-        ):
-            await router_bot.join_configured_rooms()
+@pytest.mark.asyncio
+async def test_router_restores_tasks_without_rejoining_existing_room(tmp_path: Path) -> None:
+    """Restart setup runs even when the room is already joined."""
+    config = _bind_runtime(Config(models={"default": {"provider": "openai", "id": "test-model"}}), tmp_path)
+    bot, restore_room = _bot_with_scheduled_task_runtime(ROUTER_AGENT_NAME, config, tmp_path, {"lobby": object()})
 
-            # Verify router agent called restore_scheduled_tasks
-            mock_join.assert_awaited_once_with(router_bot.client, "lobby")
-            assert mock_restore.await_args is not None
-            config_provider = mock_restore.await_args.kwargs["config_provider"]
-            mock_restore.assert_awaited_once_with(
-                router_bot.client,
-                "lobby",
-                config,
-                runtime_paths_for(config),
-                router_bot._conversation_reader,
-                config_provider=config_provider,
-            )
-            assert config_provider() is config
-            replacement_config = config.model_copy(deep=True)
-            router_bot.config = replacement_config
-            assert config_provider() is replacement_config
+    with (
+        patch("mindroom.bot_room_lifecycle.get_joined_rooms", new_callable=AsyncMock, return_value=["lobby"]),
+        patch("mindroom.matrix.client_room_admin.join_room", new_callable=AsyncMock) as mock_join,
+        patch(
+            "mindroom.bot.config_confirmation.restore_pending_changes",
+            new_callable=AsyncMock,
+            return_value=1,
+        ) as mock_restore_configs,
+        patch("mindroom.bot.AgentBot._send_welcome_message_if_empty", new_callable=AsyncMock) as mock_welcome,
+    ):
+        await bot.join_configured_rooms()
 
-    @pytest.mark.asyncio
-    async def test_non_router_agents_dont_restore_tasks(self, tmp_path: Path) -> None:
-        """Test that non-router agents don't restore scheduled tasks."""
-        config = self._bind_runtime(
-            Config(
-                agents={
-                    "general": {
-                        "display_name": "GeneralAgent",
-                        "role": "General assistant",
-                        "model": "default",
-                        "rooms": ["lobby"],
-                    },
-                },
-                models={"default": {"provider": "openai", "id": "test-model"}},
-            ),
-            tmp_path,
-        )
-
-        # Test with regular agent (not router)
-        regular_user = AgentMatrixUser(
-            agent_name="general",
-            user_id="@general:mindroom.com",
-            password="test",  # noqa: S106
-            display_name="GeneralAgent",
-        )
-        regular_bot = make_test_agent_bot(
-            agent_user=regular_user,
-            storage_path=tmp_path,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            rooms=["lobby"],
-        )
-
-        # Mock the client and join_room
-        regular_bot.client = make_matrix_client_mock(user_id=regular_user.user_id)
-        regular_bot.client.rooms = {}
-        self._install_runtime_support(regular_bot)
-
-        with (
-            patch("mindroom.bot_room_lifecycle.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
-            patch(
-                "mindroom.matrix.client_room_admin.join_room",
-                new_callable=AsyncMock,
-                return_value=RoomJoinOutcome.JOINED,
-            ) as mock_join,
-            patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock, return_value=2) as mock_restore,
-        ):
-            await regular_bot.join_configured_rooms()
-
-            # Verify regular agent did NOT call restore_scheduled_tasks
-            mock_join.assert_awaited_once_with(regular_bot.client, "lobby")
-            mock_restore.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_router_restores_tasks_without_rejoining_existing_room(self, tmp_path: Path) -> None:
-        """Router restart setup should run even when the room is already joined."""
-        config = self._bind_runtime(Config(models={"default": {"provider": "openai", "id": "test-model"}}), tmp_path)
-
-        router_user = AgentMatrixUser(
-            agent_name=ROUTER_AGENT_NAME,
-            user_id=f"@{ROUTER_AGENT_NAME}:mindroom.com",
-            password="test",  # noqa: S106
-            display_name="RouterAgent",
-        )
-        router_bot = make_test_agent_bot(
-            agent_user=router_user,
-            storage_path=tmp_path,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            rooms=["lobby"],
-        )
-        router_bot.client = make_matrix_client_mock(user_id=router_user.user_id)
-        router_bot.client.rooms = {"lobby": object()}
-        self._install_runtime_support(router_bot)
-
-        with (
-            patch("mindroom.bot_room_lifecycle.get_joined_rooms", new_callable=AsyncMock, return_value=["lobby"]),
-            patch("mindroom.matrix.client_room_admin.join_room", new_callable=AsyncMock) as mock_join,
-            patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock, return_value=2) as mock_restore,
-            patch(
-                "mindroom.bot.config_confirmation.restore_pending_changes",
-                new_callable=AsyncMock,
-                return_value=1,
-            ) as mock_restore_configs,
-            patch(
-                "mindroom.bot.AgentBot._send_welcome_message_if_empty",
-                new_callable=AsyncMock,
-            ) as mock_welcome,
-        ):
-            await router_bot.join_configured_rooms()
-
-        mock_join.assert_not_awaited()
-        assert mock_restore.await_args is not None
-        config_provider = mock_restore.await_args.kwargs["config_provider"]
-        mock_restore.assert_awaited_once_with(
-            router_bot.client,
-            "lobby",
-            config,
-            runtime_paths_for(config),
-            router_bot._conversation_reader,
-            config_provider=config_provider,
-        )
-        assert config_provider() is config
-        replacement_config = config.model_copy(deep=True)
-        router_bot.config = replacement_config
-        assert config_provider() is replacement_config
-        mock_restore_configs.assert_awaited_once_with(router_bot.client, "lobby")
-        mock_welcome.assert_awaited_once_with("lobby")
-
-    @pytest.mark.asyncio
-    async def test_router_drains_deferred_overdue_tasks_on_first_sync_response(self, tmp_path: Path) -> None:
-        """The router should start deferred overdue tasks after the first successful sync."""
-        config = self._bind_runtime(Config(models={"default": {"provider": "openai", "id": "test-model"}}), tmp_path)
-
-        router_user = AgentMatrixUser(
-            agent_name=ROUTER_AGENT_NAME,
-            user_id=f"@{ROUTER_AGENT_NAME}:mindroom.com",
-            password="test",  # noqa: S106
-            display_name="RouterAgent",
-        )
-        router_bot = make_test_agent_bot(
-            agent_user=router_user,
-            storage_path=tmp_path,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            rooms=["lobby"],
-        )
-        router_bot.client = make_matrix_client_mock(user_id=router_user.user_id)
-        self._install_runtime_support(router_bot)
-
-        with (
-            patch(
-                "mindroom.bot.drain_deferred_overdue_tasks",
-                new_callable=AsyncMock,
-                return_value=2,
-            ) as mock_drain,
-            patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
-        ):
-            await _complete_frame(router_bot)
-
-            assert router_bot._deferred_overdue_task_drain_task is not None
-            await router_bot._deferred_overdue_task_drain_task
-
-            assert mock_drain.await_args is not None
-            config_provider = mock_drain.await_args.kwargs["config_provider"]
-            mock_drain.assert_awaited_once_with(
-                router_bot.client,
-                config,
-                runtime_paths_for(config),
-                router_bot._conversation_reader,
-                config_provider=config_provider,
-            )
-            assert config_provider() is config
-            replacement_config = config.model_copy(deep=True)
-            router_bot.config = replacement_config
-            assert config_provider() is replacement_config
-
-            await _complete_frame(router_bot, 1)
-            mock_drain.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_router_restarts_deferred_drain_when_queue_remains_after_sync_restart(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """A later sync response should restart draining if queued overdue work remains."""
-        config = self._bind_runtime(Config(models={"default": {"provider": "openai", "id": "test-model"}}), tmp_path)
-
-        router_user = AgentMatrixUser(
-            agent_name=ROUTER_AGENT_NAME,
-            user_id=f"@{ROUTER_AGENT_NAME}:mindroom.com",
-            password="test",  # noqa: S106
-            display_name="RouterAgent",
-        )
-        router_bot = make_test_agent_bot(
-            agent_user=router_user,
-            storage_path=tmp_path,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            rooms=["lobby"],
-        )
-        router_bot.client = make_matrix_client_mock(user_id=router_user.user_id)
-        self._install_runtime_support(router_bot)
-
-        with (
-            patch(
-                "mindroom.bot.drain_deferred_overdue_tasks",
-                new_callable=AsyncMock,
-                return_value=1,
-            ) as mock_drain,
-            patch("mindroom.bot.has_deferred_overdue_tasks", return_value=True),
-            patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
-        ):
-            await _complete_frame(router_bot)
-            assert router_bot._deferred_overdue_task_drain_task is not None
-            await router_bot._deferred_overdue_task_drain_task
-
-            await _complete_frame(router_bot, 1)
-            assert router_bot._deferred_overdue_task_drain_task is not None
-            await router_bot._deferred_overdue_task_drain_task
-
-            assert mock_drain.await_count == 2
-
-    @pytest.mark.asyncio
-    async def test_router_does_not_restart_deferred_drain_after_sync_shutdown_preparation(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Late sync responses during teardown must not respawn the deferred drain."""
-        config = self._bind_runtime(Config(models={"default": {"provider": "openai", "id": "test-model"}}), tmp_path)
-
-        router_user = AgentMatrixUser(
-            agent_name=ROUTER_AGENT_NAME,
-            user_id=f"@{ROUTER_AGENT_NAME}:mindroom.com",
-            password="test",  # noqa: S106
-            display_name="RouterAgent",
-        )
-        router_bot = make_test_agent_bot(
-            agent_user=router_user,
-            storage_path=tmp_path,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            rooms=["lobby"],
-        )
-        router_bot.client = make_matrix_client_mock(user_id=router_user.user_id)
-        self._install_runtime_support(router_bot)
-
-        with (
-            patch(
-                "mindroom.bot.drain_deferred_overdue_tasks",
-                new_callable=AsyncMock,
-                return_value=1,
-            ) as mock_drain,
-            patch("mindroom.bot.has_deferred_overdue_tasks", return_value=True),
-            patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
-        ):
-            await router_bot.prepare_for_sync_shutdown()
-            await _complete_frame(router_bot)
-
-            assert router_bot._deferred_overdue_task_drain_task is None
-            mock_drain.assert_not_awaited()
-
-            router_bot.mark_sync_loop_started()
-            await _complete_frame(router_bot, 1)
-
-            assert router_bot._deferred_overdue_task_drain_task is not None
-            await router_bot._deferred_overdue_task_drain_task
-            mock_drain.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_router_stop_cancels_running_scheduled_tasks(self, tmp_path: Path) -> None:
-        """Stopping the router should clear in-memory scheduled tasks before restart."""
-        config = self._bind_runtime(Config(models={"default": {"provider": "openai", "id": "test-model"}}), tmp_path)
-
-        router_user = AgentMatrixUser(
-            agent_name=ROUTER_AGENT_NAME,
-            user_id=f"@{ROUTER_AGENT_NAME}:mindroom.com",
-            password="test",  # noqa: S106
-            display_name="RouterAgent",
-        )
-        router_bot = make_test_agent_bot(
-            agent_user=router_user,
-            storage_path=tmp_path,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            rooms=["lobby"],
-        )
-        router_bot.client = make_matrix_client_mock(user_id=router_user.user_id)
-        router_bot.client.rooms = {}
-        self._install_runtime_support(router_bot)
-        drain_task = asyncio.create_task(asyncio.sleep(60))
-        router_bot._deferred_overdue_task_drain_task = drain_task
-        scheduling.set_scheduled_task_runner_owner(
-            scheduling.ScheduledTaskRunnerOwner(router_bot.client, router_bot._conversation_reader),
-        )
-        scheduling.register_scheduled_task_state_writer(router_bot.client)
-
-        async def wait_for_background_tasks_side_effect(**kwargs: float) -> None:
-            assert "timeout" in kwargs
-            assert drain_task.cancelled()
-
-        with (
-            patch(
-                "mindroom.bot.wait_for_background_tasks",
-                new_callable=AsyncMock,
-                side_effect=wait_for_background_tasks_side_effect,
-            ),
-            patch("mindroom.bot.clear_deferred_overdue_tasks", return_value=1) as mock_clear,
-            patch(
-                "mindroom.bot.cancel_all_running_scheduled_tasks",
-                new_callable=AsyncMock,
-                return_value=2,
-            ) as mock_cancel,
-        ):
-            await router_bot.stop()
-
-        assert drain_task.cancelled()
-        assert scheduling._runner_owner is None
-        assert scheduling._state_writers == {}
-        mock_clear.assert_called_once_with()
-        mock_cancel.assert_awaited_once()
-        router_bot.client.close.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_non_router_stop_keeps_scheduled_tasks_and_router_owner(self, tmp_path: Path) -> None:
-        """Replacing a non-router agent leaves the router's runner owner and running tasks alone."""
-        config = self._bind_runtime(
-            Config(
-                agents={"general": {"display_name": "GeneralAgent", "model": "default", "rooms": ["lobby"]}},
-                models={"default": {"provider": "openai", "id": "test-model"}},
-            ),
-            tmp_path,
-        )
-        agent_user = AgentMatrixUser(
-            agent_name="general",
-            user_id="@general:mindroom.com",
-            password="test",  # noqa: S106
-            display_name="GeneralAgent",
-        )
-        agent_bot = make_test_agent_bot(
-            agent_user=agent_user,
-            storage_path=tmp_path,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            rooms=["lobby"],
-        )
-        agent_bot.client = make_matrix_client_mock(user_id=agent_user.user_id)
-        agent_bot.client.rooms = {}
-        self._install_runtime_support(agent_bot)
-        router_owner = scheduling.ScheduledTaskRunnerOwner(
-            make_matrix_client_mock(user_id="@router:mindroom.com"),
-            agent_bot._conversation_reader,
-        )
-        scheduling.set_scheduled_task_runner_owner(router_owner)
-        scheduling.register_scheduled_task_state_writer(router_owner.client)
-        scheduling.register_scheduled_task_state_writer(agent_bot.client)
-
-        with patch("mindroom.bot.cancel_all_running_scheduled_tasks", new_callable=AsyncMock) as mock_cancel:
-            await agent_bot.stop()
-
-        assert scheduling._runner_owner is router_owner
-        assert scheduling._state_writers == {router_owner.client.user_id: router_owner.client}
-        mock_cancel.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_multiple_agents_only_router_restores(self, tmp_path: Path) -> None:
-        """Test that when multiple agents join a room, only router restores tasks."""
-        config = self._bind_runtime(
-            Config(
-                agents={
-                    "general": {
-                        "display_name": "GeneralAgent",
-                        "role": "General assistant",
-                        "model": "default",
-                        "rooms": ["lobby"],
-                    },
-                    "email_assistant": {
-                        "display_name": "EmailAssistant",
-                        "role": "Email assistant",
-                        "model": "default",
-                        "rooms": ["lobby"],
-                    },
-                },
-                models={"default": {"provider": "openai", "id": "test-model"}},
-            ),
-            tmp_path,
-        )
-
-        agents_to_test = [
-            ("general", "GeneralAgent", False),
-            ("email_assistant", "EmailAssistant", False),
-            (ROUTER_AGENT_NAME, "RouterAgent", True),  # Only router should restore
-        ]
-
-        restore_call_count = 0
-
-        for agent_name, display_name, should_restore in agents_to_test:
-            user = AgentMatrixUser(
-                agent_name=agent_name,
-                user_id=f"@{agent_name}:mindroom.com",
-                password="test",  # noqa: S106
-                display_name=display_name,
-            )
-            bot = make_test_agent_bot(
-                agent_user=user,
-                storage_path=tmp_path / agent_name,
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["lobby"],
-            )
-            bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-            bot.client.rooms = {}
-            self._install_runtime_support(bot)
-
-            with (
-                patch("mindroom.bot_room_lifecycle.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
-                patch(
-                    "mindroom.matrix.client_room_admin.join_room",
-                    new_callable=AsyncMock,
-                    return_value=RoomJoinOutcome.JOINED,
-                ),
-                patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock, return_value=2) as mock_restore,
-                patch(
-                    "mindroom.bot.config_confirmation.restore_pending_changes",
-                    new_callable=AsyncMock,
-                    return_value=0,
-                ),
-                patch("mindroom.bot.AgentBot._send_welcome_message_if_empty", new_callable=AsyncMock),
-            ):
-                await bot.join_configured_rooms()
-
-                if should_restore:
-                    mock_restore.assert_called_once()
-                    restore_call_count += 1
-                else:
-                    mock_restore.assert_not_called()
-
-        # Verify only one agent (router) called restore
-        assert restore_call_count == 1
+    mock_join.assert_not_awaited()
+    restore_room.assert_awaited_once_with(bot, "lobby")
+    mock_restore_configs.assert_awaited_once_with(bot.client, "lobby")
+    mock_welcome.assert_awaited_once_with("lobby")

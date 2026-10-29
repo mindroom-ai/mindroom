@@ -23,6 +23,7 @@ from mindroom.matrix.invited_rooms_store import invited_rooms_path, load_invited
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.orchestration.config_updates import ConfigUpdatePlan
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -738,19 +739,18 @@ async def test_emit_config_reloaded_context_includes_matrix_admin(tmp_path: Path
     orchestrator.hook_registry.has_hooks.return_value = True
     router_client = AsyncMock(spec=nio.AsyncClient)
     router_client.homeserver = "http://localhost:8008"
-    orchestrator.agent_bots["router"] = SimpleNamespace(
-        client=router_client,
-        _hook_send_message=AsyncMock(),
+    orchestrator.fleet.add(
+        "router",
+        SimpleNamespace(
+            client=router_client,
+            _hook_send_message=AsyncMock(),
+            runtime_started_at=0.0,
+            _hook_agent_message_snapshot=AsyncMock(),
+        ),
     )
 
     with patch("mindroom.orchestrator.emit", new=AsyncMock()) as mock_emit:
-        await orchestrator._emit_config_reloaded(
-            new_config=config,
-            changed_entities={"router"},
-            added_entities=set(),
-            removed_entities=set(),
-            plugin_changes=(),
-        )
+        await orchestrator._emit_config_reloaded(ConfigUpdatePlan(new_config=config), changed_entities={"router"})
 
     context = mock_emit.await_args.args[2]
     assert context.matrix_admin is not None

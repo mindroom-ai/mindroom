@@ -43,7 +43,6 @@ from mindroom.run_storage import RunStorage
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.session_storage.types import ConversationSession
-from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
@@ -492,7 +491,7 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
         )
 
     def stored_runs(build):
-        stored = build.store.load_session(runtime.session_id, "agent")
+        stored = build.store.load_session(runtime.session_id)
         return [run.to_dict() for run in stored.runs] if stored is not None else []
 
     with tool_runtime_context(runtime):
@@ -678,12 +677,10 @@ async def test_deferred_catalog_uses_normal_builder_without_opening_unrelated_to
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("agent_cli_api")
-@pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.parametrize("switch_model", [False, True])
 async def test_real_response_requests_only_bash_after_deferred_call_and_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    streamed: bool,
     switch_model: bool,
 ) -> None:
     """The supported response entrypoints send requests that offer one tool and replay the Bash history."""
@@ -745,20 +742,17 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
     identity = build_execution_identity_from_runtime_context(runtime)
 
     async def respond():
-        kwargs = {
-            "prompt": "actual current request",
-            "runtime_paths": runtime.runtime_paths,
-            "config": runtime.config,
-            "execution_identity": identity,
-            "supports_native_tool_approval": True,
-            "show_tool_calls": True,
-        }
-        if streamed:
-            return await ai.collect_streamed_response_content(
-                ai.stream_agent_response(ctx, **kwargs),
-                presentation=CollectedStreamPresentation(show_tool_calls=True),
-            )
-        return await ai.ai_response(ctx, **kwargs)
+        return await ai.ai_response(
+            replace(
+                ctx,
+                prompt="actual current request",
+                execution_identity=identity,
+                supports_native_tool_approval=True,
+                show_tool_calls=True,
+            ),
+            runtime.runtime_paths,
+            runtime.config,
+        )
 
     with tool_runtime_context(runtime):
         result = await respond()
@@ -772,7 +766,7 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
         assert "actual current request" in str(request.messages)
     store = owners[0].catalog.store
     assert store is not None
-    saved = store.load_session(ctx.session_id, "agent")
+    saved = store.load_session(ctx.session_id)
     assert saved is not None
     assert saved.runs
     assert saved.runs[-1].status.value == "COMPLETED", [(run.status, len(run.messages)) for run in saved.runs]
@@ -848,11 +842,15 @@ async def test_every_cli_toolkit_answers_to_its_own_tool_name(
     install_scripted_shell(monkeypatch, run_shell_command)
     with tool_runtime_context(runtime):
         result = await ai.ai_response(
-            replace(_turn_context(), agent_mode="minimal", run_id=None),
-            prompt="list my attachments",
-            runtime_paths=runtime.runtime_paths,
-            config=runtime.config,
-            execution_identity=build_execution_identity_from_runtime_context(runtime),
+            replace(
+                _turn_context(),
+                agent_mode="minimal",
+                run_id=None,
+                prompt="list my attachments",
+                execution_identity=build_execution_identity_from_runtime_context(runtime),
+            ),
+            runtime.runtime_paths,
+            runtime.config,
         )
     assert "done" in str(result)
     assert offered_tools(provider.requests[0]) == ["bash"]

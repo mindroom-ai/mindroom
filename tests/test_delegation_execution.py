@@ -233,7 +233,7 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: PLR0915
             if outcome == "cancel_completed":
                 # A crash after the child committed completion but before its parent and audit record saw it.
                 storage = create_session_storage("code", config, paths, child_identity)
-                session = storage.load_session(child.session_id, "agent")
+                session = storage.load_session(child.session_id)
                 assert session is not None
                 completed = deepcopy(storage.get_run(child.run_id))
                 assert isinstance(completed, RunRecord)
@@ -1097,7 +1097,7 @@ async def test_copied_delegation_call_never_starts_twice_from_one_approval(
     stored = storage.get_run("parent-run")
     assert isinstance(stored, RunRecord)
     state = DelegationState.from_metadata(stored.metadata)
-    session = storage.load_session("parent", "agent")
+    session = storage.load_session("parent")
     assert session is not None
     planted = deepcopy(stored)
     assert planted.requirements is not None

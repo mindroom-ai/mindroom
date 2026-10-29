@@ -15,14 +15,19 @@ Turn handling applies the general [architecture principles](../dev/2026-04-15-mi
 ## Target Boundaries
 
 - `AgentBot` owns Matrix lifecycle only.
-- `TurnController` owns one inbound turn from ingress to recorded outcome.
+- `TurnIngress` owns one inbound event from its Matrix callback to coalescing-gate admission; `VoiceIngress` admits voice messages and `InteractiveSelections` admits answers to interactive questions for it.
+- `TurnDispatcher` owns one turn from the gate's exit to its recorded outcome.
 - `TurnPolicy` owns pure decision logic only: it sends nothing, runs no AI, and writes no persistence state.
 - `ResponseRunner` owns response execution and lifecycle only.
 - `TurnStore` owns durable turn truth.
 - `DeliveryGateway` owns Matrix transport only.
 
-The ingress-to-execution seam is one-way: ingress hands the runner immutable values, and the runner assembles the final payload itself after it takes the lifecycle lock.
-A callback that runs payload building back inside `TurnController` after the lock was rejected, because data must cross the seam as values, not closures.
+The gate-to-dispatch seam is one-way: the gate hands dispatch each turn together with what dispatch may know about the queue it left, so dispatch never holds the gate and the gate is built after the dispatcher it calls.
+The queued notices of follow-ups still waiting behind a flushed batch are a snapshot taken at the flush, but whether the queue holds another run stays a live read, because dispatch asks after awaiting the turn's context and a message admitted meanwhile must still keep a newer message from absorbing the turn out of receipt order.
+An interactive selection crosses the gate as a value its owner runs after the gate, not as a closure.
+
+The dispatch-to-execution seam is one-way too: dispatch hands the runner immutable values, and the runner assembles the final payload itself after it takes the lifecycle lock.
+A callback that runs payload building back inside turn dispatch after the lock was rejected, because data must cross the seam as values, not closures.
 
 Edit regeneration runs on a runner-owned task and does not wait for its claim, so another reply holding the conversation never holds up the room's event lane.
 
@@ -77,7 +82,7 @@ A callback that raises stays pending at the head of its room lane and retries wi
 Only a callback that recognizes a deterministic refusal settles its event, by returning an outcome instead of raising.
 A message or media event whose relation target the homeserver refuses to serve can never be placed in a conversation, so it settles as intentionally ignored.
 A successful but empty readiness result settles as intentionally ignored instead of repeating download or transcription work forever.
-Pure-policy ignores, such as unmentioned managed senders, blocked deep synthetic relays, and commands another entity owns, settle their journal rows without recording a turn, which keeps high-volume ignored traffic out of the handled-turn ledger without weakening deduplication.
+Pure-policy ignores, such as unmentioned managed senders, blocked deep synthetic relays, and commands another entity owns, settle their journal rows without recording a turn, which keeps high-volume ignored traffic out of the turn tables without weakening deduplication.
 
 ### Room lanes
 
@@ -129,16 +134,22 @@ Repair cannot recover payloads that settlement already cleared.
 
 A voice message's batching scope and its echo thread are distinct: a root audio message can join the room's batch while its echo starts a thread rooted at it, and the final coalesced reply target follows the current dispatch policy.
 
-## Handled-Turn Ledger
+## Turn State
 
-- One runtime process owns each agent's ledger and its semantic ordering, so nothing defines cross-process precedence; a second runtime against the same event journal refuses to start.
-- Retention keeps replayable incomplete turns, every group an unsettled journal row references, and every turn record carrying a redaction tombstone, because history cleanup derives from those tombstones once a departure dropped the journal's tombstone or for history older than the journal.
+- One runtime process owns each agent's turn state and its semantic ordering, so nothing defines cross-process precedence; a second runtime against the same event journal refuses to start.
+- Every turn fact is a row with one writer, read by query, so there is no in-memory copy to publish or reconcile; what a sibling store of the same agent (a hot replacement, a re-login rebuild) could not see is an in-flight turn, and the claim registry every store of the agent shares covers that.
+- A turn is one immutable ordered tuple of physical sources; a different tuple is a new turn that absorbs the unfinished owners of its sources, while an alias only indexes, so an original and the relay answering it stay two live turns.
+- A write refused because an answered or delivery-bound turn owns a source writes nothing and hands each source back to the journal once the claim releases, so a conflicting source settles as handled at precheck and an unrelated one in the same batch is answered.
+- A non-AI FINAL binds its turn in the transaction that makes the row durable and settles the turn's sources there, so a reshape before the acknowledgement cannot redirect which turn the acknowledgement completes.
+- Retention keeps replayable incomplete turns and every turn an unsettled journal row references; redactions are kept apart from turns, so a turn that once read a deleted message ages out like any other.
 
 ## Redaction
 
 The user-visible history behavior is on [Conversation history](../configuration/history.md#compacted-history-and-redaction).
 
-- Nothing durable records that history cleanup is owed: every response derives it from the tombstones, so a crash between tombstone and cleanup, or a redacted event no turn owns, needs no recovery path.
+- A redaction is recorded once per agent, in the transaction that admits it, and applied there to every Matrix login of that agent and to the agent's turns; it is kept when the bot leaves the room, because an earlier login the agent returns to, or a rejoin the server does not replay the redaction to, would otherwise show the deleted text again.
+- Deleting the human message a router relayed deletes the relay that answers for it: the routed reply ends, and its approval wait with it, exactly as for a directly sent message, because reply discovery matches exact logical ids and the redacted alias is resolved to its sources first.
+- Nothing durable records that history cleanup is owed: every response derives it from the recorded redactions, so a crash between redaction and cleanup, or a redacted event no turn owns, needs no recovery path.
 - Approval creation and source-redaction admission serialize, so an approval cannot acquire a source that a deletion already settled.
 - Redacted replay can stay in local session storage until its history scope next serves a response, because cleanup runs only then.
   Approval continuations, manual compaction, and voice-call turns do not run the check either.
@@ -157,7 +168,6 @@ Clients consume approval events under these rules, which this repository's code 
 
 ## Simplifications Still Planned
 
-- `TurnController` is the only normal-turn owner but is still too large: interactive-selection execution and response-action assembly should move out of it.
-- `ResponseRunner` still owns too much execution detail: its team turn driver, interrupted persistence, inbox tracking, and enrichment helpers should become their own modules.
+- `ResponseRunner` still builds `InboxResponses`, which `bot.py`, `turns/dispatch.py`, `turns/interactive_selection.py`, and `edit_regenerator.py` reach through it; building the inbox in `bot.py` would leave the runner only the locked turn and its delivery.
 - `IngressHookRunner` is a thin hook adapter with a vague name; it may stay a helper but must not grow into another top-level orchestration object.
 - Only after those steps, revisit `MessageTarget`, which combines conversation identity and delivery placement, and split them only if the runtime still needs it.

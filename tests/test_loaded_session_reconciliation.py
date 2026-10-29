@@ -49,7 +49,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.llm.runs import AnyRunRecord
-    from mindroom.session_storage.types import SessionKind
 
 pytestmark = pytest.mark.asyncio
 
@@ -115,8 +114,8 @@ def _as_stored(session: ConversationSession | None) -> list[dict[str, Any]]:
     return [run.to_dict() for run in session.runs]
 
 
-def _reloaded(store: ConversationStore, session_id: str = SESSION, kind: SessionKind = "agent") -> list[dict[str, Any]]:
-    return _as_stored(store.load_session(session_id, kind))
+def _reloaded(store: ConversationStore, session_id: str = SESSION) -> list[dict[str, Any]]:
+    return _as_stored(store.load_session(session_id))
 
 
 def _cut(store: ConversationStore, run_id: str, session_id: str = SESSION) -> None:
@@ -244,10 +243,10 @@ async def test_an_approval_resume_leaves_its_loaded_session_as_the_store_holds_i
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity, agent_name="code")):
         paused = await pause_parent("code", "Multiply", config=config, runtime_paths=paths, identity=identity)
         # Another reply finished while the approval waited; the resume loads the session as the store holds it.
-        later = paused.store.load_session(SESSION, "agent")
+        later = paused.store.load_session(SESSION)
         assert later is not None
         paused.store.save_run(later, _completed("run-later", "code", "Meanwhile."), record_usage=False)
-        session = paused.store.load_session(SESSION, "agent")
+        session = paused.store.load_session(SESSION)
         assert session is not None
 
         runner = replace(paused.runner, storage=replace(paused.runner.storage, session=session))
@@ -281,7 +280,7 @@ async def test_an_approval_resume_whose_run_a_cut_removed_leaves_it_out_of_its_l
     ).install(monkeypatch)
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity, agent_name="code")):
         paused = await pause_parent("code", "Multiply", config=config, runtime_paths=paths, identity=identity)
-        session = paused.store.load_session(SESSION, "agent")
+        session = paused.store.load_session(SESSION)
         assert session is not None
         assert [run.run_id for run in session.runs] == ["parent-run"]
 
@@ -331,7 +330,7 @@ async def test_a_team_turn_keeps_its_member_runs_in_its_loaded_session(
     assert [run.agent_id for run in member_runs] == ["writer"]
     assert [run.run_id for run in session.runs if isinstance(run, TeamRunRecord)] == ["team-0", "run-1"]
     assert member_runs[0].parent_run_id == "run-1"
-    assert _as_stored(session) == _reloaded(store, SESSION_ID, "team")
+    assert _as_stored(session) == _reloaded(store, SESSION_ID)
 
 
 @pytest.mark.usefixtures("squad_probe")
@@ -365,7 +364,7 @@ async def test_a_team_turn_whose_run_a_cut_removed_leaves_it_and_its_members_out
     assert (writer.agent_id, writer.parent_run_id) == ("writer", "run-1")
     session = _loaded_session(opened_scopes, "squad")
     assert [run.run_id for run in session.runs] == ["team-0"]
-    assert _as_stored(session) == _reloaded(team.storage, SESSION_ID, "team")
+    assert _as_stored(session) == _reloaded(team.storage, SESSION_ID)
 
 
 # --- delegation ---------------------------------------------------------------------------------------------------

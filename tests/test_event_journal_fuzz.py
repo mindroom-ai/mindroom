@@ -134,7 +134,7 @@ async def test_journal_fuzz_oracle_detects_corruption(
             "revision": "UPDATE visible_messages SET revision_event_id = '$wrong'",
             "thread": "UPDATE visible_messages SET thread_id = '$wrong'",
             "pending": "DELETE FROM journal_events",
-            "tombstone": "DELETE FROM redaction_tombstones",
+            "tombstone": "DELETE FROM event_redactions",
         }
         await runner.store.backend.write(lambda tx: tx.execute(statements[corruption]))
         with pytest.raises(AssertionError):

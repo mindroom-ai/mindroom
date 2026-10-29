@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 import nio
 import pytest
 
+from mindroom import interactive
 from mindroom import reply_lifecycle as rl
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
 from mindroom.background_tasks import wait_for_background_tasks
@@ -41,7 +42,6 @@ from mindroom.reply_presentation import (
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, ResponsePausedForApproval
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.turn_store import TurnStore
 from tests.approval_continuation_helpers import dispatch_approval
 from tests.conftest import (
     initialize_approval_store_for_test,
@@ -52,6 +52,7 @@ from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _t
 from tests.test_reply_records_turns import (
     _admit_edit,
     _FlakyHomeserver,
+    _model_stream,
     _pending_turn,
     _regeneration,
     _reply,
@@ -61,7 +62,7 @@ from tests.test_reply_records_turns import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -69,6 +70,7 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
 
 pytestmark = pytest.mark.asyncio
+_YES_OPTION = '{"emoji":"✅","label":"Yes","value":"yes"}'
 
 _CARD_PUBLICATION_FAILED = ApprovalFailure(ApprovalFailureKind.ERROR, "Card publication failed")
 
@@ -88,6 +90,19 @@ def _paused(run_id: str = "run-1", text: str = "Reading document") -> PausedAtte
         response_text=text,
         toolkit_owners={("general", "read_document"): "test_toolkit"},
     )
+
+
+def _pausing_stream(paused: PausedAttempt) -> Callable[..., AsyncIterator[str]]:
+    """Return a turn stream that shows the paused run's text, as its run streamed it, then pauses for approval."""
+
+    def stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        async def chunks() -> AsyncIterator[str]:
+            yield paused.response_text
+            raise ResponsePausedForApproval(paused)
+
+        return chunks()
+
+    return stream
 
 
 @asynccontextmanager
@@ -139,9 +154,7 @@ async def _respond(
     target = target or _target()
     with (
         patch_response_runner_module(
-            ai_response=AsyncMock(
-                side_effect=ResponsePausedForApproval(replace(_paused(), session_id=target.session_id)),
-            ),
+            stream_agent_response=_pausing_stream(replace(_paused(), session_id=target.session_id)),
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing,
         ),
@@ -154,11 +167,9 @@ async def _respond(
 def _journal_wakes(bot: AgentBot) -> Iterator[list[tuple[str, ...]]]:
     """Collect the sources the reply records hand back to the journal, which these tests do not run."""
     wakes: list[tuple[str, ...]] = []
-    with patch.object(
-        bot._journal_dispatcher,
-        "retry_turn_sources",
-        side_effect=lambda _room_id, sources: wakes.append(sources),
-    ):
+    replies = unwrap_extracted_collaborator(bot._response_runner).deps.replies
+    assert replies is not None
+    with patch.object(replies, "retry_sources", side_effect=lambda _room_id, sources: wakes.append(sources)):
         yield wakes
 
 
@@ -167,7 +178,7 @@ async def _run_approval_wakes(bot: AgentBot, wakes: list[tuple[str, ...]]) -> No
     runner = unwrap_extracted_collaborator(bot._response_runner)
     while wakes:
         assert await runner.handoff_approval_source(wakes.pop(0)[0]) is False
-        await runner.wait_for_source_owned_inbox_responses()
+        await runner.inbox.wait_for_source_owned_inbox_responses()
 
 
 async def _span_kinds(bot: AgentBot) -> list[tuple[rl.SpanKind, rl.SpanOutcome | None]]:
@@ -196,14 +207,13 @@ async def test_a_finished_approval_records_its_turn_answered(tmp_path: Path) -> 
     """Finishing the continuation settles the turn's sources through the reply path, which records the turn answered."""
     async with _approval_bot(tmp_path, requires_human=False) as bot:
         await _pending_turn(bot)
-        with patch.object(TurnStore, "terminal_turn_record", return_value=None):
-            await _respond(bot, resume=AsyncMock(return_value=CompletedApprovalRun("Approved answer.", {})))
+        await _respond(bot, resume=AsyncMock(return_value=CompletedApprovalRun("Approved answer.", {})))
 
         assert await bot.journal_principal().approvals.approval_continuation_for_source("$event") is None
-        record = bot._turn_store.get_turn_record("$event")
+        record = await bot._turn_store.get_turn_record("$event")
         assert record is not None
         assert record.completed
-        assert bot._turn_store.is_handled("$event")
+        assert await bot._turn_store.is_handled(_target().room_id, "$event")
 
 
 async def test_a_pause_waiting_for_a_human_leaves_the_reply_paused(tmp_path: Path) -> None:
@@ -315,8 +325,8 @@ async def _send_message(bot: AgentBot, event_id: str, body: str, *, thread_id: s
             source={},
         ),
     )
-    await bot._turn_controller.handle_text_event(room, message)
-    await wait_for_background_tasks(timeout=5.0, owner=bot._turn_controller.deps.runtime)
+    await bot._turn_ingress.handle_text_event(room, message)
+    await wait_for_background_tasks(timeout=5.0, owner=bot._turn_ingress.deps.runtime)
 
 
 def _reactions(bot: AgentBot) -> list[dict[str, str]]:
@@ -353,7 +363,7 @@ async def test_a_message_sent_while_an_approval_waits_is_answered_once_after_it_
 
         model = AsyncMock(side_effect=answer)
         with patch_response_runner_module(
-            ai_response=model,
+            stream_agent_response=_model_stream(model),
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing,
         ):
@@ -389,7 +399,7 @@ async def test_a_message_in_another_conversation_is_answered_while_an_approval_w
         await _respond(bot, target=paused)
         model = AsyncMock(return_value="Other answer.")
         with patch_response_runner_module(
-            ai_response=model,
+            stream_agent_response=_model_stream(model),
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing,
         ):
@@ -519,7 +529,7 @@ async def test_stop_on_a_reply_waiting_in_place_cancels_its_wait_through_its_app
 
         with (
             patch_response_runner_module(
-                ai_response=AsyncMock(side_effect=wait_in_place),
+                stream_agent_response=_model_stream(AsyncMock(side_effect=wait_in_place)),
                 should_use_streaming=AsyncMock(return_value=False),
                 typing_indicator=_noop_typing,
             ),
@@ -571,7 +581,7 @@ async def test_a_turn_approved_in_place_settles_through_its_approval(tmp_path: P
             return "Done reading."
 
         with patch_response_runner_module(
-            ai_response=AsyncMock(side_effect=approved_in_place),
+            stream_agent_response=_model_stream(AsyncMock(side_effect=approved_in_place)),
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing,
         ):
@@ -747,7 +757,7 @@ async def test_a_resume_keeps_what_earlier_spans_showed_in_its_final_answer(tmp_
         with (
             patch.object(runtime_type, "claim_approval_resume", claim_below_an_earlier_attempt),
             patch_response_runner_module(
-                ai_response=AsyncMock(side_effect=ResponsePausedForApproval(_paused())),
+                stream_agent_response=_pausing_stream(_paused()),
                 should_use_streaming=AsyncMock(side_effect=streaming),
                 typing_indicator=_noop_typing,
             ),
@@ -775,11 +785,11 @@ async def test_a_resume_keeps_what_earlier_spans_showed_in_its_final_answer(tmp_
 async def test_each_resume_continues_the_answer_its_reply_paused_with(tmp_path: Path) -> None:
     """A resume continues the source answer and trace its reply's records keep, not what Matrix showed."""
     trace = ToolTraceEntry(type="tool_call_started", tool_name="read_document", tool_call_id="call-run-1")
-    first = replace(
-        _paused(text="Reading document"),
-        acknowledged_response_text="Reading the rendered document",
-        tool_trace=(trace,),
-    )
+    # A streamed pause shows its interactive question rendered, while its records keep the source answer.
+    source = f'Reading document\n\n```interactive\n{{"question":"Choose","options":[{_YES_OPTION}]}}\n```'
+    rendered = interactive.parse_and_format_interactive(source, extract_mapping=True).formatted_text
+    assert rendered != source
+    first = replace(_paused(text=source), tool_trace=(trace,))
     continue_run = AsyncMock(
         side_effect=[
             _paused(run_id="run-2", text="Reading the second document"),
@@ -790,8 +800,8 @@ async def test_each_resume_continues_the_answer_its_reply_paused_with(tmp_path: 
         runner = unwrap_extracted_collaborator(bot._response_runner)
         with (
             patch_response_runner_module(
-                ai_response=AsyncMock(side_effect=ResponsePausedForApproval(first)),
-                should_use_streaming=AsyncMock(return_value=False),
+                stream_agent_response=_pausing_stream(first),
+                should_use_streaming=AsyncMock(return_value=True),
                 typing_indicator=_noop_typing,
             ),
             patch.object(type(runner._approvals._approval_execution), "continue_run", continue_run),
@@ -800,15 +810,14 @@ async def test_each_resume_continues_the_answer_its_reply_paused_with(tmp_path: 
 
         assert (await _reply(bot)).state is rl.ReplyState.COMPLETED
         assert [call.kwargs["paused_answer"] for call in continue_run.await_args_list] == [
-            PausedAnswer(text="Reading document", tool_trace=(trace,)),
+            PausedAnswer(text=source, tool_trace=(trace,)),
             PausedAnswer(text="Reading the second document"),
         ]
-        assert _sent_bodies(bot) == [
-            "Thinking...",
-            "Reading the rendered document",
-            "Reading the second document",
-            "Both read.",
-        ]
+        bodies = _sent_bodies(bot)
+        assert bodies[0] == "Thinking..."
+        assert rendered in bodies
+        assert source not in bodies
+        assert bodies[-2:] == ["Reading the second document", "Both read."]
 
 
 async def test_an_edit_of_a_paused_reply_runs_nothing(tmp_path: Path) -> None:
@@ -823,7 +832,7 @@ async def test_an_edit_of_a_paused_reply_runs_nothing(tmp_path: Path) -> None:
         claimed = AsyncMock()
         sends = len(_sent_bodies(bot))
         with patch_response_runner_module(
-            ai_response=model,
+            stream_agent_response=_model_stream(model),
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing,
         ):

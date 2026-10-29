@@ -17,7 +17,6 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
-from mindroom.handled_turns import TurnRecord
 from mindroom.message_target import MessageTarget
 from mindroom.room_thread_modes import (
     _store_path,
@@ -25,6 +24,7 @@ from mindroom.room_thread_modes import (
     resolve_room_thread_mode_override,
     set_room_thread_mode_override,
 )
+from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import (
     make_test_command_handler_context,
 )

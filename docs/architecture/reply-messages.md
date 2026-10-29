@@ -31,7 +31,7 @@ The [decisions](#decisions) and [accepted limitations](#accepted-limitations) be
 Every fact about an AI reply has one owner and one writer, so no two stores can disagree about a reply:
 
 - I-S1. Everything about an AI reply, including its event, state, presentation, Stop, each span's sources and their settlement, its tool calls, its redactions, and which bot instance claims its approval, is read from the reply records or from an in-memory cache of them that is never written separately; no other store writes it.
-  The turn ledger keeps user-message and turn facts, and a response event only for turns that are not AI replies, such as commands, rejections, and router notices; the journal keeps whether each event is pending or settled; agent history keeps the conversation the model sees.
+  The turn rows keep user-message and turn facts, and a response event only for turns that are not AI replies, such as commands, rejections, and router notices; the journal keeps whether each event is pending or settled; agent history keeps the conversation the model sees.
 - I-S2. A reply settles its journal sources in the same transaction that marks the turn they index answered when the reply answered them, so a crash cannot leave one without the other.
   Deleted sources, sources that became terminal without an answer, and those of a removed entity or of an approval whose owner is gone settle unanswered.
   Sources settled outside a reply, by an ingress decision that drops a waiting replay or by a room departure, leave their turn unanswered and end the reply that waited on them.
@@ -99,6 +99,8 @@ Delivery and recovery:
 - A reply still streaming when an upgrade from an earlier release stops the backend can keep its partial text, and its replay may answer in a new message, because upgrades are assumed to run with no reply in flight.
 - An upgrade from a release before v2026.10.228 cancels every approval of a paused reply that release left pending, because it cannot rebuild the reply such an approval paused; approvals of scheduled calls are kept, and pending approvals survive an upgrade from any later release.
   A cancelled approval's Matrix message keeps what it showed, which can still say that it waits for approval, and a click on its card does nothing.
+- When some messages of a coalesced turn are deleted, or answered by another turn, after its reply already exists, the whole turn ends unanswered rather than answering the rest: a reply's span pins its sources, and a reply that ended refuses any later claim by them, so answering the survivors would need moving them to a new reply.
+  Before any reply exists, as while the turn waits for its conversation or an approval, only those messages settle and the rest are answered as their own turn.
 - A message that already waited for the conversation's lock when the reply before it paused for an approval is answered while that approval waits; it is still answered once.
 - A room departure and a removed entity end their replies without writing to Matrix, so those messages keep what they last showed: the bot has left the room, or the entity has no bot; a removed entity's reply still delivers the notes and redactions it owes if the entity comes back.
 - A note Matrix refused for good is not sent again (I15).

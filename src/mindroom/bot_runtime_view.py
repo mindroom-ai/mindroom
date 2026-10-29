@@ -33,9 +33,6 @@ class BotRuntimeView(Protocol):
     def agent_reply_memberships(self) -> AgentReplyMembershipIndex: ...  # noqa: D102
 
     @property
-    def enable_streaming(self) -> bool: ...  # noqa: D102
-
-    @property
     def orchestrator(self) -> OrchestratorRuntime | None: ...  # noqa: D102
 
     @property
@@ -53,7 +50,6 @@ class BotRuntimeState:
     config: Config
     runtime_paths: RuntimePaths
     agent_reply_memberships: AgentReplyMembershipIndex
-    enable_streaming: bool
     orchestrator: OrchestratorRuntime | None
     # Orchestrator-owned and shared across bots. Lives here, not on ResponseRunner,
     # so it survives the runtime rebuild after a login identity change.

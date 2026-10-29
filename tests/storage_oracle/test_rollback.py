@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.session_storage import preflight
-from mindroom.session_storage.legacy_agno3_backup import BACKUP_SUFFIX
+from mindroom.session_storage.legacy_agno3_conversion import BACKUP_SUFFIX
 from mindroom.session_storage.preflight import session_storage_preflight
 from mindroom.session_storage.schema import TableNames
 from tests.storage_oracle.record import FIXTURES, GOLDEN_DUMPS, SEQUENCES, observe_store, sequence_id, storage_name_of

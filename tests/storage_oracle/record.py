@@ -5,7 +5,8 @@ seed and named sequence was driven through it, keeping each step's outcome, a di
 action, the full observables after every cut (after every action for a named sequence) and after the last action,
 and a dump of the final database. Every storage golden and every legacy input was opened as that store opened it,
 and its sessions' observables kept. That store is gone, so the recordings cannot be made again: a later change to
-the vocabulary adds new seeds against the current store only (spec v4 4.7).
+the vocabulary adds new seeds against the current store only (spec v4 4.7). A comparison shows the keys a stored dict
+leaves out at their defaults (``with_defaults``), which a reader reads the same either way.
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.schema import TableNames
 from mindroom.usage.storage import quote_identifier
+from tests.llm.agno_dict_helpers import MESSAGE_DEFAULTS, TOOL_EXECUTION_DEFAULTS
+from tests.session_storage.goldens import STORAGE
 from tests.storage_oracle.determinism import deterministic
 from tests.storage_oracle.observe import observe
 
@@ -30,7 +33,7 @@ TESTS = Path(__file__).resolve().parents[1]
 # Every recorded sequence: the generated seeds and the named sequences, each a ``.json`` recording and a ``.sql`` dump.
 SEQUENCES = sorted([*(FIXTURES / "generated").glob("*.json"), *(FIXTURES / "named").glob("*.json")])
 GOLDEN_DUMPS = (
-    *sorted((TESTS / "fixtures" / "agno_parity" / "storage").glob("*.sql")),
+    *sorted(STORAGE.glob("*.sql")),
     TESTS / "fixtures" / "agno_2_6_12_code_sessions.sql",
 )
 _SESSIONS_TABLE = re.compile(r'CREATE TABLE "?([A-Za-z0-9_]+)_sessions"? \(')
@@ -64,6 +67,24 @@ def decode(text: str) -> dict[str, Any]:
     """Return the recording a file holds: key-sorted JSON whose messages and runs are stored once, under ``objects``."""
     data = json.loads(text)
     return cast("dict[str, Any]", _resolve(data["recording"], data["objects"]))
+
+
+def with_defaults(observed: object) -> Any:  # noqa: ANN401 - a JSON value
+    """Return ``observed`` with each message and tool execution showing the keys its stored dict leaves at their defaults.
+
+    The recordings show those keys, since the writers of their time stored every one. A reader reads an absent key as
+    its default, so showing them again changes nothing a reader sees, and a key holding any other value still differs.
+    """
+    if isinstance(observed, list):
+        return [with_defaults(item) for item in observed]
+    if not isinstance(observed, dict):
+        return observed
+    shown = {key: with_defaults(value) for key, value in observed.items()}
+    if "role" in shown and "id" in shown:
+        return {**MESSAGE_DEFAULTS, **shown}
+    if "tool_call_id" in shown and "tool_name" in shown:
+        return {**TOOL_EXECUTION_DEFAULTS, **shown}
+    return shown
 
 
 def first_difference(expected: object, actual: object, path: str = "") -> str | None:
@@ -113,24 +134,33 @@ def observe_store(
     observation keeps those ids, so a later one asks the same questions.
     """
     with deterministic():
-        store = create_state_storage(storage_name, root)
+        scope = _named_owner(TableNames(storage_name).database_path(root))
+        store = create_state_storage(storage_name, root, scope)
         with closing(sqlite3.connect(store.path)) as connection:
-            rows = connection.execute(
-                f"SELECT session_id, session_type, agent_id, team_id FROM {quote_identifier(store.names.sessions)} "  # noqa: S608
-                "ORDER BY session_id",
-            ).fetchall()
+            session_ids = [
+                session_id
+                for (session_id,) in connection.execute(
+                    f"SELECT session_id FROM {quote_identifier(store.names.sessions)} ORDER BY session_id",  # noqa: S608
+                )
+            ]
         sessions: dict[str, object] = {}
-        for session_id, session_type, agent_id, team_id in rows:
-            owner = team_id if session_type == "team" else agent_id
-            if not owner:
-                sessions[session_id] = {"error": "the session row names no owner"}
-                continue
+        for session_id in session_ids:
             listed = [run.run_id for run in store.list_runs(session_id)]
             run_ids = sorted({*listed, *(extra_run_ids or {}).get(session_id, [])})
-            scope = HistoryScope(kind="team" if session_type == "team" else "agent", scope_id=owner)
             sessions[session_id] = {
                 "scope": scope.key,
                 "run_ids": run_ids,
                 "observed": observe(store, session_id, scope, run_ids=run_ids),
             }
     return json.loads(_canonical({"storage_name": storage_name, "sessions": sessions}))
+
+
+def _named_owner(database: Path) -> HistoryScope:
+    """Return the one owner the session rows of ``database``, as a release before layout version 4 left it, name."""
+    names = TableNames.of_database(database)
+    with closing(sqlite3.connect(database)) as connection:
+        [(kind, owner_id)] = connection.execute(
+            "SELECT DISTINCT session_type, CASE WHEN session_type = 'team' THEN team_id ELSE agent_id END "  # noqa: S608
+            f"FROM {quote_identifier(names.sessions)}",
+        ).fetchall()
+    return HistoryScope(kind=kind, scope_id=owner_id)

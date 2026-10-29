@@ -9,7 +9,7 @@ import json
 import re
 import tempfile
 from concurrent.futures import CancelledError as FutureCancelledError
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import Context
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -23,10 +23,11 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 
     from agno.run import RunContext as AgnoRunContext
+    from httpx import Response
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.spec import RunContext
-    from mindroom.ai import ResponseTurnContext
+    from mindroom.response_turn import ResponseTurnContext, TurnSinks
     from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers
     from mindroom.tool_system.tool_function import AdaptedToolkit
 
@@ -345,7 +346,7 @@ def test_load_config_uses_dynamic_runtime_config_path(
 
     app = FastAPI()
     initialize_api_app(app, runtime_paths)
-    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is True
+    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app).loaded
     request = Request({"type": "http", "app": app})
 
     config, resolved_runtime_paths = openai_compat._load_config(request)
@@ -395,7 +396,7 @@ def test_list_models_uses_committed_snapshot_until_reload(tmp_path: Path) -> Non
         process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
     )
     initialize_api_app(app, runtime_paths)
-    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is True
+    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app).loaded
     config_path.write_text(
         "models:\n"
         "  default:\n"
@@ -699,7 +700,7 @@ def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap(tmp_path:
     )
     runtime_b.config_path.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
     initialize_api_app(app, runtime_a)
-    assert openai_compat.config_lifecycle.load_config_into_app(runtime_a, app) is True
+    assert openai_compat.config_lifecycle.load_config_into_app(runtime_a, app).loaded
     captured_runtime_paths: list[RuntimePaths | None] = []
 
     def _authenticate_and_swap(
@@ -768,7 +769,7 @@ def test_list_models_tolerate_missing_plugin_path(tmp_path: Path) -> None:
         process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
     )
     initialize_api_app(app, runtime_paths)
-    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is True
+    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app).loaded
 
     with TestClient(app, base_url="http://localhost") as client:
         response = client.get("/v1/models")
@@ -792,7 +793,7 @@ def test_list_models_returns_malformed_yaml_errors(tmp_path: Path) -> None:
         process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
     )
     initialize_api_app(app, runtime_paths)
-    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is False
+    assert not openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app).loaded
 
     with TestClient(app, base_url="http://localhost") as client:
         response = client.get("/v1/models")
@@ -831,7 +832,7 @@ def test_chat_completions_tolerate_missing_plugin_path_during_model_validation(t
         process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
     )
     initialize_api_app(app, runtime_paths)
-    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is True
+    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app).loaded
 
     with TestClient(app, base_url="http://localhost") as client:
         response = client.post(
@@ -858,7 +859,7 @@ def test_chat_completions_returns_malformed_yaml_errors(tmp_path: Path) -> None:
         process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
     )
     initialize_api_app(app, runtime_paths)
-    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app) is False
+    assert not openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app).loaded
 
     with TestClient(app, base_url="http://localhost") as client:
         response = client.post(
@@ -1085,17 +1086,17 @@ class TestChatCompletions:
         assert data["choices"][0]["message"]["content"] == "Hello! How can I help?"
         assert data["choices"][0]["finish_reason"] == "stop"
         assert data["usage"]["prompt_tokens"] == 0
-        assert mock_ai.call_args.kwargs["show_tool_calls"] is False
+        assert mock_ai.call_args.args[0].show_tool_calls is False
 
     def test_non_stream_completion_reports_run_token_usage(self, app_client: TestClient) -> None:
         """Non-streaming usage comes from the run's own token metrics instead of zeros."""
 
-        async def respond(_ctx: object, **kwargs: object) -> str:
-            collector = kwargs.get("run_metadata_collector")
-            if isinstance(collector, dict):
-                collector[constants.AI_RUN_METADATA_KEY] = {
-                    "usage": {"input_tokens": 1200, "output_tokens": 34, "total_tokens": 1234},
-                }
+        async def respond(*_args: object, sinks: TurnSinks) -> str:
+            collector = sinks.run_metadata_collector
+            assert collector is not None
+            collector[constants.AI_RUN_METADATA_KEY] = {
+                "usage": {"input_tokens": 1200, "output_tokens": 34, "total_tokens": 1234},
+            }
             return "Hello!"
 
         with patch("mindroom.api.openai_compat.ai_response", side_effect=completing(respond)):
@@ -1110,35 +1111,35 @@ class TestChatCompletions:
     def test_non_stream_usage_counts_cached_prompt_tokens_for_anthropic(self, app_client: TestClient) -> None:
         """Anthropic reports cache reads and writes outside input_tokens; prompt_tokens must include them."""
 
-        async def respond(_ctx: object, **kwargs: object) -> str:
-            collector = kwargs.get("run_metadata_collector")
-            if isinstance(collector, dict):
-                collector.update(
-                    build_ai_run_metadata_content(
-                        prices={},
-                        config=Config(
-                            agents={},
-                            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
-                            router=RouterConfig(model="default"),
-                        ),
-                        model_name="default",
-                        run_id="run-1",
-                        session_id="session-1",
-                        status=RunStatus.completed,
-                        model="claude-sonnet-5-5",
-                        model_provider="Anthropic",
-                        tool_count=0,
-                        metrics=RunMetrics(
-                            tokens=TokenCounts(
-                                input_tokens=40,
-                                output_tokens=200,
-                                total_tokens=240,
-                                cache_read_tokens=30000,
-                                cache_write_tokens=500,
-                            ),
+        async def respond(*_args: object, sinks: TurnSinks) -> str:
+            collector = sinks.run_metadata_collector
+            assert collector is not None
+            collector.update(
+                build_ai_run_metadata_content(
+                    prices={},
+                    config=Config(
+                        agents={},
+                        models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+                        router=RouterConfig(model="default"),
+                    ),
+                    model_name="default",
+                    run_id="run-1",
+                    session_id="session-1",
+                    status=RunStatus.completed,
+                    model="claude-sonnet-5-5",
+                    model_provider="Anthropic",
+                    tool_count=0,
+                    metrics=RunMetrics(
+                        tokens=TokenCounts(
+                            input_tokens=40,
+                            output_tokens=200,
+                            total_tokens=240,
+                            cache_read_tokens=30000,
+                            cache_write_tokens=500,
                         ),
                     ),
-                )
+                ),
+            )
             return "Hello!"
 
         with patch("mindroom.api.openai_compat.ai_response", side_effect=completing(respond)):
@@ -1154,7 +1155,7 @@ class TestChatCompletions:
         """Cancellation after lock acquisition must not leave the OpenAI session locked."""
         completion_lock = asyncio.Lock()
 
-        async def cancelled_response(_ctx: object, **_kwargs: object) -> str:
+        async def cancelled_response(*_args: object, **_kwargs: object) -> str:
             raise asyncio.CancelledError
 
         with (
@@ -1186,7 +1187,7 @@ class TestChatCompletions:
             )
 
             assert "include_default_tools" not in mock_ai.call_args.kwargs
-            assert mock_ai.call_args.kwargs["include_interactive_questions"] is False
+            assert mock_ai.call_args.args[0].include_interactive_questions is False
             assert mock_ai.call_args.args[0].active_event_ids == frozenset()
 
     def test_agent_completion_mints_fresh_uuid_correlation_id(self, app_client: TestClient) -> None:
@@ -1221,7 +1222,7 @@ class TestChatCompletions:
                 },
             )
 
-            assert mock_ai.call_args.kwargs["knowledge"] is None
+            assert mock_ai.call_args.args[0].knowledge is None
 
     def test_request_body_user_is_not_passed_as_ai_requester(self, app_client: TestClient) -> None:
         """OpenAI user must not be written as Matrix requester metadata."""
@@ -1798,6 +1799,94 @@ class TestChatCompletions:
         assert response.json()["choices"][0]["message"]["content"].startswith("⚠️ Error: the log line")
 
 
+async def _provider_fails() -> None:
+    msg = "Connection reset by peer"
+    raise ConnectionError(msg)
+
+
+def _post_to_a_real_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    script: Sequence[ScriptStep],
+    *,
+    stream: bool,
+) -> Response:
+    """Post one completion that runs the real agent turn driver over ``script``."""
+    config = Config(
+        agents={"general": AgentConfig(display_name="GeneralAgent", role="General-purpose assistant", rooms=[])},
+        models={"default": ModelConfig(provider="ollama", id="test-model")},
+        router=RouterConfig(model="default"),
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
+    )
+    app = FastAPI()
+    app.include_router(openai_compat.router)
+    initialize_api_app(app, runtime_paths)
+    install_model_providers(monkeypatch, {"default": ScriptedModel([list(script)])})
+    with (
+        patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+        TestClient(app, base_url="http://localhost") as client,
+    ):
+        return client.post(
+            "/v1/chat/completions",
+            json={"model": "general", "messages": [{"role": "user", "content": "Hi"}], "stream": stream},
+        )
+
+
+@pytest.mark.parametrize("stream", [True, False], ids=["streamed", "whole"])
+def test_a_turn_whose_provider_fails_before_any_text_is_a_500(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    """A provider failure before the first token fails the request, streamed or not."""
+    response = _post_to_a_real_turn(tmp_path, monkeypatch, [Await(_provider_fails)], stream=stream)
+
+    assert response.status_code == 500
+    assert response.json()["error"]["message"] == "Agent execution failed"
+
+
+def test_a_whole_turn_that_fails_after_partial_text_is_a_500(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Narration before a failure does not make the collected reply a successful completion."""
+    response = _post_to_a_real_turn(
+        tmp_path,
+        monkeypatch,
+        [TextDelta("Checking..."), Await(_provider_fails)],
+        stream=False,
+    )
+
+    assert response.status_code == 500
+    assert response.json()["error"]["message"] == "Agent execution failed"
+
+
+def test_a_streamed_turn_that_fails_after_partial_text_ends_with_its_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once text streamed, a failure is the stream's last content chunk, and nothing follows it as an answer."""
+    response = _post_to_a_real_turn(
+        tmp_path,
+        monkeypatch,
+        [TextDelta("Checking..."), Await(_provider_fails)],
+        stream=True,
+    )
+
+    assert response.status_code == 200
+    contents = [
+        delta["content"]
+        for line in response.text.strip().split("\n\n")
+        if line.startswith("data: {")
+        for delta in [json.loads(line.removeprefix("data: "))["choices"][0]["delta"]]
+        if "content" in delta
+    ]
+    assert contents[0] == "Checking..."
+    assert is_error_response(contents[-1])
+
+
 @dataclass
 class _ClosingModel(ScriptedModel):
     """A scripted route adapter that records when its stream closes."""
@@ -1819,7 +1908,7 @@ class TestStreamingCompletion:
     def test_streaming_sse_format(self, app_client: TestClient) -> None:
         """Streaming returns valid SSE format."""
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[TextDelta]:
             yield TextDelta("Hello ")
             yield TextDelta("world!")
 
@@ -1873,7 +1962,7 @@ class TestStreamingCompletion:
     ) -> None:
         """A run that streamed no text sends its finished reply as one chunk; a streamed reply is not repeated."""
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta | RunFinished]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[TextDelta | RunFinished]:
             for delta in deltas:
                 yield TextDelta(delta)
             yield RunFinished(RunRecord(run_id="run", status=RunStatus.completed, content="Whole answer"))
@@ -1890,7 +1979,7 @@ class TestStreamingCompletion:
     def test_streaming_passes_include_interactive_questions_false(self, app_client: TestClient) -> None:
         """Streaming disables interactive question prompting for OpenAI compatibility."""
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[TextDelta]:
             yield TextDelta("ok")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream) as mock_stream_fn:
@@ -1905,13 +1994,13 @@ class TestStreamingCompletion:
 
         assert response.status_code == 200
         assert "include_default_tools" not in mock_stream_fn.call_args.kwargs
-        assert mock_stream_fn.call_args.kwargs["include_interactive_questions"] is False
+        assert mock_stream_fn.call_args.args[0].include_interactive_questions is False
         assert mock_stream_fn.call_args.args[0].active_event_ids == frozenset()
 
     def test_streaming_consistent_id(self, app_client: TestClient) -> None:
         """All streaming chunks have the same completion ID."""
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[TextDelta]:
             yield TextDelta("test")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
@@ -1940,7 +2029,7 @@ class TestStreamingCompletion:
         """Worker-routing identity must stay active after the first streamed event."""
         observed_session_ids: list[str | None] = []
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[TextDelta]:
             identity = get_tool_execution_identity()
             observed_session_ids.append(identity.session_id if identity is not None else None)
             yield TextDelta("Hello ")
@@ -1986,26 +2075,26 @@ class TestStreamingCompletion:
             patch("mindroom.providers.registry._build_adapter", return_value=model),
             patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
         ):
+            execution_identity = build_tool_execution_identity(
+                channel="openai_compat",
+                agent_name="general",
+                session_id="session-123",
+                runtime_paths=runtime_paths,
+                requester_id=None,
+                room_id=None,
+                thread_id=None,
+                resolved_thread_id=None,
+            )
             response = await openai_compat._stream_completion(
-                "general",
-                "Hello",
-                "session-123",
+                openai_compat._openai_turn_context(
+                    "general",
+                    session_id="session-123",
+                    model_name="default",
+                    execution_identity=execution_identity,
+                    prompt="Hello",
+                ),
                 test_config,
                 runtime_paths,
-                None,
-                model_name="default",
-                knowledge=None,
-                execution_identity=build_tool_execution_identity(
-                    channel="openai_compat",
-                    agent_name="general",
-                    session_id="session-123",
-                    runtime_paths=runtime_paths,
-                    requester_id=None,
-                    room_id=None,
-                    thread_id=None,
-                    resolved_thread_id=None,
-                ),
-                refresh_scheduler=None,
             )
 
         assert isinstance(response, openai_compat.OpenAIStreamingResponse)
@@ -2024,6 +2113,8 @@ class TestStreamingCompletion:
         assert model.closed
         assert response.completion_predicate is not None
         assert response.completion_predicate()
+        # The response, not only its body, closes the agent stream, so a body that never started cannot leave it open.
+        assert response.close_stream is not None
         body = b"".join(sent).decode()
         assert '"content":"Hello"' in body
         assert '"content":" world"' in body
@@ -2045,7 +2136,7 @@ class TestStreamingCompletion:
         )
         observed_final_identities: list[ToolExecutionIdentity | None] = []
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[TextDelta]:
             try:
                 assert get_tool_execution_identity() == execution_identity
                 yield TextDelta("Hello")
@@ -2055,16 +2146,15 @@ class TestStreamingCompletion:
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
             response = await openai_compat._stream_completion(
-                "general",
-                "Hello",
-                "session-123",
+                openai_compat._openai_turn_context(
+                    "general",
+                    session_id="session-123",
+                    model_name="default",
+                    execution_identity=execution_identity,
+                    prompt="Hello",
+                ),
                 test_config,
                 runtime_paths,
-                None,
-                None,
-                model_name="default",
-                execution_identity=execution_identity,
-                refresh_scheduler=None,
             )
 
         assert isinstance(response, StreamingResponse)
@@ -2076,7 +2166,7 @@ class TestStreamingCompletion:
     def test_streaming_cached_response(self, app_client: TestClient) -> None:
         """Cached full response (string) is streamed correctly."""
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[str]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[str]:
             yield "This is a cached response"
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
@@ -2097,7 +2187,7 @@ class TestStreamingCompletion:
     def test_streaming_first_event_error_returns_500(self, app_client: TestClient) -> None:
         """If first stream event is an error string, return HTTP 500 instead of SSE."""
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[str]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[str]:
             yield "❌ Authentication failed (openai): Invalid API key"
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
@@ -2129,7 +2219,7 @@ class TestStreamingCompletion:
             result="3 results",
         )
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[object]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[object]:
             yield TextDelta("Let me search. ")
             yield ToolStarted(tool_started.call)
             yield ToolCompleted(tool_completed.call)
@@ -2178,7 +2268,7 @@ class TestStreamingCompletion:
             result="</tool><i>boom</i>" + ("x" * 600),
         )
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[object]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[object]:
             yield ToolStarted(tool_started.call)
             yield ToolCompleted(tool_completed.call)
 
@@ -2239,7 +2329,7 @@ class TestStreamingCompletion:
             result="two-result",
         )
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[object]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[object]:
             yield TextDelta("Start ")
             yield ToolStarted(first_started.call)
             yield ToolCompleted(first_completed.call)
@@ -2691,6 +2781,81 @@ async def test_openai_stream_response_skips_background_when_client_closes_before
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("spec_version", ["2.0", "2.4"])
+async def test_a_stream_the_client_left_closes_while_its_session_is_still_held(spec_version: str) -> None:
+    """Closing a stream the client left stores the turn it cut short, so that close ends before the lock releases.
+
+    Otherwise the session's next completion could store its turn first, and replay would read the two out of order.
+    """
+    completion_lock = asyncio.Lock()
+    await completion_lock.acquire()
+    held_at_close: list[bool] = []
+    partial_sent = asyncio.Event()
+
+    async def body() -> AsyncIterator[str]:
+        try:
+            yield "data: partial\n\n"
+            await asyncio.Event().wait()
+            yield "data: [DONE]\n\n"
+        finally:
+            held_at_close.append(completion_lock.locked())
+
+    streaming_response = openai_compat.OpenAIStreamingResponse(body(), media_type="text/event-stream")
+    streaming_response.completion_predicate = lambda: False
+    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock, None)
+
+    async def receive() -> dict[str, str]:
+        await partial_sent.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, object]) -> None:
+        if message["type"] == "http.response.body" and message.get("body") == b"data: partial\n\n":
+            partial_sent.set()
+            if spec_version == "2.4":
+                error_message = "client closed"
+                raise OSError(error_message)
+
+    with suppress(ClientDisconnect):
+        await response({"type": "http", "asgi": {"spec_version": spec_version}}, receive, send)
+
+    assert held_at_close == [True]
+    assert not completion_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_a_stream_whose_headers_never_reached_the_client_closes_while_its_session_is_still_held() -> None:
+    """A body that never started cannot close the stream it reads from, so the response closes that stream itself."""
+    completion_lock = asyncio.Lock()
+    await completion_lock.acquire()
+    held_at_close: list[bool] = []
+
+    async def body() -> AsyncIterator[str]:
+        yield "data: [DONE]\n\n"
+
+    async def close_stream() -> None:
+        held_at_close.append(completion_lock.locked())
+
+    streaming_response = openai_compat.OpenAIStreamingResponse(body(), media_type="text/event-stream")
+    streaming_response.completion_predicate = lambda: False
+    streaming_response.close_stream = close_stream
+    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock, None)
+
+    async def receive() -> dict[str, str]:
+        return {"type": "http.request"}
+
+    async def send(message: dict[str, object]) -> None:
+        if message["type"] == "http.response.start":
+            error_message = "client closed"
+            raise OSError(error_message)
+
+    with suppress(ClientDisconnect, OSError):
+        await response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send)
+
+    assert held_at_close == [True]
+    assert not completion_lock.locked()
+
+
+@pytest.mark.asyncio
 async def test_openai_stream_response_skips_background_on_asgi20_disconnect_before_done() -> None:
     """ASGI 2.0 disconnect can return normally but still must skip background work."""
     events: list[str] = []
@@ -2808,7 +2973,7 @@ def _completion_session_ids(client: TestClient, authorization_headers: list[str]
     """Post one completion per Authorization header with the same X-Session-Id and return the session IDs."""
     session_ids: list[str] = []
 
-    async def capture(ctx: ResponseTurnContext, **_kwargs: object) -> str:
+    async def capture(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
         session_ids.append(ctx.session_id)
         return "Response"
 
@@ -3190,7 +3355,7 @@ class TestAutoRouting:
     def test_auto_streaming(self, app_client: TestClient) -> None:
         """Auto model works with streaming, chunks carry resolved agent name."""
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[TextDelta]:
             yield TextDelta("Streamed!")
 
         with (
@@ -3535,11 +3700,11 @@ def test_agent_turn_names_the_mapped_keys_requester(test_config: Config, stream:
     initialize_api_app(app, runtime_paths)
     contexts: list[ResponseTurnContext] = []
 
-    async def respond(ctx: ResponseTurnContext, **_kwargs: object) -> str:
+    async def respond(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
         contexts.append(ctx)
         return "Response"
 
-    async def stream_response(ctx: ResponseTurnContext, **_kwargs: object) -> AsyncIterator[TextDelta]:
+    async def stream_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[TextDelta]:
         contexts.append(ctx)
         yield TextDelta("Response")
 
@@ -4203,7 +4368,9 @@ class TestTeamCompletion:
                 refresh_scheduler=None,
             )
 
-        assert isinstance(response, StreamingResponse)
+        assert isinstance(response, openai_compat.OpenAIStreamingResponse)
+        # The response closes the team stream too, for a body that never started.
+        assert response.close_stream is not None
         body_iterator = response.body_iterator
         await asyncio.create_task(anext(body_iterator), context=Context())
         await asyncio.create_task(body_iterator.aclose(), context=Context())
@@ -4592,7 +4759,7 @@ class TestTeamCompletion:
             runtime_paths=runtime_paths,
             execution_identity=None,
         )
-        session = storage.load_session(first.ctx.session_id, "team")
+        session = storage.load_session(first.ctx.session_id)
         assert session is not None
         assert [(run.run_id, run.status, run.content) for run in session.runs] == [
             (first.ctx.run_id, RunStatus.completed, "First answer"),
@@ -4651,7 +4818,7 @@ class TestTeamCompletion:
             runtime_paths=runtime_paths,
             execution_identity=None,
         )
-        session = storage.load_session(run.ctx.session_id, "team")
+        session = storage.load_session(run.ctx.session_id)
         assert session is not None
         assert session.session_state == {"remembered": "blue"}
         report = collect_admin_usage(config=team_config, runtime_paths=runtime_paths)
@@ -5167,7 +5334,7 @@ class TestKnowledgeIntegration:
             )
 
         assert response.status_code == 200
-        assert _knowledge_indexes(mock_ai.call_args.kwargs["knowledge"]) == [mock_reader]
+        assert _knowledge_indexes(mock_ai.call_args.args[0].knowledge) == [mock_reader]
 
     def test_knowledge_lookup_uses_explicit_runtime_key(self, knowledge_config: Config) -> None:
         """Shared knowledge lookup should resolve by config/runtime, not the static fallback map."""
@@ -5212,7 +5379,7 @@ class TestKnowledgeIntegration:
             )
 
         assert response.status_code == 200
-        assert _knowledge_indexes(mock_ai.call_args.kwargs["knowledge"]) == [mock_reader]
+        assert _knowledge_indexes(mock_ai.call_args.args[0].knowledge) == [mock_reader]
         assert observed_calls == [("docs", knowledge_config, runtime_paths)]
 
     def test_knowledge_none_when_not_configured(self, knowledge_app_client: TestClient) -> None:
@@ -5228,7 +5395,7 @@ class TestKnowledgeIntegration:
                 },
             )
 
-        assert mock_ai.call_args.kwargs["knowledge"] is None
+        assert mock_ai.call_args.args[0].knowledge is None
 
     def test_chat_completions_does_not_await_request_path_reindex(
         self,
@@ -5291,10 +5458,10 @@ class TestKnowledgeIntegration:
             )
 
         assert response.status_code == 200
-        assert mock_ai.call_args.kwargs["knowledge"] is None
+        assert mock_ai.call_args.args[0].knowledge is None
         assert (
             "Knowledge base `docs` is initializing and unavailable for semantic search this turn."
-            in mock_ai.call_args.kwargs["prompt"]
+            in mock_ai.call_args.args[0].prompt
         )
         assert scheduled_base_ids == ["docs"]
 
@@ -5302,7 +5469,7 @@ class TestKnowledgeIntegration:
         """Knowledge is passed through in streaming mode too."""
         mock_reader = MagicMock()
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[TextDelta]:
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[TextDelta]:
             yield TextDelta("Streamed!")
 
         with (
@@ -5322,7 +5489,7 @@ class TestKnowledgeIntegration:
             )
 
         assert response.status_code == 200
-        assert _knowledge_indexes(mock_stream_fn.call_args.kwargs["knowledge"]) == [mock_reader]
+        assert _knowledge_indexes(mock_stream_fn.call_args.args[0].knowledge) == [mock_reader]
 
     def test_multi_knowledge_bases_merged(self, knowledge_config: Config) -> None:
         """Agent with multiple knowledge_bases gets a merged Knowledge object."""
@@ -5370,7 +5537,7 @@ class TestKnowledgeIntegration:
             )
 
         assert response.status_code == 200
-        knowledge_arg = mock_ai.call_args.kwargs["knowledge"]
+        knowledge_arg = mock_ai.call_args.args[0].knowledge
         assert _knowledge_indexes(knowledge_arg) == [mock_reader_docs, mock_reader_wiki]
         assert [source.description.base_id for source in knowledge_arg.sources] == ["docs", "wiki"]
         assert knowledge_arg.max_results == 10
@@ -5396,7 +5563,7 @@ class TestKnowledgeIntegration:
             )
 
         assert response.status_code == 200
-        assert mock_ai.call_args.kwargs["knowledge"] is None
+        assert mock_ai.call_args.args[0].knowledge is None
         data = response.json()
         assert data["choices"][0]["message"]["content"] == "Response without knowledge"
 

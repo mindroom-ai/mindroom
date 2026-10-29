@@ -118,14 +118,11 @@ def _applied_config() -> Iterator[None]:
 
 
 def _plan(current: Config, updated: Config) -> ConfigUpdatePlan:
-    configured = {"router", *updated.agents, *updated.teams}
     existing = {"router", *current.agents, *current.teams}
     return build_config_update_plan(
         current_config=current,
         new_config=updated,
-        configured_entities=configured,
-        existing_entities=existing,
-        agent_bots={name: MagicMock() for name in existing},
+        bots={name: MagicMock() for name in existing},
     )
 
 
@@ -1783,7 +1780,7 @@ async def test_plugin_reload_interrupts_running_scripts_before_code_replacement(
         worker_lease_provider=lambda _locator: None,
     )
 
-    await runtime.apply_update_plan(_plan(config, config), plugins_changed=True)
+    await runtime.interrupt_for_plugin_reload()
 
     manager.request_revocation.assert_called_once_with(
         run_id=run.run_id,
@@ -1823,7 +1820,7 @@ async def test_plugin_reload_fails_closed_while_any_script_remains_unfinished(tm
     )
 
     with pytest.raises(RuntimeError, match="Plugin reload did not interrupt every active background script"):
-        await runtime.apply_update_plan(_plan(config, config), plugins_changed=True)
+        await runtime.interrupt_for_plugin_reload()
 
 
 @pytest.mark.asyncio
@@ -1856,7 +1853,7 @@ async def test_reload_releases_only_its_fence_while_startup_cleanup_remains_pend
     )
     runtime._startup_cleanup_pending = True
 
-    await runtime.apply_update_plan(_plan(config, config), plugins_changed=True)
+    await runtime.interrupt_for_plugin_reload()
     await runtime.finish_reload()
 
     assert reconciliation_owners == 1
@@ -4114,7 +4111,7 @@ async def test_cancelled_reload_drain_restores_broker_and_launch_admission(
 
     try:
         reload_task = asyncio.create_task(
-            runtime.apply_update_plan(_plan(_config(), _config()), plugins_changed=True),
+            runtime.interrupt_for_plugin_reload(),
         )
         await asyncio.wait_for(drain_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
         reload_task.cancel()

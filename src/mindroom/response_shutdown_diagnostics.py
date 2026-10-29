@@ -26,7 +26,6 @@ class DeferredStopPhase(StrEnum):
     """Fixed deferred-release phases safe to aggregate in operational logs."""
 
     RECOVERY_PROOF = "recovery_proof"
-    ROUTER_OVERDUE_TASKS = "router_overdue_tasks"
     JOURNAL_DISPATCHER = "journal_dispatcher"
     INGESTION_SESSION = "ingestion_session"
     JOURNAL_STORE = "journal_store"

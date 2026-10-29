@@ -23,7 +23,7 @@ from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
 from mindroom.history.run_visibility import replays_in_scope
-from mindroom.llm.runs import TeamRunRecord
+from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_VALUES
 from mindroom.session_storage.store import seen_event_ids, source_event_ids
 from mindroom.usage.storage import quote_identifier
@@ -173,7 +173,14 @@ class _InvariantBackend(StoreBackend):
     @override
     def save_stale(self, session: ConversationSession, record: AnyRunRecord) -> object:
         # A running turn is the only writer of its row until it ends (spec 3.7), so no late copy lands on it.
-        return "live-turn" if self._live(record.run_id) else super().save_stale(session, record)
+        if self._live(record.run_id):
+            return "live-turn"
+        # No writer saves a running record whole (spec 3.6): a minimal-mode delegation only patches its key onto the
+        # checkpoint row, so no late writer holds a running copy. The driver keeps the live record among its versions
+        # because the Agno-layout store, which made the recordings, saved it whole.
+        if record.status is RunStatus.running:
+            return "running-copy"
+        return super().save_stale(session, record)
 
     @override
     def save_interrupted(
@@ -431,11 +438,10 @@ def _scenarios(draw: st.DrawFn) -> Scenario:
     return Scenario(kind, tuple(actions))
 
 
-def _drive(scenario: Scenario) -> None:
+def _drive(scenario: Scenario) -> list[object]:
     with tempfile.TemporaryDirectory() as root, deterministic() as determinism:
         backend = _InvariantBackend(Path(root), scenario.kind, determinism)
-        for action in scenario.actions:
-            backend.apply(action)
+        return [backend.apply(action) for action in scenario.actions]
 
 
 @pytest.mark.timeout(600)
@@ -516,3 +522,27 @@ def test_the_v2_invariants_hold_after_every_action(scenario: Scenario) -> None:
 def test_the_v2_invariants_hold_for_every_named_sequence(name: str) -> None:
     """The named sequences of spec v4 4.7 keep the invariants too."""
     _drive(NAMED[name])
+
+
+def test_a_late_copy_of_a_crashed_cli_turns_live_record_writes_nothing() -> None:
+    """A minimal-mode turn delegates, folds, and crashes; a late copy of its live record then writes nothing.
+
+    The delegation stored only its key on the turn's checkpoint row, so the copy is one no writer saves whole. The
+    interrupted record that recovery saves next makes the run visible, and it stays as that record left it.
+    """
+    outcomes = _drive(
+        Scenario(
+            "agent",
+            (
+                Action("fold_first_turn", index=2),
+                Action("cli_delegate"),
+                Action("add"),
+                Action("add"),
+                Action("checkpoint"),
+                Action("crash_after_fold"),
+                Action("stale_save", index=24),
+                Action("interrupted", index=27),
+            ),
+        ),
+    )
+    assert outcomes[6] == {"run_id": "r1", "saved": "running-copy"}

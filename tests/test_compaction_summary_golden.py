@@ -105,7 +105,7 @@ async def test_the_compaction_summary_request_equals_the_golden(tmp_path: Path) 
     assert render(requests) == render([summary_request])
     assert outcome is not None
     assert outcome.compacted_run_count == 1
-    stored = storage.load_session(session.session_id, "agent")
+    stored = storage.load_session(session.session_id)
     assert stored is not None
     assert stored.summary is not None
     assert stored.runs == []

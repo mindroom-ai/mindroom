@@ -44,13 +44,13 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
         password=TEST_PASSWORD,
     )
 
+    config.defaults.enable_streaming = False
     # Create router bot
     bot = make_test_agent_bot(
         agent_user=agent_user,
         config=config,
         storage_path=tmp_path,
         runtime_paths=runtime_paths_for(config),
-        enable_streaming=False,
         rooms=["!test:localhost"],  # Make sure bot knows it's in this room
     )
 
@@ -140,13 +140,13 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
         password=TEST_PASSWORD,
     )
 
+    config.defaults.enable_streaming = False
     # Create router bot
     bot = make_test_agent_bot(
         agent_user=agent_user,
         config=config,
         storage_path=tmp_path,
         runtime_paths=runtime_paths_for(config),
-        enable_streaming=False,
         rooms=["!test:localhost"],  # Make sure bot knows it's in this room
     )
 
@@ -255,13 +255,13 @@ async def test_unknown_command_with_reply_starts_prompt_thread(tmp_path: Path) -
         password=TEST_PASSWORD,
     )
 
+    config.defaults.enable_streaming = False
     # Create router bot
     bot = make_test_agent_bot(
         agent_user=agent_user,
         config=config,
         storage_path=tmp_path,
         runtime_paths=runtime_paths_for(config),
-        enable_streaming=False,
         rooms=["!test:localhost"],  # Make sure bot knows it's in this room
     )
 

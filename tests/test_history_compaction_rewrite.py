@@ -566,7 +566,7 @@ async def test_checkpoint_before_an_approval_pause_does_not_cover_the_turns_it_w
     completed.status = RunStatus.completed
     completed.messages.append(Message(role="assistant", content="Approval completed"))
     storage.save_run(session, completed, record_usage=False)
-    loaded = storage.load_session("session-1", "agent")
+    loaded = storage.load_session("session-1")
     assert loaded is not None
     assert [run.run_id for run in loaded.runs] == ["earlier", "intervening", "approval"]
     summary_mock = AsyncMock(return_value="portable summary")
@@ -716,7 +716,7 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
     assert rewrite_result.served_by.model is fallback
     assert rewrite_result.served_by.name == "fallback-model"
     assert served_models == ["fallback-model", "fallback-model"]
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.text == "merged summary"
@@ -989,7 +989,7 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(
         registry_state.registry = HookRegistry.empty()
         active_states.append(ctx.is_active())
         registry_state.registry = registry
-        persisted = storage.load_session("session-1", "agent")
+        persisted = storage.load_session("session-1")
         assert persisted is not None
         assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
         observed.append(
@@ -1225,7 +1225,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
 
     @hook(EVENT_COMPACTION_BEFORE)
     async def before(ctx: CompactionHookContext) -> None:
-        persisted = storage.load_session("session-1", "agent")
+        persisted = storage.load_session("session-1")
         assert persisted is not None
         observed.append(
             (
@@ -1237,7 +1237,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
 
     @hook(EVENT_COMPACTION_AFTER)
     async def after(ctx: CompactionHookContext) -> None:
-        persisted = storage.load_session("session-1", "agent")
+        persisted = storage.load_session("session-1")
         assert persisted is not None
         observed.append(
             (
@@ -1438,7 +1438,7 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_when_rewri
             session=session,
         )
 
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is None
     assert len(persisted.runs) == 2
@@ -1772,7 +1772,7 @@ async def test_rewrite_working_session_for_compaction_keeps_the_remaining_runs_t
     assert rewrite_result.compacted_run_count == 1
     assert [run.run_id for run in working_session.runs] == ["run-2"]
 
-    stored = storage.load_session("session-1", "agent")
+    stored = storage.load_session("session-1")
     assert stored is not None
     for session in (working_session, stored):
         assert [run.run_id for run in session.runs] == ["run-2"]
@@ -1875,7 +1875,7 @@ async def test_compact_scope_history_persists_the_remaining_runs_as_they_were(tm
         )
 
     assert outcome is not None
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert [run.run_id for run in persisted.runs] == [run.run_id for run in remaining_runs]
     remaining_messages = [message for run in persisted.runs for message in run.messages or []]
@@ -1945,7 +1945,7 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
     replay_estimator = responses_adapter(tmp_path) if portable else None
 
     async def record_progress(event: CompactionLifecycleProgress) -> None:
-        persisted = storage.load_session("session-1", "agent")
+        persisted = storage.load_session("session-1")
         assert persisted is not None
         assert persisted.summary is not None
         assert [run.run_id for run in persisted.runs] == ["run-2"]
@@ -2111,7 +2111,7 @@ async def test_compact_scope_history_skips_unforced_history_that_fits(
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     seed_session(storage, _session("session-1", runs=[_completed_run("run-1"), _completed_run("run-2")]))
-    session = storage.load_session("session-1", "agent")
+    session = storage.load_session("session-1")
     assert session is not None
     summary_mock = AsyncMock(return_value="unused")
 
@@ -2210,7 +2210,7 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(
             session=session,
         )
 
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.runs == []
     assert read_scope_seen_event_ids(storage, persisted, scope) == {

@@ -17,7 +17,7 @@ from mindroom.history.summary_rows import CoveredRun, Fold
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import watch_session_row
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session_row
@@ -99,7 +99,7 @@ def _chunk(store: ConversationStore, run_ids: list[str], summary: str, scope_key
 
 def _basis(store: ConversationStore, scope_key: str) -> tuple[int | None, list[CoveredRun]]:
     """Read a fold's basis: the latest row and the visible top-level runs a load returns after it."""
-    loaded = store.load_session("s1", "team" if scope_key == _TEAM else "agent")
+    loaded = store.load_session("s1")
     run_ids = [
         run.run_id
         for run in (loaded.runs if loaded is not None else [])
@@ -172,14 +172,14 @@ def _keys(store: ConversationStore) -> dict[str, tuple[int, int]]:
     return {name: (seq, row_id) for name, seq, row_id in [*runs, *rows]}
 
 
-def _loaded(store: ConversationStore, kind: SessionKind = "agent") -> ConversationSession:
-    session = store.load_session("s1", kind)
+def _loaded(store: ConversationStore) -> ConversationSession:
+    session = store.load_session("s1")
     assert session is not None
     return session
 
 
-def _loaded_ids(store: ConversationStore, kind: SessionKind = "agent") -> list[str]:
-    return [run.run_id for run in _loaded(store, kind).runs]
+def _loaded_ids(store: ConversationStore) -> list[str]:
+    return [run.run_id for run in _loaded(store).runs]
 
 
 def _replayed(store: ConversationStore) -> str | None:
@@ -241,7 +241,7 @@ def test_fresh_storage_has_summary_tables(store: ConversationStore, tmp_path: Pa
     _execute(store, "INSERT INTO code_sessions_log_removed (session_id, run_id) VALUES ('s1', 'gone')")
 
     _execute(store, "DELETE FROM code_sessions WHERE session_id = 's1'")
-    create_state_storage("code", tmp_path)
+    create_agent_state_storage("code", tmp_path)
 
     tables = {name for (name,) in _query(store, "SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert {"code_sessions_log_summaries", "code_sessions_log_removed"} <= tables
@@ -265,19 +265,19 @@ def test_load_without_summary_rows_returns_every_run(store: ConversationStore) -
     assert _loaded_ids(store) == ["r0", "r1"]
 
 
-def test_load_keeps_member_rows_with_their_team_run(store: ConversationStore) -> None:
+def test_load_keeps_member_rows_with_their_team_run(team_store: ConversationStore) -> None:
     """Member runs load with their team run wherever their ``seq`` sits, and stay hidden with a covered one."""
     _save(
-        store,
+        team_store,
         _run("m0", parent="t0", agent_id="helper"),
         _team_run("t0"),
         _run("m1", parent="t1", agent_id="helper"),
         _team_run("t1"),
         kind="team",
     )
-    assert _chunk(store, ["t0"], "team summary", _TEAM) is not None
+    assert _chunk(team_store, ["t0"], "team summary", _TEAM) is not None
 
-    assert _loaded_ids(store, "team") == ["m1", "t1"]
+    assert _loaded_ids(team_store) == ["m1", "t1"]
 
 
 # --- Appends and their compare -------------------------------------------------------------------
@@ -531,13 +531,18 @@ def test_a_fold_without_a_stored_run_stores_it_cancelled_with_its_folded_message
 
 
 @pytest.mark.parametrize("kind", ["agent", "team"])
-def test_a_first_turn_fold_creates_the_session_row_of_its_scope(store: ConversationStore, kind: SessionKind) -> None:
+def test_a_first_turn_fold_creates_the_session_row_of_its_scope(
+    store: ConversationStore,
+    team_store: ConversationStore,
+    kind: SessionKind,
+) -> None:
     """A first turn whose summary call reported no usage still commits its fold, on a row of the scope's kind."""
+    store = team_store if kind == "team" else store
     running: AnyRunRecord = _team_run("live", RunStatus.running) if kind == "team" else _run("live", RunStatus.running)
 
     assert _fold(store, running, "S") is not None
 
-    loaded = _loaded(store, kind)
+    loaded = _loaded(store)
     assert (loaded.kind, loaded.owner_id) == (kind, "crew" if kind == "team" else "code")
     assert loaded.summary is not None
     assert loaded.summary.text == "S"
@@ -545,8 +550,13 @@ def test_a_first_turn_fold_creates_the_session_row_of_its_scope(store: Conversat
 
 
 @pytest.mark.parametrize("kind", ["agent", "team"])
-def test_a_first_turn_fold_reports_the_session_row_it_created(store: ConversationStore, kind: SessionKind) -> None:
+def test_a_first_turn_fold_reports_the_session_row_it_created(
+    store: ConversationStore,
+    team_store: ConversationStore,
+    kind: SessionKind,
+) -> None:
     """The fold that creates its session's row tells the block watching that session; a later fold tells none."""
+    store = team_store if kind == "team" else store
     running: AnyRunRecord = _team_run("live", RunStatus.running) if kind == "team" else _run("live", RunStatus.running)
     scope = HistoryScope(kind=kind, scope_id="crew" if kind == "team" else "code")
 
@@ -587,8 +597,13 @@ def test_a_second_fold_of_a_running_run_covers_no_run_twice(store: ConversationS
 
 
 @pytest.mark.parametrize("kind", ["agent", "team"])
-def test_a_run_loads_without_the_messages_its_folds_took(store: ConversationStore, kind: SessionKind) -> None:
+def test_a_run_loads_without_the_messages_its_folds_took(
+    store: ConversationStore,
+    team_store: ConversationStore,
+    kind: SessionKind,
+) -> None:
     """A copy saved before a fold, such as a paused approval, replays only what the fold left in the run."""
+    store = team_store if kind == "team" else store
     prompt, later = Message(role="user", content="do it"), Message(role="assistant", content="step after the fold")
     messages = [prompt, _call("c1"), _result("c1"), later]
     paused: AnyRunRecord = (
@@ -601,38 +616,38 @@ def test_a_run_loads_without_the_messages_its_folds_took(store: ConversationStor
     assert _fold(store, paused, "S", folded=messages[1:3]) is not None
 
     for _ in range(2):
-        [stored] = _loaded(store, kind).runs
+        [stored] = _loaded(store).runs
         assert [message.content for message in stored.messages] == ["do it", "step after the fold"]
     # The paused copy saved again keeps the folded rows folded.
     assert _save(store, paused, kind=kind) == ["written"]
-    [stored] = _loaded(store, kind).runs
+    [stored] = _loaded(store).runs
     assert [message.content for message in stored.messages] == ["do it", "step after the fold"]
 
 
-def test_a_fold_flags_the_member_runs_that_ended_and_keeps_an_earlier_folds_flag(store: ConversationStore) -> None:
+def test_a_fold_flags_the_member_runs_that_ended_and_keeps_an_earlier_folds_flag(team_store: ConversationStore) -> None:
     """Members a fold covered keep the id of the first fold that took them."""
     team_run = _team_run("team-run", RunStatus.running)
-    _save(store, _run("m1", parent="team-run", agent_id="helper"), kind="team")
+    _save(team_store, _run("m1", parent="team-run", agent_id="helper"), kind="team")
 
-    first = _fold(store, team_run, "S1", members=["m1"])
-    _save(store, _run("m2", parent="team-run", agent_id="helper"), kind="team")
-    second = _fold(store, team_run, "S2", members=["m1", "m2"])
+    first = _fold(team_store, team_run, "S1", members=["m1"])
+    _save(team_store, _run("m2", parent="team-run", agent_id="helper"), kind="team")
+    second = _fold(team_store, team_run, "S2", members=["m1", "m2"])
 
     assert dict(
-        _query(store, "SELECT run_id, folded_by FROM code_sessions_log_runs WHERE parent_run_id IS NOT NULL"),
+        _query(team_store, "SELECT run_id, folded_by FROM code_sessions_log_runs WHERE parent_run_id IS NOT NULL"),
     ) == {
         "m1": first,
         "m2": second,
     }
 
 
-def test_a_fold_flags_no_run_but_its_own_members(store: ConversationStore) -> None:
+def test_a_fold_flags_no_run_but_its_own_members(team_store: ConversationStore) -> None:
     """A named top-level run, or a member of another team run, is not the fold's to take."""
-    _save(store, _team_run("t0"), _run("other-member", parent="t0", agent_id="helper"), kind="team")
+    _save(team_store, _team_run("t0"), _run("other-member", parent="t0", agent_id="helper"), kind="team")
 
-    assert _fold(store, _team_run("live", RunStatus.running), "S", members=["t0", "other-member"]) is not None
+    assert _fold(team_store, _team_run("live", RunStatus.running), "S", members=["t0", "other-member"]) is not None
 
-    assert _query(store, "SELECT run_id FROM code_sessions_log_runs WHERE folded_by IS NOT NULL") == []
+    assert _query(team_store, "SELECT run_id FROM code_sessions_log_runs WHERE folded_by IS NOT NULL") == []
 
 
 def test_a_crash_after_a_fold_replays_its_summary_and_a_late_pre_fold_copy_hides_what_it_folded(
@@ -666,7 +681,7 @@ def test_a_fold_keeps_what_its_turn_read_seen_after_the_turn_stops(store: Conver
     assert "$context" in summary_rows.history_event_ids(store, session_id="s1", scope_key=_AGENT, kind="seen")
 
 
-def test_folded_tool_call_ids_are_the_folded_messages_and_members_calls(store: ConversationStore) -> None:
+def test_folded_tool_call_ids_are_the_folded_messages_and_members_calls(team_store: ConversationStore) -> None:
     """Interrupted records leave out every call a fold summarized: folded calls, results, and folded members' tools.
 
     The turn recorder's set from the live folds and the store's from the flagged rows are the same.
@@ -678,24 +693,24 @@ def test_folded_tool_call_ids_are_the_folded_messages_and_members_calls(store: C
     later_member.tools = [ToolExecution(tool_call_id="later-member-call", tool_name="probe")]
     toolless_member = _run("m0", parent="team-run", agent_id="helper")
     team_run.ended_member_runs = [folded_member, later_member, toolless_member]
-    _save(store, folded_member, later_member, toolless_member, kind="team")
+    _save(team_store, folded_member, later_member, toolless_member, kind="team")
     orphan_result = _result("orphan-result")
     unnamed_call = Message(role="assistant", tool_calls=[{"type": "function", "function": {"name": "probe"}}])
     folded = [_call("c1"), _result("c1"), unnamed_call]
-    assert _fold(store, team_run, "S1", folded=folded, members=["m1", "m0"]) is not None
-    assert _fold(store, team_run, "S2", folded=[_call("c2"), orphan_result]) is not None
+    assert _fold(team_store, team_run, "S1", folded=folded, members=["m1", "m0"]) is not None
+    assert _fold(team_store, team_run, "S2", folded=[_call("c2"), orphan_result]) is not None
     team_run.messages = [Message(role="user", content="go"), _call("kept-call")]
     team_run.status = RunStatus.completed
-    assert _save(store, team_run, kind="team") == ["written"]
+    assert _save(team_store, team_run, kind="team") == ["written"]
 
-    calls = summary_rows.folded_tool_call_ids(store, session_id="s1", run_id="team-run")
+    calls = summary_rows.folded_tool_call_ids(team_store, session_id="s1", run_id="team-run")
 
     assert calls == {"c1", "c2", "orphan-result", "member-call"}
     recorded = _folded_calls(Fold(run=team_run, messages=tuple(folded), member_run_ids=frozenset({"m1", "m0"})))
     recorded |= _folded_calls(Fold(run=team_run, messages=(_call("c2"), orphan_result), member_run_ids=frozenset()))
     assert recorded == calls
-    assert summary_rows.folded_tool_call_ids(store, session_id="s1", run_id="m1") == set()
-    assert summary_rows.folded_tool_call_ids(store, session_id="s2", run_id="team-run") == set()
+    assert summary_rows.folded_tool_call_ids(team_store, session_id="s1", run_id="m1") == set()
+    assert summary_rows.folded_tool_call_ids(team_store, session_id="s2", run_id="team-run") == set()
 
 
 # --- Cuts -----------------------------------------------------------------------------------------
@@ -878,21 +893,21 @@ def test_an_edit_removes_the_following_runs_even_without_metadata(store: Convers
     assert _loaded_ids(store) == ["before"]
 
 
-def test_an_edit_removes_a_team_run_with_its_members(store: ConversationStore) -> None:
+def test_an_edit_removes_a_team_run_with_its_members(team_store: ConversationStore) -> None:
     """Team edit regeneration deletes the stale team run and its member rows from the team session."""
     _save(
-        store,
+        team_store,
         _run("member", parent="original", agent_id="helper"),
         _team_run("original"),
         _team_run("other"),
         kind="team",
     )
 
-    assert _edit(store, "$original", _TEAM)
+    assert _edit(team_store, "$original", _TEAM)
 
-    assert _loaded_ids(store, "team") == []
-    assert _query(store, "SELECT run_id FROM code_sessions_log_runs") == []
-    assert _removed(store) == {"original", "other", "member"}
+    assert _loaded_ids(team_store) == []
+    assert _query(team_store, "SELECT run_id FROM code_sessions_log_runs") == []
+    assert _removed(team_store) == {"original", "other", "member"}
 
 
 @pytest.mark.parametrize(
@@ -943,42 +958,47 @@ def test_a_cut_stays_in_its_scope_and_session(store: ConversationStore) -> None:
     assert not _redact(store, "$other-1")
 
 
-def test_a_member_run_holds_no_event_of_its_own(store: ConversationStore) -> None:
+def test_a_member_run_holds_no_event_of_its_own(team_store: ConversationStore) -> None:
     """Only top-level runs are cut at; a member run goes with its team run."""
-    _save(store, _run("m1", parent="t1", agent_id="helper", seen=["$only-the-member"]), _team_run("t1"), kind="team")
+    _save(
+        team_store,
+        _run("m1", parent="t1", agent_id="helper", seen=["$only-the-member"]),
+        _team_run("t1"),
+        kind="team",
+    )
 
-    assert not _redact(store, "$only-the-member", "agent:helper")
-    assert not _redact(store, "$only-the-member", _TEAM)
+    assert not _redact(team_store, "$only-the-member", "agent:helper")
+    assert not _redact(team_store, "$only-the-member", _TEAM)
 
-    assert _query(store, "SELECT run_id FROM code_sessions_log_runs ORDER BY seq") == [("m1",), ("t1",)]
+    assert _query(team_store, "SELECT run_id FROM code_sessions_log_runs ORDER BY seq") == [("m1",), ("t1",)]
 
 
-def test_a_late_save_of_a_cut_run_or_its_member_writes_nothing(store: ConversationStore) -> None:
+def test_a_late_save_of_a_cut_run_or_its_member_writes_nothing(team_store: ConversationStore) -> None:
     """A stale copy of a run a cut removed, or of its member, is never written back."""
-    _save(store, _run("m1", parent="t1", agent_id="helper"), _team_run("t1"), _team_run("t2"), kind="team")
+    _save(team_store, _run("m1", parent="t1", agent_id="helper"), _team_run("t1"), _team_run("t2"), kind="team")
 
-    assert _redact(store, "$t1", _TEAM)
+    assert _redact(team_store, "$t1", _TEAM)
 
     late_member = _run("m2", parent="t1", agent_id="helper")
-    assert _save(store, _team_run("t1"), late_member, kind="team") == ["removed", "removed"]
-    assert _loaded_ids(store, "team") == []
-    assert _fold(store, _team_run("t2", RunStatus.running), "S") is None
+    assert _save(team_store, _team_run("t1"), late_member, kind="team") == ["removed", "removed"]
+    assert _loaded_ids(team_store) == []
+    assert _fold(team_store, _team_run("t2", RunStatus.running), "S") is None
 
 
-def test_redacting_a_team_turn_that_folded_removes_its_member_runs(store: ConversationStore) -> None:
+def test_redacting_a_team_turn_that_folded_removes_its_member_runs(team_store: ConversationStore) -> None:
     """A team turn's fold goes with the turn, and its delegated member runs go with it."""
-    _save(store, _team_run("t0"), kind="team")
+    _save(team_store, _team_run("t0"), kind="team")
     team_run = _team_run("team-run", RunStatus.running)
-    _save(store, _run("member", parent="team-run", agent_id="helper"), kind="team")
-    assert _fold(store, team_run, "S", members=["member"]) is not None
+    _save(team_store, _run("member", parent="team-run", agent_id="helper"), kind="team")
+    assert _fold(team_store, team_run, "S", members=["member"]) is not None
     team_run.status = RunStatus.completed
-    assert _save(store, team_run, kind="team") == ["written"]
+    assert _save(team_store, team_run, kind="team") == ["written"]
 
-    assert _redact(store, "$team-run", _TEAM)
+    assert _redact(team_store, "$team-run", _TEAM)
 
-    assert _log(store, _TEAM) == ["run:t0"]
-    assert _loaded_ids(store, "team") == ["t0"]
-    assert _query(store, "SELECT run_id FROM code_sessions_log_runs ORDER BY seq") == [("t0",)]
+    assert _log(team_store, _TEAM) == ["run:t0"]
+    assert _loaded_ids(team_store) == ["t0"]
+    assert _query(team_store, "SELECT run_id FROM code_sessions_log_runs ORDER BY seq") == [("t0",)]
 
 
 # --- Retirement and legacy summaries --------------------------------------------------------------

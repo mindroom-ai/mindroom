@@ -86,10 +86,12 @@ class TestMemoryIntegration:
         persist_entity_accounts(config, runtime_paths)
 
         response = await ai_response(
-            make_turn_context("general", session_id="test_session", room_id="!test:room"),
-            prompt="What is 2+2?",
-            runtime_paths=runtime_paths,
-            config=config,
+            replace(
+                make_turn_context("general", session_id="test_session", room_id="!test:room"),
+                prompt="What is 2+2?",
+            ),
+            runtime_paths,
+            config,
         )
 
         # Verify response
@@ -131,10 +133,9 @@ class TestMemoryIntegration:
         runtime_paths = self._runtime_paths(tmp_path)
 
         await ai_response(
-            make_turn_context("general", session_id="test_session", room_id=None),
-            prompt="Hello",
-            runtime_paths=runtime_paths,
-            config=config,
+            replace(make_turn_context("general", session_id="test_session", room_id=None), prompt="Hello"),
+            runtime_paths,
+            config,
         )
 
         # Verify memory enhancement remains agent-scoped; mem0 inlines no MEMORY.md to keep.
@@ -162,10 +163,9 @@ class TestMemoryIntegration:
             patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory),
         ):
             response = await ai_response(
-                make_turn_context("general", session_id="session"),
-                prompt="Test",
-                runtime_paths=self._runtime_paths(tmp_path),
-                config=config,
+                replace(make_turn_context("general", session_id="session"), prompt="Test"),
+                self._runtime_paths(tmp_path),
+                config,
             )
 
             # Should return user-friendly error message with the actual error
@@ -189,10 +189,9 @@ class TestMemoryIntegration:
         with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
             # First interaction
             await ai_response(
-                make_turn_context("general", session_id="session1"),
-                prompt="Remember this: A=1",
-                runtime_paths=self._runtime_paths(tmp_path),
-                config=config,
+                replace(make_turn_context("general", session_id="session1"), prompt="Remember this: A=1"),
+                self._runtime_paths(tmp_path),
+                config,
             )
 
             # Note: Memory storage now happens at the bot level, not in ai_response
@@ -205,10 +204,9 @@ class TestMemoryIntegration:
             mock_memory.search.return_value = {"results": [{"memory": "Remember this: A=1", "id": "1"}]}
 
             await ai_response(
-                make_turn_context("general", session_id="session2"),
-                prompt="What is A?",
-                runtime_paths=self._runtime_paths(tmp_path),
-                config=config,
+                replace(make_turn_context("general", session_id="session2"), prompt="What is A?"),
+                self._runtime_paths(tmp_path),
+                config,
             )
 
             # Memory search should have been called

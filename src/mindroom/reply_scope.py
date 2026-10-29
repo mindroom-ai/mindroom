@@ -27,7 +27,6 @@ from mindroom.event_journal.replies import (
     ApprovalEnded,
     Decide,
     ReplyCreation,
-    TurnCompleted,
     WakeApproval,
 )
 from mindroom.logging_config import get_logger
@@ -65,7 +64,6 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalContinuation, PrincipalStore
     from mindroom.event_journal.matrix_delivery import ReplyRowEnqueuer
     from mindroom.event_journal.replies import PostCommitEffect
-    from mindroom.turn_record import TurnRecord
 
 
 @dataclass
@@ -259,8 +257,8 @@ class ClaimRefused(Enum):
     RETIRED = "retired"
 
 
-# As long as the handled-turn ledger keeps a turn: nothing reaches a finished
-# reply after its turn is forgotten.
+# As long as turn retention keeps a turn: nothing reaches a finished reply after
+# its turn is forgotten.
 _FINISHED_REPLY_RETENTION_NS = 30 * 24 * 60 * 60 * 1_000_000_000
 _FORGET_BATCH = 500
 
@@ -273,8 +271,6 @@ class ReplyRuntime:
     entity_name: str
     generation: str
     retry_sources: Callable[[str, tuple[str, ...]], None]
-    # Tells the turn ledger about a turn a reply's settlement already recorded answered.
-    complete_turn: Callable[[TurnRecord], Awaitable[object]]
     # Settles what the reply of an ended approval owes, given the reply's id.
     approval_ended: Callable[[str], None]
     # The task of each span this bot instance executes, which a Stop cancels.
@@ -296,9 +292,7 @@ class ReplyRuntime:
         """
         try:
             for effect in effects:
-                if isinstance(effect, TurnCompleted):
-                    await self.complete_turn(effect.record)
-                elif isinstance(effect, WakeApproval):
+                if isinstance(effect, WakeApproval):
                     await self._wake_fenced_approval(effect.approval_id)
         finally:
             for effect in effects:
@@ -421,7 +415,8 @@ class ReplyRuntime:
     async def deletions_ended(self) -> tuple[str, ...]:
         """Cancel the spans source deletions ended and wake the approvals they cancelled; return the replies they ended.
 
-        Each tombstone's projection ended its replies, and fenced the approval
+        Projecting each deletion -- a redaction, or an event that arrived
+        already redacted -- ended its replies, and fenced the approval
         that held one, in its own commit and recorded the span it cancelled.
         The debt of the replies it ended is now due.
         """
@@ -438,7 +433,7 @@ class ReplyRuntime:
         return tuple(ending.reply_id for ending in endings)
 
     async def forget_finished(self) -> None:
-        """Drop the records of replies finished as long ago as the handled-turn ledger forgets their turns."""
+        """Drop the records of replies finished as long ago as turn retention forgets their turns."""
         before_ns = time.time_ns() - _FINISHED_REPLY_RETENTION_NS
         while await self.store.replies.forget_finished(before_ns=before_ns, limit=_FORGET_BATCH) == _FORGET_BATCH:
             pass

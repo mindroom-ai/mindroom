@@ -63,7 +63,7 @@ class ResponseLifecycleReservation:
             self._acquire_task = asyncio.create_task(self._acquire())
         await self._ready.wait()
 
-    def consume(
+    def _consume(
         self,
         coordinator: ResponseLifecycleCoordinator,
         target: MessageTarget,
@@ -233,19 +233,12 @@ class QueuedHumanNoticeReservation:
     _source_event_id: str
     _active: bool = True
 
-    def _release_waiting_human_message(self) -> None:
+    def release(self) -> None:
+        """Stop counting this message as waiting for the running response; idempotent."""
         if not self._active:
             return
         self._state.consume_waiting_human_message(self._source_event_id)
         self._active = False
-
-    def consume(self) -> None:
-        """Mark the reservation as owned by the response lifecycle."""
-        self._release_waiting_human_message()
-
-    def cancel(self) -> None:
-        """Release a reservation that will not reach response lifecycle ownership."""
-        self._release_waiting_human_message()
 
 
 @dataclass
@@ -491,7 +484,7 @@ class ResponseLifecycleCoordinator:
         reservation: ResponseLifecycleReservation | None,
     ) -> tuple[asyncio.Lock, _QueuedMessageState, str | None]:
         if reservation is not None:
-            return reservation.consume(self, target), reservation._queued_signal, None
+            return reservation._consume(self, target), reservation._queued_signal, None
         lifecycle_lock = self._response_lifecycle_lock(target)
         queued_signal = self._get_or_create_queued_signal(target)
         notice = self._begin_response_turn_notice(
@@ -679,8 +672,11 @@ class ResponseLifecycle:
     ) -> FinalDeliveryOutcome:
         """Run outer lifecycle finalization and return the canonical terminal outcome."""
         if final_delivery_outcome.terminal_status == "suspended":
-            if self.pipeline_timing is not None:
-                self.pipeline_timing.emit_summary(self.deps.logger, outcome="suspended")
+            await self._finalize_suspended(
+                final_delivery_outcome,
+                post_response_outcome=build_post_response_outcome(final_delivery_outcome),
+                post_response_deps=post_response_deps,
+            )
             return final_delivery_outcome
         self._raise_if_process_shutdown()
         response_event_id = final_delivery_outcome.final_visible_event_id
@@ -727,6 +723,33 @@ class ResponseLifecycle:
         if self.pipeline_timing is not None:
             self.pipeline_timing.emit_summary(self.deps.logger, outcome=_response_outcome_label(final_delivery_outcome))
         return final_delivery_outcome
+
+    async def _finalize_suspended(
+        self,
+        final_delivery_outcome: FinalDeliveryOutcome,
+        *,
+        post_response_outcome: ResponseOutcome,
+        post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
+    ) -> None:
+        """Finalize a reply whose run waits for approval, or whose answer is recorded but not yet acknowledged.
+
+        A run paused for approval has not finished, so nothing applies. An owed answer's run finished, so its run's
+        effects apply unless the process is stopping; effects and hooks that need a delivered completed answer skip.
+        The outbox owns the answer by then, so an effect that fails or is cancelled must not settle it again.
+        """
+        if post_response_outcome.run_succeeded and not self.deps.process_shutdown_requested():
+            if callable(post_response_deps):
+                post_response_deps = cast("Callable[[], PostResponseEffectsDeps]", post_response_deps)()
+            try:
+                await apply_post_response_effects(final_delivery_outcome, post_response_outcome, post_response_deps)
+            except asyncio.CancelledError:
+                if self.deps.process_shutdown_requested():
+                    raise
+                self.deps.logger.warning("Post-response effects cancelled for an answer the outbox owes")
+            except Exception:
+                self.deps.logger.exception("Post-response effects failed for an answer the outbox owes")
+        if self.pipeline_timing is not None:
+            self.pipeline_timing.emit_summary(self.deps.logger, outcome="suspended")
 
     async def _apply_effects_safely(
         self,

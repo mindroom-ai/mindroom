@@ -58,7 +58,6 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
 from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.run_storage import TerminalRecord
-from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
@@ -72,8 +71,6 @@ from mindroom.tool_system.skills import SKILL_READ_FUNCTION_NAMES
 from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
@@ -731,15 +728,6 @@ def _participant_available_toolkits(context: ToolRuntimeContext) -> list[str]:
     ]
 
 
-def _caller_workspace_root(context: ToolRuntimeContext) -> Path:
-    return resolve_agent_runtime(
-        context.agent_name,
-        context.config,
-        context.runtime_paths,
-        execution_identity=build_execution_identity_from_runtime_context(context),
-    ).workspace.root
-
-
 def _participant_request(
     context: ToolRuntimeContext,
     participant: dict[str, object],
@@ -754,7 +742,7 @@ def _participant_request(
     try:
         if participant.get("profile") is not None:
             profile = load_profile(
-                _caller_workspace_root(context),
+                context.agent_workspace_root(),
                 _required_participant_text(participant, "profile"),
             )
             persona = replace(profile.persona, source_kind="workflow", source_name=source_name)
@@ -779,7 +767,7 @@ def _participant_request(
                 context.agent_name,
                 context.config,
                 context.runtime_paths,
-                _caller_workspace_root(context),
+                context.agent_workspace_root(),
             ),
             context.persona.kept_skills if context.persona is not None else None,
         )

@@ -3,20 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from mindroom.config.main import failed_config_source_fingerprint, load_config
+from mindroom.config.load_attempt import ConfigLoad, load_config_attempt
+from mindroom.config.main import failed_config_source_fingerprint
 from mindroom.config.reload_status import ConfigReloadStatus
-from mindroom.config.yaml_includes import partial_source_files
+from mindroom.config.yaml_includes import source_files_fingerprint
 from mindroom.event_journal.opening import describe_event_journal, pending_event_journal_restart
 from mindroom.logging_config import get_logger
-from mindroom.orchestration.config_updates import (
-    build_config_update_plan,
-    configured_entity_names,
-    plugin_change_paths,
-)
+from mindroom.orchestration.config_updates import build_config_update_plan, plugin_change_paths
 from mindroom.orchestration.runtime import cancel_logged_task, create_logged_task
 from mindroom.tool_jobs.settings import pending_background_tool_jobs_restart
 
@@ -24,17 +22,13 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
     from pathlib import Path
 
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.orchestration.config_updates import ConfigUpdatePlan
     from mindroom.response_admission import ResponseAdmissionGate
 
 logger = get_logger(__name__)
-
-# One planned config transition and the plugin paths it changes.
-type _ConfigTransition = tuple[ConfigUpdatePlan, tuple[str, ...]]
-
 
 _CONFIG_RELOAD_DEBOUNCE_SECONDS = 2.0
 _REPLACEMENT_DRAIN_IDLE_POLL_SECONDS = 0.5
@@ -89,6 +83,36 @@ class _ReplacementDrainState:
         return self.wait_started_at is not None and self.wait_seconds(now) >= force_after_seconds
 
 
+def load_published_config(runtime_paths: RuntimePaths, *, api_enabled: bool) -> ConfigLoad:
+    """Load the config once, publishing it to the embedded dashboard API when one runs.
+
+    With the API embedded, this load is the dashboard's only one, so the runtime
+    and the dashboard always see the same validated config.
+    """
+    if not api_enabled:
+        return load_config_attempt(runtime_paths)
+    from mindroom.api import main as api_main  # noqa: PLC0415
+
+    return api_main.config_lifecycle.load_config_into_app(runtime_paths, api_main.app)
+
+
+async def load_startup_config(runtime_paths: RuntimePaths, *, api_enabled: bool) -> Config:
+    """Bind the embedded API to this runtime and load the config startup applies.
+
+    The API serves only after this returns, so no request sees it without config,
+    and the dashboard keeps that config while the homeserver is unreachable.
+    A failed load fails startup.
+    """
+    if api_enabled:
+        from mindroom.api import main as api_main  # noqa: PLC0415
+
+        api_main.initialize_api_app(api_main.app, runtime_paths)
+    # Config validation executes plugin modules and walks the filesystem;
+    # keep it off the event loop (#1260).
+    published = await asyncio.to_thread(load_published_config, runtime_paths, api_enabled=api_enabled)
+    return published.loaded_config()
+
+
 @dataclass
 class ConfigReloadLifecycle:
     """Own debounced config reloads and serialized replacement admission.
@@ -101,12 +125,16 @@ class ConfigReloadLifecycle:
 
     runtime_paths: RuntimePaths
     is_running: Callable[[], bool]
-    current_config: Callable[[], Config | None]
-    agent_bots: Callable[[], Mapping[str, AgentBot | TeamBot]]
-    load_initial_config: Callable[[Config], Awaitable[bool]]
-    apply_update_plan: Callable[[Config, ConfigUpdatePlan, tuple[str, ...]], Awaitable[bool]]
+    # Reloads run only once startup published its config, so a config always exists here.
+    current_config: Callable[[], Config]
+    agent_bots: Callable[[], Mapping[str, AgentBot]]
+    load_config: Callable[[], ConfigLoad]
+    apply_update_plan: Callable[[Config, ConfigUpdatePlan], Awaitable[bool]]
     response_admission_gate: ResponseAdmissionGate
     before_runtime_replacement: Callable[[], Awaitable[None]]
+    # Rebinds runtime consumers of the published API config: a load that changes no effective
+    # config, such as a comment edit, still advances the API generation they are bound to.
+    rebind_published_config_consumers: Callable[[], None]
     # Releases the background script launch fence a reload took; launches read the applied config this publishes.
     finish_reload: Callable[[], Awaitable[None]]
     # Shared with manual plugin reloads and MCP catalog-change handling so no
@@ -115,14 +143,11 @@ class ConfigReloadLifecycle:
     _response_admission_apply_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _reload_task: asyncio.Task | None = field(default=None, init=False)
     _requested_at: float | None = field(default=None, init=False)
-    # Source files of the last reload attempt that failed to load, so the
-    # config watcher can cover include files the last good config never saw.
-    # Owned by ``_update_config``, which is the only place that knows whether
-    # an attempt was adopted.
-    failed_reload_source_files: frozenset[Path] | None = field(default=None, init=False)
-    # Source topology from the latest config that loaded successfully, even
-    # when its effective authored content did not require publication.
-    loaded_source_files: frozenset[Path] | None = field(default=None, init=False)
+    # Set by process shutdown, after which no file edit is loaded or applied.
+    _cancelled: bool = field(default=False, init=False)
+    # Every file the config watcher covers besides config.yaml: the files of the last load that succeeded, even when
+    # it changed nothing, plus the files each failed load since then reached.
+    watched_source_files: frozenset[Path] = field(default=frozenset(), init=False)
     # The last config whose complete update plan returned successfully.
     _fully_applied_config: Config | None = field(default=None, init=False, repr=False)
     # A transition target that may have published only part of its runtime state.
@@ -134,7 +159,7 @@ class ConfigReloadLifecycle:
         """Return the last config whose complete update plan returned, never a pending or failed transition."""
         return self._fully_applied_config
 
-    def record_applied(self, config: Config) -> None:
+    def _record_applied(self, config: Config) -> None:
         """Acknowledge source bytes only after their complete runtime publication."""
         self._fully_applied_config = config
         self.status = ConfigReloadStatus(
@@ -148,24 +173,50 @@ class ConfigReloadLifecycle:
         )
 
     def request_reload(self) -> None:
-        """Queue a debounced config reload for the running orchestrator."""
-        if not self.is_running():
-            logger.info("Ignoring config change while startup is still in progress")
-            return
+        """Queue a debounced config reload; startup applies a request made before the runtime runs once it publishes."""
         self._requested_at = asyncio.get_running_loop().time()
         if self._reload_task is not None and not self._reload_task.done():
             logger.info("Configuration reload already queued; extending debounce window")
             return
-        self.status = ConfigReloadStatus(status="pending")
-        logger.info("Queued configuration reload")
+        if not self.is_running():
+            logger.info("Configuration change recorded until the runtime runs")
+            if not self._starting():
+                return
+        else:
+            self.status = ConfigReloadStatus(status="pending")
+            logger.info("Queued configuration reload")
         self._reload_task = create_logged_task(
             self._run_reload_loop(),
             name="config_reload",
             failure_message="Queued config reload failed",
         )
 
+    def record_load_sources(self, source_files: frozenset[Path] | None, *, loaded: bool) -> None:
+        """Keep the config watcher on every file a load read.
+
+        A failed load adds the files it reached, so fixing a newly added include
+        file that the last good config never read still triggers the retry.
+        """
+        if loaded:
+            self.watched_source_files = source_files or frozenset()
+        elif source_files:
+            self.watched_source_files |= source_files
+
+    def _starting(self) -> bool:
+        """Return whether the runtime has not run yet, as opposed to having stopped."""
+        return not self._cancelled and not self.is_running() and self._fully_applied_config is None
+
+    def startup_published(self, config: Config) -> None:
+        """Acknowledge startup's config, and reload at once if its files changed since startup loaded them."""
+        self._record_applied(config)
+        if self._requested_at is not None or _source_fingerprint_on_disk(config, self.runtime_paths) != (
+            config.source_fingerprint
+        ):
+            self.request_reload()
+
     async def cancel(self) -> None:
-        """Cancel any queued config reload task."""
+        """Cancel any queued config reload task; process shutdown calls this, so later requests do nothing."""
+        self._cancelled = True
         task = self._reload_task
         self._reload_task = None
         self._requested_at = None
@@ -174,39 +225,27 @@ class ConfigReloadLifecycle:
 
     async def _update_config(self) -> bool | None:
         """Reload config, returning whether agents changed or ``None`` when superseded."""
+        # Config validation executes plugin modules and walks the filesystem;
+        # keep it off the event loop (#1260). The load runs before the admission
+        # lock, so the embedded dashboard sees an edit as soon as it loads, even
+        # while another replacement drains responses; a dashboard save against
+        # the previous config would otherwise overwrite the edit. The runtime
+        # adopts nothing until planning under the admission lock succeeds.
+        async with self.config_update_lock:
+            published = await asyncio.to_thread(self.load_config)
+        if published.superseded:
+            # A dashboard save or runtime swap committed during the load and
+            # already changed the files, so the watcher queues the reload
+            # that applies it; this stale read is never adopted.
+            return None
+        self.record_load_sources(published.source_files, loaded=published.config is not None)
+        new_config = published.loaded_config()
+        self.status = ConfigReloadStatus(status="pending", fingerprint=new_config.source_fingerprint)
         async with self._response_admission_apply_lock:
-            # Config validation executes plugin modules and walks the filesystem;
-            # keep it off the event loop (#1260). Admission stays open because
-            # nothing is published until loading and planning both succeed.
-            async with self.config_update_lock:
-                new_config = await asyncio.to_thread(
-                    load_config,
-                    self.runtime_paths,
-                    tolerate_plugin_load_errors=True,
-                )
-            self.loaded_source_files = new_config.source_files
-            self.status = ConfigReloadStatus(status="pending", fingerprint=new_config.source_fingerprint)
             runtime_config = self.current_config()
             if self._fully_applied_config is None:
                 self._fully_applied_config = runtime_config
             current_config = self._fully_applied_config
-            self.failed_reload_source_files = None
-
-            if current_config is None:
-                updated = False
-
-                async def load_initial_config() -> None:
-                    nonlocal updated
-                    async with self.config_update_lock:
-                        updated = await self.load_initial_config(new_config)
-                        self.record_applied(new_config)
-
-                applied = await self._apply_after_response_drain(
-                    load_initial_config,
-                    operation_name="configuration reload",
-                    request_is_current=self._reload_publication_is_current,
-                )
-                return updated if applied else None
 
             if pending_event_journal_restart(new_config, self.runtime_paths):
                 # Adopted, not refused: the store was opened once at startup and
@@ -221,22 +260,19 @@ class ConfigReloadLifecycle:
 
             current_effective_config = current_config.runtime_model_dump()
             new_effective_config = new_config.runtime_model_dump()
-            runtime_effective_config = runtime_config.runtime_model_dump() if runtime_config is not None else None
+            runtime_effective_config = runtime_config.runtime_model_dump()
             if (
                 self._incomplete_config is None
                 and current_effective_config == new_effective_config == runtime_effective_config
             ):
                 logger.info("Configuration content unchanged; skipping publication")
-                self.record_applied(new_config)
+                self._record_applied(new_config)
+                self.rebind_published_config_consumers()
                 return False
             repair_config = self._incomplete_config
-            if (
-                repair_config is None
-                and runtime_config is not None
-                and runtime_effective_config != current_effective_config
-            ):
+            if repair_config is None and runtime_effective_config != current_effective_config:
                 repair_config = runtime_config
-            requested_transition = None
+            requested_plan = None
             if repair_config is not None:
                 logger.warning(
                     "config_reload_repairing_partial_publication",
@@ -245,7 +281,7 @@ class ConfigReloadLifecycle:
             else:
                 # The bot inventory changes only under the admission lock held here,
                 # so this plan is still exact when the apply runs after any drain.
-                requested_transition = self._plan_config_transition(current_config, new_config)
+                requested_plan = self._plan_config_transition(current_config, new_config)
 
             updated = False
 
@@ -255,15 +291,15 @@ class ConfigReloadLifecycle:
                     fully_applied_config=current_config,
                     requested_config=new_config,
                     repair_config=repair_config,
-                    requested_transition=requested_transition,
+                    requested_plan=requested_plan,
                 )
-                self.record_applied(new_config)
+                self._record_applied(new_config)
 
             applied = await self._apply_after_response_drain(
                 apply_update_steps,
                 operation_name="configuration reload",
                 request_is_current=self._reload_publication_is_current,
-                wait_for_idle=requested_transition is None or requested_transition[0].requires_response_drain,
+                wait_for_idle=requested_plan is None or requested_plan.requires_response_drain,
             )
             return updated if applied else None
 
@@ -273,7 +309,7 @@ class ConfigReloadLifecycle:
         fully_applied_config: Config,
         requested_config: Config,
         repair_config: Config | None,
-        requested_transition: _ConfigTransition | None = None,
+        requested_plan: ConfigUpdatePlan | None = None,
     ) -> bool:
         """Restore the last-good state when needed, then apply the requested config."""
         updated = False
@@ -288,7 +324,7 @@ class ConfigReloadLifecycle:
                     requested_updated = await self._apply_config_transition(
                         fully_applied_config,
                         requested_config,
-                        requested_transition,
+                        requested_plan,
                     )
                     updated = updated or requested_updated
                     self._incomplete_config = None
@@ -304,29 +340,22 @@ class ConfigReloadLifecycle:
         self,
         current_config: Config,
         new_config: Config,
-        transition: _ConfigTransition | None = None,
+        plan: ConfigUpdatePlan | None = None,
     ) -> bool:
         """Apply one normal config transition, planning it now unless already planned."""
-        plan, plugin_changes = transition or self._plan_config_transition(current_config, new_config)
-        return await self.apply_update_plan(current_config, plan, plugin_changes)
+        return await self.apply_update_plan(
+            current_config,
+            plan or self._plan_config_transition(current_config, new_config),
+        )
 
-    def _plan_config_transition(self, current_config: Config, new_config: Config) -> _ConfigTransition:
+    def _plan_config_transition(self, current_config: Config, new_config: Config) -> ConfigUpdatePlan:
         """Build one config transition plan against the current bot inventory."""
-        agent_bots = self.agent_bots()
-        plugin_changes = plugin_change_paths(current_config, new_config)
-        plan = build_config_update_plan(
+        return build_config_update_plan(
             current_config=current_config,
             new_config=new_config,
-            configured_entities=set(configured_entity_names(new_config)),
-            existing_entities=set(agent_bots.keys()),
-            agent_bots=agent_bots,
+            bots=self.agent_bots(),
+            plugin_changes=plugin_change_paths(current_config, new_config),
         )
-        if plugin_changes:
-            plan = replace(
-                plan,
-                entities_to_restart=plan.entities_to_restart | set(agent_bots),
-            )
-        return plan, plugin_changes
 
     def _reload_publication_is_current(self) -> bool:
         """Allow direct updates, but skip queued snapshots superseded before publication."""
@@ -503,12 +532,6 @@ class ConfigReloadLifecycle:
                 fingerprint=failed_config_source_fingerprint(exc) or self.status.fingerprint,
             )
             logger.exception("Configuration update failed; will retry if a new change is queued")
-            # Keep watching every file the broken load read so fixing a newly
-            # added include file (not yet in the last good config) still
-            # triggers the retry reload.
-            failed_files = partial_source_files(exc)
-            if failed_files is not None:
-                self.failed_reload_source_files = failed_files
             return
         if updated is None:
             logger.info("Configuration reload superseded before publication; skipping")
@@ -523,14 +546,40 @@ class ConfigReloadLifecycle:
         loop = asyncio.get_running_loop()
 
         try:
-            while self.is_running() and self._requested_at is not None:
+            while self._requested_at is not None:
                 requested_at = self._requested_at
                 await self._wait_for_reload_debounce(requested_at, loop)
                 if self._requested_at != requested_at:
                     # A newer config change superseded the current one.
                     continue
-
-                await self._apply_queued_config_reload()
+                if self.is_running():
+                    await self._apply_queued_config_reload()
+                    continue
+                if not self._starting():
+                    return
+                # Startup applies the kept request once it publishes, but the
+                # dashboard loads the edit now, so a dashboard save made while
+                # MindRoom starts cannot write over it.
+                async with self.config_update_lock:
+                    published = await asyncio.to_thread(self.load_config)
+                if not published.superseded:
+                    self.record_load_sources(
+                        published.source_files,
+                        loaded=published.config is not None,
+                    )
+                if self._requested_at == requested_at:
+                    return
         finally:
             if self._reload_task is current_task:
                 self._reload_task = None
+
+
+def _source_fingerprint_on_disk(config: Config, runtime_paths: RuntimePaths) -> str | None:
+    """Return the fingerprint of the files ``config`` was loaded from, as they are now; None if one is gone."""
+    if not config.source_files:
+        return config.source_fingerprint
+    try:
+        digests = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in config.source_files}
+    except OSError:
+        return None
+    return source_files_fingerprint(runtime_paths.config_path, digests)

@@ -42,6 +42,7 @@ from tests.storage_oracle.record import (
     observe_database,
     sequence_id,
     storage_name_of,
+    with_defaults,
 )
 
 if TYPE_CHECKING:
@@ -67,6 +68,9 @@ MASKS: dict[str, str] = {
     "force_request_moves_into_metadata": "spec v4 4.5 and decision 5 (W9): a manual compaction request queued in the "
     "session state becomes its scope's metadata flag",
     "session_columns_encoded_once": "spec v4 4.5: session columns Agno 2 encoded twice are stored encoded once",
+    "foreign_runs_take_the_database_agent": "#3115: an agent's database owns every top-level run in it, so a run "
+    "naming another agent, which no release stored there, takes the agent's name as layout version 3 set it "
+    "(``mindroom.session_storage.legacy_agent_session_owners``)",
     "paused_notice_reads_as_no_content": "#3106: a run whose content is a paused notice reads with no content "
     "(``mindroom.llm.legacy_run_content``)",
 }
@@ -105,6 +109,9 @@ _PINS: dict[str, set[str]] = {
     },
     "legacy/captured__legacy_compaction_state__opening_storage_numbers_rows_an_old_writer_stored_without_an_index": {
         "row_ids_fill_the_record",
+    },
+    "legacy/captured__archive_migration__two_scopes_keep_separate_summary_rows": {
+        "foreign_runs_take_the_database_agent",
     },
     "legacy/synthetic__duplicate_message_id": {"repeated_message_id_derived"},
     "legacy/synthetic__embedded_paused_member_advanced": {"embedded_members_become_member_rows"},
@@ -176,6 +183,40 @@ def _input_facts(dump: str) -> _Input:
     return facts
 
 
+def _adopting_agent(dump: str) -> str | None:
+    """Return the agent whose sessions, all its, hold a top-level agent run naming another agent, which it adopts."""
+    names = AgnoTableNames(storage_name_of(dump))
+    with closing(sqlite3.connect(":memory:")) as connection:
+        connection.executescript(dump)
+        if not {names.sessions, names.runs} <= table_names(connection):
+            return None
+        owners = connection.execute(
+            f"SELECT DISTINCT session_type, agent_id FROM {quote_identifier(names.sessions)}",  # noqa: S608
+        ).fetchall()
+        if len(owners) != 1 or owners[0][0] != "agent":
+            return None
+        agent = owners[0][1]
+        foreign = connection.execute(
+            f"SELECT 1 FROM {quote_identifier(names.runs)} WHERE parent_run_id IS NULL AND run_type = 'agent' "  # noqa: S608
+            "AND agent_id IS NOT ?",
+            (agent,),
+        ).fetchone()
+    return agent if foreign is not None else None
+
+
+def _adopted(dump: str, agent: str) -> str:
+    """Return ``dump`` with its top-level agent runs naming ``agent``, as its conversion leaves them."""
+    names = AgnoTableNames(storage_name_of(dump))
+    with closing(sqlite3.connect(":memory:")) as connection:
+        connection.executescript(dump)
+        connection.execute(
+            f"UPDATE {quote_identifier(names.runs)} SET agent_id = ?1, run_data = json_set(run_data, '$.agent_id', ?1) "  # noqa: S608
+            "WHERE parent_run_id IS NULL AND run_type = 'agent'",
+            (agent,),
+        )
+        return "\n".join(connection.iterdump()) + "\n"
+
+
 def _without_runs(dump: str, run_ids: set[str]) -> str:
     """Return ``dump`` without the run rows ``run_ids``."""
     names = AgnoTableNames(storage_name_of(dump))
@@ -197,9 +238,9 @@ def _end_state(dump: str, scenario: Scenario, root: Path) -> dict[str, Any]:
         connection.executescript(dump)
     with deterministic() as determinism:
         determinism.at(len(scenario.actions) - 1)
-        store = create_state_storage(storage_name, root)
+        store = create_state_storage(storage_name, root, HistoryScope(kind=scenario.kind, scope_id=storage_name))
         observed = observe(store, SESSION_ID, HistoryScope(kind=scenario.kind, scope_id=storage_name))
-    return json.loads(json.dumps(observed, sort_keys=True))
+    return with_defaults(json.loads(json.dumps(observed, sort_keys=True)))
 
 
 def _runs(observed: dict[str, Any]) -> list[dict[str, Any]]:
@@ -401,10 +442,16 @@ def _masked(
         # The Agno-layout store failed every read of the session; leaving the row out reads as never having stored it.
         for entry in recorded["sessions"].values():
             assert "JSONDecodeError" in entry["observed"]["list_runs"]["error"]
-        expected = observe_database(_without_runs(dump, facts.undecodable), root, extra)
+        expected = with_defaults(observe_database(_without_runs(dump, facts.undecodable), root, extra))
         recorded.clear()
         recorded.update(expected)
         used.add("undecodable_run_left_out")
+    if (agent := _adopting_agent(dump)) is not None:
+        # The Agno-layout store read each run under the agent it named; the conversion adopts them as layout version 3
+        # did at the agent's own open, so the recording is what the same database shows with its runs adopted.
+        recorded.clear()
+        recorded.update(with_defaults(observe_database(_adopted(dump, agent), root, extra)))
+        used.add("foreign_runs_take_the_database_agent")
     for session_id, entry in observed["sessions"].items():
         if "observed" not in entry:
             continue
@@ -421,7 +468,7 @@ def test_a_converted_input_shows_its_recording_but_for_named_masks(name: str, tm
     text = dump.read_text(encoding="utf-8")
     recorded = decode(recording.read_text(encoding="utf-8"))
     facts = _input_facts(text)
-    observed = observe_database(text, tmp_path / "converted", facts.extra_run_ids())
+    observed = with_defaults(observe_database(text, tmp_path / "converted", facts.extra_run_ids()))
     used = _masked(text, recorded, observed, facts, tmp_path / "expected")
     assert first_difference(recorded, observed) is None, first_difference(recorded, observed)
     assert used == _PINS.get(name, set())
@@ -468,7 +515,7 @@ def test_a_fold_run_a_retirement_removed_converts_without_a_row(tmp_path: Path) 
             (json.dumps(segment),),
         )
         connection.execute("INSERT INTO code_sessions_removed_runs (run_id, session_id) VALUES ('x', 's')")
-    store = create_state_storage("code", tmp_path)
+    store = create_state_storage("code", tmp_path, HistoryScope(kind="agent", scope_id="code"))
     session = ConversationSession(session_id="s", kind="agent", owner_id="code")
     later = RunRecord(run_id="r0", agent_id="code", session_id="s", status=RunStatus.completed)
 

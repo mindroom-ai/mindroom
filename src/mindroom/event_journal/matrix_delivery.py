@@ -21,9 +21,9 @@ from mindroom.event_journal.models import DeliveryStage, UnreadableMatrixDeliver
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine, Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
-    from mindroom.event_journal.models import MatrixDelivery, TerminalTurnWrite
+    from mindroom.event_journal.models import MatrixDelivery
     from mindroom.event_journal.projection import ProjectedEvent
     from mindroom.event_journal.replies import PostCommitEffect, PreparedReplyRow, ReplyRowEnqueue, ReplyRowRequest
     from mindroom.event_journal.views import MatrixDeliveryView
@@ -44,35 +44,6 @@ type _ObserveDelivered = Callable[[MatrixDelivery, str], Awaitable[tuple[Project
 # transaction ID can no longer prove there wasn't one. Returns the event ID if
 # the answer is already in the room, or ``None`` if it never arrived.
 type ResolveDelivered = Callable[[MatrixDelivery], Awaitable[str | None]]
-
-# The terminal turn record one delivered answer completes, given the claimed
-# delivery and canonical response event ID. Returns None when there is nothing to write --
-# no record for the turn, or one that already knows its response event.
-type _TerminalTurnFor = Callable[[MatrixDelivery, str], "TerminalTurnWrite | None"]
-
-# Told after an acknowledgement this caller actually bound, so the record the
-# transaction committed can be re-asserted through whatever ordering the ledger
-# uses for every other write. A caller that lost the row is never told, because
-# it committed nothing to settle.
-type _TerminalTurnCommitted = Callable[["TerminalTurnWrite"], Coroutine[object, object, None]]
-
-
-@dataclass(frozen=True, slots=True)
-class TurnHandoff:
-    """Which journal sources one FINAL answer discharges, and who to tell.
-
-    The two halves are split by the commit, not by preference. Resolving the
-    sources has to happen before the write, because the settlement travels
-    inside it; telling the in-process worker has to happen after it, because a
-    transaction that rolled back handed nothing over and the worker would
-    otherwise re-dispatch a turn it still owns.
-    """
-
-    # The turn is keyed on its anchor event, but a coalesced batch answers
-    # several sources at once, and every one of them is discharged together.
-    sources_for_turn: Callable[[str], tuple[str, ...]]
-    # In-memory only: the pending-event worker no longer holds these.
-    released: Callable[[tuple[str, ...]], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,8 +80,6 @@ class _FlushOutcome:
     """One locked send result and the callback it leaves for after unlock."""
 
     event_id: str | None
-    # The terminal turn record a bound FINAL acknowledgement committed.
-    committed_terminal: TerminalTurnWrite | None = None
     retry_required: bool = False
     propagate_cancellation: asyncio.CancelledError | None = field(default=None, repr=False, compare=False)
     reply_effects: tuple[PostCommitEffect, ...] = ()
@@ -134,19 +103,20 @@ class MatrixDeliveryWorker:
     # already in the room. Only consulted when the transaction ID has stopped
     # being proof, which is the one case where resending blind duplicates.
     resolve_delivered: ResolveDelivered | None = None
-    # Where a turn stops being the journal's work and becomes the outbox's.
-    # Deliberately unused for `INITIAL`: a placeholder is not an answer, and
-    # handing the turn over on one would leave a crash before the model
-    # finished with nothing pending to replay and "Thinking..." in the room
-    # forever.
-    handoff: TurnHandoff | None = None
-    # The turn record this delivery completes, asked for only once the event ID
-    # exists and written in the acknowledgement's own transaction. The
+    # Where a turn stops being the journal's work and becomes the outbox's: a
+    # FINAL answer's enqueue settles the turn's journal sources, and this hears
+    # their event IDs only after that commit, because an enqueue that rolled
+    # back handed nothing over. Deliberately unused for `INITIAL`: a
+    # placeholder is not an answer, and handing the turn over on one would
+    # leave a crash before the model finished with nothing pending to replay
+    # and "Thinking..." in the room forever.
+    handoff: Callable[[tuple[str, ...]], None] | None = None
+    # Whether a delivered answer completes the turn it was bound to when its
+    # row became durable, in the acknowledgement's own transaction. The
     # acknowledgement is the proof that an answer is visible and what its event
-    # ID is; the record is the thing that needs to know it. Committing them
-    # apart leaves a delivered answer whose record cannot be edited.
-    terminal_turn_for: _TerminalTurnFor | None = None
-    terminal_turn_committed: _TerminalTurnCommitted | None = None
+    # ID is; the turn is the thing that needs to know it. Committing them apart
+    # leaves a delivered answer whose turn cannot be edited.
+    completes_turns: bool = False
     process_shutdown_requested: Callable[[], bool] = lambda: False
     # Told the reply whose row just stopped being unknown, so claims that
     # waited for that reply's earlier writes run again.
@@ -178,6 +148,7 @@ class MatrixDeliveryWorker:
         result: Mapping[str, object] | None = None,
         edits_event_id: str | None = None,
         permanent_failure_reason: str | None = None,
+        turn_key: str | None = None,
     ) -> str | None:
         """Enqueue, claim, send, and acknowledge one delivery.
 
@@ -204,6 +175,7 @@ class MatrixDeliveryWorker:
         halves of "the outbox owes this answer, the journal no longer does"
         commit together, so the send below is the only step a crash can leave
         half done -- and resending a frozen row is what recovery is for.
+        ``turn_key`` names the turn a FINAL answers, as its producer recorded it.
         """
         async with self._delivery_lock(delivery_id):
             outcome = await self._complete_delivery_across_cancellation(
@@ -215,6 +187,7 @@ class MatrixDeliveryWorker:
                 result=result,
                 edits_event_id=edits_event_id,
                 permanent_failure_reason=permanent_failure_reason,
+                turn_key=turn_key,
             )
         return await self._finish_flush(outcome)
 
@@ -247,7 +220,7 @@ class MatrixDeliveryWorker:
             if enqueued is None or enqueued.delivery_id is None or enqueued.stage is None:
                 return ReplyRowDelivery(enqueue=enqueued)
             if self.handoff is not None and enqueued.settled_event_ids:
-                self.handoff.released(enqueued.settled_event_ids)
+                self.handoff(enqueued.settled_event_ids)
             if not await self._flush_reply_rows(request.reply_id, before_sequence=enqueued.sequence):
                 # An earlier row cannot be sent yet; recovery sends both in order.
                 return ReplyRowDelivery(enqueue=enqueued)
@@ -278,6 +251,47 @@ class MatrixDeliveryWorker:
                 return False
         return not await self.store.unresolved_reply_rows(reply_id, before_sequence=before_sequence)
 
+    async def _enqueue(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+        result: Mapping[str, object] | None,
+        edits_event_id: str | None,
+        permanent_failure_reason: str | None,
+        turn_key: str | None,
+        hands_over: bool,
+    ) -> tuple[str | None, tuple[str, ...]]:
+        """Record the delivery; a FINAL that hands its turn over also returns the journal sources it settled."""
+        if not hands_over:
+            transaction_id = await self.store.enqueue_matrix_delivery(
+                delivery_id=delivery_id,
+                stage=stage,
+                event_type=self.event_type,
+                room_id=room_id,
+                thread_id=thread_id,
+                payload=payload,
+                result=result,
+                edits_event_id=edits_event_id,
+                permanent_failure_reason=permanent_failure_reason,
+            )
+            return transaction_id, ()
+        enqueued = await self.store.enqueue_final_answer(
+            delivery_id=delivery_id,
+            event_type=self.event_type,
+            room_id=room_id,
+            thread_id=thread_id,
+            payload=payload,
+            result=result,
+            edits_event_id=edits_event_id,
+            permanent_failure_reason=permanent_failure_reason,
+            turn_key=turn_key,
+        )
+        return (None, ()) if enqueued is None else (enqueued.transaction_id, enqueued.settled_event_ids)
+
     async def _complete_delivery_across_cancellation(
         self,
         *,
@@ -289,6 +303,7 @@ class MatrixDeliveryWorker:
         result: Mapping[str, object] | None,
         edits_event_id: str | None,
         permanent_failure_reason: str | None,
+        turn_key: str | None,
     ) -> _FlushOutcome:
         """Finish a delivery whose durable handoff may already have committed."""
         completed: _FlushOutcome | None = None
@@ -301,25 +316,24 @@ class MatrixDeliveryWorker:
         async def finish() -> _FlushOutcome:
             nonlocal completed
             handoff = self.handoff if stage is DeliveryStage.FINAL else None
-            handed_over = handoff.sources_for_turn(delivery_id) if handoff is not None else ()
-            transaction_id = await self.store.enqueue_matrix_delivery(
+            transaction_id, handed_over = await self._enqueue(
                 delivery_id=delivery_id,
                 stage=stage,
-                event_type=self.event_type,
                 room_id=room_id,
                 thread_id=thread_id,
                 payload=payload,
                 result=result,
                 edits_event_id=edits_event_id,
-                settle_source_event_ids=handed_over,
                 permanent_failure_reason=permanent_failure_reason,
+                turn_key=turn_key,
+                hands_over=handoff is not None,
             )
             if transaction_id is None:
                 logger.info("matrix_delivery_refused_for_ended_membership", delivery_id=delivery_id, stage=stage.value)
                 completed = _FlushOutcome(event_id=None)
                 return completed
             if handoff is not None:
-                handoff.released(handed_over)
+                handoff(handed_over)
             if process_shutdown_requested:
                 completed = _FlushOutcome(event_id=None)
                 return completed
@@ -613,29 +627,17 @@ class MatrixDeliveryWorker:
         return await self._acknowledge(claimed, event_id)
 
     async def _acknowledge(self, claimed: MatrixDelivery, event_id: str) -> _FlushOutcome:
-        """Bind the row and report whether its record needs publishing.
+        """Bind the row, completing in the same transaction the turn a non-AI FINAL answers.
 
-        The record commits inside the acknowledgement, so nothing else writes
-        it -- which means the ledger never sees that write in the order it
-        orders its own. Recovery is where that matters: it acknowledges and
-        returns with no ordinary terminal write following, so a mutation racing
-        this one overwrites the row and the answer's event ID is gone for good.
-        Publishing the committed record is what puts it back under the
-        ledger's ordering. That callback runs after the visible-delivery lock
-        is released: it is downstream bookkeeping, and keeping the lock while
-        calling out would let a callback that re-enters delivery deadlock the
-        turn on itself.
-
-        Only on a bound acknowledgement. A loser committed nothing, so it has
-        nothing to settle and must not overwrite the winner's record.
+        Only a bound acknowledgement completes it. A loser committed nothing and
+        must not report its own send.
 
         Ownership is the store's answer, never this call's own inference. The
         settled event matching the one just sent looks like proof of winning
         and is not: two processes resending one frozen transaction ID from the
         same device are deduplicated by Matrix into the *same* event, so a
         loser sees its own event on the row while the write that put it there
-        was somebody else's -- and it would publish a record the database does
-        not hold.
+        was somebody else's.
 
         Returns the event the row actually names, which is not always the one
         just sent. A caller that lost the race must report the winner's event
@@ -645,24 +647,16 @@ class MatrixDeliveryWorker:
         itself was guarded.
         """
         delivered_projections = await self._delivered_projections(claimed, event_id)
-        terminal_response_event_id = claimed.edits_event_id or event_id
         acknowledged = await self.store.acknowledge_matrix_delivery(
             delivery_id=claimed.delivery_id,
             stage=claimed.stage,
             event_id=event_id,
             delivered_projections=delivered_projections,
-            terminal_turn=self._terminal_turn(
-                claimed,
-                terminal_response_event_id,
-            ),
+            terminal_response_event_id=self._terminal_response_event_id(claimed, event_id),
         )
         if acknowledged.settled_event_id is None:
             return _FlushOutcome(event_id=event_id)
-        return _FlushOutcome(
-            event_id=acknowledged.settled_event_id,
-            committed_terminal=acknowledged.terminal_turn,
-            reply_effects=acknowledged.reply_effects,
-        )
+        return _FlushOutcome(event_id=acknowledged.settled_event_id, reply_effects=acknowledged.reply_effects)
 
     async def _delivered_projections(
         self,
@@ -684,22 +678,21 @@ class MatrixDeliveryWorker:
         event_id = outcome.event_id
         if outcome.reply_effects and self.run_reply_effects is not None:
             await self.run_reply_effects(outcome.reply_effects)
-        if outcome.committed_terminal is not None and self.terminal_turn_committed is not None:
-            await run_coroutine_until_complete(self.terminal_turn_committed(outcome.committed_terminal))
         if outcome.propagate_cancellation is not None:
             raise outcome.propagate_cancellation
         return event_id
 
-    def _terminal_turn(self, delivery: MatrixDelivery, event_id: str) -> TerminalTurnWrite | None:
-        """Return the turn record this acknowledgement should also commit.
+    def _terminal_response_event_id(self, delivery: MatrixDelivery, event_id: str) -> str | None:
+        """Return the response event the turn this acknowledgement also completes names, if it completes one.
 
         Only for ``FINAL``. An ``INITIAL`` row is a placeholder, and binding a
         turn's terminal record to one would call a turn finished while the
-        model is still running.
+        model is still running. A reply's row completes nothing here: the
+        reply's records record its turn answered when they settle its sources.
         """
-        if delivery.stage is not DeliveryStage.FINAL or self.terminal_turn_for is None:
+        if not self.completes_turns or delivery.stage is not DeliveryStage.FINAL or delivery.reply_id is not None:
             return None
-        return self.terminal_turn_for(delivery, event_id)
+        return delivery.edits_event_id or event_id
 
     async def _resolve_delivered_event(self, claimed: MatrixDelivery) -> str | None:
         """Return the event an earlier attempt left in the room, if any.
@@ -850,5 +843,4 @@ __all__ = [
     "ReplyRowEnqueuer",
     "ResolveDelivered",
     "SendDelivery",
-    "TurnHandoff",
 ]

@@ -44,7 +44,7 @@ def _stored_parent(config: Config, paths: RuntimePaths, run_id: str) -> RunRecor
 
 def _save_parent(config: Config, paths: RuntimePaths, record: RunRecord) -> None:
     storage = create_session_storage("leader", config, paths, _identity())
-    session = storage.load_session(_identity().session_id or "", "agent")
+    session = storage.load_session(_identity().session_id or "")
     assert session is not None
     storage.save_run(session, record, record_usage=False)
 
@@ -171,7 +171,7 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: PLR
             ),
         ]
         child_storage = create_session_storage(child_name, config, paths, child_execution_identity(child))
-        child_session = child_storage.load_session(child.session_id, "agent")
+        child_session = child_storage.load_session(child.session_id)
         assert child_session is not None
         child_storage.save_run(child_session, child_run, record_usage=False)
     approved = not decision.startswith("deny")

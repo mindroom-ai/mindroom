@@ -19,6 +19,7 @@ from mindroom.api.usage_export import UsageExportRunner
 from mindroom.session_storage.agent_storage import prepare_conversation_database
 from mindroom.session_storage.schema import TableNames
 from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
+from tests.session_storage.agno_layout import recorded_owner
 
 _ISSUER = "https://issuer.example"
 _SERVICE_AUDIENCE = "mindroom-usage-export"
@@ -179,7 +180,7 @@ def _seed_usage_database(storage_root: Path) -> None:
             ),
         )
 
-    prepare_conversation_database(database, TableNames.of_database(database), agent_name=None)
+    prepare_conversation_database(database, TableNames.of_database(database), recorded_owner(database))
 
 
 def _invalid_service_assertion(case: str, private_key: rsa.RSAPrivateKey) -> str | None:

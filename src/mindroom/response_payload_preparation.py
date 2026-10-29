@@ -1,13 +1,13 @@
 """Execution-side, under-lock assembly of one response request's payload.
 
-Ingress (``TurnController`` + ``text_ingress_dispatch``) builds a complete,
+Turn dispatch (:class:`~mindroom.turns.dispatch.TurnDispatcher`) builds a complete,
 immutable :class:`ResponsePayloadPreparation` value and hands it to the
 response runner inside the :class:`~mindroom.response_runner.ResponseRequest`.
 Once the runner owns the lifecycle lock and has refreshed thread history, it
 calls :meth:`ResponsePayloadPreparer.prepare` to finish assembling the request.
 
 Data crosses the seam as values, and the work runs here as a first-class named
-step rather than as a closure back into ingress.
+step rather than as a closure back into turn dispatch.
 """
 
 from __future__ import annotations
@@ -30,10 +30,11 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.dispatch_handoff import MediaDispatchEvent
+    from mindroom.hooks.ingress import IngressHookRunner
     from mindroom.inbound_turn_normalizer import DispatchPayload, InboundTurnNormalizer
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_runner import ResponseRequest
-    from mindroom.turn_policy import IngressHookRunner, PreparedDispatch
+    from mindroom.turn_policy import PreparedDispatch
 
 
 @dataclass(frozen=True)
