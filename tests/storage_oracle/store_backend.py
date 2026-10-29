@@ -353,14 +353,13 @@ class StoreBackend(Driver):
 
     @override
     def chunk_basis(self, session: ConversationSession, run_ids: Sequence[str], previous_summary: str | None) -> object:
-        return read_chunk_basis(self.store, session, self.scope, run_ids, previous_summary=previous_summary)
+        return read_chunk_basis(self.store, session, run_ids, previous_summary=previous_summary)
 
     @override
     def append_chunk(self, session: ConversationSession, basis: object, run_ids: Sequence[str], summary: str) -> bool:
         return append_compaction_chunk(
             self.store,
             session=session,
-            scope=self.scope,
             basis=cast("_ChunkBasis", basis),
             included_run_ids=run_ids,
             summary=summary,
@@ -383,7 +382,7 @@ class StoreBackend(Driver):
 
     @override
     def fold_basis(self, session: ConversationSession) -> FoldBasisView | None:
-        basis = read_fold_basis(self.store, session, self.scope)
+        basis = read_fold_basis(self.store, session)
         if basis is None:
             return None
         return FoldBasisView(handle=basis, summary=basis.summary, run_ids=tuple(run.run_id for run in basis.runs))
@@ -400,7 +399,6 @@ class StoreBackend(Driver):
         appended = append_fold(
             self.store,
             session=session,
-            scope=self.scope,
             basis=cast("FoldBasis", basis.handle),
             summary=summary,
             fold=Fold(
@@ -431,7 +429,7 @@ class StoreBackend(Driver):
 
     @override
     def set_force(self, session: ConversationSession, *, forced: bool) -> None:
-        set_force_compaction(self.store, session=session, scope=self.scope, forced=forced)
+        set_force_compaction(self.store, session=session, forced=forced)
 
     @override
     def request_force(self, session: ConversationSession) -> None:
@@ -440,7 +438,6 @@ class StoreBackend(Driver):
         set_force_compaction(
             self.store,
             session=new_scope_session(session_id=SESSION_ID, scope=self.scope),
-            scope=self.scope,
             forced=True,
         )
 

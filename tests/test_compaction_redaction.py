@@ -94,7 +94,7 @@ def _seed(storage: ConversationStore, run_ids: list[str]) -> ConversationSession
 
 
 def _compact(storage: ConversationStore, session: ConversationSession, run_ids: list[str], summary: str) -> None:
-    compact_runs(storage, session, _SCOPE, run_ids, summary)
+    compact_runs(storage, session, run_ids, summary)
 
 
 def _stored(storage: ConversationStore) -> ConversationSession:
@@ -108,7 +108,7 @@ def _summary(session: ConversationSession) -> str | None:
 
 
 def _seen(storage: ConversationStore, session: ConversationSession) -> set[str]:
-    return read_scope_seen_event_ids(storage, session, _SCOPE)
+    return read_scope_seen_event_ids(storage, session)
 
 
 def _redact(storage: ConversationStore, session: ConversationSession, event_id: str) -> bool:
@@ -183,7 +183,7 @@ def test_redacting_a_loaded_only_event_keeps_the_summary(storage: ConversationSt
     """A summary provably built without the event survives its redaction."""
     session = _seed(storage, ["r1", "r2"])
     _compact(storage, session, ["r1"], "summary of r1")
-    update_scope_seen_event_ids(storage, session, _SCOPE, ["$team-consumed"])
+    update_scope_seen_event_ids(storage, session, ["$team-consumed"])
 
     assert _redact(storage, session, "$r2")
 
@@ -227,7 +227,7 @@ def test_history_event_ids_include_compacted_sources_and_paused_runs(storage: Co
     event_ids = _read_scope_history_event_ids(storage, _stored(storage))
 
     assert {"$coalesced", "$r1", "$r2", "$r3"} <= event_ids
-    assert "$coalesced" not in read_scope_seen_event_ids(storage, _stored(storage), _SCOPE)
+    assert "$coalesced" not in read_scope_seen_event_ids(storage, _stored(storage))
 
 
 def test_redaction_without_any_matching_history_changes_nothing(storage: ConversationStore) -> None:
@@ -406,7 +406,7 @@ async def test_redaction_cleans_the_agent_runs_of_a_conversation_started_under_i
 def test_team_redaction_without_compaction_keeps_unrelated_runs(storage: ConversationStore) -> None:
     """Seen ids a team records on the session row are not legacy provenance."""
     session = _seed(storage, ["t1", "t2", "t3"])
-    update_scope_seen_event_ids(storage, session, _SCOPE, ["$t1", "$t2", "$t3"])
+    update_scope_seen_event_ids(storage, session, ["$t1", "$t2", "$t3"])
 
     assert _redact(storage, session, "$t3")
 
@@ -420,7 +420,7 @@ def test_rollback_forgets_seen_ids_of_the_removed_runs(storage: ConversationStor
     session = _seed(storage, ["r1", "r2", "r3"])
     _compact(storage, session, ["r1"], "summary of r1")
     _compact(storage, session, ["r2"], "summary of r1 and r2")
-    update_scope_seen_event_ids(storage, session, _SCOPE, ["$r3"])
+    update_scope_seen_event_ids(storage, session, ["$r3"])
 
     assert _redact(storage, session, "$r2")
 
@@ -469,7 +469,7 @@ def test_a_stale_session_copy_keeps_the_rolled_back_seen_ids_out(storage: Conver
     stale = _stored(storage)
     assert _redact(storage, session, "$r2")
 
-    update_scope_seen_event_ids(storage, stale, _SCOPE, ["$team-consumed"])
+    update_scope_seen_event_ids(storage, stale, ["$team-consumed"])
 
     stored = _stored(storage)
     assert _summary(stored) == "summary of r1"

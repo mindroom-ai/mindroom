@@ -178,7 +178,7 @@ async def test_a_stale_save_of_a_folded_run_never_replays(tmp_path: Path) -> Non
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = seed_session(storage, _session([_completed_run("run-1"), _completed_run("run-2")]))
-    compact_runs(storage, session, _SCOPE, ["run-1"], "summary")
+    compact_runs(storage, session, ["run-1"], "summary")
     seed_session(storage, _session([_completed_run("run-1"), _completed_run("run-2")]))
 
     prepared = await prepare_history_for_run_for_test(
@@ -207,7 +207,7 @@ def test_a_stale_save_of_a_folded_run_and_its_member_runs_changes_neither(tmp_pa
         _completed_run("kept"),
     ]
     session = seed_session(storage, _session(runs))
-    compact_runs(storage, session, _SCOPE, ["compacted"], "summary")
+    compact_runs(storage, session, ["compacted"], "summary")
     seed_session(storage, _session(runs))
 
     persisted = storage.load_session("session-1")
@@ -234,13 +234,13 @@ def test_update_scope_state_on_latest_applies_update_to_freshest_row(tmp_path: P
         seen_states.append(latest)
         return HistoryScopeState(force_compact_before_next_run=False)
 
-    returned_state = update_scope_state_on_latest(storage, session=stale_session, scope=_SCOPE, update=clear_force)
+    returned_state = update_scope_state_on_latest(storage, session=stale_session, update=clear_force)
 
     assert seen_states == [concurrent_state]
     assert returned_state.force_compact_before_next_run is False
     persisted_session = storage.load_session("session-1")
     assert persisted_session is not None
-    assert read_scope_state(persisted_session, _SCOPE) == returned_state
+    assert read_scope_state(persisted_session) == returned_state
     assert stale_session.metadata == persisted_session.metadata
 
 
@@ -271,14 +271,13 @@ def test_update_scope_state_on_latest_skips_write_when_update_is_a_no_op(
     returned_state = update_scope_state_on_latest(
         storage,
         session=stale_session,
-        scope=_SCOPE,
         update=lambda latest: latest,
     )
 
     assert statements
     assert not [statement for statement in statements if statement.lstrip().upper().startswith("UPDATE")]
     assert returned_state == persisted_state
-    assert read_scope_state(stale_session, _SCOPE) == persisted_state
+    assert read_scope_state(stale_session) == persisted_state
 
 
 def test_scope_state_writes_keep_other_scopes_verbatim() -> None:
@@ -348,7 +347,7 @@ async def test_chunk_progress_survives_interruption_and_restart(
             storage=storage,
             session=session,
             scope=_SCOPE,
-            state=read_scope_state(session, _SCOPE),
+            state=read_scope_state(session),
             summarizer=_summarizer(
                 summary_model(),
                 10_000,
@@ -370,7 +369,7 @@ async def test_chunk_progress_survives_interruption_and_restart(
     assert interrupted.summary.text == "summary chunk 1"
     assert [run.run_id for run in interrupted.runs or []] == ["run-2"]
     assert folded_run_ids(storage) == ["run-1"]
-    assert read_scope_state(interrupted, _SCOPE).force_compact_before_next_run is True
+    assert read_scope_state(interrupted).force_compact_before_next_run is True
     assert "RUN1-MARKER" in first_pass_inputs[0]
 
     # A stale writer saves the already-compacted run again before the restart.
@@ -405,7 +404,7 @@ async def test_chunk_progress_survives_interruption_and_restart(
     assert persisted.summary.text == "summary chunk 2"
     assert persisted.runs == []
     assert folded_run_ids(storage) == ["run-1", "run-2"]
-    assert read_scope_state(persisted, _SCOPE).force_compact_before_next_run is False
+    assert read_scope_state(persisted).force_compact_before_next_run is False
     # The restart consumed the partial summary and never re-summarized run-1.
     assert len(restart_inputs) == 1
     assert "summary chunk 1" in restart_inputs[0]
@@ -1100,7 +1099,7 @@ async def test_claude_compaction_splits_dense_preserved_metadata_before_the_inpu
             storage=storage,
             session=session,
             scope=_SCOPE,
-            state=read_scope_state(session, _SCOPE),
+            state=read_scope_state(session),
             summarizer=_summarizer(
                 summary_model(model_id="claude-sonnet-5", claude=True),
                 summary_input_limit,
@@ -1164,7 +1163,7 @@ async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_pa
             storage=storage,
             session=session,
             scope=_SCOPE,
-            state=read_scope_state(session, _SCOPE),
+            state=read_scope_state(session),
             summarizer=_summarizer(
                 summary_model(),
                 10_000,
@@ -1379,7 +1378,7 @@ async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_pat
             storage=storage,
             session=session,
             scope=_SCOPE,
-            state=read_scope_state(session, _SCOPE),
+            state=read_scope_state(session),
             summarizer=_summarizer(
                 primary,
                 100_000,
@@ -1443,7 +1442,7 @@ async def test_small_refused_summary_request_fails_without_identical_retry_or_pe
             storage=storage,
             session=session,
             scope=_SCOPE,
-            state=read_scope_state(session, _SCOPE),
+            state=read_scope_state(session),
             summarizer=_summarizer(
                 summary_model(),
                 10_000,
@@ -1465,7 +1464,7 @@ async def test_small_refused_summary_request_fails_without_identical_retry_or_pe
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1"]
-    assert read_scope_state(persisted, _SCOPE) == HistoryScopeState(force_compact_before_next_run=True)
+    assert read_scope_state(persisted) == HistoryScopeState(force_compact_before_next_run=True)
 
 
 @pytest.mark.asyncio
@@ -1504,7 +1503,7 @@ async def test_minimum_available_budget_can_issue_smaller_degradation_retry(tmp_
             storage=storage,
             session=session,
             scope=_SCOPE,
-            state=read_scope_state(session, _SCOPE),
+            state=read_scope_state(session),
             summarizer=_summarizer(
                 summary_model(),
                 summary_input_budget,
@@ -1566,7 +1565,7 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
             storage=storage,
             session=session,
             scope=_SCOPE,
-            state=read_scope_state(session, _SCOPE),
+            state=read_scope_state(session),
             summarizer=_summarizer(
                 summary_model(),
                 summary_input_budget,
@@ -1591,7 +1590,7 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
     assert persisted.summary.text == previous_summary
     assert "TAIL-FACT-MUST-SURVIVE" in persisted.summary.text
     assert [run.run_id for run in persisted.runs] == ["run-1"]
-    assert read_scope_state(persisted, _SCOPE) == HistoryScopeState()
+    assert read_scope_state(persisted) == HistoryScopeState()
 
     runtime_generate_summary = AsyncMock()
     install_model_providers(monkeypatch, {"default": summary_model()})
@@ -1619,7 +1618,7 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
     assert repeated.summary is not None
     assert repeated.summary.text == previous_summary
     assert [run.run_id for run in repeated.runs or []] == ["run-1"]
-    assert read_scope_state(repeated, _SCOPE) == HistoryScopeState()
+    assert read_scope_state(repeated) == HistoryScopeState()
 
 
 @pytest.mark.asyncio
@@ -1666,7 +1665,7 @@ async def test_two_timeouts_exhaust_current_attempt_without_persisting_suppressi
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1"]
-    assert read_scope_state(persisted, _SCOPE) == HistoryScopeState()
+    assert read_scope_state(persisted) == HistoryScopeState()
 
 
 @pytest.mark.parametrize(
@@ -1718,7 +1717,7 @@ async def test_compaction_retries_transient_provider_error_at_same_budget(
             storage=storage,
             session=session,
             scope=_SCOPE,
-            state=read_scope_state(session, _SCOPE),
+            state=read_scope_state(session),
             summarizer=_summarizer(
                 summary_model(),
                 10_000,

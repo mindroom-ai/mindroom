@@ -525,7 +525,7 @@ def _seed_history(
         runs=[_completed_team_run("run-earlier", team_id=team.scope.scope_id, messages=list(messages))],
     )
     seed_session(team.storage, session)
-    update_scope_seen_event_ids(team.storage, session, team.scope, list(seen_event_ids))
+    update_scope_seen_event_ids(team.storage, session, list(seen_event_ids))
 
 
 @pytest.mark.asyncio
@@ -825,7 +825,7 @@ async def test_a_matrix_reply_marks_its_trigger_and_the_unread_thread_events_see
 
     session = team.storage.load_session(SESSION_ID)
     assert session is not None
-    assert read_scope_seen_event_ids(team.storage, session, team.scope) == {"$event-1", EVENT_ID}
+    assert read_scope_seen_event_ids(team.storage, session) == {"$event-1", EVENT_ID}
 
 
 @pytest.mark.asyncio
@@ -848,7 +848,7 @@ async def test_a_team_reply_writes_session_metadata_in_the_database_s_lane(
 
     session = team.storage.load_session(SESSION_ID)
     assert session is not None
-    assert read_scope_seen_event_ids(team.storage, session, team.scope) == {EVENT_ID}
+    assert read_scope_seen_event_ids(team.storage, session) == {EVENT_ID}
     assert writing_threads
     assert all(name.startswith("conversation-store") for name in writing_threads), writing_threads
 

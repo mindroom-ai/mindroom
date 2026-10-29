@@ -555,30 +555,24 @@ def folds_of(storage: ConversationStore, scope_key: str, session_id: str = "sess
 def compact_runs(
     storage: ConversationStore,
     session: ConversationSession,
-    scope: HistoryScope,
     run_ids: list[str],
     summary: str,
 ) -> None:
-    """Append one compaction chunk folding ``run_ids`` behind ``summary``, as compaction commits a chunk."""
+    """Append one compaction chunk folding ``run_ids`` behind ``summary`` in ``session``'s scope, as compaction does."""
+    scope_key = HistoryScope(kind=session.kind, scope_id=session.owner_id).key
+    latest = summary_rows.latest_row(storage, session_id=session.session_id, scope_key=scope_key)
     assert append_compaction_chunk(
         storage=storage,
         session=session,
-        scope=scope,
         basis=read_chunk_basis(
             storage,
             session,
-            scope,
             run_ids,
-            previous_summary=_stored_summary(storage, session, scope),
+            previous_summary=latest.summary if latest is not None else None,
         ),
         included_run_ids=run_ids,
         summary=summary,
     )
-
-
-def _stored_summary(storage: ConversationStore, session: ConversationSession, scope: HistoryScope) -> str | None:
-    latest = summary_rows.latest_row(storage, session_id=session.session_id, scope_key=scope.key)
-    return latest.summary if latest is not None else None
 
 
 def seed_summary(storage: ConversationStore, session: ConversationSession, scope: HistoryScope, summary: str) -> None:

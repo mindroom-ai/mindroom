@@ -99,14 +99,12 @@ def _fold(
     members: Sequence[str] = (),
 ) -> bool:
     """Fold the stored runs after the latest summary row and part of the running ``run``, as a mid-turn fold does."""
-    scope = _TEAM_SCOPE if isinstance(run, TeamRunRecord) else _SCOPE
     session = _session(run)
-    basis = read_fold_basis(storage, session, scope)
+    basis = read_fold_basis(storage, session)
     assert basis is not None
     return append_fold(
         storage,
         session=session,
-        scope=scope,
         basis=basis,
         summary=summary,
         fold=Fold(run=run, messages=tuple(folded), member_run_ids=frozenset(members)),
@@ -286,7 +284,7 @@ def test_editing_a_turn_an_older_resumed_run_folded_removes_that_run(storage: Co
     _seed(storage, [_run("r1")])
     _save(storage, paused)
     _save(storage, _run("r2"))
-    compact_runs(storage, _loaded(storage), _SCOPE, ["r1"], "S0")
+    compact_runs(storage, _loaded(storage), ["r1"], "S0")
     assert _fold(storage, paused, "S1")
     assert log_of(storage, _SCOPE.key, "session") == ["run:r1", "row:S0", "run:r2", "row:S1", "run:paused"]
 
@@ -338,14 +336,13 @@ def test_a_fold_is_refused_when_another_compaction_appended_first(storage: Conve
     """A pre-reply compaction that commits during a long turn's summary call wins; the fold builds on stale history."""
     session = _seed(storage, [_run("r1"), _run("r2")])
     running = _run("live")
-    basis = read_fold_basis(storage, _session(), _SCOPE)
+    basis = read_fold_basis(storage, _session())
     assert basis is not None
-    compact_runs(storage, session, _SCOPE, ["r1"], "S-pre-reply")
+    compact_runs(storage, session, ["r1"], "S-pre-reply")
 
     assert not append_fold(
         storage,
         session=session,
-        scope=_SCOPE,
         basis=basis,
         summary="S-fold",
         fold=Fold(run=running, messages=(), member_run_ids=frozenset()),
@@ -356,14 +353,13 @@ def test_a_fold_is_refused_when_another_compaction_appended_first(storage: Conve
 def test_a_fold_racing_a_retirement_is_refused(storage: ConversationStore) -> None:
     """Retirement appends a barrier, so a fold read before it would summarize retired history again."""
     session = _seed(storage, [_run("r1")])
-    basis = read_fold_basis(storage, _session(), _SCOPE)
+    basis = read_fold_basis(storage, _session())
     assert basis is not None
     summary_rows.retire(storage, session=_session(), scope_key=_SCOPE.key)
 
     assert not append_fold(
         storage,
         session=session,
-        scope=_SCOPE,
         basis=basis,
         summary="S",
         fold=Fold(run=_run("live", status=RunStatus.running), messages=(), member_run_ids=frozenset()),
@@ -416,7 +412,7 @@ def test_a_fold_keeps_the_events_its_turn_read_seen_after_the_turn_stops(storage
     running.status = RunStatus.cancelled
     _save(storage, running)
 
-    assert "$context" in read_scope_seen_event_ids(storage, _loaded(storage), _SCOPE)
+    assert "$context" in read_scope_seen_event_ids(storage, _loaded(storage))
 
 
 def test_redacting_a_team_turn_that_folded_removes_its_member_runs(team_store: ConversationStore) -> None:

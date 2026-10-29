@@ -173,7 +173,7 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(
     assert persisted.summary.text == "merged summary"
     assert persisted.runs == []
 
-    state = read_scope_state(persisted, scope)
+    state = read_scope_state(persisted)
     assert len(folded_run_ids(storage)) == 4
     assert state.force_compact_before_next_run is False
 
@@ -278,7 +278,7 @@ async def test_prepare_history_for_run_required_compaction_edits_failure_when_mo
 
     persisted = storage.load_session("session-1")
     assert persisted is not None
-    assert read_scope_state(persisted, scope).force_compact_before_next_run is False
+    assert read_scope_state(persisted).force_compact_before_next_run is False
     assert prepared.compaction_decision.mode == "required"
     assert prepared.compaction_reply_outcome == "failed"
     assert len(lifecycle.events) == 2
@@ -1290,7 +1290,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
     assert persisted.summary.text == first_summary_text
     assert [run.run_id for run in persisted.runs or []] == (["run-3"] if second_chunk == "fails" else [])
     assert summary_mock.await_count == 2
-    assert read_scope_state(persisted, scope).force_compact_before_next_run is False
+    assert read_scope_state(persisted).force_compact_before_next_run is False
     if second_chunk == "fails":
         assert prepared.compaction_reply_outcome == "failed"
     else:
@@ -1776,7 +1776,7 @@ async def test_prepare_history_for_run_compaction_failure_clears_force_flag(
         async def complete_failure(self, event: CompactionLifecycleFailure) -> None:
             stored = storage.load_session("session-1")
             assert stored is not None
-            flag_at_failure_notice.append(read_scope_state(stored, scope).force_compact_before_next_run)
+            flag_at_failure_notice.append(read_scope_state(stored).force_compact_before_next_run)
             await super().complete_failure(event)
 
     install_model_providers(monkeypatch, {"default": summary_model()})
@@ -1804,7 +1804,7 @@ async def test_prepare_history_for_run_compaction_failure_clears_force_flag(
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2", "run-3", "run-4"]
 
-    state = read_scope_state(persisted, scope)
+    state = read_scope_state(persisted)
     assert state.force_compact_before_next_run is False
     assert summary_rows_of(storage, scope.key) == []
 
@@ -1862,7 +1862,7 @@ async def test_a_manual_compaction_the_conversation_outran_says_so_and_stays_req
     persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is None
-    assert read_scope_state(persisted, scope).force_compact_before_next_run is True
+    assert read_scope_state(persisted).force_compact_before_next_run is True
     # The reply plans with what the conversation holds now, not the run the redaction removed.
     assert [run.run_id for run in session.runs or []] == ["run-2"]
     assert prepared.compaction_reply_outcome == "failed"
@@ -1993,7 +1993,7 @@ async def _prepare_with_reported_usage(
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     if folded_run_ids:
         with patch("mindroom.history.summary_rows.time", return_value=_SUMMARY_WRITTEN_AT):
-            compact_runs(storage, session, scope, list(folded_run_ids), "Earlier summary")
+            compact_runs(storage, session, list(folded_run_ids), "Earlier summary")
     estimate = estimate_prompt_visible_history_tokens(
         session=session,
         scope=scope,

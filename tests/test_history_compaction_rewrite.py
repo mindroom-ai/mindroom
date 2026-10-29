@@ -1413,7 +1413,7 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_when_rewri
         observed.append("after")
 
     registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [before, after])])
-    config, runtime_paths, storage, scope, runtime_context = _forced_compaction_context(
+    config, runtime_paths, storage, _scope, runtime_context = _forced_compaction_context(
         tmp_path,
         session=session,
         registry=registry,
@@ -1442,7 +1442,7 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_when_rewri
     assert persisted is not None
     assert persisted.summary is None
     assert len(persisted.runs) == 2
-    assert read_scope_state(persisted, scope).force_compact_before_next_run is False
+    assert read_scope_state(persisted).force_compact_before_next_run is False
     assert prepared.compaction_reply_outcome == "failed"
     assert observed == []
 
@@ -2213,7 +2213,7 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(
     persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.runs == []
-    assert read_scope_seen_event_ids(storage, persisted, scope) == {
+    assert read_scope_seen_event_ids(storage, persisted) == {
         "event-1",
         "event-2",
         "event-3",

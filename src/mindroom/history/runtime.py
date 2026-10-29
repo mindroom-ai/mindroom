@@ -551,7 +551,6 @@ async def _compact_before_reply(
         await clear_manual_compaction_request(
             storage=storage,
             session=session,
-            scope=scope,
             state=state,
             keep_concurrent_request=False,
         )
@@ -833,9 +832,9 @@ def _prepare_scope_state_for_run(
     scope: HistoryScope,
     execution_plan: ResolvedHistoryExecutionPlan,
 ) -> HistoryScopeState:
-    state = read_scope_state(session, scope)
+    state = read_scope_state(session)
     if state.force_compact_before_next_run and not execution_plan.text_compaction_available:
-        state = set_force_compaction(storage, session=session, scope=scope, forced=False)
+        state = set_force_compaction(storage, session=session, forced=False)
         logger.warning(
             "Forced compaction skipped because text compaction is unavailable",
             session_id=session.session_id,

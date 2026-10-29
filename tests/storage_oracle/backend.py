@@ -781,7 +781,7 @@ class Driver(ABC):
             return "stale-basis"
         self.chunk_summary_usage(session)
         appended = self.append_chunk(session, basis, chunk, _summary_text(summary_tokens(previous) | set(chunk)))
-        if appended and read_scope_state(session, self.scope).force_compact_before_next_run:
+        if appended and read_scope_state(session).force_compact_before_next_run:
             self.set_force(session, forced=False)
         return {"appended": appended, "chunk": chunk}
 

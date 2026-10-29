@@ -324,7 +324,7 @@ async def _compact_scope(
     The append stores the run's folded part with the row and leaves the turn's session as the store holds it, and
     once the row is stored, the run's request and record follow.
     """
-    basis = await asyncio.to_thread(read_fold_basis, store, session, scope)
+    basis = await asyncio.to_thread(read_fold_basis, store, session)
     if basis is None:
         logger.warning("Mid-turn compaction skipped because the conversation changed", run_id=record.run_id)
         return None

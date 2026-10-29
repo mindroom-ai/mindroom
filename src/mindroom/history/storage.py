@@ -94,9 +94,9 @@ def new_scope_session(*, session_id: str, scope: HistoryScope) -> ConversationSe
     )
 
 
-def read_scope_state(session: ConversationSession, scope: HistoryScope) -> HistoryScopeState:
-    """Return the scoped compaction state for one session and scope."""
-    return _scope_state(session.metadata, scope)
+def read_scope_state(session: ConversationSession) -> HistoryScopeState:
+    """Return the compaction state of the scope owning ``session``."""
+    return _scope_state(session.metadata, _owner_scope(session))
 
 
 def _scope_state(metadata: dict[str, Any] | None, scope: HistoryScope) -> HistoryScopeState:
@@ -166,16 +166,13 @@ def run_event_ids(run: AnyRunRecord) -> set[str]:
     return seen_event_ids(run.metadata) | source_event_ids(run.metadata)
 
 
-def read_scope_seen_event_ids(
-    storage: ConversationStore,
-    session: ConversationSession,
-    scope: HistoryScope,
-) -> set[str]:
-    """Return the Matrix event ids one scope's replayed history already represents.
+def read_scope_seen_event_ids(storage: ConversationStore, session: ConversationSession) -> set[str]:
+    """Return the Matrix event ids the replayed history of the scope owning ``session`` already represents.
 
     Loaded runs carry their own ids, the summary rows supply those of compacted
     history, and session metadata adds ids no stored run carries.
     """
+    scope = _owner_scope(session)
     seen = _read_preserved_scope_seen_event_ids(session.metadata, scope)
     seen |= summary_rows.history_event_ids(storage, session_id=session.session_id, scope_key=scope.key, kind="seen")
     for run in session.runs:
@@ -199,14 +196,12 @@ def _read_scope_history_event_ids(storage: ConversationStore, session: Conversat
     return event_ids
 
 
-def update_scope_seen_event_ids(
-    storage: ConversationStore,
-    session: ConversationSession,
-    scope: HistoryScope,
-    event_ids: list[str],
-) -> None:
-    """Merge consumed Matrix event ids into the scope's preserved seen ids on ``session``'s stored row."""
-    storage.update_metadata(session, partial(_with_merged_scope_seen_event_ids, scope=scope, event_ids=event_ids))
+def update_scope_seen_event_ids(storage: ConversationStore, session: ConversationSession, event_ids: list[str]) -> None:
+    """Merge consumed Matrix event ids into the owner scope's preserved seen ids on ``session``'s stored row."""
+    storage.update_metadata(
+        session,
+        partial(_with_merged_scope_seen_event_ids, scope=_owner_scope(session), event_ids=event_ids),
+    )
 
 
 def remove_runs_answering(storage: ConversationStore, session_id: str, scope: HistoryScope, event_id: str) -> bool:
@@ -319,14 +314,14 @@ def update_scope_state_on_latest(
     storage: ConversationStore,
     *,
     session: ConversationSession,
-    scope: HistoryScope,
     update: Callable[[HistoryScopeState], HistoryScopeState],
 ) -> HistoryScopeState:
-    """Apply one scope-state update to the stored row's metadata, which ``session`` then holds; return the new state.
+    """Apply one update to the state of the scope owning ``session`` in its stored row's metadata; return the new state.
 
-    The update callable sees the latest stored state, so it can refuse to write (return its input unchanged) when
-    the durable row moved since the caller read it.
+    ``session`` then holds the stored metadata. The update callable sees the latest stored state, so it can refuse to
+    write (return its input unchanged) when the durable row moved since the caller read it.
     """
+    scope = _owner_scope(session)
 
     def change(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
         latest = _scope_state(metadata, scope)
@@ -334,32 +329,26 @@ def update_scope_state_on_latest(
         return metadata if next_state == latest else _with_scope_state(metadata, scope, next_state)
 
     storage.update_metadata(session, change)
-    return read_scope_state(session, scope)
+    return read_scope_state(session)
 
 
 def set_force_compaction(
     storage: ConversationStore,
     *,
     session: ConversationSession,
-    scope: HistoryScope,
     forced: bool,
 ) -> HistoryScopeState:
-    """Store whether the scope's next run compacts its history first, on the stored row's latest state."""
+    """Store whether the next run of the scope owning ``session`` compacts first, on the stored row's latest state."""
     return update_scope_state_on_latest(
         storage,
         session=session,
-        scope=scope,
         update=lambda latest: replace(latest, force_compact_before_next_run=forced),
     )
 
 
-def _latest_summary_row(
-    storage: ConversationStore,
-    session: ConversationSession,
-    scope: HistoryScope,
-) -> tuple[int | None, str | None]:
-    """Return the id of the scope's latest summary row and its text as replay reads it, or ``None`` for each it lacks."""
-    latest = summary_rows.latest_row(storage, session_id=session.session_id, scope_key=scope.key)
+def _latest_summary_row(storage: ConversationStore, session: ConversationSession) -> tuple[int | None, str | None]:
+    """Return the id of the owner scope's latest summary row and its text as replay reads it, or ``None`` for each."""
+    latest = summary_rows.latest_row(storage, session_id=session.session_id, scope_key=_owner_scope(session).key)
     if latest is None:
         return None, None
     return latest.id, replayed_summary_text(latest.summary)
@@ -376,17 +365,16 @@ class _ChunkBasis:
 def read_chunk_basis(
     storage: ConversationStore,
     session: ConversationSession,
-    scope: HistoryScope,
     run_ids: Sequence[str],
     *,
     previous_summary: str | None,
 ) -> _ChunkBasis | None:
     """Read what a chunk folding some of ``run_ids`` after ``previous_summary`` builds on, before its summary call.
 
-    The chunk summarizes the session as it was loaded, so this returns ``None`` when the stored history has
-    changed since: the latest row's text is not ``previous_summary``, or a candidate run is gone or hidden.
+    The chunk summarizes the session as it was loaded, so this returns ``None`` when its owner scope's stored history
+    has changed since: the latest row's text is not ``previous_summary``, or a candidate run is gone or hidden.
     """
-    based_on, latest_summary = _latest_summary_row(storage, session, scope)
+    based_on, latest_summary = _latest_summary_row(storage, session)
     covered = tuple(summary_rows.covered_runs(storage, session_id=session.session_id, run_ids=run_ids))
     if latest_summary != previous_summary or {run.run_id for run in covered if run.visible} != set(run_ids):
         return None
@@ -397,12 +385,11 @@ def append_compaction_chunk(
     storage: ConversationStore,
     *,
     session: ConversationSession,
-    scope: HistoryScope,
     basis: _ChunkBasis,
     included_run_ids: Collection[str],
     summary: str,
 ) -> bool:
-    """Durably append one compaction chunk's summary row before the next chunk is attempted.
+    """Durably append one compaction chunk's summary row to the scope owning ``session``, before the next chunk.
 
     The append writes nothing when the scope's latest row, or a run the chunk folded,
     changed since ``basis`` was read. ``session`` then holds the stored result.
@@ -411,7 +398,7 @@ def append_compaction_chunk(
     row_id = summary_rows.append_summary(
         storage,
         session_id=session.session_id,
-        scope_key=scope.key,
+        scope_key=_owner_scope(session).key,
         based_on=basis.based_on,
         covered=[run for run in basis.covered if run.run_id in included_run_ids],
         summary=summary,
@@ -430,16 +417,17 @@ class FoldBasis:
     covered: tuple[summary_rows.CoveredRun, ...]
 
 
-def read_fold_basis(storage: ConversationStore, session: ConversationSession, scope: HistoryScope) -> FoldBasis | None:
-    """Read the latest summary row and the visible stored runs after it.
+def read_fold_basis(storage: ConversationStore, session: ConversationSession) -> FoldBasis | None:
+    """Read the latest summary row of the scope owning ``session`` and the visible stored runs after it.
 
     The stored log, not the running loop's own session, is authoritative for what earlier folds covered, so
     the basis is read from it. A stored copy of the running run is paused or cancelled, so it never counts
     as visible.
     Returns ``None`` when the stored history changed between the reads.
     """
-    based_on, latest_summary = _latest_summary_row(storage, session, scope)
+    based_on, latest_summary = _latest_summary_row(storage, session)
     stored = storage.load_session(session.session_id)
+    scope = _owner_scope(session)
     runs = [run for run in (stored.runs if stored is not None else []) if replays_in_scope(run, scope)]
     run_ids = [run.run_id for run in runs]
     covered = tuple(summary_rows.covered_runs(storage, session_id=session.session_id, run_ids=run_ids))
@@ -457,16 +445,17 @@ def append_fold(
     storage: ConversationStore,
     *,
     session: ConversationSession,
-    scope: HistoryScope,
     basis: FoldBasis,
     summary: str,
     fold: summary_rows.Fold,
 ) -> bool:
-    """Append a mid-turn fold's summary row and store what it took, unless its basis went stale or a cut removed its run.
+    """Append a mid-turn fold's summary row to the scope owning ``session`` and store what it took.
 
-    ``session``, the turn's own, then holds what a fresh load does, so a request rebuilt from it within the turn,
-    as a delegation continuation is, replays only what the summary does not cover.
+    Nothing is written when its basis went stale or a cut removed its run. ``session``, the turn's own, then holds
+    what a fresh load does, so a request rebuilt from it within the turn, as a delegation continuation is, replays
+    only what the summary does not cover.
     """
+    scope = _owner_scope(session)
     row_id = summary_rows.append_summary(
         storage,
         session_id=session.session_id,
@@ -487,7 +476,7 @@ def run_folded_tool_call_ids(storage: ConversationStore, *, session_id: str, run
 
 
 def _owner_scope(session: ConversationSession) -> HistoryScope:
-    """Return the history scope that owns ``session``: its kind and owner, which an agent's store open makes the agent."""
+    """Return the history scope that owns ``session``: its kind and owner, which a load takes from the database's owner."""
     return HistoryScope(kind=session.kind, scope_id=session.owner_id)
 
 

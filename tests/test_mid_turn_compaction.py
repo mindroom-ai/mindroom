@@ -1408,7 +1408,7 @@ async def test_force_flag_survives_mid_turn_compaction(tmp_path: Path, summary_c
     assert summary_calls.inputs
     after = storage.load_session("session-1")
     assert after is not None
-    assert read_scope_state(after, TEST_AGENT_SCOPE).force_compact_before_next_run is True
+    assert read_scope_state(after).force_compact_before_next_run is True
 
 
 @pytest.mark.asyncio

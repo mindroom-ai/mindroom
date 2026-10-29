@@ -375,7 +375,7 @@ async def _compaction_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
         storage=storage,
         session=session,
         scope=scope,
-        state=read_scope_state(session, scope),
+        state=read_scope_state(session),
         resolved_inputs=inputs,
         history_budget=None,
         before_tokens=0,

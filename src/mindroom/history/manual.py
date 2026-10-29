@@ -68,12 +68,7 @@ async def request_compaction_before_next_reply(
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
         ),
-        partial(
-            set_force_compaction,
-            session=new_scope_session(session_id=session_id, scope=scope),
-            scope=scope,
-            forced=True,
-        ),
+        partial(set_force_compaction, session=new_scope_session(session_id=session_id, scope=scope), forced=True),
     )
     logger.info(
         "Manual compaction scheduled",

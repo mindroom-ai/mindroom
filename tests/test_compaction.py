@@ -350,5 +350,5 @@ def test_team_scope_storage_is_shared_across_requesters(tmp_path: Path) -> None:
     assert first_storage.path == second_storage.path
     assert persisted is not None
     assert persisted.metadata["source"] == "alice"
-    state = read_scope_state(persisted, scope)
+    state = read_scope_state(persisted)
     assert state.force_compact_before_next_run is True

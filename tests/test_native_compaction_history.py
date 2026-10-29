@@ -567,7 +567,7 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
     )
     db = create_agent_state_storage("test_agent", tmp_path)
     seed_session(db, seeded)
-    compact_runs(db, seeded, _SCOPE, ["folded"], "Archived summary.")
+    compact_runs(db, seeded, ["folded"], "Archived summary.")
     session = db.load_session("session")
     assert session is not None
     resolved = _inputs(config)

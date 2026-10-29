@@ -178,7 +178,7 @@ async def test_a_streamed_team_reply_renders_the_members_and_the_consensus_and_s
     assert team.models["checker-model"].requests == []
     session = team.storage.load_session(SESSION_ID)
     assert session is not None
-    assert EVENT_ID in read_scope_seen_event_ids(team.storage, session, TEAM_SCOPE)
+    assert EVENT_ID in read_scope_seen_event_ids(team.storage, session)
 
 
 @pytest.mark.asyncio
@@ -217,7 +217,7 @@ async def test_a_team_turn_whose_attempts_all_came_back_empty_leaves_its_trigger
     session = team.storage.load_session(SESSION_ID)
     assert session is not None
     assert session.runs == []
-    assert read_scope_seen_event_ids(team.storage, session, TEAM_SCOPE) == set()
+    assert read_scope_seen_event_ids(team.storage, session) == set()
 
 
 @pytest.mark.asyncio
@@ -243,7 +243,7 @@ async def test_a_team_turn_that_only_ran_tools_marks_its_trigger_seen(
     assert ProbeToolkit.calls == ["a"]
     session = team.storage.load_session(SESSION_ID)
     assert session is not None
-    assert read_scope_seen_event_ids(team.storage, session, TEAM_SCOPE) == {EVENT_ID}
+    assert read_scope_seen_event_ids(team.storage, session) == {EVENT_ID}
     assert history_storage._read_preserved_scope_seen_event_ids(session.metadata, TEAM_SCOPE) == {EVENT_ID}
 
 

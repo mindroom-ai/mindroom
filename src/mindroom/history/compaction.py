@@ -247,7 +247,6 @@ async def clear_manual_compaction_request(
     *,
     storage: ConversationStore,
     session: ConversationSession,
-    scope: HistoryScope,
     state: HistoryScopeState,
     keep_concurrent_request: bool = True,
 ) -> None:
@@ -267,7 +266,7 @@ async def clear_manual_compaction_request(
 
     await run_session_storage_operation(
         lambda: storage,
-        partial(update_scope_state_on_latest, session=session, scope=scope, update=update),
+        partial(update_scope_state_on_latest, session=session, update=update),
     )
 
 
@@ -349,7 +348,7 @@ async def compact_scope_history(
     over_budget = available_history_budget is not None and before_tokens > available_history_budget
     runs = visible_runs if state.force_compact_before_next_run or over_budget else []
     if not runs:
-        await clear_manual_compaction_request(storage=storage, session=session, scope=scope, state=state)
+        await clear_manual_compaction_request(storage=storage, session=session, state=state)
         return None
 
     mode = state.compaction_mode
@@ -410,11 +409,11 @@ async def compact_scope_history(
         await run_session_storage_operation(lambda: storage, lambda opened: opened.reload_log(session))
         raise
     if rewrite_result is None:
-        await clear_manual_compaction_request(storage=storage, session=session, scope=scope, state=state)
+        await clear_manual_compaction_request(storage=storage, session=session, state=state)
         return None
 
     compacted_at = _iso_utc_now()
-    await clear_manual_compaction_request(storage=storage, session=session, scope=scope, state=state)
+    await clear_manual_compaction_request(storage=storage, session=session, state=state)
     logger.info(
         "Compaction summary generated",
         session_id=session.session_id,
@@ -481,7 +480,6 @@ async def _rewrite_working_session_for_compaction(
                 read_chunk_basis,
                 storage,
                 persisted_session,
-                scope,
                 [run.run_id for run in remaining],
                 previous_summary=previous_summary,
             ),
@@ -506,7 +504,6 @@ async def _rewrite_working_session_for_compaction(
             partial(
                 append_compaction_chunk,
                 session=persisted_session,
-                scope=scope,
                 basis=basis,
                 included_run_ids=compacted_run_ids,
                 summary=chunk.summary,
@@ -629,7 +626,6 @@ async def compact_running_turn(
             partial(
                 append_fold,
                 session=session,
-                scope=scope,
                 basis=basis,
                 summary=summary,
                 fold=fold,

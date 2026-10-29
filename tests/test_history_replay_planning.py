@@ -1304,7 +1304,7 @@ async def test_prepare_history_for_run_forced_compaction_without_budget_clears_f
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
-    assert read_scope_state(persisted, scope).force_compact_before_next_run is False
+    assert read_scope_state(persisted).force_compact_before_next_run is False
     assert prepared.compaction_reply_outcome == "none"
 
 
@@ -1461,7 +1461,7 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
     assert persisted.summary is not None
     assert persisted.summary.text == "merged summary"
     assert persisted.runs == []
-    state = read_scope_state(persisted, scope)
+    state = read_scope_state(persisted)
     assert len(folded_run_ids(storage)) == 2
     assert state.force_compact_before_next_run is False
 
