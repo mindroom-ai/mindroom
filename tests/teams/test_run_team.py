@@ -673,7 +673,7 @@ async def test_cancelling_the_team_stores_the_member_s_cancelled_row_before_the_
     assert member_row["parent_run_id"] == "r"
     assert member_row["messages"][-1]["metrics"] == {"input_tokens": 50, "output_tokens": 2, "total_tokens": 52}
     assert team_row["member_responses"] == []
-    assert [tool["result"] for tool in team_row["tools"]] == [None]
+    assert [tool.get("result") for tool in team_row["tools"]] == [None]
 
 
 @pytest.mark.parametrize(
