@@ -445,7 +445,7 @@ class _TaskRunner:
                             membership_config,
                             runtime.runtime_paths,
                         )
-                        if runtime.config_provider() is not membership_config:
+                        if runtime._config() is not membership_config:
                             continue
                         if creator_joined:
                             return task
