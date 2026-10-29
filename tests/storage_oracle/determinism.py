@@ -18,10 +18,10 @@ from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
-from mindroom.history import legacy_compaction_state
+from mindroom.history import legacy_compaction_state, summary_rows
 from mindroom.history import storage as history_storage
 from mindroom.llm import messages, runs
-from mindroom.session_storage import agent_storage, legacy_agno2_runs, preflight, store, summaries, types
+from mindroom.session_storage import agent_storage, legacy_agno2_runs, preflight, store, types
 
 if TYPE_CHECKING:
     import sqlite3
@@ -85,7 +85,7 @@ def _time_module(determinism: Determinism) -> SimpleNamespace:
 # Modules that call ``uuid4`` by that name, each with its own counter.
 _UUID_MODULES: tuple[ModuleType, ...] = (messages, runs, agent_storage, preflight)
 # Modules that call ``time()`` imported from ``time``.
-_TIME_FUNCTION_MODULES: tuple[ModuleType, ...] = (messages, runs, store, summaries, types)
+_TIME_FUNCTION_MODULES: tuple[ModuleType, ...] = (messages, runs, store, summary_rows, types)
 # Modules that call ``time.time()`` on the imported module.
 _TIME_MODULE_MODULES: tuple[ModuleType, ...] = (agent_storage, legacy_compaction_state, legacy_agno2_runs)
 # Modules that call ``datetime.now``.

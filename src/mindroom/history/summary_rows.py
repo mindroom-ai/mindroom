@@ -16,6 +16,7 @@ rows, flagged so it never replays. The statements these rules run live in ``sess
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import time
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.session_storage import summaries
@@ -149,6 +150,7 @@ def append_summary(
             # With nothing covered, the row sorts where the latest one does.
             through=max((run.seq for run in covered), default=through),
             summary=summary,
+            created_at=int(time()),
             event_ids=event_ids,
             seen_event_ids=seen,
             provenance=provenance,
@@ -302,6 +304,7 @@ def retire(storage: ConversationStore, *, session: ConversationSession, scope_ke
             scope_key=scope_key,
             through=rows[-1].through if rows else 0,
             summary=None,
+            created_at=int(time()),
         )
         owners = {row.fold_run_id for row in rows if row.fold_run_id is not None}
         removed = delete_runs_in_transaction(connection, names, owners, session_id=session_id)

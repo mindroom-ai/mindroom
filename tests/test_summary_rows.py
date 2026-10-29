@@ -1027,6 +1027,24 @@ def test_retiring_writes_a_barrier_and_removes_every_run_that_folded_mid_turn(st
     assert not _redact(store, "$live")
 
 
+def test_a_barrier_is_a_row_without_text_events_or_provenance(
+    store: ConversationStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retirement's barrier records when it was written, through the latest row, with empty event sets."""
+    _save(store, _run("r1"))
+    assert _chunk(store, ["r1"], "S1") is not None
+    monkeypatch.setattr(summary_rows, "time", lambda: 1_750_000_000.5)
+
+    summary_rows.retire(store, session=_session(), scope_key=_AGENT)
+
+    assert _query(
+        store,
+        "SELECT through, summary, legacy, created_at, event_ids, seen_event_ids, fold_run_id, fold_event_ids, "
+        "fold_seen_event_ids FROM code_sessions_log_summaries WHERE summary IS NULL",
+    ) == [(1, None, 0, 1_750_000_000, "[]", "[]", None, None, None)]
+
+
 def test_a_barrier_hides_what_it_retired_from_replay_seen_ids_and_cuts(store: ConversationStore) -> None:
     """Retired summaries and the runs behind them count for nothing, while runs after the barrier still do."""
     _save(store, _run("r1", seen=["$context"]), _run("p2", RunStatus.paused), _run("r3"))

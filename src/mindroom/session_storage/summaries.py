@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from time import time
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_SQL, quote_identifier
@@ -151,13 +150,15 @@ def append_row(
     scope_key: str,
     through: int,
     summary: str | None,
+    created_at: int,
     event_ids: Collection[str] = (),
     seen_event_ids: Collection[str] = (),
     provenance: FoldProvenance | None = None,
 ) -> int:
     """Append one summary row to the scope, a barrier when ``summary`` is None, and return its id.
 
-    The session row must exist. ``provenance``, given for a mid-turn fold's row, is what the row keeps of its fold.
+    The session row must exist. ``created_at`` is the row's time in whole seconds, which a replayed summary reports.
+    ``provenance``, given for a mid-turn fold's row, is what the row keeps of its fold.
     """
     fold = (
         (provenance.run_id, _encoded(provenance.event_ids), _encoded(provenance.seen_event_ids))
@@ -175,7 +176,7 @@ def append_row(
             summary,
             _encoded(event_ids),
             _encoded(seen_event_ids),
-            int(time()),
+            created_at,
             *fold,
         ),
     ).fetchone()
