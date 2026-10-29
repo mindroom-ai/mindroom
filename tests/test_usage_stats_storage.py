@@ -385,7 +385,7 @@ def test_reader_preserves_run_table_creation_date_after_updates(tmp_path: Path) 
 
 @pytest.mark.parametrize("legacy_encoding", [False, True])
 def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, legacy_encoding: bool) -> None:
-    """Admin totals use the team session's member-inclusive aggregate, which member run rows add to."""
+    """Admin totals use the team session's member-inclusive aggregate, and the team's source lists each member run."""
     session = ConversationSession(
         kind="team",
         session_id="session-1",
@@ -436,7 +436,7 @@ def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, l
         ),
     )
 
-    source = _source(tmp_path / "sessions" / "engineering.db")
+    source = replace(_source(tmp_path / "sessions" / "engineering.db"), scope="team", source_agent_id=None)
     if legacy_encoding:
         with sqlite3.connect(source.path) as connection:
             (session_data,) = connection.execute("SELECT session_data FROM engineering_sessions").fetchone()
@@ -451,7 +451,7 @@ def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, l
         ("provider-b", "model-b", {"input_tokens": 14, "output_tokens": 6, "total_tokens": 20}),
         ("provider-a", "model-a", {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}),
     ]
-    assert [run.run_id for run in row.runs] == ["team-run"]
+    assert [(run.run_id, run.parent_run_id) for run in row.runs] == [("member-run", "team-run"), ("team-run", None)]
     assert row.runs_available is True
     assert row.session_metrics_available is True
 
