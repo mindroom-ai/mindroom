@@ -38,7 +38,8 @@ class GeminiSettings:
     thinking_budget: int | None = None
     include_thoughts: bool | None = None
     thinking_level: str | None = None
-    # Google Search grounding, beside the function tools on the Gemini API and in place of them on Vertex AI.
+    # Google Search grounding, beside the function tools for a Gemini 3 model name on the Gemini API and in place of
+    # them for every other model and on Vertex AI.
     search: bool = False
 
 

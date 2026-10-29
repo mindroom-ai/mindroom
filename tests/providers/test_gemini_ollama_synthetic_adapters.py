@@ -700,27 +700,47 @@ _WEATHER_DECLARATIONS = {
 }
 
 
+_COMBINED_SEARCH = ([{"googleSearch": {}}, _WEATHER_DECLARATIONS], {"includeServerSideToolInvocations": True})
+_SEARCH_ALONE = ([{"googleSearch": {}}], None)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("config", "tools", "sent_tools", "sent_tool_config"),
+    ("config", "tools", "sent"),
     [
-        (GEMINI, [WEATHER], [{"googleSearch": {}}, _WEATHER_DECLARATIONS], {"includeServerSideToolInvocations": True}),
-        (GEMINI, [], [{"googleSearch": {}}], None),
-        (GEMINI_VERTEX, [WEATHER], [{"googleSearch": {}}], None),
+        (GEMINI, [WEATHER], _COMBINED_SEARCH),
+        ({**GEMINI, "id": "gemini-3.8-flash"}, [WEATHER], _COMBINED_SEARCH),
+        ({**GEMINI, "id": "models/gemini-4-pro"}, [WEATHER], _COMBINED_SEARCH),
+        ({**GEMINI, "id": "gemini-2.5-flash"}, [WEATHER], _SEARCH_ALONE),
+        ({**GEMINI, "id": "gemini-flash-latest"}, [WEATHER], _SEARCH_ALONE),
+        ({**GEMINI, "id": "tunedModels/travel-helper"}, [WEATHER], _SEARCH_ALONE),
+        (GEMINI, [], _SEARCH_ALONE),
+        (GEMINI_VERTEX, [WEATHER], _SEARCH_ALONE),
     ],
-    ids=["gemini-with-tools", "gemini-without-tools", "vertexai-with-tools"],
+    ids=[
+        "gemini-3-1-with-tools",
+        "gemini-3-8-with-tools",
+        "gemini-4-with-tools",
+        "gemini-2-5-with-tools",
+        "alias-with-tools",
+        "tuned-model-with-tools",
+        "gemini-without-tools",
+        "vertexai-with-tools",
+    ],
 )
-async def test_gemini_search_goes_beside_the_function_tools_where_the_route_combines_them(
+async def test_gemini_search_goes_beside_the_function_tools_only_for_a_gemini_3_name_on_the_gemini_api(
     config: dict[str, Any],
     tools: list[ToolSpec],
-    sent_tools: list[dict[str, Any]],
-    sent_tool_config: dict[str, Any] | None,
+    sent: tuple[list[dict[str, Any]], dict[str, Any] | None],
     tmp_path: Path,
 ) -> None:
-    """The Gemini API takes Google Search beside function tools when the request asks for the server-side search parts.
+    """The Gemini API takes Google Search beside function tools on Gemini 3 and later, with the server-side search parts.
 
-    Vertex AI takes no search tool beside function calling, so there search replaces the function tools.
+    Any other model name, an alias or an older generation, sends search alone in place of the function tools, as before
+    search combined with them, since older models reject the combination; Vertex AI takes no search tool beside
+    function calling.
     """
+    sent_tools, sent_tool_config = sent
     request, _ = await run_adapter(
         _config(config, search=True),
         _request(tools=tools),
@@ -736,8 +756,12 @@ async def test_gemini_search_goes_beside_the_function_tools_where_the_route_comb
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("config", "sent_tools", "json_output"),
-    [(GEMINI, [_WEATHER_DECLARATIONS], True), (GEMINI_VERTEX, None, True)],
-    ids=["gemini", "vertexai"],
+    [
+        (GEMINI, [_WEATHER_DECLARATIONS], True),
+        ({**GEMINI, "id": "gemini-2.5-flash"}, None, True),
+        (GEMINI_VERTEX, None, True),
+    ],
+    ids=["gemini-3", "gemini-2-5", "vertexai"],
 )
 async def test_gemini_decision_requests_with_search_drop_the_search(
     config: dict[str, Any],
@@ -746,9 +770,9 @@ async def test_gemini_decision_requests_with_search_drop_the_search(
     json_output: bool,
     tmp_path: Path,
 ) -> None:
-    """A decision drops Google Search and keeps whatever function schemas the route sends beside it, uncallable.
+    """A decision drops Google Search and keeps whatever function schemas the request sends beside it, uncallable.
 
-    Vertex AI sends search in place of the function tools, so its decision is left with no tools at all.
+    An older model and Vertex AI send search in place of the function tools, so their decision is left with no tools.
     """
     request, _ = await run_adapter(
         _config(config, search=True),
@@ -795,8 +819,8 @@ async def test_gemini_stores_server_side_search_parts_even_unsigned(tmp_path: Pa
 async def test_gemini_replays_server_side_search_parts_only_to_a_request_that_asks_for_them(tmp_path: Path) -> None:
     """The search calls and results a reply returns go back as given, signatures included, beside the function tools.
 
-    A request without search beside its function tools asked for no such parts, and Vertex AI rejects them, so those
-    requests leave them out and keep the reply's own call.
+    A request without search beside its function tools, such as one from an older model or one without tools, asked for
+    no such parts, and Vertex AI rejects them, so those requests leave them out and keep the reply's own call.
     """
     call = {"id": "call-1", "name": "get_weather", "args": {"city": "Paris"}}
     response = gemini_sse(
@@ -823,6 +847,11 @@ async def test_gemini_replays_server_side_search_parts_only_to_a_request_that_as
         "combined": (combined, _request(*messages, tools=[WEATHER])),
         "decision": (combined, _request(*messages, tools=[WEATHER], tool_choice="none")),
         "without-search": (GEMINI, _request(*messages, tools=[WEATHER])),
+        "without-tools": (combined, _request(*messages)),
+        "gemini-2-5": (
+            _config({**GEMINI, "id": "gemini-2.5-flash"}, search=True),
+            _request(*messages, tools=[WEATHER]),
+        ),
         "vertexai": (_config(GEMINI_VERTEX, search=True), _request(*messages, tools=[WEATHER])),
     }
     sent = {}
@@ -836,7 +865,7 @@ async def test_gemini_replays_server_side_search_parts_only_to_a_request_that_as
         {"toolResponse": _STORED_SEARCH_RESULT, "thoughtSignature": "c2lnMg=="},
         function_call,
     ]
-    assert sent["decision"] == sent["without-search"] == sent["vertexai"] == [function_call]
+    assert all(parts == [function_call] for name, parts in sent.items() if name != "combined")
 
 
 def test_gemini_tool_choice_none_turns_function_calling_off() -> None:

@@ -9,6 +9,7 @@ credentials file from the config, else ``GOOGLE_CLOUD_PROJECT``, ``GOOGLE_CLOUD_
 
 from __future__ import annotations
 
+import re
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from functools import partial
@@ -58,6 +59,9 @@ _PROVIDER = "Google"
 _SAMPLING_CONTROL_NAMES = frozenset({"temperature", "top_p", "top_k"})
 # How the SDK's ``ValueError`` begins when a Gemini API client has no API key at all.
 _NO_API_KEY_ERROR = "No API key was provided."
+# The generation a Gemini model id names, as in ``gemini-3.8-flash`` or ``models/gemini-4-pro``; an alias such as
+# ``gemini-flash-latest`` names none.
+_GEMINI_GENERATION = re.compile(r"gemini-(\d+)(?:[.-]|$)")
 
 
 @dataclass(slots=True, kw_only=True)
@@ -191,15 +195,19 @@ class GeminiProvider:
         return config
 
     def _sends_search_beside_tools(self, request: ModelRequest) -> bool:
-        """Return whether ``request`` sends Google Search beside its function tools, which only the Gemini API takes.
+        """Return whether ``request`` sends Google Search beside its function tools, as the Gemini API takes it on Gemini 3.
 
-        Such a request asks for the server-side search parts, as the Gemini API requires for that combination on
-        Gemini 3 and later models (https://ai.google.dev/gemini-api/docs/generate-content/tool-combination). Vertex AI
-        takes no search tool beside function calling
+        Such a request asks for the server-side search parts, as the Gemini API requires for that combination, which it
+        supports on Gemini 3 and later models only (https://ai.google.dev/gemini-api/docs/generate-content/tool-combination).
+        A model whose id names no such generation, an older model or an alias that may point at one, sends search in
+        place of the function tools, which every model accepts. Vertex AI takes no search tool beside function calling
         (https://docs.cloud.google.com/vertex-ai/generative-ai/docs/grounding/grounding-with-google-search), so there
-        search replaces the function tools.
+        search replaces the function tools too.
         """
-        return self.settings.search and bool(request.tools) and not self._sdk_client().vertexai
+        if not self.settings.search or not request.tools or self._sdk_client().vertexai:
+            return False
+        generation = _GEMINI_GENERATION.match(self.identity.id.rsplit("/", 1)[-1].casefold())
+        return generation is not None and int(generation[1]) >= 3
 
     def _tool_settings(self, request: ModelRequest) -> dict[str, Any]:
         """Return the request's ``tools`` and ``tool_config``; one it leaves out keeps the authored generation config's."""
