@@ -226,7 +226,7 @@ _SIGNATURES = {
         "runtime_attachment_ids, runtime_media_attachments, hook_registry, hook_registry_state, correlation_id, "
         "hook_message_sender, matrix_admin, room_state_querier, room_state_putter, message_received_depth, "
         "orchestrator, tool_function_filter, persona, membership, membership_turn_id, source_kind, config_provider, "
-        "cli_approval_handler)"
+        "cli_approval_handler, hook_source)"
     ),
     "ToolRuntimeHookBindings": (
         "(message_sender, matrix_admin, room_state_querier, room_state_putter, message_received_depth)"

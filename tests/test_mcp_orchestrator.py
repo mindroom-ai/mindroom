@@ -9,15 +9,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom.api import main as api_main
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.external_triggers.store import ExternalTriggerTarget, TriggerDeliverySnapshot
+from mindroom.integrations import unbind_integrations
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan, configured_entity_names
 from mindroom.orchestration.entity_fleet import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.slack.integration import bound_slack_runtime
 from tests.conftest import install_bots, published_config_load, swap_fleet_bot
 from tests.identity_helpers import persist_entity_accounts
 
@@ -354,9 +357,18 @@ async def test_startup_room_setup_binds_external_trigger_runtime_after_setup(tmp
         patch.object(orchestrator._rooms, "setup", side_effect=setup_rooms),
         patch.object(orchestrator._external_trigger_runtime, "bind_if_ready", side_effect=bind_runtime),
     ):
-        await orchestrator._setup_startup_rooms_and_memberships([bot])
+        try:
+            await orchestrator._setup_startup_rooms_and_memberships([bot])
+            slack_runtime = bound_slack_runtime(api_main.app)
+            # Slack events reach the live bot mapping, so setup that runs again keeps the same runtime.
+            assert slack_runtime is not None
+            assert slack_runtime.bots is orchestrator.agent_bots
+            await orchestrator._setup_startup_rooms_and_memberships([bot])
+            assert bound_slack_runtime(api_main.app) is slack_runtime
+        finally:
+            unbind_integrations(api_main.app)
 
-    assert call_order == ["setup", "bind"]
+    assert call_order == ["setup", "bind", "setup", "bind"]
 
 
 @pytest.mark.asyncio

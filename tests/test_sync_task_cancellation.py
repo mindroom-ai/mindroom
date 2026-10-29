@@ -19,6 +19,7 @@ from structlog.testing import capture_logs
 
 from mindroom import runtime_shutdown
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.api import main as api_main
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
@@ -37,6 +38,7 @@ from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.event_journal.matrix_delivery import RecoveryOutcome
 from mindroom.hooks import HookRegistry, HookRegistryState
+from mindroom.integrations import bind_integrations
 from mindroom.journal_dispatch import JournalDispatcher
 from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.health import (
@@ -77,6 +79,7 @@ from mindroom.runtime_shutdown import (
     RuntimeShutdownIntent,
     ShutdownBudget,
 )
+from mindroom.slack.integration import bound_slack_runtime
 from tests.bot_helpers import make_test_agent_bot
 
 if TYPE_CHECKING:
@@ -3279,18 +3282,20 @@ async def test_reload_replaces_restarted_entities_when_one_reply_outlives_the_dr
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path, fleet_sync: _FleetSyncLog) -> None:
+async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path, fleet_sync: _FleetSyncLog) -> None:  # noqa: PLR0915
     """Test that stop() cancels all sync tasks."""
     shutdown_order = fleet_sync.events
 
-    async def track_catalog_drain(*_args: object, **_kwargs: object) -> None:
-        shutdown_order.append("catalog_drain")
+    async def track_drain(*_args: object, owner: object, **_kwargs: object) -> None:
+        shutdown_order.append("slack_drain" if owner is slack_runtime else "catalog_drain")
 
     with patch(
         "mindroom.orchestrator.wait_for_background_tasks",
-        new=AsyncMock(side_effect=track_catalog_drain),
+        new=AsyncMock(side_effect=track_drain),
     ) as mock_wait:
         orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+        bind_integrations(api_main.app, orchestrator.agent_bots, orchestrator.agent_reply_memberships)
+        slack_runtime = bound_slack_runtime(api_main.app)
 
         # Create mock bots
         mock_bot1 = AsyncMock()
@@ -3300,8 +3305,13 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path, fleet_sync: _
         mock_bot2.agent_name = "router"
         mock_bot2.running = True
 
+        slack_bound_at_bot_shutdown: list[bool] = []
+
+        def track_begin_shutdown() -> None:
+            slack_bound_at_bot_shutdown.append(bound_slack_runtime(api_main.app) is not None)
+
         for mock_bot in (mock_bot1, mock_bot2):
-            mock_bot.begin_process_shutdown = MagicMock()
+            mock_bot.begin_process_shutdown = MagicMock(side_effect=track_begin_shutdown)
             mock_bot.pending_response_owner_count = 0
             mock_bot.pending_response_phase_counts = {}
             mock_bot.deferred_stop_phase = None
@@ -3354,9 +3364,15 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path, fleet_sync: _
                     owner=orchestrator._dispatch_recovery_task_owner,
                     shutdown_intent=ORDERLY_SHUTDOWN,
                 ),
+                call(5.0, owner=slack_runtime, shutdown_intent=ORDERLY_SHUTDOWN),
             ],
         )
-        assert mock_wait.await_count == 2
+        assert mock_wait.await_count == 3
+        # Slack events are refused before bots begin shutting down and before their deliveries drain,
+        # and the drain finishes before any bot stops.
+        assert slack_bound_at_bot_shutdown == [False, False]
+        assert bound_slack_runtime(api_main.app) is None
+        assert shutdown_order.index("slack_drain") < shutdown_order.index("entity_teardown")
         quiesce_indexes = [index for index, action in enumerate(shutdown_order) if action == "source_quiesce"]
         cancel_indexes = [index for index, action in enumerate(shutdown_order) if action.startswith("cancel_sync:")]
         assert len(quiesce_indexes) == 2

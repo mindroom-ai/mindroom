@@ -44,6 +44,10 @@ path = "mindroom.bounded_bytes"
 depends_on = []
 
 [[modules]]
+path = "mindroom.integrations"
+depends_on = ["mindroom.slack.integration"]
+
+[[modules]]
 path = "mindroom.origins"
 depends_on = ["mindroom.runtime_env_policy"]
 
@@ -1615,11 +1619,14 @@ visibility = [
     "mindroom.custom_tools.google_drive",
     "mindroom.custom_tools.github",
     "mindroom.custom_tools.microsoft_graph",
+    "mindroom.custom_tools.slack",
     "mindroom.egress_broker",
     "mindroom.mcp.manager",
     "mindroom.oauth.client",
     "mindroom.oauth.reset",
     "mindroom.oauth.reset_execution",
+    "mindroom.slack.watch_delivery",
+    "mindroom.slack.watches",
 ]
 
 [[modules]]
@@ -1851,12 +1858,36 @@ depends_on = [
     "mindroom.bounded_bytes",
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
+    "mindroom.delivery_replay",
     "mindroom.external_triggers.auth",
     "mindroom.external_triggers.executor",
     "mindroom.external_triggers.models",
-    "mindroom.external_triggers.replay_store",
     "mindroom.response_admission",
 ]
+
+[[modules]]
+path = "mindroom.api.slack_events"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.bounded_bytes",
+    "mindroom.slack.app",
+    "mindroom.slack.delivery",
+    "mindroom.slack.events",
+    "mindroom.slack.integration",
+]
+
+[[modules]]
+path = "mindroom.delivery_replay"
+depends_on = [
+    "mindroom.durable_write",
+    "mindroom.file_locks",
+    "mindroom.legacy_delivery_replay",
+]
+
+[[modules]]
+path = "mindroom.legacy_delivery_replay"
+depends_on = []
+visibility = ["mindroom.delivery_replay"]
 
 [[modules]]
 path = "mindroom.external_triggers.executor"
@@ -2109,6 +2140,7 @@ depends_on = [
     "mindroom.api.skills",
     "mindroom.api.tools",
     "mindroom.api.budgets",
+    "mindroom.integrations",
     "mindroom.api.usage",
     "mindroom.api.usage_export",
     "mindroom.api.validation_errors",
@@ -3316,6 +3348,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.event_journal.opening",
     "mindroom.hooks",
+    "mindroom.integrations",
     "mindroom.knowledge.watch",
     "mindroom.matrix.provisioning_heartbeat",
     "mindroom.matrix.users",
@@ -3436,6 +3469,9 @@ visibility = [
     "mindroom.orchestrator",
     "mindroom.reaction_dispatch",
     "mindroom.response_runner",
+    "mindroom.slack.delivery",
+    "mindroom.slack.turns",
+    "mindroom.slack.watch_delivery",
     "mindroom.text_ingress_dispatch",
     "mindroom.turn_controller",
     "mindroom.voice.visible_voice_echo",
@@ -3619,6 +3655,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.git_urls",
     "mindroom.history.types",
+    "mindroom.integrations",
     "mindroom.logging_config",
     "mindroom.matrix.state",
     "mindroom.matrix_identifiers",
@@ -4918,6 +4955,7 @@ depends_on = [
     "mindroom.event_journal.opening",
     "mindroom.handled_turns",
     "mindroom.hooks",
+    "mindroom.integrations",
     "mindroom.inbound_turn_normalizer",
     "mindroom.journal_dispatch",
     "mindroom.legacy_handled_turns",
@@ -7148,7 +7186,11 @@ from = ["mindroom.tool_system.declarations"]
 [[interfaces]]
 expose = [
     "AuthorizedFile",
+    "UploadSourceError",
     "agent_file_access",
+    "checked_upload_source",
+    "open_upload_source",
+    "read_upload_source",
     "resolve_agent_file",
 ]
 from = ["mindroom.file_access"]
@@ -9915,3 +9957,116 @@ visibility = [
 path = "mindroom.session_storage.legacy_tool_results"
 depends_on = ["mindroom.llm"]
 visibility = ["mindroom.session_storage.legacy_agno3_schema"]
+
+[[modules]]
+path = "mindroom.slack.api"
+depends_on = []
+
+[[modules]]
+path = "mindroom.slack.app"
+depends_on = ["mindroom.slack.api"]
+
+[[modules]]
+path = "mindroom.slack.delivery"
+depends_on = [
+    "mindroom.matrix.state",
+    "mindroom.response_admission",
+    "mindroom.slack.api",
+    "mindroom.slack.app",
+    "mindroom.slack.events",
+    "mindroom.slack.identity",
+    "mindroom.slack.turns",
+    "mindroom.slack.watch_delivery",
+]
+
+[[modules]]
+path = "mindroom.slack.events"
+depends_on = []
+
+[[modules]]
+path = "mindroom.slack.files"
+depends_on = ["mindroom.atomic_file", "mindroom.path_confinement", "mindroom.slack.api"]
+
+[[modules]]
+path = "mindroom.slack.identity"
+depends_on = ["mindroom.matrix.identity", "mindroom.slack.api", "mindroom.slack.render"]
+
+[[modules]]
+path = "mindroom.slack.integration"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.slack_events",
+    "mindroom.integrations",
+    "mindroom.slack.api",
+    "mindroom.slack.delivery",
+    "mindroom.slack.reply_mirror",
+]
+# Core reaches Slack only through the integration registry.
+visibility = ["mindroom.api.slack_events", "mindroom.integrations"]
+
+[[modules]]
+path = "mindroom.slack.oauth"
+depends_on = ["mindroom.slack.api", "mindroom.slack.app"]
+
+[[modules]]
+path = "mindroom.slack.render"
+depends_on = ["mindroom.slack.api"]
+
+[[modules]]
+path = "mindroom.slack.reply_mirror"
+depends_on = [
+    "mindroom.delivery_replay",
+    "mindroom.matrix.state",
+    "mindroom.slack.api",
+    "mindroom.slack.app",
+    "mindroom.slack.events",
+    "mindroom.slack.turns",
+    "mindroom.tool_system.events",
+]
+visibility = ["mindroom.slack.integration"]
+
+[[modules]]
+path = "mindroom.slack.turns"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.delivery_replay",
+    "mindroom.hooks.sender",
+    "mindroom.response_admission",
+    "mindroom.slack.api",
+    "mindroom.slack.identity",
+    "mindroom.slack.render",
+]
+
+[[modules]]
+path = "mindroom.slack.watch_delivery"
+depends_on = [
+    "mindroom.oauth.credential_lifecycle",
+    "mindroom.response_admission",
+    "mindroom.slack.api",
+    "mindroom.slack.events",
+    "mindroom.slack.oauth",
+    "mindroom.slack.render",
+    "mindroom.slack.turns",
+    "mindroom.slack.watches",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.slack.watches"
+depends_on = ["mindroom.oauth.credential_lifecycle", "mindroom.slack.api", "mindroom.slack.app"]
+
+[[modules]]
+path = "mindroom.custom_tools.slack"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.file_access",
+    "mindroom.oauth.credential_lifecycle",
+    "mindroom.slack.api",
+    "mindroom.slack.app",
+    "mindroom.slack.files",
+    "mindroom.slack.identity",
+    "mindroom.slack.oauth",
+    "mindroom.slack.render",
+    "mindroom.slack.watches",
+    "mindroom.tool_system.runtime_context",
+]

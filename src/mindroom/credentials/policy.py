@@ -60,6 +60,8 @@ _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS = frozenset(
     {
         "desktop",
         "google_vertex_adc",
+        # The Slack app's bot token, signing secret and app token stay in the primary runtime.
+        "slack_app",
     },
 )
 

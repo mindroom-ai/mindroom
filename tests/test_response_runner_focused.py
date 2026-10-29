@@ -228,6 +228,7 @@ if TYPE_CHECKING:
     from mindroom.reply_scope import SpanHandle
     from mindroom.response_lifecycle import _QueuedMessageState
     from mindroom.streaming import ProgressPublisher
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 def _preparation(target: MessageTarget, envelope: MessageEnvelope) -> ResponsePayloadPreparation:
@@ -4761,6 +4762,26 @@ async def test_approval_request_restores_exact_hook_envelope_after_store_reload(
     assert restored.response_envelope.hook_source == "plugin:message_received"
     assert restored.response_envelope.dispatch_policy_source_kind == "plugin"
     assert restored.response_envelope.message_received_depth == 3
+
+
+def test_resumed_approval_tool_context_keeps_the_turns_hook_source(tmp_path: Path) -> None:
+    """Tools of a resumed turn see the hook that started it, as they did before the approval."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    target = _target(thread_id="$thread", reply_to_event_id="$source")
+
+    def tool_context(hook_source: str | None) -> ToolRuntimeContext:
+        continuation = approval_continuation(approval_id="approval-hook-source", hook_source=hook_source)
+        request = runner._approvals._approval_response_request(continuation, target=target)
+        context = runner.deps.tool_runtime.build_context(
+            target,
+            user_id=continuation.requester_id,
+            source_envelope=request.response_envelope,
+        )
+        assert context is not None
+        return context
+
+    assert tool_context("slack-watch/w-1").hook_source == "slack-watch/w-1"
+    assert tool_context(None).hook_source is None
 
 
 @pytest.mark.asyncio

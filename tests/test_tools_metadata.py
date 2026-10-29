@@ -2072,7 +2072,6 @@ _UNCONFINED_LOCAL_FILE_TOOLS = (
     "pandas",
     "postgres",
     "redshift",
-    "slack",
     "sql",
 )
 

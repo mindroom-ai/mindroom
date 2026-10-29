@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import TeamBot
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
 from mindroom.config.agent import AgentConfig
@@ -69,6 +71,7 @@ from tests.conftest import (
 from tests.reply_span_helpers import reply_span, seed_finished_reply
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
     from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
@@ -404,6 +407,146 @@ async def test_response_hook_service_skips_when_no_hooks(tmp_path: Path) -> None
             sources=ResponseSources((_envelope().source_event_id,), (_envelope().source_event_id,)),
         ),
     )
+
+
+def _after_response_service(
+    tmp_path: Path,
+    reply_mirror: Callable[[MessageEnvelope, str], Coroutine[Any, Any, None] | None],
+    plugins: list[object] | None = None,
+) -> ResponseHookService:
+    """Return a response hook service with a reply mirror and, unless given plugins, no hooks."""
+    config = _config(tmp_path)
+    hook_context = HookContextSupport(
+        runtime=type("RT", (), {"client": None, "orchestrator": None, "config": config, "runtime_started_at": 0.0})(),
+        runtime_paths=runtime_paths_for(config),
+        agent_name="code",
+        hook_registry_state=HookRegistryState(HookRegistry.from_plugins(plugins or [])),
+        hook_send_message=AsyncMock(),
+    )
+    return ResponseHookService(hook_context=hook_context, reply_mirror=reply_mirror)
+
+
+async def _emit_after_response(service: ResponseHookService, *, response_kind: str) -> None:
+    """Emit one final reply, then wait for what the service started in the background."""
+    envelope = _envelope()
+    await service.emit_after_response(
+        identity=ResponseIdentity(
+            response_kind=response_kind,
+            response_envelope=envelope,
+            correlation_id="corr-mirror",
+            sources=ResponseSources((envelope.source_event_id,), (envelope.source_event_id,)),
+        ),
+        response_text="final reply",
+        response_event_id="$reply",
+        delivery_kind="sent",
+    )
+    assert await wait_for_background_tasks(5.0, owner=service.hook_context.runtime)
+
+
+@pytest.mark.asyncio
+async def test_after_response_mirrors_agent_replies_without_any_hooks(tmp_path: Path) -> None:
+    """The reply mirror gets each agent's final reply even when no after-response hook is registered."""
+    mirrored: list[tuple[MessageEnvelope, str]] = []
+
+    async def mirror(envelope: MessageEnvelope, text: str) -> None:
+        mirrored.append((envelope, text))
+
+    await _emit_after_response(_after_response_service(tmp_path, mirror), response_kind="ai")
+
+    assert mirrored == [(_envelope(), "final reply")]
+
+
+@pytest.mark.asyncio
+async def test_after_response_does_not_wait_for_the_reply_mirror(tmp_path: Path) -> None:
+    """A slow mirror runs in the background, so the response lock is not held while it works."""
+    release = asyncio.Event()
+    finished: list[str] = []
+
+    async def slow_mirror(_envelope: MessageEnvelope, text: str) -> None:
+        await release.wait()
+        finished.append(text)
+
+    service = _after_response_service(tmp_path, slow_mirror)
+    identity = ResponseIdentity(
+        response_kind="ai",
+        response_envelope=_envelope(),
+        correlation_id="corr-slow",
+        sources=ResponseSources(("$event",), ("$event",)),
+    )
+
+    await asyncio.wait_for(
+        service.emit_after_response(
+            identity=identity,
+            response_text="final reply",
+            response_event_id="$reply",
+            delivery_kind="sent",
+        ),
+        timeout=1,
+    )
+    assert finished == []
+    release.set()
+    assert await wait_for_background_tasks(5.0, owner=service.hook_context.runtime)
+    assert finished == ["final reply"]
+
+
+@pytest.mark.asyncio
+async def test_after_response_starts_no_task_for_a_reply_the_mirror_declines(tmp_path: Path) -> None:
+    """A mirror that returns no coroutine, because the reply goes nowhere else, costs no background task."""
+    seen: list[str] = []
+
+    def declining_mirror(_envelope: MessageEnvelope, text: str) -> None:
+        seen.append(text)
+
+    service = _after_response_service(tmp_path, declining_mirror)
+
+    with capture_logs() as logs, patch("mindroom.delivery_gateway.create_background_task") as create_task:
+        await _emit_after_response(service, response_kind="ai")
+
+    assert seen == ["final reply"]
+    create_task.assert_not_called()
+    assert [entry for entry in logs if entry["log_level"] == "error"] == []
+
+
+@pytest.mark.asyncio
+async def test_after_response_does_not_mirror_team_replies(tmp_path: Path) -> None:
+    """Only an agent's own final reply is mirrored."""
+    mirrored: list[str] = []
+
+    async def mirror(_envelope: MessageEnvelope, text: str) -> None:
+        mirrored.append(text)
+
+    await _emit_after_response(_after_response_service(tmp_path, mirror), response_kind="team")
+
+    assert mirrored == []
+
+
+@pytest.mark.parametrize("failure", ["before_the_task_starts", "in_the_task"])
+@pytest.mark.asyncio
+async def test_after_response_survives_a_failing_reply_mirror(tmp_path: Path, failure: str) -> None:
+    """A mirror that fails is logged and never reaches delivery; after-response hooks still run."""
+    seen: list[str] = []
+    message = "mirror broke"
+
+    async def failing_mirror(_envelope: MessageEnvelope, _text: str) -> None:
+        raise RuntimeError(message)
+
+    def failing_start(_envelope: MessageEnvelope, _text: str) -> Coroutine[Any, Any, None]:
+        raise RuntimeError(message)
+
+    @hook(EVENT_MESSAGE_AFTER_RESPONSE)
+    async def on_after(ctx: AfterResponseContext) -> None:
+        seen.append(ctx.result.response_text)
+
+    reply_mirror = failing_start if failure == "before_the_task_starts" else failing_mirror
+    service = _after_response_service(tmp_path, reply_mirror, [_plugin("mirror-order", [on_after])])
+
+    with capture_logs() as logs:
+        await _emit_after_response(service, response_kind="ai")
+
+    assert seen == ["final reply"]
+    assert [entry["event"] for entry in logs if entry["log_level"] == "error"] == [
+        "Reply mirror failed" if failure == "before_the_task_starts" else "Background task failed",
+    ]
 
 
 @pytest.mark.asyncio
