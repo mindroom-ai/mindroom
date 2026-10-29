@@ -64,8 +64,8 @@ _RATE_LIMIT_NAMES = frozenset({"rate_limit_error", "rate_limit_exceeded"})
 # with a 402, and the ``details.error_code`` of its 429 ``rate_limit_error`` once the organization reached its usage
 # tier's monthly spend cap, which carries no ``retry-after``.
 # Z.ai's business codes, which it sends with a 429 like a rate limit, for an account without balance or resource
-# package (1113) and an expired GLM Coding Plan (1309); its codes for a usage limit, extra usage included, name the time
-# the limit resets, so they stay rate limits.
+# package (1113), an expired GLM Coding Plan (1309), and an expired enterprise package (1314); its codes for a usage
+# limit, extra usage included, name the time the limit resets, so they stay rate limits.
 _QUOTA_EXHAUSTED_NAMES = frozenset(
     {
         "insufficient_quota",
@@ -78,6 +78,7 @@ _QUOTA_EXHAUSTED_NAMES = frozenset(
         "enforced_spend_limit_reached",
         "1113",
         "1309",
+        "1314",
     },
 )
 # How providers word a refusal their account's billing causes when they send no billing name, which no retry passes

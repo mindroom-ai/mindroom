@@ -221,6 +221,12 @@ def test_a_payment_required_status_fails_at_once_as_a_billing_stop(
             ProviderError,
             QUOTA_EXHAUSTED,
         ),
+        (
+            "1314",
+            "Your enterprise package has expired. Please contact your enterprise administrator.",
+            ProviderError,
+            QUOTA_EXHAUSTED,
+        ),
         # A limit that resets stays a rate limit, even once no balance or spend limit is left for extra usage.
         (
             "1316",
