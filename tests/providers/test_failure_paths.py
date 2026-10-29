@@ -915,6 +915,19 @@ _TOOL_ARGUMENTS = _chat_chunk(
 )
 _CHAT_CASES = [
     *_OPENAI_HTTP_CASES,
+    # Moonshot names a 429 that only a top-up lets through by its error type alone, with one of two typical messages.
+    _Case(
+        "http_429_moonshot_exceeded_current_quota",
+        _openai_status(
+            429,
+            "Account balance is insufficient or the account has been disabled",
+            "exceeded_current_quota_error",
+        ),
+        ProviderError,
+        f"{ERROR}Account balance is insufficient or the account has been disabled",
+        1,
+        code=QUOTA_EXHAUSTED,
+    ),
     _Case(
         "event_server_error",
         _chat_error(message="The server had an error.", type="server_error"),
@@ -1015,11 +1028,10 @@ _CHAT_CASES = [
     ),
     *_early_ends(_chat_cut_off(), _chat_cut_off(_chat_chunk({"content": _PARTIAL}))),
 ]
-_CHAT_SHARED = [
-    case
-    for case in _CHAT_CASES
-    if case.failure in {"http_503", "http_400", "event_server_error", "http_200_error_body"}
-]
+_CHAT_SHARED_FAILURES = frozenset(
+    {"http_503", "http_400", "http_429_moonshot_exceeded_current_quota", "event_server_error", "http_200_error_body"},
+)
+_CHAT_SHARED = [case for case in _CHAT_CASES if case.failure in _CHAT_SHARED_FAILURES]
 
 _RESPONSES_CASES = [
     *_OPENAI_HTTP_CASES,
