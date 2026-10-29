@@ -1,7 +1,7 @@
 """Delegation child snapshots earlier releases stored are rewritten once, and every reader reads them as before.
 
 The fixtures under ``tests/fixtures/delegation_snapshots`` are what each release's own writers stored, with what
-v2026.10.683's readers, the last that filled absent fields on every read, showed of them (see the README there).
+v2026.10.683's readers, which filled absent fields on every read, showed of them (see the README there).
 """
 
 from __future__ import annotations

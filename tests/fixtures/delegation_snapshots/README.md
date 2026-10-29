@@ -13,7 +13,7 @@ The children are one authored with a tool list, one authored without a tool list
 | `v2026.10.683.json` | v2026.10.244's rows after v2026.10.683 read them and wrote them back: every field present, the requested model null, and the database converted to layout version 4. |
 
 In each file, `subagent_sessions` holds the session files the release's `reserve_subagent_turn` and `update_subagent_turn` wrote, and `conversation_database` is the dump of agent `leader`'s conversation database, holding a parent run paused on the first child's approval, which the release's `persist_delegation_state` saved with all three children and the pending call's source.
-`views` is what v2026.10.683's readers, the last before the rewrite, read of each copy: every field of each child, with the requested model a follow-up resolves and the skills and knowledge each persona keeps.
+`views` is what v2026.10.683's readers, which filled absent fields on every read, read of each copy: every field of each child, with the requested model a follow-up resolves and the skills and knowledge each persona keeps.
 
 ## Recording again
 
