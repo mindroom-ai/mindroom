@@ -17,10 +17,12 @@ from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.external_triggers.store import ExternalTriggerTarget, TriggerDeliverySnapshot
+from mindroom.integrations import unbind_integrations
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
 from mindroom.orchestration.runtime import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.slack.integration import bound_slack_runtime
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -359,14 +361,14 @@ async def test_startup_room_setup_binds_external_trigger_runtime_after_setup(tmp
     ):
         try:
             await orchestrator._setup_startup_rooms_and_memberships([bot])
-            slack_runtime = config_lifecycle.app_state(api_main.app).slack_runtime
+            slack_runtime = bound_slack_runtime(api_main.app)
             # Slack events reach the live bot mapping, so setup that runs again keeps the same runtime.
             assert slack_runtime is not None
             assert slack_runtime.bots is orchestrator.agent_bots
             await orchestrator._setup_startup_rooms_and_memberships([bot])
-            assert config_lifecycle.app_state(api_main.app).slack_runtime is slack_runtime
+            assert bound_slack_runtime(api_main.app) is slack_runtime
         finally:
-            api_main.unbind_slack_runtime(api_main.app)
+            unbind_integrations(api_main.app)
 
     assert call_order == ["setup", "bind", "setup", "bind"]
 

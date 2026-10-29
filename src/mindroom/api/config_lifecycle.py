@@ -58,7 +58,6 @@ if TYPE_CHECKING:
     from mindroom.knowledge.watch import KnowledgeSourceWatcher
     from mindroom.response_activity import ActiveScriptRunInfo, ResponseIdentity
     from mindroom.response_admission import ResponseAdmissionGate
-    from mindroom.slack.delivery import SlackRuntime
     from mindroom.thread_export.workspace_sync import WorkspaceThreadExportRunner
     from mindroom.worker_computer.sessions import ComputerSessionStore
     from mindroom.workers.backend import WorkerBackend
@@ -140,7 +139,8 @@ class _MindroomAppState:
     thread_export_runner: WorkspaceThreadExportRunner | None = None
     leave_matrix_room: Callable[[str, str], Awaitable[bool]] | None = None
     external_trigger_runtime: ExternalTriggerRuntime | None = None
-    slack_runtime: SlackRuntime | None = None
+    # Each bound integration's runtime by integration name; the integration's own routes read its entry.
+    integration_runtimes: dict[str, object] = field(default_factory=dict)
     agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=AgentReplyMembershipIndex)
     response_admission_gate: ResponseAdmissionGate | None = None
     budget_monitor: BudgetMonitor | None = None

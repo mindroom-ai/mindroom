@@ -23,7 +23,6 @@ from mindroom.approval.inbound import (
 from mindroom.approval.tool_approval import is_process_active_approval_card
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_live_bot
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
 from mindroom.entity_resolution import entity_identity_registry, persisted_bot_user_ids
@@ -46,6 +45,7 @@ from mindroom.hooks import (
     emit,
     send_hook_message,
 )
+from mindroom.integrations import reply_mirror_for
 from mindroom.legacy_handled_turns import legacy_responses_file_path
 from mindroom.matrix.decrypt_diagnostics import DecryptionDiagnostics
 from mindroom.matrix.durable_ingestion import run_ingestion_pump
@@ -81,8 +81,6 @@ from mindroom.runtime_shutdown import (
     ShutdownBudget,
     restart_reason_category_for,
 )
-from mindroom.slack.api import slack_http_client
-from mindroom.slack.reply_mirror import is_slack_project_turn, mirror_reply_to_slack
 from mindroom.teams.formation import TeamOutcome, resolve_configured_team
 from mindroom.teams.spec import TeamMode
 from mindroom.timestamp_formatting import format_timestamp_ms
@@ -675,17 +673,11 @@ class AgentBot:
                 response_hooks=ResponseHookService(
                     hook_context=self._hook_context_support,
                     # Reads the live config, which a reload replaces.
-                    reply_mirror=lambda envelope, response_text: (
-                        mirror_reply_to_slack(
-                            envelope,
-                            response_text,
-                            config=self.config,
-                            runtime_paths=self.runtime_paths,
-                            credentials_manager=get_runtime_credentials_manager(self.runtime_paths),
-                            client_factory=slack_http_client,
-                        )
-                        if is_slack_project_turn(envelope)
-                        else None
+                    reply_mirror=lambda envelope, response_text: reply_mirror_for(
+                        envelope,
+                        response_text,
+                        config=self.config,
+                        runtime_paths=self.runtime_paths,
                     ),
                 ),
                 outbox=self._journal_store.principal(self._journal_principal_id),

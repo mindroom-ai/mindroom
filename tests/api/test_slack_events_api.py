@@ -22,6 +22,7 @@ from mindroom.api import main as api_main
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.main import Config
 from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.integrations import unbind_integrations
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.slack import app as slack_app
 from mindroom.slack import identity as slack_identity
@@ -109,11 +110,11 @@ def events_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Even
     monkeypatch.setattr(turns, "send_matrix_message", matrix.send)
     monkeypatch.setattr(slack_events, "_ACK_BUDGET_SECONDS", _TEST_BUDGET_SECONDS)
     runtime = runtime_for({"launch": FakeBot(AsyncMock())}, AgentReplyMembershipIndex(), slack)
-    config_lifecycle.app_state(api_main.app).slack_runtime = runtime
+    config_lifecycle.app_state(api_main.app).integration_runtimes["slack"] = runtime
     try:
         yield EventsApi(paths, slack, matrix, runtime)
     finally:
-        api_main.unbind_slack_runtime(api_main.app)
+        unbind_integrations(api_main.app)
 
 
 def test_acknowledgement_budget_leaves_headroom_within_slacks_timeout() -> None:
@@ -174,7 +175,7 @@ async def test_oversized_body_is_413(events_api: EventsApi) -> None:
 
 @pytest.mark.asyncio
 async def test_unbound_runtime_answers_503(events_api: EventsApi) -> None:
-    api_main.unbind_slack_runtime(api_main.app)
+    unbind_integrations(api_main.app)
 
     response = await events_api.post(event_payload())
 
@@ -237,8 +238,8 @@ async def test_shutdown_drains_pending_delivery(events_api: EventsApi) -> None:
     owned = {task.get_name() for task in background_tasks._tasks_for_owner(events_api.runtime)}
     assert owned == {"slack_event_delivery", "slack_event_retry"}
 
-    runtime = api_main.unbind_slack_runtime(api_main.app)
-    assert runtime is events_api.runtime
+    assert unbind_integrations(api_main.app) == [("slack", events_api.runtime)]
+    runtime = events_api.runtime
     assert (await events_api.post(event_payload(ts="1700000001.000100"))).status_code == 503
     drain = asyncio.create_task(wait_for_background_tasks(5.0, owner=runtime, shutdown_intent=ORDERLY_SHUTDOWN))
     await asyncio.sleep(0)
@@ -247,9 +248,9 @@ async def test_shutdown_drains_pending_delivery(events_api: EventsApi) -> None:
     assert len(events_api.matrix.sent) == 1
 
     events_api.matrix.gate = asyncio.Event()
-    config_lifecycle.app_state(api_main.app).slack_runtime = runtime
+    config_lifecycle.app_state(api_main.app).integration_runtimes["slack"] = runtime
     assert (await events_api.post(event_payload(ts="1700000002.000100"))).status_code == 200
-    api_main.unbind_slack_runtime(api_main.app)
+    unbind_integrations(api_main.app)
     with capture_logs() as logs:
         # The orchestrator waits 5 s; the cancellation that follows does not depend on how long.
         assert await wait_for_background_tasks(0.1, owner=runtime, shutdown_intent=ORDERLY_SHUTDOWN) is False

@@ -44,6 +44,10 @@ path = "mindroom.bounded_bytes"
 depends_on = []
 
 [[modules]]
+path = "mindroom.integrations"
+depends_on = ["mindroom.slack.integration"]
+
+[[modules]]
 path = "mindroom.origins"
 depends_on = ["mindroom.runtime_env_policy"]
 
@@ -1847,6 +1851,7 @@ depends_on = [
     "mindroom.slack.app",
     "mindroom.slack.delivery",
     "mindroom.slack.events",
+    "mindroom.slack.integration",
 ]
 
 [[modules]]
@@ -2105,10 +2110,9 @@ depends_on = [
     "mindroom.api.schedules",
     "mindroom.api.script_gateway",
     "mindroom.api.skills",
-    "mindroom.api.slack_events",
     "mindroom.api.tools",
     "mindroom.api.budgets",
-    "mindroom.slack.delivery",
+    "mindroom.integrations",
     "mindroom.api.usage",
     "mindroom.api.usage_export",
     "mindroom.api.validation_errors",
@@ -3270,6 +3274,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.event_journal.opening",
     "mindroom.hooks",
+    "mindroom.integrations",
     "mindroom.knowledge.watch",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
@@ -3582,6 +3587,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.git_urls",
     "mindroom.history.types",
+    "mindroom.integrations",
     "mindroom.logging_config",
     "mindroom.matrix.state",
     "mindroom.matrix_identifiers",
@@ -4876,6 +4882,7 @@ depends_on = [
     "mindroom.event_journal.opening",
     "mindroom.handled_turns",
     "mindroom.hooks",
+    "mindroom.integrations",
     "mindroom.inbound_turn_normalizer",
     "mindroom.journal_dispatch",
     "mindroom.legacy_handled_turns",
@@ -4904,8 +4911,6 @@ depends_on = [
     "mindroom.response_payload_preparation",
     "mindroom.response_runner",
     "mindroom.scheduling.tasks",
-    "mindroom.slack.api",
-    "mindroom.slack.reply_mirror",
     "mindroom.teams",
     "mindroom.timestamp_formatting",
     "mindroom.approval.tool_approval",
@@ -9843,6 +9848,19 @@ path = "mindroom.slack.identity"
 depends_on = ["mindroom.matrix.identity", "mindroom.slack.api", "mindroom.slack.render"]
 
 [[modules]]
+path = "mindroom.slack.integration"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.slack_events",
+    "mindroom.integrations",
+    "mindroom.slack.api",
+    "mindroom.slack.delivery",
+    "mindroom.slack.reply_mirror",
+]
+# Core reaches Slack only through the integration registry.
+visibility = ["mindroom.api.slack_events", "mindroom.integrations"]
+
+[[modules]]
 path = "mindroom.slack.oauth"
 depends_on = ["mindroom.slack.api", "mindroom.slack.app"]
 
@@ -9861,7 +9879,7 @@ depends_on = [
     "mindroom.slack.turns",
     "mindroom.tool_system.events",
 ]
-visibility = ["mindroom.bot"]
+visibility = ["mindroom.slack.integration"]
 
 [[modules]]
 path = "mindroom.slack.turns"

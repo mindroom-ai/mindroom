@@ -18,7 +18,6 @@ from structlog.testing import capture_logs
 
 from mindroom import runtime_shutdown
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.api import config_lifecycle
 from mindroom.api import main as api_main
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
@@ -38,6 +37,7 @@ from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.event_journal.matrix_delivery import RecoveryOutcome
 from mindroom.hooks import HookRegistry, HookRegistryState
+from mindroom.integrations import bind_integrations
 from mindroom.journal_dispatch import JournalDispatcher
 from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.health import (
@@ -84,6 +84,7 @@ from mindroom.runtime_shutdown import (
     ShutdownBudget,
     shutdown_intent_for_entity,
 )
+from mindroom.slack.integration import bound_slack_runtime
 from tests.bot_helpers import make_test_agent_bot
 
 if TYPE_CHECKING:
@@ -3526,11 +3527,8 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:  # n
         ) as mock_wait,
     ):
         orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-        slack_runtime = api_main.bind_slack_runtime(
-            api_main.app,
-            bots=orchestrator.agent_bots,
-            agent_reply_memberships=orchestrator.agent_reply_memberships,
-        )
+        bind_integrations(api_main.app, orchestrator.agent_bots, orchestrator.agent_reply_memberships)
+        slack_runtime = bound_slack_runtime(api_main.app)
 
         # Track which tasks are cancelled
         cancelled = []
@@ -3556,7 +3554,7 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:  # n
         slack_bound_at_bot_shutdown: list[bool] = []
 
         def track_begin_shutdown() -> None:
-            slack_bound_at_bot_shutdown.append(config_lifecycle.app_state(api_main.app).slack_runtime is not None)
+            slack_bound_at_bot_shutdown.append(bound_slack_runtime(api_main.app) is not None)
 
         for mock_bot in (mock_bot1, mock_bot2):
             mock_bot.begin_process_shutdown = MagicMock(side_effect=track_begin_shutdown)
@@ -3616,7 +3614,7 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:  # n
         # Slack events are refused before bots begin shutting down and before their deliveries drain,
         # and the drain finishes before any bot stops.
         assert slack_bound_at_bot_shutdown == [False, False]
-        assert config_lifecycle.app_state(api_main.app).slack_runtime is None
+        assert bound_slack_runtime(api_main.app) is None
         assert shutdown_order.index("slack_drain") < shutdown_order.index("entity_teardown")
         quiesce_indexes = [index for index, action in enumerate(shutdown_order) if action == "source_quiesce"]
         cancel_indexes = [index for index, action in enumerate(shutdown_order) if action == "sync_cancel"]

@@ -86,7 +86,7 @@ from mindroom.config.runtime_overlays import (
     strip_runtime_approved_egress_overlay_from_dump,
 )
 from mindroom.config.schema_hints import DashboardJsonSchema, dashboard_hint, redact_config_for_display
-from mindroom.config.slack import SlackConfig, validate_slack_agents
+from mindroom.config.slack import SlackConfig
 from mindroom.config.tool_entries import raw_tool_entry_name_and_lazy_flag_fields, raw_tools_entries
 from mindroom.config.validation import TimezoneName  # noqa: TC001
 from mindroom.config.voice import VoiceConfig
@@ -113,6 +113,7 @@ from mindroom.git_urls import credential_free_repo_url
 
 # config layer loads BEFORE the history runtime; import leaf types so config load does not drag in agents+tools.
 from mindroom.history.types import HistoryPolicy, ResolvedHistorySettings
+from mindroom.integrations import validate_integrations
 from mindroom.logging_config import get_logger
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
@@ -838,9 +839,9 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_slack_answering_agents(self) -> Config:
-        """Require valid Slack channels and rooms on agents, and one answering agent per channel."""
-        validate_slack_agents(self)
+    def validate_integration_config(self) -> Config:
+        """Run each built-in integration's own config checks."""
+        validate_integrations(self)
         return self
 
     @model_validator(mode="after")

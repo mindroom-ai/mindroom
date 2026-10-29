@@ -18,6 +18,7 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.slack.app import load_slack_app
 from mindroom.slack.delivery import deliver_slack_event, retry_slack_event
 from mindroom.slack.events import verify_slack_signature
+from mindroom.slack.integration import bound_slack_runtime
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -51,7 +52,7 @@ async def post_slack_event(request: Request) -> Response:
     app = await asyncio.to_thread(load_slack_app, credentials_manager)
     if app is None:
         raise HTTPException(status_code=404, detail="Not Found")
-    runtime = config_lifecycle.app_state(request.app).slack_runtime
+    runtime = bound_slack_runtime(request.app)
     if runtime is None:
         raise HTTPException(status_code=503, detail=_UNAVAILABLE)
     if not verify_slack_signature(
