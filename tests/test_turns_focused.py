@@ -82,6 +82,7 @@ from mindroom.event_journal import (
     journal,
     turn_rows,
 )
+from mindroom.event_journal.identity import journal_principal_id
 from mindroom.event_journal.opening import open_event_journal
 from mindroom.hooks import (
     EVENT_MESSAGE_RECEIVED,
@@ -612,7 +613,7 @@ def _build_harness(
         runtime_paths=runtime_paths,
         storage_path=storage_path,
     ).store
-    journal_principal = journal_store.principal(f"{agent_name}@{matrix_id.full_id}")
+    journal_principal = journal_store.principal(journal_principal_id(agent_name, matrix_id.full_id))
     turn_store = TurnStore(
         TurnStoreDeps(
             turn_records=journal_store.turn_records(agent_name),
@@ -669,7 +670,7 @@ def _build_harness(
             settle_ignored_sources=_settle_ignored_dispatch_sources,
             replies=ReplyRuntime(
                 store=EventJournalStore.open_sqlite(storage_path / "replies.db").principal(
-                    f"{agent_name}@{matrix_id.full_id}",
+                    journal_principal_id(agent_name, matrix_id.full_id),
                 ),
                 entity_name=agent_name,
                 generation="test-runtime",
@@ -960,7 +961,7 @@ def _obligation_runner(
     harness: _Harness,
     *,
     tracking_path: Path,
-    principal_id: str,
+    matrix_user_id: str,
     entity_name: str,
     room: nio.MatrixRoom,
 ) -> JournalDispatcher:
@@ -969,7 +970,7 @@ def _obligation_runner(
 
     store = EventJournalStore.open_sqlite(tracking_path / "event_journal.db")
     return JournalDispatcher(
-        store=store.principal(f"{entity_name}@{principal_id}"),
+        store=store.principal(journal_principal_id(entity_name, matrix_user_id)),
         callbacks=JournalCallbacks(
             on_message=harness.ingress.handle_text_event,
             on_media=harness.ingress.handle_media_event,
@@ -985,7 +986,7 @@ def _obligation_runner(
             on_job_cancel=AsyncMock(),
         ),
         room_for_id=lambda _room_id: room,
-        schedule_trigger_sender_is_managed=lambda sender: sender == principal_id,
+        schedule_trigger_sender_is_managed=lambda sender: sender == matrix_user_id,
     )
 
 
@@ -1539,7 +1540,7 @@ async def test_duplicate_router_relay_claim_settles_without_restart(config: Conf
     obligation_runner = _obligation_runner(
         harness,
         tracking_path=tmp_path / "dispatch-tracking",
-        principal_id=_entity_user_id(config, "general"),
+        matrix_user_id=_entity_user_id(config, "general"),
         entity_name="general",
         room=room,
     )
@@ -1646,7 +1647,7 @@ async def test_an_alias_contender_does_not_hold_its_room_lane_while_the_turn_it_
     dispatcher = _obligation_runner(
         harness,
         tracking_path=tmp_path / "dispatch-tracking",
-        principal_id=_entity_user_id(config, "general"),
+        matrix_user_id=_entity_user_id(config, "general"),
         entity_name="general",
         room=room,
     )
@@ -2117,26 +2118,27 @@ async def test_contended_claim_does_not_strand_the_winner_in_the_senders_lane(
     that keeps its slot across the wait closes the cycle: the batch is admitted
     to the gate and never dispatched, with no error logged anywhere.
     """
-    # The winner's batch waits in the gate, holding its claim, until the drain flushes it.
+    # A media event waits out the debounce in the gate, holding its claim, until the drain flushes it, which builds
+    # the cycle: ordinary text skips the wait and would be dispatched before the duplicate arrived.
     harness = _build_harness(config, tmp_path, debounce_seconds=60.0)
     room = _room_with_members(config, "general")
-    event = _text_event(
-        f"{_entity_user_id(config, 'general')} answer once",
-        event_id="$duplicate-delivery:localhost",
-    )
+    event = _image_event(event_id="$duplicate-delivery:localhost")
 
     async with asyncio.timeout(10):
         outcomes = [
-            await harness.ingress.handle_text_event(room, event),
-            await harness.ingress.handle_text_event(room, event),
+            await harness.ingress.handle_media_event(room, event),
+            await harness.ingress.handle_media_event(room, event),
         ]
         await harness.gate.drain_all()
         await harness.runner.settle_inbox_responses()
 
     assert outcomes == [TurnDispatchOutcome.DEFERRED, TurnDispatchOutcome.DEFERRED]
-    assert [batch.event.event_id for batch in harness.gate_batches] == [event.event_id]
+    # Two admitted copies would coalesce into one batch, so the batch must hold one media event.
+    assert [len(batch.media_events) for batch in harness.gate_batches] == [1]
     assert len(harness.runner.requests) == 1
     assert harness.gate.lanes.all_settled()
+    # The duplicate goes back to the journal once the winner's claim is released.
+    assert harness.retried_dispatch_sources == [(event.event_id,)]
 
 
 @pytest.mark.asyncio
@@ -2192,7 +2194,7 @@ async def test_failed_gate_admission_releases_ingress_claim_once(
     obligation_runner = _obligation_runner(
         harness,
         tracking_path=tmp_path / "dispatch-tracking",
-        principal_id=_entity_user_id(config, "general"),
+        matrix_user_id=_entity_user_id(config, "general"),
         entity_name="general",
         room=room,
     )
@@ -2227,7 +2229,7 @@ async def test_failed_media_admission_remains_a_pending_exact_callback(
     obligation_runner = _obligation_runner(
         harness,
         tracking_path=tmp_path / "dispatch-tracking",
-        principal_id=_entity_user_id(config, "general"),
+        matrix_user_id=_entity_user_id(config, "general"),
         entity_name="general",
         room=room,
     )
@@ -2249,7 +2251,7 @@ async def test_router_silent_ignore_compacts_exact_callback(config: Config, tmp_
     obligation_runner = _obligation_runner(
         harness,
         tracking_path=tmp_path / "dispatch-tracking",
-        principal_id=_entity_user_id(config, ROUTER_AGENT_NAME),
+        matrix_user_id=_entity_user_id(config, ROUTER_AGENT_NAME),
         entity_name=ROUTER_AGENT_NAME,
         room=room,
     )
@@ -3620,7 +3622,7 @@ async def test_an_emote_is_answered_like_any_other_user_message(config: Config, 
     obligation_runner = _obligation_runner(
         harness,
         tracking_path=tmp_path / "dispatch-tracking",
-        principal_id=_entity_user_id(config, "general"),
+        matrix_user_id=_entity_user_id(config, "general"),
         entity_name="general",
         room=room,
     )
@@ -3925,7 +3927,7 @@ async def test_membership_uncertainty_does_not_complete_ingress(tmp_path: Path, 
     dispatcher = _obligation_runner(
         harness,
         tracking_path=tmp_path / "dispatch-tracking",
-        principal_id=_entity_user_id(config, "general"),
+        matrix_user_id=_entity_user_id(config, "general"),
         entity_name="general",
         room=room,
     )
@@ -4524,7 +4526,7 @@ async def test_eventless_silent_schedule_completion_is_terminal_before_recovery(
     obligation_runner = _obligation_runner(
         harness,
         tracking_path=tmp_path / "dispatch-tracking",
-        principal_id=_entity_user_id(config, "general"),
+        matrix_user_id=_entity_user_id(config, "general"),
         entity_name="general",
         room=room,
     )
@@ -6200,7 +6202,7 @@ async def test_pending_membership_preserves_receipt_order_and_quiet_retry(  # no
     dispatcher = _obligation_runner(
         harness,
         tracking_path=tracking_path,
-        principal_id=_entity_user_id(config, "general"),
+        matrix_user_id=_entity_user_id(config, "general"),
         entity_name="general",
         room=room,
     )
@@ -6239,7 +6241,7 @@ async def test_pending_membership_preserves_receipt_order_and_quiet_retry(  # no
             dispatcher = _obligation_runner(
                 harness,
                 tracking_path=tracking_path,
-                principal_id=_entity_user_id(config, "general"),
+                matrix_user_id=_entity_user_id(config, "general"),
                 entity_name="general",
                 room=room,
             )
@@ -6302,7 +6304,7 @@ async def test_late_membership_change_preserves_exact_source(  # noqa: PLR0915
     dispatcher = _obligation_runner(
         harness,
         tracking_path=tmp_path / "dispatch-tracking",
-        principal_id=_entity_user_id(config, "general"),
+        matrix_user_id=_entity_user_id(config, "general"),
         entity_name="general",
         room=room,
     )

@@ -24,6 +24,7 @@ from mindroom.constants import (
 from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseHookService
 from mindroom.event_journal import EventJournalStore
 from mindroom.event_journal.approval_store import ApprovalStore
+from mindroom.event_journal.identity import journal_principal_id
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.history.session_context import resolve_bound_team_scope
 from mindroom.history.types import HistoryScope
@@ -338,7 +339,7 @@ def _build_response_runner(
     response_hook_service.emit_after_response = AsyncMock(wraps=response_hook_service.emit_after_response)
     # One principal's records, as a bot's gateway and reply runtime share them.
     principal = EventJournalStore.open_sqlite(storage_path / "reply_records.db").principal(
-        f"{bot.agent_name}@{bot.matrix_id.full_id}",
+        journal_principal_id(bot.agent_name, bot.matrix_id.full_id),
     )
     delivery_gateway = DeliveryGateway(
         DeliveryGatewayDeps(

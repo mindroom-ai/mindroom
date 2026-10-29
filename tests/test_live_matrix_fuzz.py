@@ -26,6 +26,7 @@ from nio.durable.store import DurableStore
 
 from mindroom.config.main import Config
 from mindroom.event_journal import DeliveryStage, EventClass, EventJournalStore, EventKind, InboundEvent
+from mindroom.event_journal.identity import journal_principal_id
 from mindroom.event_journal.schema import SQLITE_DIALECT, schema_statements
 from mindroom.matrix.conversation_hydration import ConversationHydrator
 from scripts.testing import fuzz_live_matrix
@@ -3287,7 +3288,7 @@ def test_pending_journal_work_counts_only_unsettled_events() -> None:
         store = EventJournalStore.open_sqlite(stack.storage_path / "tracking" / "event_journal.db")
 
         async def seed() -> None:
-            principal = store.principal(f"general@{stack.agent_id}")
+            principal = store.principal(journal_principal_id("general", stack.agent_id))
             for event_id in ("$settled", "$pending"):
                 await principal.admit(
                     InboundEvent(

@@ -47,6 +47,11 @@ def agent_of_principal(principal_id: str) -> str:
     return principal_id.partition("@")[0]
 
 
+def matrix_user_of_principal(principal_id: str) -> str:
+    """Return the Matrix login a journal principal belongs to."""
+    return principal_id.partition("@")[2]
+
+
 def delivery_transaction_id(principal_id: str, delivery_id: str, stage: str) -> str:
     """Return the deterministic Matrix transaction ID for one delivery stage.
 

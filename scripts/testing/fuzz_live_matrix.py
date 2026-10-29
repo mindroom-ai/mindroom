@@ -52,6 +52,7 @@ import yaml
 import mindroom
 from mindroom.constants import AI_RUN_METADATA_KEY, STREAM_STATUS_KEY
 from mindroom.event_journal import turn_rows
+from mindroom.event_journal.identity import journal_principal_id
 from mindroom.event_journal.schema import SQLITE_DIALECT, render
 from mindroom.prompts import AGENT_IDENTITY_CONTEXT_TEMPLATE
 from mindroom.streaming import INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE
@@ -3468,7 +3469,7 @@ class ManagedTuwunelStack:
     @staticmethod
     def _journal_principal_id(matrix_id: str, *, agent_name: str = AGENT_NAME) -> str:
         """Return the journal's composite principal identity for one managed bot."""
-        return f"{agent_name}@{matrix_id}"
+        return journal_principal_id(agent_name, matrix_id)
 
     def _restart_source_settled(self) -> bool:
         """Read committed producer progress without interpreting opaque sync tokens."""
@@ -7898,7 +7899,7 @@ class LiveFuzzRunner:
         try:
             store = EventJournalStore.open_sqlite(
                 self.stack.storage_path / "tracking" / "event_journal.db",
-            ).principal(f"{AGENT_NAME}@{self.stack.agent_id}")
+            ).principal(journal_principal_id(AGENT_NAME, self.stack.agent_id))
             hydrator = ConversationHydrator(
                 store=store,
                 runtime=cast("Any", SimpleNamespace(client=client)),

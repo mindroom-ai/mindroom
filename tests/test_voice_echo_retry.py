@@ -58,7 +58,7 @@ def _wire_dispatcher(harness: _Harness, room: nio.MatrixRoom, tmp_path: Path) ->
     dispatcher = _obligation_runner(
         harness,
         tracking_path=tmp_path / "dispatch",
-        principal_id=harness.ingress.deps.matrix_id.full_id,
+        matrix_user_id=harness.ingress.deps.matrix_id.full_id,
         entity_name=harness.ingress.deps.agent_name,
         room=room,
     )
