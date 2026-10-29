@@ -1441,6 +1441,7 @@ def _sent_type(part: dict[str, Any] | None) -> str:
             "text/plain",
         ),
         (File(content=b"{}", filename="data.json"), "text", "application/json"),
+        (File(content=b"From: a@example.org\n\nHi", filename="mail.eml"), "note message/rfc822", "message/rfc822"),
         (
             File(content=b"a,b", filename="report.csv.gz"),
             "note application/octet-stream",

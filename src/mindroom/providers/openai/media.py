@@ -35,9 +35,9 @@ __all__ = [
 ]
 
 # OpenAI's file inputs guide (https://developers.openai.com/api/docs/guides/pdf-files): "Chat Completions accepts only
-# PDF files as ``file`` content parts", and the guide sends another file's text as a ``text`` part, while Responses also
-# reads spreadsheets, documents, presentations, and text and code, which are every ``text/*`` type the guide lists and
-# these types outside ``text/``.
+# PDF files as ``file`` content parts", and the guide sends another file's text as a ``text`` part. Responses reads the
+# types of the guide's "Full list of accepted file types": PDF, spreadsheets, documents, presentations, and text and
+# code, which are any ``text/*`` type, covering the ones the list names, and the types below outside ``text/``.
 _PDF = "application/pdf"
 _RESPONSES_FILE_TYPES = frozenset(
     {
@@ -66,7 +66,6 @@ _RESPONSES_FILE_TYPES = frozenset(
         "application/javascript",
         "application/json",
         "application/json5",
-        "application/rss+xml",
         "application/toml",
         "application/typescript",
         "application/x-awk",
@@ -88,6 +87,7 @@ _RESPONSES_FILE_TYPES = frozenset(
         "application/x-toml",
         "application/x-yaml",
         "application/yaml",
+        "message/rfc822",
     },
 )
 
