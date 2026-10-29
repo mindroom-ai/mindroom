@@ -14,7 +14,7 @@ from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.session_storage.codec import run_columns, run_kind, run_record
 from mindroom.session_storage.legacy_agno3_schema import run_from_row
 
-_RUNS = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "runs"
+_RUNS = Path(__file__).resolve().parents[1] / "fixtures" / "legacy_agno3" / "runs"
 # The stored-dict keys a run row keeps in columns of its own or in rows of other tables, never in ``record``.
 _NOT_IN_RECORD = {
     "run_id",

@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from mindroom.teams.runtime import TeamCallKey, TeamRunEvent
     from mindroom.tool_system.tool_function import AdaptedToolkit
 
-STORAGE = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "storage"
+STORAGE = Path(__file__).resolve().parents[1] / "fixtures" / "legacy_agno3" / "storage"
 SQUAD = "!room:example.org:$squad"
 SQUAD_APPROVED = "!room:example.org:$squad-approved"
 PANEL = "!room:example.org:$panel"

@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolkitClose
 
-LOADED_SESSIONS = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "storage" / "loaded_sessions.json"
+LOADED_SESSIONS = Path(__file__).resolve().parents[1] / "fixtures" / "legacy_agno3" / "storage" / "loaded_sessions.json"
 
 
 def _prompt() -> list[Message]:

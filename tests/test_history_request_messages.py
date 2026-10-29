@@ -1,7 +1,7 @@
 """Owned history request assembly reproduces Agno's history selection and MindRoom's replay policy.
 
 Selection parity reads the history goldens Agno 3.0.9 produced for each stored session
-(``tests/fixtures/agno_parity/history``) and the loaded sessions they were selected from.
+(``tests/fixtures/legacy_agno3/history``) and the loaded sessions they were selected from.
 """
 # ruff: noqa: D103
 
@@ -37,15 +37,15 @@ from tests.llm.agno_dict_helpers import stored_run_record
 if TYPE_CHECKING:
     from mindroom.session_storage.store import ConversationStore
 
-_PARITY = Path(__file__).parent / "fixtures" / "agno_parity"
+_LEGACY = Path(__file__).parent / "fixtures" / "legacy_agno3"
 _LOADED_SESSIONS: dict[str, dict[str, dict[str, Any]]] = json.loads(
-    (_PARITY / "storage" / "loaded_sessions.json").read_text(),
+    (_LEGACY / "storage" / "loaded_sessions.json").read_text(),
 )
 _SCOPED_SELECTIONS: dict[str, dict[str, dict[str, Any]]] = json.loads(
-    (_PARITY / "history" / "scoped_selections.json").read_text(),
+    (_LEGACY / "history" / "scoped_selections.json").read_text(),
 )
 _HISTORY_GOLDENS = sorted(
-    path for path in (_PARITY / "history").glob("*.json") if path.name != "scoped_selections.json"
+    path for path in (_LEGACY / "history").glob("*.json") if path.name != "scoped_selections.json"
 )
 _SETTINGS = replay_settings()
 _AGENT = HistoryScope(kind="agent", scope_id="code")
@@ -58,7 +58,7 @@ _SUMMARY_FOLLOWS = {"mindroom_compaction_summary_follows": True}
 
 
 def _golden(name: str) -> dict[str, Any]:
-    return json.loads((_PARITY / "history" / name).read_text())
+    return json.loads((_LEGACY / "history" / name).read_text())
 
 
 def _session(golden: dict[str, Any]) -> dict[str, Any]:

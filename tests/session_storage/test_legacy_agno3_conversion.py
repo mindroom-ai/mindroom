@@ -47,7 +47,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
 
 _NAMES = TableNames("code")
-_AGNO_PARITY = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity"
+_LEGACY_AGNO3 = Path(__file__).resolve().parents[1] / "fixtures" / "legacy_agno3"
 _SESSION = "s1"
 _DUMPS = {
     **{f"goldens/{dump.stem}": dump for dump in GOLDEN_DUMPS},
@@ -901,7 +901,7 @@ def test_converted_runs_drop_their_stored_tool_schemas(tmp_path: Path) -> None:
 
 def test_converted_runs_keep_only_the_keys_records_model(tmp_path: Path) -> None:
     """A run Agno wrote converts without the keys the owned records drop, and keeps every key they read."""
-    stored = json.loads((_AGNO_PARITY / "codecs.json").read_text(encoding="utf-8"))["paused_agent_run"]
+    stored = json.loads((_LEGACY_AGNO3 / "codecs.json").read_text(encoding="utf-8"))["paused_agent_run"]
     assert {"input", "session_state", "content_type"} <= set(stored)
     assert any(DROPPED_TOOL_EXECUTION_KEYS & set(tool) for tool in stored["tools"])
     database = _agno_database(tmp_path, (stored["session_id"], "agent", stored["agent_id"]))

@@ -30,7 +30,7 @@ TESTS = Path(__file__).resolve().parents[1]
 # Every recorded sequence: the generated seeds and the named sequences, each a ``.json`` recording and a ``.sql`` dump.
 SEQUENCES = sorted([*(FIXTURES / "generated").glob("*.json"), *(FIXTURES / "named").glob("*.json")])
 GOLDEN_DUMPS = (
-    *sorted((TESTS / "fixtures" / "agno_parity" / "storage").glob("*.sql")),
+    *sorted((TESTS / "fixtures" / "legacy_agno3" / "storage").glob("*.sql")),
     TESTS / "fixtures" / "agno_2_6_12_code_sessions.sql",
 )
 _SESSIONS_TABLE = re.compile(r'CREATE TABLE "?([A-Za-z0-9_]+)_sessions"? \(')

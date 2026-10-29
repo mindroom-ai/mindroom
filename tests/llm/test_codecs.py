@@ -1,7 +1,7 @@
 """Dict codecs of ``mindroom.llm`` read the dicts Agno 3.0.9 wrote, keeping every value the owned records model.
 
-These are legacy inputs and never change: ``tests/fixtures/agno_parity/codecs.json`` holds what real Agno objects
-produced, and the stored-run fixtures under ``tests/fixtures/agno_parity/runs`` hold what MindRoom stored through Agno.
+These are legacy inputs and never change: ``tests/fixtures/legacy_agno3/codecs.json`` holds what real Agno objects
+produced, and the stored-run fixtures under ``tests/fixtures/legacy_agno3/runs`` hold what MindRoom stored through Agno.
 Each one read and written back is the dict it was, minus the keys the owned records deliberately drop, which
 ``tests.llm.agno_dict_helpers`` lists once per type. The schema MindRoom itself writes is
 ``tests/llm/test_stored_dicts.py``'s.
@@ -37,7 +37,7 @@ from tests.llm.agno_dict_helpers import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity"
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "legacy_agno3"
 # What Agno 3.0.9 objects wrote, keyed by the case that built them; see the fixtures README.
 AGNO: dict[str, Any] = json.loads((FIXTURES / "codecs.json").read_text(encoding="utf-8"))
 

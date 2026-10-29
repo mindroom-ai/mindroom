@@ -1,4 +1,4 @@
-"""The conversation databases Agno 3.0.9 wrote through MindRoom (``tests/fixtures/agno_parity/storage``), restored."""
+"""The conversation databases Agno 3.0.9 wrote through MindRoom (``tests/fixtures/legacy_agno3/storage``), restored."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import SessionKind
 
-STORAGE = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "storage"
+STORAGE = Path(__file__).resolve().parents[1] / "fixtures" / "legacy_agno3" / "storage"
 
 
 @dataclass(frozen=True)

@@ -1,6 +1,6 @@
 # Agno parity goldens
 
-These fixtures pin what MindRoom sends to providers and models and what it publishes, so a change to model-visible bytes shows as a golden diff, and they hold the data Agno wrote, which MindRoom must keep reading.
+These fixtures pin what MindRoom sends to providers and models and what it publishes, so a change to model-visible bytes shows as a golden diff, and they and the legacy inputs in `tests/fixtures/legacy_agno3/` hold the data Agno wrote, which MindRoom must keep reading.
 They were first captured while Agno 3.0.9 ran MindRoom, so the owned runtime could prove it changed neither (`docs/dev/2026-10-20-replace-agno-design.md`).
 The goldens of what owned code produces now regenerate from it, in the encodings this file describes, while the data Agno wrote stays as captured, as legacy inputs.
 The capture scripts that wrote them and the tests that checked them against Agno were deleted with Agno's runtime.
@@ -23,7 +23,7 @@ A conflict in a read-only golden is resolved on its own, as data, since no comma
 
 ## Legacy inputs
 
-`storage/`, `runs/`, `history/`, `codecs.json`, and the `bases` of `knowledge/rows.json` hold what Agno 3.0.9 wrote and computed, so the data a deployment kept from before the replacement stays pinned as it was; they are read-only and never change.
+`storage/`, `runs/`, `history/`, and `codecs.json` in `tests/fixtures/legacy_agno3/` (this file names them relative to that directory) and the `bases` of `knowledge/rows.json` hold what Agno 3.0.9 wrote and computed, so the data a deployment kept from before the replacement stays pinned as it was; they are read-only and never change.
 Tests read them as inputs: the storage conversion, the legacy codec tests, and the resumes of runs paused before the upgrade start from them.
 Three families still compare owned results with them on purpose: history selection (`history/`), which MindRoom keeps as Agno selected; the knowledge rows, which an owned refresh must keep writing; and the storage replay in `tests/session_storage/test_store_goldens.py`, whose usage ledger, session totals, and first-turn session rows must equal what Agno wrote to `storage/`, so an upgraded conversation's totals keep adding up.
 A deliberate change to the ledger or the session row replaces that replay's comparison with authored values.
@@ -233,7 +233,7 @@ Decoding errors embed the message of Python's `ast.literal_eval`, and probes tha
 A capture script, deleted with Agno's runtime, wrote `storage/`, `runs/`, `history/`, and `events/`.
 Every scenario ran MindRoom's real code path with real Agno agents and teams: `ai_response`, `stream_agent_response`, `team_response`, `team_response_stream`, the approval resume (`AgentApprovalExecution.continue_run` and `continue_paused_team_run`, called with the decisions, receipt, and continuation `ResponseRunner` builds), the OpenAI-compatible API, and MindRoom's storage, compaction, and reply-linkage functions.
 Only the provider was replaced, by the synthetic provider answering from a script.
-The `storage/`, `runs/`, and `history/` files hold data Agno wrote and are never rewritten; the `events/` files hold what MindRoom published and regenerate from owned code.
+The `storage/`, `runs/`, and `history/` files are legacy inputs that hold data Agno wrote and are never rewritten; the `events/` files hold what MindRoom published and regenerate from owned code.
 `tests/session_storage/test_store_goldens.py` proves that every `storage/` file converts to storage v2 and then reads and writes with nothing lost or changed.
 
 ### Scenarios

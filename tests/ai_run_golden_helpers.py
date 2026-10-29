@@ -55,6 +55,7 @@ if TYPE_CHECKING:
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "agno_parity"
 GOLDEN = _FIXTURES / "events" / "ai_run.json"
+_STORED_RUNS = Path(__file__).parent / "fixtures" / "legacy_agno3" / "runs"
 GOLDEN_RUN_METADATA: dict[str, dict[str, Any]] = json.loads(GOLDEN.read_text(encoding="utf-8"))
 
 _CLOCK = "<clock>"
@@ -106,7 +107,7 @@ def _stored_runs() -> dict[str, AnyRunRecord]:
     """Return each run row the run goldens hold, by run id, skipping values nested in a row."""
     runs: dict[str, AnyRunRecord] = {}
     for name in ("run_output.json", "team_run_output.json"):
-        for key, data in json.loads((_FIXTURES / "runs" / name).read_text(encoding="utf-8")).items():
+        for key, data in json.loads((_STORED_RUNS / name).read_text(encoding="utf-8")).items():
             _, path = key.split(":", 1)
             if path == data["run_id"]:
                 assert path not in runs
