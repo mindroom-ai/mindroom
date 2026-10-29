@@ -16,9 +16,9 @@ from mindroom.delegation.state import SubagentPersona
 from mindroom.knowledge.search import KNOWLEDGE_SEARCH_TOOL_NAME
 from mindroom.knowledge.utils import semantic_agent_knowledge_base_ids
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import ToolAuthoredOverrideValidator
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.skills import (
     SKILL_FUNCTION_NAMES,
     SkillMarkdownError,
@@ -219,11 +219,8 @@ def list_profiles(workspace_root: Path) -> list[_PersonaProfile | _InvalidPerson
     return entries
 
 
-def load_profile(workspace_root: Path | None, name: str) -> _PersonaProfile:
+def load_profile(workspace_root: Path, name: str) -> _PersonaProfile:
     """Read one named profile, raising ``PersonaError`` with the user-facing reason."""
-    if workspace_root is None:
-        msg = "Cannot delegate: subagent profiles need an agent workspace."
-        raise PersonaError(msg)
     if not _PROFILE_NAME.fullmatch(name):
         msg = f"Cannot delegate: {_NAME_RULE}."
         raise PersonaError(msg)
@@ -267,20 +264,15 @@ def caller_toolkit_names(agent_name: str, config: Config, *, delegation_depth: i
     if agent_name not in config.agents:
         # A reload can remove the caller mid-response; its copies then have no tools to inherit.
         return []
-    surface = visible_tool_surface(
-        agent_name=agent_name,
-        config=config,
-        delegation_depth=delegation_depth,
-        include_matrix_room_runtime_tools=True,
-    )
-    return surface.toolkit_names(config)
+    agent_tools = resolve_agent_tools(config, agent_name)
+    return agent_tools.toolkit_names(agent_tools.candidates(depth=delegation_depth, matrix_room_tools=True))
 
 
 def caller_skill_names(
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    workspace_root: Path | None,
+    workspace_root: Path,
 ) -> list[str]:
     """Return every skill this agent may use: its configured skills and the skills in its workspace."""
     if agent_name not in config.agents:
@@ -419,7 +411,7 @@ def resolve_persona_request(  # noqa: PLR0911
     profile: object,
     model: str | None,
     minimal: bool,
-    workspace_root: Path | None,
+    workspace_root: Callable[[], Path],
     available_toolkits: Callable[[], Sequence[str]],
     available_skills: Callable[[], Sequence[str]],
     available_knowledge: Callable[[], Sequence[str]],
@@ -429,6 +421,7 @@ def resolve_persona_request(  # noqa: PLR0911
 
     ``cap`` is the persona of the authored subagent making this call, if any: copies it authors stay
     within its tools, skills, and knowledge bases, and while it lists any, it cannot start an unauthored copy.
+    ``workspace_root`` returns the caller's workspace, which is resolved only to read a profile.
     """
     mode: AgentMode = "minimal" if minimal else "standard"
     # Some models fill every optional argument; empty values author nothing.
@@ -455,7 +448,7 @@ def resolve_persona_request(  # noqa: PLR0911
         elif not isinstance(profile, str):
             return "Cannot delegate: profile must be a profile name."
         else:
-            loaded = load_profile(workspace_root, profile)
+            loaded = load_profile(workspace_root(), profile)
             persona, model = loaded.persona, model or loaded.model
             mode = "minimal" if minimal else loaded.mode or "standard"
         persona = _capped_persona(persona, available_toolkits(), available_skills, available_knowledge, cap)

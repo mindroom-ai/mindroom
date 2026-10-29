@@ -1497,6 +1497,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `matrix_space` | Root Matrix Space for managed rooms | [Matrix Space](https://docs.mindroom.chat/rooms/#matrix-space) |
 | `timezone`, `scheduler_catch_up_grace_seconds` | Default timezone for dates, times, and schedules (default `UTC`; agents can override it) and missed-run catch-up | [Scheduling](https://docs.mindroom.chat/scheduling/#timezone) |
 | `external_trigger_policy` | Inbound external triggers | [External Triggers](https://docs.mindroom.chat/external-triggers/) |
+| `slack` | How Slack workspace members map to Matrix users | [Slack](https://docs.mindroom.chat/tools/slack/#slack-configuration) |
 | `tool_approval` | Human approval for tool calls | [Tool Approval](https://docs.mindroom.chat/tool-approval/#tool-approval) |
 | `egress_broker` | Agent Keys: services whose API keys and connected accounts are added to worker requests without the worker seeing them | [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) |
 | `background_tool_jobs` | Experimental background execution of tool calls, off by default | [Background Jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
@@ -1928,7 +1929,7 @@ These settings are global-only:
 | `max_consecutive_agent_replies` | `50` | Consecutive agent or team messages (>= 1) before agents stop waking each other; see [Agents mentioning other agents](https://docs.mindroom.chat/authorization/#agents-mentioning-other-agents) |
 | `max_preload_chars` | `50000` | Cap (>= 1) on preloaded context files; see [File-Based Context Loading](#file-based-context-loading) |
 | `tool_output_auto_save_threshold_bytes` | `51200` | Larger tool outputs are saved to the workspace; see [Workspace and tool output files](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files) |
-| `worker_grantable_credentials` | `null` | Shared credential services available inside isolated workers (`null` grants none); Google OAuth client and token services and `google_vertex_adc` cannot be granted. See [Credential leases](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases) |
+| `worker_grantable_credentials` | `null` | Shared credential services available inside isolated workers (`null` grants none); Google OAuth client and token services, `google_vertex_adc`, and `slack_app` cannot be granted. See [Credential leases](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases) |
 | `thread_summary_model`, `thread_summary_temperature`, `thread_summary_first_threshold`, `thread_summary_subsequent_interval` | `null`, `0.2`, `1`, `10` | Automatic thread summaries; see [Automatic Thread Summaries](https://docs.mindroom.chat/tools/matrix-and-attachments/#automatic-thread-summaries) |
 
 # Model Configuration
@@ -1958,6 +1959,7 @@ The same model can have different IDs on different providers; check the [OpenAI]
 
 Letter case, surrounding spaces, and `-` versus `_` do not matter, so `Llama-CPP` means `llama_cpp`.
 A `provider` value that does not match one of these fails config load with an error that names the model and lists these values, even when no agent uses that model.
+Config load and `mindroom config validate` also fail, naming each reference, when an agent, a team, or the router (including the implicit `default` an entity without a `model` uses), a `room_models` or `room_thread_summary_models` entry, `defaults.thread_summary_model`, or `voice.intelligence.model` while voice is enabled names a model that `models` does not define.
 
 To generate a starter config for one provider, use `mindroom config init --provider <preset>` (see [Getting Started](https://docs.mindroom.chat/getting-started/)).
 The [macOS app's local model setup](https://docs.mindroom.chat/installation/macos-app/#local-ai-models) downloads and runs models with one click, with hardware recommendations including Qwen3.8 27B when memory permits.
@@ -3626,13 +3628,12 @@ agents:
   assistant:
     display_name: Assistant
     role: A helpful assistant with direct file access to source docs
-    memory_backend: file
     tools: [file, shell]
     knowledge_bases: [source_docs]
 ```
 
 A files-mode base has no vector index, does not use the embedder, and does not provide `search_knowledge_base`.
-The agent needs a workspace, which `memory_backend: file` creates at `${MINDROOM_STORAGE_PATH}/agents/<agent>/workspace` (private agents use their private root).
+The agent's workspace is `${MINDROOM_STORAGE_PATH}/agents/<agent>/workspace` (private agents use their private root).
 When the base's path is inside that workspace and the folder exists, MindRoom exposes it as `knowledge/<base_id>` and tells the agent to use file tools on it.
 Bases outside the workspace are not linked, and with the default [`file_access: workspace`](https://docs.mindroom.chat/configuration/agents/#configuration-options) the agent's file tools cannot reach them.
 
@@ -3653,7 +3654,7 @@ knowledge_bases:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `description` | string | `""` | What the base contains; shown to agents in the `search_knowledge_base` tool description and in files-mode instructions so they know when to use it |
-| `mode` | `semantic` or `files` | `semantic` | `semantic` builds an embedding-backed search index; `files` skips embeddings and exposes the files to workspace-aware agents |
+| `mode` | `semantic` or `files` | `semantic` | `semantic` builds an embedding-backed search index; `files` skips embeddings and exposes the files to agents' file tools |
 | `path` | string | `./knowledge_docs` | Folder path, relative to the config file directory or absolute |
 | `watch` | bool | `true` | Watch the local folder and refresh in the background when files change. When `false`, direct external edits require an explicit reindex unless `poll_interval_seconds` is set; dashboard/API uploads and deletes still trigger a refresh |
 | `poll_interval_seconds` | int | `null` | Schedule a background refresh of the local folder this often (minimum `5`), for folders that another host writes to; see [Folders Written by Another Host](#folders-written-by-another-host). Unset means no polling. Semantic mode only, so `mode: files` bases reject it. Git-backed bases use `git.poll_interval_seconds` instead, and setting both is rejected |
@@ -4059,7 +4060,6 @@ agents:
   analyst:
     display_name: Analyst
     role: Answers questions from the team's knowledge bundles
-    memory_backend: file
     tools: [file]
     knowledge_bases: [acme_okf]
     skills: [open-knowledge-format]
@@ -4349,7 +4349,7 @@ They do not appear in the dashboard Skills page or the skills API, because those
 Hidden entries such as `.usage.json`, `.history/`, and `.archive/` are never loaded as skills.
 
 Agents never need write access to a global skill root to create skills, so the bundled, plugin, and user roots can stay read-only, for example in container or Kubernetes deployments.
-An agent with a workspace and workspace-rooted file or shell tools can write a skill to `<workspace>/skills/<skill-name>/SKILL.md`, which its file tools address as `skills/<skill-name>/SKILL.md`.
+An agent with workspace-rooted file or shell tools can write a skill to `<workspace>/skills/<skill-name>/SKILL.md`, which its file tools address as `skills/<skill-name>/SKILL.md`.
 Such agents are told how in their system prompt through the `WORKSPACE_SKILL_AUTHORING_PROMPT` built-in prompt, which you can change through [Built-In Prompt Overrides](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides).
 A new or edited workspace skill is picked up on the agent's next run without a config change.
 
@@ -5752,7 +5752,6 @@ Paths, including the targets of symbolic links, follow the agent's [`file_access
 
 - With the default `workspace`, paths resolve from the agent workspace and must stay inside it, so pass workspace-relative paths such as `incoming/file.txt`.
   `~` expands to the MindRoom process home, not the worker workspace, so `~/incoming/file.txt` is rejected.
-  Without a configured workspace, path registration is refused.
 - With `unrestricted`, any file the MindRoom process can read is accepted, including absolute paths.
 
 ## Retention
@@ -7153,7 +7152,6 @@ A template or override that would produce an invalid agent fails validation as s
 ## Generated Agents
 
 Generated agents are ordinary agents in the running config, and workers receive them too.
-Docker workers take them from the config the runtime last accepted, and every other setting from `config.yaml`, so a rejected `config.yaml` edit can give a worker a mix of the two until you fix the file.
 They never appear in the saved config file, and the dashboard and `config_manager` edit only what you authored.
 
 - Editing the template changes every user's agent at the next reload.
@@ -7472,7 +7470,6 @@ agents:
     display_name: Assistant
     role: A helpful assistant with file and web access
     model: sonnet
-    memory_backend: file  # gives the agent a workspace for file paths
     tools:
       - file
       - shell
@@ -7500,7 +7497,6 @@ defaults:
 
 agents:
   code:
-    memory_backend: file                 # gives the agent a workspace for file paths
     tools:
       - file                               # no inline settings
       - shell:                             # this agent only
@@ -7576,7 +7572,7 @@ agents:
 ```
 
 A name the toolkit does not provide fails when the tool loads with `Included tool(s) not present in the toolkit: <names>` or `Excluded tool(s) not present in the toolkit: <names>`.
-The built-in usage instructions that `daytona`, `gmail`, `google_calendar`, `reasoning`, `slack`, and `zep` add to the agent's prompt are left out while a function they name is disabled or filtered out; instructions you set through a tool's `instructions` option are always included.
+The built-in usage instructions that `daytona`, `gmail`, `google_calendar`, `reasoning`, and `zep` add to the agent's prompt are left out while a function they name is disabled or filtered out; instructions you set through a tool's `instructions` option are always included.
 
 ## Browse By Topic
 
@@ -7597,6 +7593,7 @@ The built-in usage instructions that `daytona`, `gmail`, `google_calendar`, `rea
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/) - Email, chat, and social/community integrations.
 - [Project Management](https://docs.mindroom.chat/tools/project-management/) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/) - Per-user OAuth Jira and Confluence Cloud access, additional connected sites, and attachment downloads.
+- [Slack](https://docs.mindroom.chat/tools/slack/) - Per-user OAuth Slack search, reading, posting, and downloads, project agents that answer mentions of the MindRoom app, and watches that forward a person's Slack mentions and direct messages to Matrix.
 - [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) - Per-user OAuth OneDrive and SharePoint files, Excel ranges, SharePoint lists and pages, Outlook mail and calendars, To Do tasks, Teams channels and chats, Teams meeting transcripts, OneNote pages, and the people directory through Microsoft Graph.
 - [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar and task APIs and MindRoom scheduling tools.
 - [Memory & Storage](https://docs.mindroom.chat/tools/memory-and-storage/) - Mem0 and Zep external memory services; the built-in [`memory`](https://docs.mindroom.chat/memory/#memory) tool is documented with the memory system.
@@ -8025,7 +8022,6 @@ agents:
   assistant:
     display_name: Assistant
     role: Help in chat
-    memory_backend: file  # gives the agent a workspace for file paths
     tools:
       - shell
       - coding: {defer: true, initial: true}
@@ -8136,7 +8132,7 @@ A caller with the [`delegate`](https://docs.mindroom.chat/tools/agent-orchestrat
 Use it for self-contained tasks where the child does not need its role, instructions, and tool guidance up front; it can still read them with `mindroom-agent context`.
 The option is offered only in Matrix conversations, only for allowed subagents that have the `shell` tool and meet the [deployment requirements](#deployment-requirements), and never while shell commands require approval.
 A minimal subagent cannot pause for approval, so approval-gated tools are hidden from it.
-A listed child whose shell permissions or workspace still rule out minimal mode fails with the reason and a hint to start a new subagent without minimal.
+A listed child whose shell permissions still rule out minimal mode fails with the reason and a hint to start a new subagent without minimal.
 A minimal [authored subagent](https://docs.mindroom.chat/tools/agent-orchestration/#authored-subagents) uses its authored prompt in place of the minimal prompt's identity line, keeps its workspace and `mindroom-agent` lines, and an explicit `tools` list for it must include `shell` or `shell.run_shell_command`.
 Its `mindroom-agent context` documents hold its own prompt, runtime guidance, and the skills it keeps, not the caller's configured role or instructions.
 
@@ -8192,7 +8188,7 @@ Use `--call-id UUID` to fix the call ID before submission; reusing an ID with th
 
 `context read` accepts only names returned by `context list` or by other commands, not filesystem paths.
 Large schemas return a context name for paged reading.
-Large tool results return a preview and a workspace file path holding the full output; for an agent without a workspace, they are shortened instead.
+Large tool results return a preview and a workspace file path holding the full output.
 Images, audio, and files are handled like ordinary response attachments.
 
 ## Exit codes
@@ -8228,10 +8224,7 @@ A pending approval still resumes after a restart once it is decided, but MindRoo
 
 Minimal Bash runs where the agent's ordinary shell runs.
 Every mode that uses `mindroom-agent` needs the `shell` tool on the agent and MindRoom running with its API server, not `--no-api`.
-Minimal mode and minimal subagents also need:
-
-- the shell's `run_shell_command` allowed;
-- an agent workspace, which `memory_backend: file` or a `private` agent provides.
+Minimal mode and minimal subagents also need the shell's `run_shell_command` allowed.
 
 `!mode <agent> minimal` lists every missing requirement at once.
 Set environment settings in the runtime's `.env` and restart MindRoom.
@@ -8326,7 +8319,7 @@ Each run keeps the limits and `allowed_tools` value in effect when it started.
 - A non-empty `allowed_tools` list restricts the script to those toolkits, and their functions run without approval.
 - An empty list lets the script call every eligible toolkit on the agent, but each call waits for approval unless a `tool_approval` rule auto-approves it.
 - Unknown or ineligible toolkit names, including `*`, make `start_script` fail with an error.
-- The `browser`, `script`, `agent_manager`, `claude_agent`, `compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `memory`, `self_config`, and `skill_manage` toolkits are never available to scripts, even when the agent has them.
+- The `browser`, `script`, `agent_manager`, `claude_agent`, `compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `memory`, `self_config`, `skill_manage`, and `slack` toolkits are never available to scripts, even when the agent has them.
 - Listing `config_manager` or `scheduler` in `allowed_tools` does not auto-approve their calls; only a `tool_approval` rule can.
 - Operator [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules are checked first, so a matching `require_approval` rule still pauses the call, and functions that declare their own confirmation still ask for it.
 - Only the original requester can approve or deny a script's call, and approval cards for a cancelled or finished run are settled without running the call.
@@ -9208,7 +9201,7 @@ Standard error is merged into standard output; redirect it with `2>file` to keep
 
 The bridge captures up to 10 MiB of output per command and reports `output_truncated: true` when more was dropped.
 Large output arrives as an encrypted Matrix attachment that the cloud tool downloads within its `timeout_seconds`.
-For agents with a workspace, MindRoom's normal [tool output files](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files) apply to large results.
+MindRoom's normal [tool output files](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files) apply to large results.
 
 ## Uncertain Outcomes
 
@@ -9334,12 +9327,12 @@ Only a worker isolates `shell`, `python`, and `docker`, because they execute cod
 
 ### Workspace and tool output files
 
-When an agent has a workspace, it is the working directory (`base_dir`) of `file`, `shell`, `coding`, and worker-routed `python`, and generated files and charts are saved inside it.
+Every agent has a workspace: `agents/<agent>/workspace/` in the storage directory, or the requester's private root for a [`private`](https://docs.mindroom.chat/configuration/agents/#private-instances) agent.
+It is the working directory (`base_dir`) of `file`, `shell`, `coding`, and worker-routed `python`, and generated files and charts are saved inside it.
 `python` in the primary process resolves its file functions against the workspace, but the code it runs uses the process's current directory, so relative paths such as `open("data.csv")` may miss workspace files.
-`base_dir` is managed by MindRoom and cannot be set inline in `config.yaml`; without a workspace, `shell` and `python` use the process's current directory, and so do `file` and `coding` under `file_access: unrestricted`.
-Under the default `file_access: workspace`, `file` and `coding` of an agent without a workspace refuse every path outside its shared directories, except in a worker with worker-specific storage (Docker and Kubernetes workers, and `static_runner` calls of agents with a [`worker_scope`](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes)), where they use that worker's own directory; give the agent a workspace with `memory_backend: file` or a `private` configuration.
+`base_dir` is managed by MindRoom and cannot be set inline in `config.yaml`.
 
-Agents with a workspace also get an optional `mindroom_output_path` argument on supported tools.
+Supported tools also take an optional `mindroom_output_path` argument.
 Set it to a workspace-relative file path to save the tool's full output to that file and return a short receipt to the model instead.
 The path must name a file inside the workspace; absolute paths, `..`, paths that start with `~` or contain `$` or `%`, symlinks, and paths inside a `.git` directory are refused.
 Without `mindroom_output_path`, outputs larger than `defaults.tool_output_auto_save_threshold_bytes` (integer, at least 1, default `51200`, which is 50 KiB) are saved under `mindroom_tool_outputs/` in the workspace, and the model receives the path, size, format, a preview, and a note to read the file in parts, because reading it whole would only save it again.
@@ -9354,7 +9347,6 @@ agents:
     display_name: Code
     role: Edit code, run local checks, and export artifacts
     model: sonnet
-    memory_backend: file
     tools:
       - coding
       - shell:
@@ -9403,7 +9395,6 @@ Prefer [`coding`](#coding) for code-editing agents.
 ```yaml
 agents:
   editor:
-    memory_backend: file  # gives the agent a workspace for file paths
     tools:
       - file:
           enable_delete_file: true
@@ -9526,7 +9517,6 @@ Paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture
 ```yaml
 agents:
   code:
-    memory_backend: file  # gives the agent a workspace for file paths
     tools:
       - coding
 ```
@@ -9683,7 +9673,6 @@ PDF and DOCX generation are disabled when `reportlab` or `python-docx` is unavai
 Files are also saved to disk when `output_directory` is set or `save_files` is `true`.
 Saved files go into `output_directory` inside the agent workspace, or the workspace root when only `save_files` is set, and overwrite files of the same name.
 `output_directory` must be a relative path that stays inside the workspace.
-Agents without a workspace cannot save generated files; the files exist only in the tool result.
 
 ### Configuration
 
@@ -9723,7 +9712,6 @@ Bar, line, and pie charts accept a dict, a list of dicts, or a JSON string; scat
 Each function saves a PNG in `output_dir` inside the agent workspace and returns the file path.
 A chart's `filename` must be a plain file name; when omitted, the chart is named after its type and numbered, such as `bar_chart_3.png`.
 Charts overwrite files of the same name, and `output_dir` is created when missing.
-Agents without a workspace cannot save charts.
 Because charts are in the workspace, `attachments` and `matrix_message` can send them under the default `file_access: workspace`.
 
 ### Configuration
@@ -10034,7 +10022,6 @@ agents:
 Non-Workspace files over `max_read_size` return an error suggesting `google_drive_download_file` instead.
 Downloads larger than `max_download_size` are refused without leaving a partial file.
 Uploads and content replacement read local files according to the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
-Downloads need an agent workspace; for an agent without one, `download_file` is ignored and a warning is logged.
 To change the content of a native Google Doc, use [`google_docs`](#google_docs).
 If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link; see [Google Services OAuth For Local Installs](https://docs.mindroom.chat/deployment/google-services-user-oauth/#connect).
 A connection that granted only read-only Drive access keeps working for reads, while writes ask the user to reconnect; see [Scope Rationale](https://docs.mindroom.chat/deployment/google-services-oauth/#scope-rationale).
@@ -11904,7 +11891,7 @@ A new thread may not appear in `matrix_room(action="threads")` until it has a re
 | `idempotency_key` | `str \| None` | `None` | Nonblank key of at most 256 characters for [safe send retries](#safe-send-retries); text-only sends. |
 | `limit` | `int \| None` | `None` | Messages to read, clamped to 1–50; default 20. |
 
-Agents with a workspace also see the standard [`mindroom_output_path`](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files) argument, which saves the tool result to a file; it does not change where the message goes.
+The tool also takes the standard [`mindroom_output_path`](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files) argument, which saves the tool result to a file; it does not change where the message goes.
 
 `send` requires text, attachments, or both.
 `edit` requires non-empty text and can only edit messages the agent's own account sent.
@@ -12079,7 +12066,7 @@ Use it to pick a tool, configure its credentials, and understand why a tool is u
 | Tool | Use it for | Setup |
 | --- | --- | --- |
 | [`gmail`](#gmail) | Reading, searching, drafting, sending, and labeling mail in a Gmail mailbox | Google Gmail OAuth |
-| [`slack`](#slack) | Slack messages, threaded replies, channel and user lookups, history, search, and files | Bot or user token |
+| [`slack`](https://docs.mindroom.chat/tools/slack/) | Searching, reading, posting, and reacting in Slack as the connected person or in a project's channels, and answering mentions of the MindRoom app | Slack app with OAuth |
 | [`discord`](#discord) | Discord channel messages, channel info and history, and message deletion | Bot token |
 | [`telegram`](#telegram) | Text and media sent by a Telegram bot to one fixed chat | Bot token and chat ID |
 | [`whatsapp`](#whatsapp) | WhatsApp Business text, template, interactive, and media messages | Access token and phone number ID |
@@ -12098,7 +12085,7 @@ For Outlook mail, see `outlook_mail` in [Microsoft 365](https://docs.mindroom.ch
 
 Set fields of type `password` through the dashboard or credential store; see [Security Restrictions](https://docs.mindroom.chat/tools/#security-restrictions).
 Many credential fields below are optional in the dashboard but required in practice, and the tool fails to load or errors on its first call without them.
-Instead of stored fields, these tools also read the environment variables `SLACK_TOKEN`, `SLACK_USER_TOKEN`, `DISCORD_BOT_TOKEN`, `TELEGRAM_TOKEN`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_API_KEY`, `TWILIO_API_SECRET`, `WEBEX_ACCESS_TOKEN`, `RESEND_API_KEY`, `X_BEARER_TOKEN`, `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `ZOOM_ACCOUNT_ID`, `ZOOM_CLIENT_ID`, and `ZOOM_CLIENT_SECRET`.
+Instead of stored fields, these tools also read the environment variables `DISCORD_BOT_TOKEN`, `TELEGRAM_TOKEN`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_API_KEY`, `TWILIO_API_SECRET`, `WEBEX_ACCESS_TOKEN`, `RESEND_API_KEY`, `X_BEARER_TOKEN`, `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `ZOOM_ACCOUNT_ID`, `ZOOM_CLIENT_ID`, and `ZOOM_CLIENT_SECRET`.
 `gmail` instead connects through Google OAuth; see [Google Services OAuth For Local Installs](https://docs.mindroom.chat/deployment/google-services-user-oauth/) or [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) for custom and hosted setups.
 Most tools enable or disable individual functions with `enable_<function>` flags, and `all: true` enables every function; `include_tools` and `exclude_tools` filter further, as described in [Filtering Toolkit Functions](https://docs.mindroom.chat/tools/#filtering-toolkit-functions).
 
@@ -12114,9 +12101,9 @@ Archiving, trashing, attachment downloads, and sending existing drafts are not a
 `send_email_to_self(subject, body)` always sends to the connected account's own address, so an approval rule can allow it while still requiring approval for `send_email`; see [Tool Approval](https://docs.mindroom.chat/tool-approval/).
 
 Draft and send functions accept attachment file paths, not Matrix attachment IDs.
-Allowed paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting: with the default `workspace`, attachments must be files inside the agent workspace, and an agent without a workspace cannot attach files.
+Allowed paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting: with the default `workspace`, attachments must be files inside the agent workspace.
 With `unrestricted`, any file MindRoom can read is allowed.
-Relative paths resolve from the workspace root, or from the MindRoom working directory when an `unrestricted` agent has no workspace.
+Relative paths resolve from the workspace root.
 Attachments may total at most 25 MiB per message; larger sets fail with `Gmail attachments exceed the 25 MiB limit`.
 
 Each option below defaults to `true`, and setting it to `false` removes the matching function.
@@ -12133,50 +12120,6 @@ Each option below defaults to `true`, and setting it to `false` removes the matc
 | `send_email_reply` | `boolean` | `true` | `send_email_reply()` |
 
 Use `exclude_tools` to remove other functions, such as `delete_custom_label`.
-
-## [`slack`]
-
-`slack` sends messages and threaded replies, lists channels and users, reads channel history and threads, searches messages, and uploads or downloads files.
-Use channel IDs rather than names, especially for threaded replies and history reads.
-`get_channel_history()` returns only top-level messages; to read a thread's replies, enable `get_thread()` and pass the parent message's timestamp.
-`slack` always runs in the primary runtime, and its file uploads and downloads are not confined by the agent's `file_access`, so enable it only for agents trusted with what the MindRoom process can reach; see [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access).
-
-To search messages, set `enable_search_messages: true` and store a user token with the [`search:read`](https://docs.slack.dev/reference/methods/search.messages/) scope in `user_token`; a bot token alone cannot search.
-A user token stored as the primary `token` also works for search.
-`search_workspace()` works only when Slack itself invokes the agent and supplies an action token, so it fails in ordinary Matrix conversations; use `search_messages()` there.
-Slack's tool-selection guide reaches the agent's prompt only while every function it names is enabled, and with messaging enabled it names `list_users()`, so set `enable_list_users: true` to include it.
-
-| Option | Type | Default | Notes |
-| --- | --- | --- | --- |
-| `token` | `password` | `null` | Bot or user token, or `SLACK_TOKEN`; required. |
-| `user_token` | `password` | `null` | User token for `search_messages()`, or `SLACK_USER_TOKEN`. |
-| `markdown` | `boolean` | `true` | Render Slack markdown in sent messages. |
-| `output_directory` | `text` | `null` | Directory for saved downloads; setting it also enables saving. |
-| `save_downloads` | `boolean` | `false` | Save downloads to disk instead of returning their content; without `output_directory`, files go to the current working directory. |
-| `enable_send_message` | `boolean` | `true` | Enable `send_message()`. |
-| `enable_send_message_thread` | `boolean` | `true` | Enable `send_message_thread()`. |
-| `enable_list_channels` | `boolean` | `true` | Enable `list_channels()`. |
-| `enable_get_channel_history` | `boolean` | `true` | Enable `get_channel_history()`. |
-| `enable_upload_file` | `boolean` | `true` | Enable `upload_file()`. |
-| `enable_download_file` | `boolean` | `true` | Enable `download_file()`. |
-| `enable_search_messages` | `boolean` | `false` | Enable `search_messages()`; needs a user token. |
-| `enable_search_workspace` | `boolean` | `false` | Enable `search_workspace()`. |
-| `enable_get_thread` | `boolean` | `false` | Enable `get_thread()`. |
-| `enable_list_users` | `boolean` | `false` | Enable `list_users()`. |
-| `enable_get_user_info` | `boolean` | `false` | Enable `get_user_info()`. |
-| `enable_get_channel_info` | `boolean` | `false` | Enable `get_channel_info()`. |
-| `all` | `boolean` | `false` | Enable every function. |
-| `max_file_size` | `number` | `1073741824` | Maximum upload or download size in bytes. |
-| `thread_message_limit` | `number` | `20` | Maximum messages returned by `get_thread()`. |
-
-```yaml
-agents:
-  support:
-    tools:
-      - slack:
-          enable_get_thread: true
-          enable_search_messages: true
-```
 
 ## [`discord`]
 
@@ -13051,6 +12994,337 @@ Other Atlassian errors keep Atlassian's message with URLs removed.
 - [Plugins](https://docs.mindroom.chat/plugins/)
 - [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/)
 
+# Slack
+
+The `slack` tool lets agents search and read Slack, list recent conversations, download and upload files, and post, edit, delete, and react to messages through one Slack app that your organization creates for MindRoom.
+Agents can also answer mentions of that app in Slack channels, and people can have their own Slack mentions and direct messages forwarded into a Matrix room.
+OAuth connection mechanics shared with other providers are on [OAuth Integration Framework](https://docs.mindroom.chat/oauth-framework/).
+
+An agent works in one of two modes, chosen by whether its `slack` entry lists `channels`:
+
+| | Personal | Project |
+| --- | --- | --- |
+| Chosen by | no `channels` | `channels` |
+| Acts as | each requester, with their own Slack account | the MindRoom Slack app |
+| Reads and posts | everything that person can see in Slack, including direct messages | only the listed channels the app has joined, never direct messages |
+| Slack events | a person's [watch](#watches) forwards their mentions and direct messages to Matrix | with `room`, a mention of the app [starts a thread](#project-agents) |
+
+## Functions
+
+| Function | Does | Personal | Project |
+| --- | --- | --- | --- |
+| `slack_search` | Finds messages, conversations, or people and returns the IDs the other functions take | `messages` (Slack search syntax, such as `launch in:#general from:@dana after:2026-10-01`), `conversations`, and `people` | `conversations` only, among the agent's channels |
+| `slack_recent` | Lists conversations by their latest message, newest first, with that message's start and link, in batches when Slack limits it | `dms` (direct and group direct messages, named after the other person, leaving out deactivated people) or `channels`, with a message in the last `days` (default 30) | needs a personal connection; `slack_search` lists the agent's channels |
+| `slack_read` | Reads a conversation's latest messages, or one thread | any conversation the person can see | the agent's channels |
+| `slack_download` | Saves a file of up to 50 MB in the agent workspace's `slack-downloads/` folder | any file the person can see | files shared in the agent's channels |
+| `slack_upload` | Shares a workspace file of up to 50 MB in a conversation or thread, with an optional `title` and `comment` | as the person; a user ID opens a direct message | as the app, in the agent's channels |
+| `slack_post` | Posts a message, or a reply in a thread | as the person; a user ID opens a direct message | as the app, in the agent's channels |
+| `slack_edit` | Replaces a message's text | the person's own messages | the app's own messages, in the agent's channels |
+| `slack_delete` | Deletes a message | messages the person may delete in Slack | the app's own messages, in the agent's channels |
+| `slack_react` | Adds an emoji reaction to a message | as the person | as the app, in the agent's channels |
+| `slack_watch` | Starts, stops, or checks a [watch](#watches) | in a Matrix conversation | not offered |
+
+Functions take a conversation ID such as `C0123ABCD`, `<conversation>:<ts>` such as `C0123ABCD:1714000000.000100`, or a message link, never a channel name.
+`slack_upload` takes a path in the agent's workspace and follows the agent's [`file_access`](https://docs.mindroom.chat/configuration/agents/) setting.
+[Background scripts](https://docs.mindroom.chat/tools/background-scripts/) cannot call `slack`.
+
+## Set Up The Slack App
+
+An administrator creates one Slack app for the MindRoom installation.
+One MindRoom serves one Slack workspace: accounts from other workspaces cannot connect, their events are ignored, and Enterprise Grid org-wide installs are not supported.
+Slack must reach MindRoom for the OAuth redirect and for events, so set `MINDROOM_PUBLIC_URL` to a public HTTPS address.
+
+1. In Slack, open [Your Apps](https://api.slack.com/apps), choose **Create New App**, then **From a manifest**, pick the workspace, and paste this manifest with `mindroom.example.com` replaced by your public MindRoom host:
+
+   ```yaml
+   display_information:
+     name: MindRoom
+   features:
+     app_home:
+       home_tab_enabled: false
+       messages_tab_enabled: false
+     bot_user:
+       display_name: MindRoom
+       always_online: true
+   oauth_config:
+     redirect_urls:
+       - https://mindroom.example.com/api/oauth/slack/callback
+     scopes:
+       bot:
+         - app_mentions:read
+         - channels:history
+         - channels:read
+         - groups:history
+         - groups:read
+         - chat:write
+         - reactions:write
+         - files:read
+         - files:write
+         - users:read
+         - users:read.email
+       user:
+         - search:read
+         - channels:history
+         - channels:read
+         - groups:history
+         - groups:read
+         - im:history
+         - im:read
+         - mpim:history
+         - mpim:read
+         - users:read
+         - users:read.email
+         - chat:write
+         - im:write
+         - reactions:write
+         - files:read
+         - files:write
+   settings:
+     event_subscriptions:
+       request_url: https://mindroom.example.com/api/slack/events
+       bot_events:
+         - app_mention
+         - message.channels
+         - message.groups
+       user_events:
+         - message.channels
+         - message.groups
+         - message.im
+         - message.mpim
+     org_deploy_enabled: false
+     socket_mode_enabled: false
+     token_rotation_enabled: false
+   ```
+
+   The bot's `users:read.email` scope is what maps a Slack author to a MindRoom account; without it nobody can wake a project agent.
+   Keep `token_rotation_enabled` and `socket_mode_enabled` off, because MindRoom stores Slack user tokens that do not expire and receives events over HTTP.
+
+2. Install the app to the workspace and copy the **Bot User OAuth Token**.
+3. On **Basic Information**, copy the **Client ID**, **Client Secret**, and **Signing Secret**.
+   Under **App-Level Tokens**, generate a token with the `authorizations:read` scope; watches need it, and everything else works without it.
+4. Store the credentials in the two credential services below, through the dashboard credentials page or a [credential seed](https://docs.mindroom.chat/oauth-framework/#credential-seeds).
+5. Set the [`slack` section](#slack-configuration) of `config.yaml` so Slack people map to MindRoom accounts.
+6. If MindRoom sits behind an SSO proxy, let `POST /api/slack/events` through without SSO.
+   Slack signs every request and MindRoom rejects unsigned ones.
+7. In the app's **Event Subscriptions**, retry the request URL's verification.
+   MindRoom answers Slack's verification only once step 4 is done, so the first check fails.
+
+| Credential service | Fields |
+| --- | --- |
+| `slack_oauth_client` | `client_id`, `client_secret` |
+| `slack_app` | `bot_token`, `signing_secret`, and `app_token` (the app-level token) |
+
+```json
+[
+  {
+    "service": "slack_oauth_client",
+    "credentials": {
+      "client_id": {"env": "SLACK_CLIENT_ID"},
+      "client_secret": {"env": "SLACK_CLIENT_SECRET"}
+    }
+  },
+  {
+    "service": "slack_app",
+    "credentials": {
+      "bot_token": {"env": "SLACK_BOT_TOKEN"},
+      "signing_secret": {"env": "SLACK_SIGNING_SECRET"},
+      "app_token": {"env": "SLACK_APP_TOKEN"}
+    }
+  }
+]
+```
+
+A seed with an empty field is skipped, so leave `app_token` out of the seed when you have no app-level token.
+The Slack app's credentials stay in the primary runtime and are never given to workers.
+
+## Slack Configuration
+
+```yaml
+slack:
+  email_domain: example.com
+  matrix_user_id_template: "@{localpart}:example.org"
+```
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `email_domain` | string | unset | Email domain of the workspace members who may wake project agents, such as `example.com`. Set it together with `matrix_user_id_template`. |
+| `matrix_user_id_template` | string | unset | Matrix user ID that a member's email address maps to, with exactly one `{localpart}`: with the values above, `dana@example.com` becomes `@dana:example.org`. Set it together with `email_domain`. |
+
+Only project agents that answer mentions need this section; personal agents and watches do not.
+
+The `slack` entry of an agent takes these options:
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `channels` | list of channel IDs | unset | Makes the agent a [project agent](#project-agents) with these channels, such as `C0123ABCD`; leave it out for a personal agent. A channel's ID is at the bottom of its details in Slack. Set it on the agent's own entry, not in `defaults.tools`. |
+| `room` | string | unset | One of the agent's `rooms`, where Slack mentions of the app in its channels start threads. Needs `channels` and the `slack` section above. |
+| `write` | boolean | `true` | When `false`, the agent has no `slack_post`, `slack_edit`, `slack_delete`, `slack_react`, and `slack_upload`. An agent with `room` needs `true`, because it posts its replies to Slack. |
+
+An agent that another agent [creates](https://docs.mindroom.chat/personal-agents/#created-agents-and-self-updates) keeps its creator's `channels` but not its `room`, because it has no rooms and never answers mentions.
+
+## Personal Agents
+
+```yaml
+agents:
+  mind:
+    private:
+      per: user
+    tools:
+      - slack
+```
+
+The first time a person asks for something in Slack, the agent replies with a link to connect Slack.
+After the person approves in Slack, the agent searches, reads, and posts with that person's own account, so it finds only what they can see and posts as them.
+A person can also connect or disconnect on the [Connections portal](https://docs.mindroom.chat/connections-portal/); when Slack revokes a token, the agent replies with a new link.
+
+Downloads are saved in the agent's workspace.
+On an agent that is not `private`, every requester of the agent shares that workspace and can read what another person downloaded, so use a `private` agent for personal Slack.
+
+## Project Agents
+
+```yaml
+agents:
+  launch:
+    rooms: [launch]
+    tools:
+      - slack:
+          channels: [C0123ABCD, C0456EFGH]
+          room: launch
+```
+
+Invite the MindRoom app to each listed channel, for example with `/invite @MindRoom`.
+The agent reads and posts only in listed channels that the app has joined, never in direct messages, even when one is listed.
+Without `room`, the agent works in those channels only when someone asks it in Matrix.
+
+With `room`, the agent answers Slack:
+
+1. A person mentions the app in a listed channel, and a 👀 reaction appears on their message.
+2. A thread opens in `room`, showing the Slack message with its author's name and a link, marked as from Slack.
+3. The agent answers as that person's MindRoom account, so the agent's access rules and the person's own connected accounts apply.
+4. The agent's final reply is posted in the Slack thread by the app, cut with "…" at Slack's length limit.
+   The agent does not need `slack_post` to answer.
+5. Replies in that Slack thread need no mention for 7 days after the last message; they continue the same Matrix thread, as whoever wrote them.
+   After that, mention the app again.
+
+Who can wake the agent:
+
+- The author's Slack email must be confirmed and in `slack.email_domain`, and its localpart maps to a Matrix account through `slack.matrix_user_id_template`.
+- Guests, bots and other apps, deactivated accounts, and people from other workspaces never wake an agent.
+- The mapped account must also pass the agent's [`access`](https://docs.mindroom.chat/authorization/#responder-access) check in `room`.
+- Anyone else sees a message in Slack that only they can see, `MindRoom can't answer you here.`, at most once a day per thread, and nothing reaches Matrix.
+
+Only replies to Slack messages are posted to Slack; what people write in the Matrix thread stays in Matrix.
+A reply can be missing in Slack when Slack is unavailable, although it exists in Matrix.
+A channel has one answering agent, so two agents cannot both set `room` with the same channel, and a `personal_agents` template cannot set `room`.
+
+## Watches
+
+A watch forwards a person's own Slack mentions and direct messages into the Matrix room where they start it.
+It works with a personal agent, needs the app-level token, and needs the person's connected Slack account.
+
+In the room, ask the agent, for example "Tell me when someone messages or mentions me in Slack", and it calls `slack_watch`:
+
+- `action="start"` creates the watch, or replaces the one the person has with this agent in this room.
+- `action="stop"` ends it, and `action="status"` shows its filters and, when it is not delivering, why.
+- `mentions` (default `true`) delivers messages that mention the person, including in group direct messages.
+- `direct_messages` (default `true`) delivers every message others send in the person's direct messages and group direct messages.
+- `channels` (optional) limits channel messages to those channel IDs; direct messages are not limited by it.
+  Replies in a thread where the person was mentioned also arrive, within those channels.
+
+Each delivery opens a thread in the room, such as "Slack direct message for you from Dana", with the Slack text, its author, its channel unless it is a direct message, and a link.
+Messages in the same direct message conversation join one thread, and replies in a Slack channel thread join that thread, until 7 days pass without a message.
+The agent can then summarize it or draft a reply; its turn runs as the watch's owner.
+A watch lasts until it is stopped.
+
+A watch delivers only while all of these hold, so someone else never reads a private message:
+
+- Only the owner and MindRoom's own accounts are in the room, and nobody is invited; a bridge or other bot counts as a person.
+- The room hides earlier messages from people who join later.
+  A [personal room](https://docs.mindroom.chat/personal-rooms/) MindRoom created already does.
+- The owner's Slack connection works and is still the Slack account the watch started with.
+
+`slack_watch(action="status")` reports a paused watch with one of these texts:
+
+| Status | Fix |
+| --- | --- |
+| `paused: Slack is not connected` | Connect Slack again from the link the agent gives. |
+| `paused: Slack account changed; start the watch again` | Start the watch again. |
+| `paused: you are not in this room` | Rejoin the room. |
+| `paused: another person is in this room` | Remove the other person or invitation, or watch from a room only you are in. |
+| `paused: people who join this room later could read earlier messages` | Change the room's history visibility so that people who join later do not see earlier messages, or use a personal room. |
+| `paused: room members could not be checked` | Try again when the homeserver answers. |
+
+Security: Slack text comes from other people, so during a turn that a watch started, `slack_post`, `slack_edit`, `slack_delete`, `slack_react`, and `slack_upload` refuse with `Ask me in a new message to post to Slack`, and `slack_watch` start and stop refuse with `Ask me in a new message to change your Slack watch`.
+A new message from the owner in the same thread can post.
+Work that turn schedules or delegates still runs as the owner, so add the [approval](#approval) rules below to keep Slack writes behind a person's approval.
+
+## MCP
+
+`slack` works through the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/): select the agent and the `slack` tool on the Connections portal, and calls use the signed-in person's own Slack account, as in Matrix.
+`slack_watch` does not work there.
+A project agent's channels are readable over MCP by everyone allowed to use that agent, and writable unless `write` is `false`, because its calls use the app's token.
+Which agents the gateway offers is described in [Agent eligibility](https://docs.mindroom.chat/deployment/mcp-gateway/#agent-eligibility).
+
+## Approval
+
+Add [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules to make Slack writes wait for a person:
+
+```yaml
+tool_approval:
+  rules:
+    - match: slack_post
+      action: require_approval
+    - match: slack_edit
+      action: require_approval
+    - match: slack_delete
+      action: require_approval
+    - match: slack_react
+      action: require_approval
+    - match: slack_upload
+      action: require_approval
+```
+
+The 👀 reaction and the reply MindRoom posts to a Slack mention are not tool calls, so these rules do not gate them.
+
+## Limits
+
+- Slack sends at most 30,000 events per hour per workspace, and events beyond that are not delivered, so in a very busy workspace some watch deliveries and mentions can be missed until the next hour.
+- If MindRoom is unreachable for more than a few minutes, Slack stops resending, and those messages never reach agents.
+- Messages sent directly to the app in Slack are not answered.
+- While anyone's watch takes direct messages, every direct message that a connected person sends or receives costs one Slack request to check who can see it, which counts against Slack's rate limits.
+- `slack_recent` makes one Slack request per conversation, so for a person in many conversations Slack's rate limit, or more than 1,000 conversations, ends a call early.
+  The call then answers with the conversations it read, `complete: false`, and a `next_cursor`; the agent waits `retry_after` seconds, calls again with that cursor to read the next conversations, and merges the batches.
+
+## Troubleshooting
+
+| You see | Meaning and fix |
+| --- | --- |
+| `The MindRoom Slack app is not configured` | `slack_app` has no bot token or signing secret, or Slack rejected the bot token. Store valid ones. |
+| `Invite the MindRoom app to <#C0123ABCD>` | The app has not joined that listed channel. Invite it. |
+| `Not one of this agent's Slack channels` | The conversation is not in the agent's `channels`, or it is a direct message. |
+| `This file is not in one of this agent's Slack channels` | A project agent downloads only files shared in its channels. |
+| `Slack canvases and posts can't be downloaded as files; open them in Slack` | `slack_download` takes files, not canvases or posts. |
+| `Message and people search need a personal Slack connection` | A project agent searches only conversations. |
+| `Slack needs the <scope> permission; reconnect Slack to grant it` | A personal connection lacks a user scope. Reconnect Slack. |
+| `Slack needs the <scope> permission; add it to the MindRoom Slack app` | A project call needs a bot scope. Add it in the app and reinstall the app. |
+| `Slack rate limit, retry after 30s` | Slack asked to wait; the agent can retry then. |
+| `Slack did not answer; the message may have been sent, so check with slack_read before retrying` | A post, edit, delete, or upload may have gone through; check before trying again. |
+| `Slack refused the request: <code>` | Slack's own error code: for example, `channel_not_found` means the account cannot see that conversation, `not_in_channel` means it is not a member, so join it or invite the app, and `cant_update_message` or `cant_delete_message` means the account may not change that message. |
+| `path '<path>' must be an existing file inside the agent workspace` | `slack_upload` reads only workspace files under the default `file_access`; save the file in the workspace first. |
+| `<path> is <size> bytes; the limit is 52428800 bytes.` | `slack_upload` takes files of up to 50 MB. |
+| `This Slack account belongs to another workspace` | The person approved with an account outside the app's workspace. |
+| `The MindRoom Slack app needs an app-level token for watches` | Add `app_token` to `slack_app`. |
+| `Cannot watch Slack here: another person is in this room` | A watch needs a room where only the owner is; the text after the colon names the cause, as in the table above. |
+| `MindRoom couldn't receive your message; try again` | Shown in Slack when delivery to the agent failed; mention the app again. |
+| Slack cannot verify the request URL | MindRoom answers 404 until `slack_app` has a bot token and signing secret, and 401 for a wrong signing secret; an SSO proxy in front of `/api/slack/events` also blocks it. |
+| Slack reports `503` from the request URL | MindRoom answers 503 until it has finished starting, while it stops, and when a delivery failed, so that Slack resends the event; an API server started on its own, outside `mindroom run`, always answers 503. |
+
+Config errors name the setting:
+
+| Error | Fix |
+| --- | --- |
+| `Slack channel C0123ABCD is answered by both first and second` | Remove the channel from one agent's `channels`, or remove that agent's `room`. |
+
 # Microsoft 365
 
 The Microsoft 365 tools reach OneDrive, SharePoint, Outlook mail and calendars, Microsoft To Do, Teams, OneNote, and the organization directory through Microsoft Graph as the person who asked.
@@ -13764,7 +14038,6 @@ agents:
     display_name: Code
     role: Implement and debug code changes
     model: sonnet
-    memory_backend: file  # gives the agent a workspace for file paths
     tools: [coding, shell]
     delegate_to: [research]  # can delegate further
 
@@ -13802,7 +14075,7 @@ Delegated runs do not create a Matrix thread and cannot ask the user interactive
 When a child in a Matrix conversation calls a tool that needs approval, the approval card appears in the source room and thread, and the delegation continues after the decision.
 In Matrix conversations, a parent runs its subagents one at a time.
 Delegated runs through the OpenAI-compatible API have fewer tools available; see [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/).
-When the caller has a workspace, both calls accept the standard `mindroom_output_path` argument described in [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files).
+Both calls accept the standard `mindroom_output_path` argument described in [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files).
 
 Use `continue_subagent` with the returned ID to send a follow-up into the same child session after its previous turn returns.
 The ID works across parent turns and restarts, but only for the same caller, requester, and originating conversation.
@@ -13862,7 +14135,7 @@ run_subagent(
 #### Subagent Profiles
 
 Save a reusable persona as `subagents/<name>.md` in the agent's workspace and run it with `run_subagent(profile="<name>", task=...)`.
-The agent creates and edits profiles with its own file or shell tools, so profiles need an agent workspace, which exists with `memory_backend: file` or a `private:` configuration.
+The agent creates and edits profiles with its own file or shell tools.
 
 ```markdown
 ---
@@ -13889,7 +14162,6 @@ Authoring errors:
 - `Cannot delegate: unknown knowledge base '<id>'. Your knowledge bases: ...` - `knowledge` names something other than one of the caller's `semantic` knowledge bases, such as a `files`-mode base or the caller's file memory.
 - `Cannot delegate: subagent profile '<name>' was not found in subagents/.` - no such file in the caller's workspace.
 - `Cannot delegate: subagent profile '<name>' is invalid: <reason>.` - fix the file as the reason says.
-- `Cannot delegate: subagent profiles need an agent workspace.` - give the agent a workspace as described above.
 - `Subagent tool '<entry>' is no longer available to you; start a new subagent.` - the caller lost a tool the subagent uses.
 - `Cannot delegate: tool '<entry>' is not available to you.` - the caller's tool configuration excludes that function, or the tool is unavailable in this conversation, for example because it failed to load or the conversation is a voice call; fix the configuration or name a tool the caller can use here.
 
@@ -14004,7 +14276,7 @@ Changing a tool's authored settings, other than for MCP tools, cancels its still
 Include/exclude filters remain checked per function.
 Output redirection and automatic output saving apply to the completed child result, while released waits return the job handle directly.
 `job(action="list")` rediscovers handles after compaction, later turns, and a restart.
-For workspace-backed agents, `job` also accepts `mindroom_output_path`: `wait` saves the returned result.
+An agent's `job` tool also accepts `mindroom_output_path`: `wait` saves the returned result.
 Large supported results use the same configured automatic file-saving policy as other tools.
 Redirecting a stored result does not rerun the original tool or change its saved output.
 Removing a toolkit, changing its execution scope, the agent's `file_access`, or its provenance, or excluding a function revokes access.
@@ -14195,7 +14467,6 @@ The tool never accepts arbitrary filesystem paths; it publishes only these sourc
 - **`dynamic_workflow_run`**: `source` takes `workflow_id`, `run_id`, and optional `scope` (default `agent`), and the run must be completed.
 - **`static_site`**: `source` takes a workspace-relative `path` and a required `title`.
   The path is a directory containing `index.html` plus optional CSS, JavaScript, images, fonts, or JSON, or a single HTML file served as `index.html`.
-  The agent needs a workspace, which exists when it uses `memory_backend: file` or a `private:` configuration.
   Publishing copies the site, so later workspace edits need a new `publish_report()` call.
   A site may contain at most 200 files, 200 directories nested at most 32 levels deep, and 10 MiB in total, and it may contain only regular files, not symlinks.
   Static sites are served at `/reports/public/<slug>/` with a trailing slash so relative asset URLs resolve.
@@ -14551,7 +14822,7 @@ It provides:
 `upload_file()` follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) and refuses local files larger than 64 MiB, so fetch larger data from inside the sandbox instead.
 `download_file_from_sandbox()` and `read_file_content()` refuse sandbox files larger than 64 MiB, and a refused download leaves no partial file.
 `run_python_code()` and `run_command()` refuse output larger than 64 MiB with a tool error, and `stream_command()` returns only its first 64 MiB, so write larger output to a sandbox file instead.
-Downloads always land inside the agent workspace at workspace-relative paths; absolute paths, `..`, and links leaving the workspace are refused, and agents without a workspace cannot download.
+Downloads always land inside the agent workspace at workspace-relative paths; absolute paths, `..`, and links leaving the workspace are refused.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -15088,16 +15359,16 @@ None of these ownership rules grants responder access.
 </video>
 
 Use the top-level `tool_approval` block to make chosen tool calls wait for a person to approve them in the Matrix conversation.
-This example gates Slack message sending and file uploads, plus shell calls selected by a review script:
+This example gates Slack posting and reactions, plus shell calls selected by a review script:
 
 ```yaml
 tool_approval:
   default: auto_approve
   timeout_days: 7
   rules:
-    - match: send_message*
+    - match: slack_post
       action: require_approval
-    - match: upload_file
+    - match: slack_react
       action: require_approval
     - match: run_shell_command
       script: ./approval_scripts/shell_review.py
@@ -15293,7 +15564,7 @@ See [Authorization](https://docs.mindroom.chat/authorization/#platform-and-crede
 
 ### Where Connections Are Stored
 
-Providers that store credentials per requester, such as GitHub, Atlassian, and Microsoft 365, always save the token in the requester's `user` scope and never fall back to a shared or global token.
+Providers that store credentials per requester, such as GitHub, Atlassian, Microsoft 365, and Slack, always save the token in the requester's `user` scope and never fall back to a shared or global token.
 For other providers, the token follows the agent's effective execution scope: `private.per`, then `agents.<name>.worker_scope`, then `defaults.worker_scope`.
 
 | Scope | Whose connection is used |
@@ -15304,7 +15575,7 @@ For other providers, the token follows the agent's effective execution scope: `p
 | _(unset)_ | One installation-level connection in the global credential store |
 
 Private agents derive the scope from `private.per` and cannot also set `worker_scope`.
-OAuth tokens and OAuth client configuration stay in the primary runtime and are never mirrored into worker containers, and GitHub, Google, and Microsoft 365 OAuth tools always run in the primary runtime.
+OAuth tokens and OAuth client configuration stay in the primary runtime and are never mirrored into worker containers, and GitHub, Google, Microsoft 365, and Slack OAuth tools always run in the primary runtime.
 
 ### Built-In Providers
 
@@ -15314,6 +15585,7 @@ OAuth tokens and OAuth client configuration stay in the primary runtime and are 
 | Atlassian Cloud (Jira and Confluence) | [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/) |
 | Google Drive, Docs, Calendar, Sheets, Tasks, Gmail, and Google Cloud | [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) |
 | Microsoft 365 (OneDrive, SharePoint, Outlook mail and calendar, To Do, Teams, OneNote, and the people directory) | [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) |
+| Slack (each person's own Slack account) | [Slack](https://docs.mindroom.chat/tools/slack/#set-up-the-slack-app) |
 | Remote MCP servers with `auth.type: oauth` | [OAuth-Backed Remote MCP](https://docs.mindroom.chat/mcp/#oauth-backed-remote-mcp) |
 
 A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom or the browser opened the dashboard at `MINDROOM_DASHBOARD_URL`, and the authorization server confirmed that callback when registering.
@@ -15780,6 +16052,8 @@ Automations likewise run for a private instance only as the requester that recor
 The knowledge graph database lives in the primary-only `knowledge_graph/` storage directory, and its embedded server opens no TCP port and listens on a Unix socket in a private temporary directory of the primary, so no worker can reach it.
 Knowledge indexes, including private agents' indexes, their metadata, and candidate checkpoints, live in the primary-only `knowledge_db/` storage directory, like knowledge Git directories, so no worker can write the index files the primary opens.
 
+The Slack app's credentials (`slack_app`: bot token, signing secret, and app-level token) and each person's Slack user token (`slack_oauth`) stay in the primary runtime: `slack` always runs there, and `slack_app` can never be granted to a worker through `worker_grantable_credentials`.
+
 Egress broker secrets (credential services named `egress_*`) are stored in primary-only credential stores and never reach worker-writable locations, matching the placement of primary-built tool settings.
 When the broker is enabled, the worker-routed `shell` and `python` calls of agents with the `egress_credentials` tool receive a signed proxy token in their environment, and the broker injects the configured secret when such a request matches a service rule; other agents' calls get no token and no secret.
 Worker code can read its own proxy token, but the token only authorizes that worker's scope and expires after `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` (default 7 days), so a leaked token exercises only that scope's configured services until it expires.
@@ -15840,7 +16114,7 @@ It writes an approved proposal into `memory/` from bytes worker code staged, whi
 Delegation records keep their working state below `tracking/`, and the `run.json`, `events.jsonl`, and `transcript.md` in the child's workspace are exports the primary never reads.
 Worker code that makes one of those exports or the caller's receipt unwritable only leaves the record's exports or the receipt stale; the delegation still records its events and settles.
 
-In the primary, `mindroom_output_path`, attachment saves, Google Drive, Microsoft Files, Outlook mail attachment, and E2B downloads, `file_generation` saves, `visualization` charts, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes refuse a workspace replaced by a link after runtime resolution.
+In the primary, `mindroom_output_path`, attachment saves, Google Drive, Microsoft Files, Outlook mail attachment, Slack, and E2B downloads, `file_generation` saves, `visualization` charts, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes refuse a workspace replaced by a link after runtime resolution.
 That check covers only the workspace's final path component, so a replaced parent such as `agents/<name>` is not refused.
 With the default workspace names that is not exploitable in the hosted layout, because no primary-only directory there contains an entry named `workspace`; an authored `private.root` that matches a primary directory name, such as `credentials`, could be reached through a replaced parent.
 
@@ -15867,6 +16141,7 @@ Reads of worker-controlled files are capped per surface.
 | `e2b` uploads, sandbox files that `e2b` downloads or reads, and `e2b` command and code output | 64 MiB | Refused with a tool error; `stream_command()` returns its first 64 MiB |
 | `microsoft_files` uploads | 250 MB, Microsoft Graph's single-request limit | Refused with a tool error before any request |
 | `outlook_mail` attachments | 3 MB per file, Microsoft Graph's inline attachment limit | Refused with a tool error before any request |
+| `slack` uploads | 50 MB, the same as Slack downloads | Refused with a tool error before any request |
 | Files a `file` content search reads | 500 KiB each, Agno's search limit | Skipped |
 | `browser` upload snapshots, kept in the browser's temp directory until their tab closes | 256 MiB in total per browser | Refused with a tool error |
 | Media files a background job's result reads by path | 48 MiB in total per result, within its 64 MiB encoded limit | The job fails with a size-limit error |
@@ -15899,9 +16174,9 @@ Every tool, including plugin tools, must declare one of these file access classe
 
 | Tool class | Tools | Behavior |
 |---|---|---|
-| Path tools | `attachments` (including `view_file`), `matrix_message`, `chat_ui` canvas pages (`show_canvas` with `path`), `gmail`, `google_drive`, `microsoft_files`, `outlook_mail` attachments, `browser` uploads, `e2b` uploads, `openai` and `groq` audio files, `airflow`, `moviepy_video_tools` | Follow the agent's `file_access` and refuse replaced workspace roots and swapped files; `airflow` and `moviepy_video_tools` writes do not follow links below the workspace, and MoviePy and FFmpeg work only on private staged copies, refusing video inputs that FFmpeg would open as playlists or manifests |
+| Path tools | `attachments` (including `view_file`), `matrix_message`, `chat_ui` canvas pages (`show_canvas` with `path`), `gmail`, `google_drive`, `microsoft_files`, `outlook_mail` attachments, `slack` uploads, `browser` uploads, `e2b` uploads, `openai` and `groq` audio files, `airflow`, `moviepy_video_tools` | Follow the agent's `file_access` and refuse replaced workspace roots and swapped files; `airflow` and `moviepy_video_tools` writes do not follow links below the workspace, and MoviePy and FFmpeg work only on private staged copies, refusing video inputs that FFmpeg would open as playlists or manifests |
 | Worker path tools | `file`, `coding` | Follow the agent's `file_access`; reads, writes, edits, deletes, and every file a `file` content search reads refuse replaced workspace roots and swapped files, while listing and the other searches walk by path, as the known gap below describes |
-| Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `browserbase`, `slack`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
+| Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `browserbase`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
 | Other tools | Everything else, including `web_browser_tools`, which opens only `http` and `https` URLs | Take no local file paths |
 
 [`browser_mcp`](https://docs.mindroom.chat/tools/worker-computer/#native-playwright-mcp-provider) runs only in a worker and confines its upload, drop, screenshot, and PDF paths to the worker workspace whatever the agent's `file_access`.
@@ -15909,7 +16184,7 @@ Every tool, including plugin tools, must declare one of these file access classe
 MCP servers on the local `stdio` transport are unconfined too, because they are operator-launched programs; remote `sse` and `streamable-http` servers take no local file paths.
 Whether a tool executes code is a separate metadata flag from its file access class; only the code-execution tools above carry it.
 A worker isolates the unconfined tools that support worker routing (`shell`, `python`, `docker`, `csv`, `postgres`, `redshift`).
-The rest require the primary runtime and cannot run in a worker (`claude_agent`, `script`, `duckdb`, `pandas`, `sql`, `composio`, `browserbase`, `slack`), so enable them only for agents trusted with everything the primary runtime can reach.
+The rest require the primary runtime and cannot run in a worker (`claude_agent`, `script`, `duckdb`, `pandas`, `sql`, `composio`, `browserbase`, and `stdio` MCP servers), so enable them only for agents trusted with everything the primary runtime can reach.
 MindRoom logs a warning when an agent routes code-execution tools to a worker while primary-process tools stay unconfined, meaning unconfined tools or path tools under `file_access: unrestricted`, because those tools can then read runtime secrets the worker was meant to keep away.
 The model sees the effective file access and the unconfined tools in its tool execution environment description.
 
@@ -15940,7 +16215,7 @@ Such a session authenticates dashboard routes as the administrator's Matrix ID, 
 
 These are tracked gaps, not intentional behaviors; fix them rather than documenting around them.
 
-- The unconfined non-code tools `composio`, `postgres`, `redshift`, `browserbase`, and `slack` do not yet follow `file_access`; a separate change will confine their explicit path and URL arguments.
+- The unconfined non-code tools `composio`, `postgres`, `redshift`, and `browserbase` do not yet follow `file_access`; a separate change will confine their explicit path and URL arguments.
 - SQL-capable tools (`duckdb`, `csv`, `sql`, and `pandas` query helpers) embed file paths inside queries, so guarding explicit path arguments cannot confine them; they stay unconfined until a query-level mechanism exists.
 - The listing and search functions of `file` and `coding` (`list_files`, `search_files`, `grep`, `find_files`, and `ls`) refuse a workspace that no longer resolves to the pinned directory and paths that lead outside it, but then walk and read by path.
   This matters only when an operator routes these tools to the primary process while worker code writes the same workspace, such as the Kubernetes `static_runner` sidecar with `worker_tools` that leave out `file` and `coding`.
@@ -15960,10 +16235,10 @@ Do not report or "fix" these; they are deliberate.
 - An operator who runs MindRoom without workers, for example inside a dedicated LXC container or VM, has chosen full trust; `file_access: unrestricted` matches that choice.
 - `file_access: unrestricted`, or unconfined tools in the primary process, are allowed together with worker routing; they log a warning instead of failing.
 - Hosted tenants may set `file_access: unrestricted`; it exposes only their own instance.
-- With `file_access: workspace`, the browser, attachments, `matrix_message`, `chat_ui` canvases, Gmail, Google Drive, Microsoft Files, and Outlook mail may still use every file in the agent workspace.
+- With `file_access: workspace`, the browser, attachments, `matrix_message`, `chat_ui` canvases, Gmail, Google Drive, Microsoft Files, Outlook mail, and Slack uploads may still use every file in the agent workspace.
 - A `chat_ui` canvas can leak what the user types into it through WebRTC, which browsers do not let a page block, or, with libraries on, through the addresses it requests, so agents should only show pages they wrote; see [Privacy and safety](https://docs.mindroom.chat/canvases/#privacy-and-safety).
-- The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation; Gmail, Google Drive, Microsoft Files, and Outlook mail take file paths only, so an agent first saves a received attachment into the workspace with `get_attachment(mindroom_output_path=...)` and then passes that workspace path.
-- `mindroom_output_path`, attachment saves, Google Drive and Microsoft Files downloads, Outlook mail attachment downloads, `file_generation` saves, `visualization` charts, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
+- The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation; Gmail, Google Drive, Microsoft Files, Outlook mail, and Slack take file paths only, so an agent first saves a received attachment into the workspace with `get_attachment(mindroom_output_path=...)` and then passes that workspace path.
+- `mindroom_output_path`, attachment saves, Google Drive and Microsoft Files downloads, Outlook mail attachment downloads, Slack downloads, `file_generation` saves, `visualization` charts, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
 - A skill review may resend the reviewed conversation unredacted to the provider that just received it, and a digest replay redacts credentials only on a best-effort basis; see [What a review sees](https://docs.mindroom.chat/skills/#what-a-review-sees).
   The check that refuses skill files holding a literal credential is a heuristic for common formats; a miss is not a vulnerability, because skills live in the agent's own workspace next to the conversation history that already held the value.
@@ -15996,6 +16271,7 @@ Do not report or "fix" these; they are deliberate.
 - An `exploration` run is an ordinary turn started by an automation prompt, with the agent's own tools and approval rules, so content it reads can steer it as it could any turn that reads untrusted content; approval rules, not the prompt's instruction to only read, stop writes.
 - A shared agent's exploration follows tool calls from every requester's conversations with that agent's own credentials, so one requester can lead it to read something their own access cannot and then query the result in the shared graph; use a private agent when requesters must stay apart.
 - Knowledge graph extraction reads tool results that worker code produced, so a crafted result can add wrong facts to the graph, each attributed to its source; it runs nothing in the primary.
+- A personal `slack_download` saves a file the requester can see in Slack into the agent's workspace, so on a non-private agent every requester of that agent can read it; personal Slack belongs on `private` agents.
 - A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` workers, so files one requester leaves there (such as `.mindroom/worker-env.sh`, `.pth` files, or Git config) can run in another requester's runtime; use `private` agents when requesters need isolation from each other.
 - Likewise, a non-private agent's primary-process `browser` profiles and default artifacts live in that agent's state root and are shared by all of its requesters, so one requester can use web sessions another signed in and upload screenshots another took; they never cross agents or the requesters of a private agent.
 - A browser egress proxy in a sandbox runner receives destination hostnames, because an approved-egress proxy decides by name, so rebinding between the relay's check and that proxy's own lookup is the proxy's responsibility; in the primary the relay tunnels to the address it validated.
@@ -16021,6 +16297,11 @@ Do not report or "fix" these; they are deliberate.
   The `/connections` page shell is served without authentication, while every API stays protected.
 - With `personal_rooms.agent` naming a `personal_agents` template, every human member of an onboarding room gets a Matrix account and a running agent; membership of that room is the only gate, so its join policy and invitations control who gets one.
 - A `personal_agents` template whose `access` admits other people exposes each owner's agent, including its memory, files, and shared credentials, to them and to their own agents acting for them; owner-only access is the default.
+- `POST /api/slack/events` is public: it has no dashboard login, accepts a request only when it carries a valid signature from the Slack app's signing secret made within five minutes, and answers 404 while no Slack app is configured.
+- A Slack message wakes a project agent as the MindRoom account that its author's confirmed Slack email maps to through `slack.email_domain` and `slack.matrix_user_id_template`, still subject to the agent's `access`, so whoever can set that email on a full member account of the workspace can act as that MindRoom account; guests, bots, other workspaces, and emails that map to one of MindRoom's own accounts or to a configured `bot_accounts` entry never map.
+  Slack text is delivered as a fenced block that is never parsed for Matrix mentions, so it cannot wake other agents.
+  Only messages in the agent's listed channels wake it, and only while Slack confirms at that moment that the app is still a member there, never in a direct message.
+- A personal Slack watch delivers only into a room where the owner is the only human, nobody is invited, and people who join later cannot read earlier messages; the turn runs as the owner, and the toolkit refuses Slack writes in it, but work that turn schedules or delegates still runs as the owner, so `tool_approval` rules for Slack's write functions (`slack_post`, `slack_edit`, `slack_delete`, `slack_react`, and `slack_upload`) are the boundary for those.
 - The MCP gateway runs an agent's tools without its instructions, so it withholds agents whose worker scope is `shared` or unset unless `mcp_gateway_shared_credentials` opts one in; an opted-in agent's users can call its tools directly with its shared accounts and worker, and the shared workspace and browser profiles of a non-private `user` or `user_agent` agent stay reachable through the gateway as they are in chat.
 
 ## Reviewing security findings
@@ -16590,7 +16871,7 @@ Only declared values are passed; MindRoom does not detect them from parameter na
 | `FILE_ACCESS` | `file_access` | The constructing agent's effective `file_access` setting |
 | `WORKER_TARGET` | `worker_target` | Resolved worker routing context (scope, execution identity, worker key) |
 | `TOOL_OUTPUT_WORKSPACE_ROOT` | `tool_output_workspace_root` | Workspace root used for managed tool-output saves |
-| `WORKER_TOOLS_OVERRIDE` | `worker_tools_override` | Effective worker-routed tool override |
+| `WORKSPACE_IN_WORKER` | `workspace_in_worker` | Whether the constructing agent's workspace-path tools run in a worker, which is where its attachments are saved |
 | `CURRENT_ROOM_ID` | `current_room_id` | Active Matrix room ID when available |
 | `AGENT_STATE_ROOT` | `agent_state_root` | The constructing agent's state root in the primary runtime, requester-scoped for private agents; `None` inside workers |
 
@@ -16672,6 +16953,7 @@ worker_target = context.resolve_worker_target()
 ```
 
 A plugin tool always runs as an agent, inside a team as the member that called it, so `resolve_worker_target()` returns that agent's target.
+A sub-toolkit built with that target runs in a worker when the sandbox settings and the tool's default target route it there; with `runtime_config=context.config` it also does when the agent's explicit `worker_tools` list names it, and a list that leaves it out never moves it to the primary runtime.
 
 ## OAuth providers
 
@@ -16958,7 +17240,7 @@ from mindroom.plugin_api import Ask, AutomationContext, Done, automation, read_r
 # The digest lives in the agent's file memory, so skip agents without it.
 @automation("weekly_digest", requires_file_memory=True)
 def check(ctx: AutomationContext) -> Ask | None:
-    if ctx.workspace is None or not ctx.workspace.is_dir():
+    if not ctx.workspace.is_dir():
         return None
     target = ctx.options.get("target", "digest.md")
     # A stamp only this run asks for tells its result apart from last week's file.
@@ -16986,7 +17268,7 @@ plugins:
 agents:
   mind:
     display_name: Mind
-    memory_backend: file   # gives the agent a workspace
+    memory_backend: file   # weekly_digest requires file memory
     tools: [file]          # the agent writes the digest
     automations:
       - {name: weekly_digest, cron: "0 9 * * 1", options: {target: digest.md}}
@@ -17014,7 +17296,7 @@ agents:
 | `settings` | The plugin's `settings`, set once per plugin, read-only |
 | `requester_id` | For a [private agent](https://docs.mindroom.chat/scheduling/#automations), the requester whose instance this run maintains; `None` for a shared agent |
 | `execution_identity` | The identity that resolves that requester's instance, for helpers that take one; `None` for a shared agent |
-| `workspace` | The workspace root, which may not exist yet: a private agent's is the requester's private root; `None` for a shared agent without `memory_backend: file`, which has no workspace |
+| `workspace` | The workspace root, which may not exist yet: a shared agent's own workspace, or for a private agent the requester's private root |
 | `state_dir` | The automation state directory of the agent, or of the requester's instance, in MindRoom storage outside the workspace; name your files after your automation and create the directory when you first write |
 
 ### What MindRoom guarantees
@@ -17245,6 +17527,7 @@ Custom events default to 1000 ms.
   Streamed replies usually show text before they finish, so this hook does not see them; set `defaults.enable_streaming: false` when every reply must pass through it, as with the disclaimer and redaction examples above.
   Once a streamed reply is visible it cannot be suppressed; use `message:final_response_transform` for one text-only replacement after a streamed reply succeeds.
   `message:final_response_transform` cannot suppress, redact, or delete the reply, or change its metadata.
+  A reply resumed after a tool approval runs `message:before_response` on its final text, not `message:final_response_transform`; when the reply streams, its resumed text can show before that hook runs.
 - **`message:cancelled`**: `ctx.info.failure_reason` tells cancellation, interruption, suppression, and delivery failure apart.
 - **`agent:started` with `required=True`**: use a short, separate required hook for initialization the bot must not run without, and keep optional work such as backfill or welcome messages in ordinary hooks.
   A failure or timeout stops the remaining startup hooks and fails that bot's startup like any other startup error.
@@ -17907,6 +18190,8 @@ Callbacks follow `external_trigger_policy` and count toward `max_triggers_per_ow
 When finished, run: bash /path/to/callback_1234.sh "<short result summary>"
 ```
 
+The script lives in the agent's workspace, and the path is where the agent's shell finds it in MindRoom, in a dedicated worker, or in a `static_runner` sandbox that mounts the agent workspaces, as the Kubernetes sidecar does.
+The [Docker Compose `static_runner` sandbox](https://docs.mindroom.chat/deployment/sandbox-proxy/#sandbox-proxy-isolation_1) cannot see agent workspaces, so a background task started from a shell there cannot run the script.
 The script needs only Bash and curl.
 It posts the summary to the room and thread where the callback was minted, which wakes the agent.
 After a successful delivery the callback is used up and the script deletes itself; if delivery fails, the script remains so it can be run again.
@@ -18205,6 +18490,7 @@ Under **MCP gateway**, select **All tools** for an agent or choose tools individ
 
 Tools that share a service connection share its OAuth controls, and tools that need a Matrix room or an agent conversation, such as `claude_agent`, are labeled **MindRoom only** and are not exposed.
 A shared agent's configured worker and credential scopes still decide whose service connection runs a call.
+For the `slack` tool, see [Slack over MCP](https://docs.mindroom.chat/tools/slack/#mcp).
 When managed account provisioning is enabled, users without an active provisioned account see an access notice instead of MCP controls until an administrator provisions them; their ordinary connections remain available.
 [Connections sessions from MindRoom Chat](https://docs.mindroom.chat/connections-portal/#open-it-from-mindroom-chat) carry no email, so with managed account provisioning they reach the MCP controls, and in built-in authorization mode client consent, through the one active account whose `userName` the trusted upstream email template maps to their Matrix user.
 Without such a template, when trusted upstream auth uses a signed Matrix claim, or when several accounts map to the same user, those users see that notice and need trusted upstream sign-in for them.
@@ -19403,7 +19689,7 @@ agents:
 The tools that default to workers when no list is set are `browser_mcp`, `coding`, `docker`, `file`, `python`, and `shell`.
 Any other registered tool can be listed in `worker_tools`, except tools that need the primary runtime or room context, which stay in the primary runtime even when listed.
 These include the Matrix, scheduling, todo, attachment, and thread tools, `gmail` and the other Google tools, `github`, `atlassian`, `slack`, `spotify`, `homeassistant`, `reasoning`, `daytona`, `e2b`, `mem0`, `claude_agent`, `config_manager`, `oauth_connections`, and `agent_vault_access`, plus `browserbase`, `composio`, `duckdb`, `pandas`, `sql`, and `zep`, which keep a session, connection, or other state between calls.
-The built-in `memory`, `delegate`, `self_config`, and `agent_manager` tools also always run in the primary runtime.
+The built-in `memory`, `delegate`, `self_config`, and `agent_manager` tools and configured MCP `mcp_<server_id>` tools also always run in the primary runtime.
 The `browser` tool chooses per call: `target: desktop` stays in the primary runtime, while `target: host` follows the worker routing.
 
 ### Execution modes
@@ -19456,7 +19742,7 @@ What a worker can see depends on the backend:
 - **Dedicated Docker and Kubernetes workers** mount only the workspaces listed in the [scope table](#worker-scopes), the shared directories of the agents they serve, their own scratch space, and read-only assigned knowledge, never the sessions or memory beside the workspaces.
   For private agents they mount only the private root (`private.root`), never the state root around it.
 
-When an agent has a workspace (the `file` memory backend or `private`), `shell`, `file`, `python`, and `coding` use it as their default working directory (`base_dir`); this is a convenience, not a boundary.
+`shell`, `file`, `python`, and `coding` use the agent's workspace as their default working directory (`base_dir`); this is a convenience, not a boundary.
 
 A missing or linked workspace is not mounted.
 Assigned knowledge that is missing, reached through a link, or inside another agent's workspace, a private instance, a shared directory the worker does not mount, or a worker root is not mounted either, and the worker sees an empty knowledge folder.
@@ -20837,7 +21123,7 @@ Examples use `chat.example.com` for that host, `admin.example.com` for the dashb
 
 The first rule keeps a request from passing Access as one path and reaching a service as another, because Access, the tunnel, and the origin can resolve such paths differently.
 The client chart serves `/.well-known/matrix/client` only with MatrixRTC or bug reports enabled; otherwise send it to Tuwunel as well.
-Runtime features with public paths include the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/), the [Connections portal](https://docs.mindroom.chat/connections-portal/#trusted-upstream-sign-in), the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#route-browser-and-machine-traffic), the [worker computer](https://docs.mindroom.chat/tools/worker-computer/#reverse-proxy-and-host-routing), [external triggers](https://docs.mindroom.chat/external-triggers/), the [usage export](https://docs.mindroom.chat/usage/#usage-export-service) and [budget](https://docs.mindroom.chat/budgets/#budget-service) services, and [published](https://docs.mindroom.chat/tools/agent-orchestration/#report_publishing) and [private](https://docs.mindroom.chat/tools/agent-orchestration/#dynamic_workflow) reports.
+Runtime features with public paths include the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/), the [Connections portal](https://docs.mindroom.chat/connections-portal/#trusted-upstream-sign-in), the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#route-browser-and-machine-traffic), the [worker computer](https://docs.mindroom.chat/tools/worker-computer/#reverse-proxy-and-host-routing), [external triggers](https://docs.mindroom.chat/external-triggers/), [Slack events](https://docs.mindroom.chat/tools/slack/#set-up-the-slack-app), the [usage export](https://docs.mindroom.chat/usage/#usage-export-service) and [budget](https://docs.mindroom.chat/budgets/#budget-service) services, and [published](https://docs.mindroom.chat/tools/agent-orchestration/#report_publishing) and [private](https://docs.mindroom.chat/tools/agent-orchestration/#dynamic_workflow) reports.
 `admin.example.com` sends every path to the runtime, as described in [Dashboard On Its Own Host](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#dashboard-on-its-own-host), behind the same first rule.
 
 ```yaml
@@ -20877,6 +21163,7 @@ Access applies the most specific path application, so every other path keeps the
 | `/livekit/jwt/*`, `/livekit/sfu/*` | MindRoom voice agents, which request call tokens and join LiveKit from the server, and the MatrixRTC authorization service, which calls LiveKit through its public `auth.livekitUrl` |
 | `/.well-known/matrix/server`, `/_matrix/federation/v1/openid/userinfo` | The MatrixRTC authorization service, which checks each caller's Matrix OpenID token with the caller's homeserver |
 | The MCP paths that the [route table](https://docs.mindroom.chat/deployment/mcp-gateway/#route-browser-and-machine-traffic) marks public or pass-through | MCP clients; with Cloudflare Managed OAuth, follow [External authorization](https://docs.mindroom.chat/deployment/mcp-gateway/#external-authorization) instead |
+| `POST /api/slack/events` | Slack, whose [event requests](https://docs.mindroom.chat/tools/slack/#set-up-the-slack-app) MindRoom accepts only with a valid Slack signature |
 | `/_matrix/client/versions` (optional) | External uptime checks; it answers without a Matrix login, so a passing check shows that Cloudflare, the tunnel, and Tuwunel respond |
 
 Machine callers of runtime routes need their own Access application with a service token, as the [usage export](https://docs.mindroom.chat/usage/#usage-export-service) and [budget](https://docs.mindroom.chat/budgets/#budget-service) services expect, or a bypass that leaves authentication to the route, such as the signed requests of [external triggers](https://docs.mindroom.chat/external-triggers/) or the API keys of the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/).
@@ -21560,6 +21847,12 @@ Unset or `0` disables the probe (the default), and any other value below `60` fa
 Use this page when upgrading an existing deployment across a release that needs operator action.
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
+
+## Upgrading to checked model references and per-agent workspaces
+
+A config whose agent, team, router, room, thread-summary, or enabled voice model names no model under `models` now fails to load instead of failing at the first reply, so run `mindroom config validate` before upgrading and add or rename the missing models; a config with agents and no `router.model` needs a model named `default`.
+Every agent now has its own workspace, and a shared agent whose `worker_scope` is `user` or `user_agent` works in it instead of each worker's own scratch directory, so files those workers kept in their scratch directories are no longer the agent's working directory.
+Make such an agent [`private`](https://docs.mindroom.chat/configuration/agents/#private-instances) to keep each requester's files apart.
 
 ## Upgrading from `MCPTools` plugin toolkits
 

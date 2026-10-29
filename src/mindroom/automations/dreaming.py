@@ -28,6 +28,7 @@ from zoneinfo import ZoneInfo
 from mindroom.automations.registry import automation
 from mindroom.automations.steps import Ask, AutomationContext, Done, workspace_context_files
 from mindroom.automations.threads import automation_threads
+from mindroom.config.resolution import entity_timezone
 from mindroom.logging_config import get_logger
 from mindroom.memory import refresh_agent_memory_search, write_scope_markdown_file
 from mindroom.path_confinement import (
@@ -376,10 +377,10 @@ def check_dreaming(ctx: AutomationContext) -> Ask | None:
     # The workspace of an agent with file memory, which this automation requires, is its file-memory root.
     root = ctx.workspace
     # A workspace appears with the agent's first turn.
-    if root is None or not root.is_dir():
+    if not root.is_dir():
         return None
     now = datetime.now(UTC)
-    today = now.astimezone(ZoneInfo(config.get_entity_timezone(agent_name))).date().isoformat()
+    today = now.astimezone(ZoneInfo(entity_timezone(config, agent_name))).date().isoformat()
     tree = _read_memory_tree(root, "")
     context_files = workspace_context_files(config, agent_name)
     excluded = frozenset({f"{_MEMORY_DIR}/{today}.md", *context_files, *tree.rejected})

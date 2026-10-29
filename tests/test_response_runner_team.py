@@ -44,7 +44,7 @@ from mindroom.room_model_overrides import set_room_model_override
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_summary import thread_summary_message_count_hint
-from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.turn_policy import _ResponderAvailability
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -78,9 +78,10 @@ from tests.conftest import (
 )
 from tests.identity_helpers import entity_ids
 from tests.response_attempt_helpers import install_direct_response_admission
+from tests.team_turn_helpers import scripted_team_stream
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -88,7 +89,6 @@ if TYPE_CHECKING:
     from mindroom.constants import (
         RuntimePaths,
     )
-    from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.matrix.conversation_reads import DeliveredResponse
     from mindroom.matrix.users import AgentMatrixUser
 
@@ -177,7 +177,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths)
         coordinator = unwrap_extracted_collaborator(bot._response_runner)
         original_prepare_admitted_turn = coordinator._prepare_admitted_locked_turn
-        mock_team_response = AsyncMock(return_value="Team reply")
+        team_stream = scripted_team_stream("Team reply")
 
         async def change_room_default_during_preparation(*args: object, **kwargs: object) -> ResponseRequest | None:
             set_room_model_override(
@@ -196,7 +196,7 @@ class TestAgentBot(AgentBotTestBase):
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 should_use_streaming=AsyncMock(return_value=False),
-                team_response=mock_team_response,
+                team_response_stream=team_stream,
             ),
         ):
             await coordinator.generate_team_response_helper(
@@ -215,9 +215,9 @@ class TestAgentBot(AgentBotTestBase):
                 team_mode="collaborate",
             )
 
-        response_kwargs = mock_team_response.await_args.kwargs
-        assert response_kwargs["model_name"] == "large"
-        assert response_kwargs["member_model_names"] == {"calculator": "large", "general": "large"}
+        spec, _ctx = team_stream.call_args.args
+        assert spec.model_name == "large"
+        assert spec.member_model_names == {"calculator": "large", "general": "large"}
 
     @pytest.mark.asyncio
     async def test_scheduled_model_overrides_coordinator_and_members(
@@ -241,7 +241,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths)
         coordinator = unwrap_extracted_collaborator(bot._response_runner)
         original_prepare_admitted_turn = coordinator._prepare_admitted_locked_turn
-        mock_team_response = AsyncMock(return_value="Team reply")
+        team_stream = scripted_team_stream("Team reply")
 
         async def change_room_default_during_preparation(*args: object, **kwargs: object) -> ResponseRequest | None:
             set_room_model_override(
@@ -260,7 +260,7 @@ class TestAgentBot(AgentBotTestBase):
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 should_use_streaming=AsyncMock(return_value=False),
-                team_response=mock_team_response,
+                team_response_stream=team_stream,
             ),
         ):
             await coordinator.generate_team_response_helper(
@@ -280,9 +280,9 @@ class TestAgentBot(AgentBotTestBase):
                 team_mode="collaborate",
             )
 
-        response_kwargs = mock_team_response.await_args.kwargs
-        assert response_kwargs["model_name"] == "cheap"
-        assert response_kwargs["member_model_names"] == {"calculator": "cheap", "general": "cheap"}
+        spec, _ctx = team_stream.call_args.args
+        assert spec.model_name == "cheap"
+        assert spec.member_model_names == {"calculator": "cheap", "general": "cheap"}
 
     @pytest.mark.asyncio
     async def test_over_budget_requester_team_uses_fallback_for_priced_models(
@@ -313,7 +313,7 @@ class TestAgentBot(AgentBotTestBase):
             budgets=BudgetMonitor(runtime_paths=runtime_paths, config_provider=lambda: config),
         )
         coordinator = unwrap_extracted_collaborator(bot._response_runner)
-        mock_team_response = AsyncMock(return_value="Team reply")
+        team_stream = scripted_team_stream("Team reply")
 
         with (
             patch(
@@ -323,7 +323,7 @@ class TestAgentBot(AgentBotTestBase):
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 should_use_streaming=AsyncMock(return_value=False),
-                team_response=mock_team_response,
+                team_response_stream=team_stream,
             ),
         ):
             await coordinator.generate_team_response_helper(
@@ -342,9 +342,9 @@ class TestAgentBot(AgentBotTestBase):
                 team_mode="collaborate",
             )
 
-        response_kwargs = mock_team_response.await_args.kwargs
-        assert response_kwargs["model_name"] == "cheap"
-        assert response_kwargs["member_model_names"] == {"calculator": "cheap", "general": "local"}
+        spec, _ctx = team_stream.call_args.args
+        assert spec.model_name == "cheap"
+        assert spec.member_model_names == {"calculator": "cheap", "general": "local"}
 
     @pytest.mark.asyncio
     async def test_team_model_snapshot_is_complete_before_streaming_check_yields(
@@ -365,7 +365,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths)
-        mock_team_response = AsyncMock(return_value="Team reply")
+        team_stream = scripted_team_stream("Team reply")
 
         async def change_room_default(*_args: object, **_kwargs: object) -> bool:
             set_room_model_override(
@@ -383,7 +383,7 @@ class TestAgentBot(AgentBotTestBase):
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 should_use_streaming=AsyncMock(side_effect=change_room_default),
-                team_response=mock_team_response,
+                team_response_stream=team_stream,
             ),
         ):
             await bot._response_runner.generate_team_response_helper(
@@ -402,9 +402,9 @@ class TestAgentBot(AgentBotTestBase):
                 team_mode="collaborate",
             )
 
-        response_kwargs = mock_team_response.await_args.kwargs
-        assert response_kwargs["model_name"] == "large"
-        assert response_kwargs["member_model_names"] == {"calculator": "large", "general": "large"}
+        spec, _ctx = team_stream.call_args.args
+        assert spec.model_name == "large"
+        assert spec.member_model_names == {"calculator": "large", "general": "large"}
 
     @pytest.mark.asyncio
     async def test_generate_team_response_helper_applies_hooks_to_final_team_message(
@@ -453,7 +453,7 @@ class TestAgentBot(AgentBotTestBase):
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 should_use_streaming=AsyncMock(return_value=False),
-                team_response=AsyncMock(return_value="Team reply"),
+                team_response_stream=scripted_team_stream("Team reply"),
             ),
         ):
             resolution = await bot._response_runner.generate_team_response_helper(
@@ -500,9 +500,11 @@ class TestAgentBot(AgentBotTestBase):
         bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths_for(config))
         trace = ToolTraceEntry(type="tool_call_completed", tool_name="touch", args_preview="label=a")
 
-        async def fake_team_response(**kwargs: Any) -> str:  # noqa: ANN401
-            kwargs["tool_trace_collector"].append(trace)
-            return "Team reply"
+        def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncIterator[StructuredStreamChunk]:
+            async def document() -> AsyncIterator[StructuredStreamChunk]:
+                yield StructuredStreamChunk(content="Team reply", tool_trace=[trace])
+
+            return document()
 
         with (
             patch(
@@ -512,7 +514,7 @@ class TestAgentBot(AgentBotTestBase):
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 should_use_streaming=AsyncMock(return_value=False),
-                team_response=fake_team_response,
+                team_response_stream=fake_team_response_stream,
             ),
         ):
             await bot._response_runner.generate_team_response_helper(
@@ -569,7 +571,7 @@ class TestAgentBot(AgentBotTestBase):
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 should_use_streaming=AsyncMock(return_value=False),
-                team_response=AsyncMock(return_value="Team reply"),
+                team_response_stream=scripted_team_stream("Team reply"),
             ),
         ):
             resolution = await bot._response_runner.generate_team_response_helper(
@@ -607,7 +609,7 @@ class TestAgentBot(AgentBotTestBase):
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        mock_team_response = AsyncMock(return_value="Team reply")
+        team_stream = scripted_team_stream("Team reply")
 
         with (
             patch(
@@ -621,7 +623,7 @@ class TestAgentBot(AgentBotTestBase):
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 should_use_streaming=AsyncMock(return_value=False),
-                team_response=mock_team_response,
+                team_response_stream=team_stream,
             ),
         ):
             resolution = await bot._response_runner.generate_team_response_helper(
@@ -645,7 +647,8 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         assert _handled_response_event_id(resolution) == "$team"
-        prepared_message = mock_team_response.await_args.kwargs["message"]
+        _spec, ctx = team_stream.call_args.args
+        prepared_message = ctx.prompt
         assert "Summarize the latest invoice." in prepared_message
         assert "Available attachment IDs: att_invoice." in prepared_message
         assert prepared_message.index("Summarize the latest invoice.") < prepared_message.index(
@@ -669,7 +672,7 @@ class TestAgentBot(AgentBotTestBase):
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        mock_team_response = AsyncMock(return_value="Team reply")
+        team_stream = scripted_team_stream("Team reply")
         timestamped_prompt = "[2026-03-20 08:15 PDT] What time is it?"
 
         with (
@@ -684,7 +687,7 @@ class TestAgentBot(AgentBotTestBase):
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 should_use_streaming=AsyncMock(return_value=False),
-                team_response=mock_team_response,
+                team_response_stream=team_stream,
             ),
         ):
             resolution = await bot._response_runner.generate_team_response_helper(
@@ -708,7 +711,8 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         assert _handled_response_event_id(resolution) == "$team"
-        prepared_message = mock_team_response.await_args.kwargs["message"]
+        _spec, ctx = team_stream.call_args.args
+        prepared_message = ctx.prompt
         assert prepared_message == timestamped_prompt
 
     @pytest.mark.asyncio
@@ -730,7 +734,7 @@ class TestAgentBot(AgentBotTestBase):
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        mock_team_response = AsyncMock(return_value="Team reply")
+        team_stream = scripted_team_stream("Team reply")
 
         with (
             patch(
@@ -744,7 +748,7 @@ class TestAgentBot(AgentBotTestBase):
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 should_use_streaming=AsyncMock(return_value=False),
-                team_response=mock_team_response,
+                team_response_stream=team_stream,
             ),
         ):
             await bot._response_runner.generate_team_response_helper(
@@ -765,7 +769,8 @@ class TestAgentBot(AgentBotTestBase):
                 team_mode="collaborate",
             )
 
-        [older] = mock_team_response.await_args.kwargs["thread_history"]
+        _spec, ctx = team_stream.call_args.args
+        [older] = ctx.thread_history
         assert older.body == "[2026-03-20 08:00 PDT] older text"
 
     @pytest.mark.asyncio
@@ -824,7 +829,7 @@ class TestAgentBot(AgentBotTestBase):
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 should_use_streaming=AsyncMock(return_value=False),
-                team_response=AsyncMock(return_value="Team reply"),
+                team_response_stream=scripted_team_stream("Team reply"),
             ),
         ):
             resolution = await bot._response_runner.generate_team_response_helper(
@@ -1040,10 +1045,6 @@ class TestAgentBot(AgentBotTestBase):
         ]
         refreshed_history = ThreadHistoryResult(thread_history, is_full_history=True)
 
-        async def fake_team_response(*_args: object, **kwargs: object) -> str:
-            cast("TurnRecorder", kwargs["turn_recorder"]).mark_completed()
-            return "Team reply"
-
         config = _configured_team_test_config(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = make_test_team_bot(
@@ -1065,7 +1066,7 @@ class TestAgentBot(AgentBotTestBase):
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=False),
                 typing_indicator=_noop_typing_indicator,
-                team_response=fake_team_response,
+                team_response_stream=scripted_team_stream("Team reply", completes=True),
             ),
             patch.object(
                 ConversationResolver,
@@ -1108,10 +1109,6 @@ class TestAgentBot(AgentBotTestBase):
         async def suppressing_hook(ctx: BeforeResponseContext) -> None:
             ctx.draft.suppress = True
 
-        async def fake_team_response_stream(turn_recorder: TurnRecorder) -> AsyncGenerator[str, None]:
-            turn_recorder.mark_completed()
-            yield "Team reply"
-
         config = _configured_team_test_config(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = make_test_team_bot(
@@ -1133,7 +1130,7 @@ class TestAgentBot(AgentBotTestBase):
         with patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=True),
             typing_indicator=_noop_typing_indicator,
-            team_response_stream=lambda *_args, **kwargs: fake_team_response_stream(kwargs["turn_recorder"]),
+            team_response_stream=scripted_team_stream("Team reply", completes=True),
         ):
             resolution = await bot._run_regenerated_response(
                 ResponseRequest(
@@ -1229,13 +1226,11 @@ class TestAgentBot(AgentBotTestBase):
         # The startup placeholder lands, binding the reply's event.
         unique_room_send_responses(bot.client, prefix="$placeholder")
         bot.orchestrator = MagicMock()
-        mock_team_response = AsyncMock()
         with (
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=True),
                 typing_indicator=noop_typing_indicator,
                 team_response_stream=fake_team_response_stream,
-                team_response=mock_team_response,
             ),
             patch.object(
                 ResponseRunner,
@@ -1247,7 +1242,6 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(
                     return_value=StreamTransportOutcome(
                         last_physical_stream_event_id="$placeholder",
-                        terminal_status="completed",
                         rendered_body="stream chunk",
                         visible_body_state="visible_body",
                     ),
@@ -1276,7 +1270,6 @@ class TestAgentBot(AgentBotTestBase):
 
         assert _handled_response_event_id(resolution) == "$placeholder"
         assert _visible_response_event_id(resolution) == "$placeholder"
-        mock_team_response.assert_not_awaited()
         send_kwargs = mock_send_streaming_response.await_args.kwargs
         # The stream adopts the placeholder this turn's reply created.
         reply = await bot._reply_runtime.store.replies.for_sources(("$event",))
@@ -1298,23 +1291,22 @@ class TestAgentBot(AgentBotTestBase):
             typing_events.append("started")
             yield
 
-        async def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
-            yield "stream chunk"
-
         config = self._config_for_storage(tmp_path)
         assert config.defaults.show_tool_calls is True
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         unique_room_send_responses(bot.client, prefix="$response")
         bot.orchestrator = MagicMock()
-        mock_team_response = AsyncMock(return_value="Finding")
-        mock_team_response_stream = MagicMock(side_effect=fake_team_response_stream)
+        team_stream = scripted_team_stream("Finding")
+        send_streaming_response = AsyncMock()
 
-        with patch_response_runner_module(
-            should_use_streaming=AsyncMock(return_value=True),
-            typing_indicator=record_typing,
-            team_response_stream=mock_team_response_stream,
-            team_response=mock_team_response,
+        with (
+            patch_response_runner_module(
+                should_use_streaming=AsyncMock(return_value=True),
+                typing_indicator=record_typing,
+                team_response_stream=team_stream,
+            ),
+            patch("mindroom.delivery_gateway.send_streaming_response", new=send_streaming_response),
         ):
             await bot._response_runner.generate_team_response_helper(
                 ResponseRequest(
@@ -1339,10 +1331,12 @@ class TestAgentBot(AgentBotTestBase):
                 team_mode="coordinate",
             )
 
-        mock_team_response.assert_awaited_once()
-        mock_team_response_stream.assert_not_called()
-        assert mock_team_response.await_args.kwargs["ctx"].allow_no_report_response is True
-        assert mock_team_response.await_args.kwargs["compaction_lifecycle"] is None
+        # The turn's stream is collected and delivered whole, never streamed into the room.
+        send_streaming_response.assert_not_awaited()
+        team_stream.assert_called_once()
+        _spec, ctx = team_stream.call_args.args
+        assert ctx.allow_no_report_response is True
+        assert ctx.compaction_lifecycle is None
         assert typing_events == []
         # One message, the final answer: no placeholder to edit or redact, and no stop button.
         [send] = bot.client.room_send.await_args_list
@@ -1363,7 +1357,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock()
 
-        async def team_response_with_started_receipt_check(*_args: object, **_kwargs: object) -> str:
+        async def team_response_with_started_receipt_check(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
             for agent_name in ("calculator", "general"):
                 receipt_directory = (
                     runtime_paths.storage_root / "agents" / agent_name / "workspace" / ".mindroom" / "scheduled_runs"
@@ -1371,11 +1365,11 @@ class TestAgentBot(AgentBotTestBase):
                 [receipt_path] = list(receipt_directory.glob("*.json"))
                 receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
                 assert receipt["status"] == "started"
-            return "Finding"
+            yield "Finding"
 
         with (
             patch_response_runner_module(
-                team_response=AsyncMock(side_effect=team_response_with_started_receipt_check),
+                team_response_stream=team_response_with_started_receipt_check,
             ),
             patch(
                 "mindroom.delivery_gateway.DeliveryGateway.send_text",
@@ -1497,7 +1491,7 @@ class TestAgentBot(AgentBotTestBase):
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=False),
                 typing_indicator=_noop_typing_indicator,
-                team_response=AsyncMock(return_value="Team handled"),
+                team_response_stream=scripted_team_stream("Team handled"),
             ),
         ):
             resolution = await bot._response_runner.generate_team_response_helper(

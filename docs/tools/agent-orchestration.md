@@ -50,7 +50,6 @@ agents:
     display_name: Code
     role: Implement and debug code changes
     model: sonnet
-    memory_backend: file  # gives the agent a workspace for file paths
     tools: [coding, shell]
     delegate_to: [research]  # can delegate further
 
@@ -88,7 +87,7 @@ Delegated runs do not create a Matrix thread and cannot ask the user interactive
 When a child in a Matrix conversation calls a tool that needs approval, the approval card appears in the source room and thread, and the delegation continues after the decision.
 In Matrix conversations, a parent runs its subagents one at a time.
 Delegated runs through the OpenAI-compatible API have fewer tools available; see [OpenAI-Compatible API](../openai-api.md).
-When the caller has a workspace, both calls accept the standard `mindroom_output_path` argument described in [Execution & Coding](execution-and-coding.md#workspace-and-tool-output-files).
+Both calls accept the standard `mindroom_output_path` argument described in [Execution & Coding](execution-and-coding.md#workspace-and-tool-output-files).
 
 Use `continue_subagent` with the returned ID to send a follow-up into the same child session after its previous turn returns.
 The ID works across parent turns and restarts, but only for the same caller, requester, and originating conversation.
@@ -148,7 +147,7 @@ run_subagent(
 #### Subagent Profiles
 
 Save a reusable persona as `subagents/<name>.md` in the agent's workspace and run it with `run_subagent(profile="<name>", task=...)`.
-The agent creates and edits profiles with its own file or shell tools, so profiles need an agent workspace, which exists with `memory_backend: file` or a `private:` configuration.
+The agent creates and edits profiles with its own file or shell tools.
 
 ```markdown
 ---
@@ -175,7 +174,6 @@ Authoring errors:
 - `Cannot delegate: unknown knowledge base '<id>'. Your knowledge bases: ...` - `knowledge` names something other than one of the caller's `semantic` knowledge bases, such as a `files`-mode base or the caller's file memory.
 - `Cannot delegate: subagent profile '<name>' was not found in subagents/.` - no such file in the caller's workspace.
 - `Cannot delegate: subagent profile '<name>' is invalid: <reason>.` - fix the file as the reason says.
-- `Cannot delegate: subagent profiles need an agent workspace.` - give the agent a workspace as described above.
 - `Subagent tool '<entry>' is no longer available to you; start a new subagent.` - the caller lost a tool the subagent uses.
 - `Cannot delegate: tool '<entry>' is not available to you.` - the caller's tool configuration excludes that function, or the tool is unavailable in this conversation, for example because it failed to load or the conversation is a voice call; fix the configuration or name a tool the caller can use here.
 
@@ -290,7 +288,7 @@ Changing a tool's authored settings, other than for MCP tools, cancels its still
 Include/exclude filters remain checked per function.
 Output redirection and automatic output saving apply to the completed child result, while released waits return the job handle directly.
 `job(action="list")` rediscovers handles after compaction, later turns, and a restart.
-For workspace-backed agents, `job` also accepts `mindroom_output_path`: `wait` saves the returned result.
+An agent's `job` tool also accepts `mindroom_output_path`: `wait` saves the returned result.
 Large supported results use the same configured automatic file-saving policy as other tools.
 Redirecting a stored result does not rerun the original tool or change its saved output.
 Removing a toolkit, changing its execution scope, the agent's `file_access`, or its provenance, or excluding a function revokes access.
@@ -481,7 +479,6 @@ The tool never accepts arbitrary filesystem paths; it publishes only these sourc
 - **`dynamic_workflow_run`**: `source` takes `workflow_id`, `run_id`, and optional `scope` (default `agent`), and the run must be completed.
 - **`static_site`**: `source` takes a workspace-relative `path` and a required `title`.
   The path is a directory containing `index.html` plus optional CSS, JavaScript, images, fonts, or JSON, or a single HTML file served as `index.html`.
-  The agent needs a workspace, which exists when it uses `memory_backend: file` or a `private:` configuration.
   Publishing copies the site, so later workspace edits need a new `publish_report()` call.
   A site may contain at most 200 files, 200 directories nested at most 32 levels deep, and 10 MiB in total, and it may contain only regular files, not symlinks.
   Static sites are served at `/reports/public/<slug>/` with a trailing slash so relative asset URLs resolve.

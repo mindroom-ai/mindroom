@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -20,6 +21,7 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
+from mindroom.response_turn import TurnSinks
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.timing import DispatchPipelineTiming
@@ -37,6 +39,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.ai import AIStreamChunk
+    from mindroom.response_turn import ResponseTurnContext
 
 
 def _config(tmp_path: Path) -> Config:
@@ -70,26 +73,18 @@ def _completed_team_run(run_id: str, content: str | None) -> TeamRunRecord:
     )
 
 
-async def _respond(config: Config, **kwargs: object) -> str:
-    return await ai_response(
-        make_turn_context("general", session_id="session-1"),
-        prompt="test",
-        runtime_paths=runtime_paths_for(config),
-        config=config,
-        **kwargs,
-    )
+def _ctx(**turn_inputs: object) -> ResponseTurnContext:
+    return replace(make_turn_context("general", session_id="session-1"), prompt="test", **turn_inputs)
 
 
-async def _stream(config: Config, **kwargs: object) -> list[AIStreamChunk]:
+async def _respond(config: Config, *, sinks: TurnSinks = TurnSinks(), **turn_inputs: object) -> str:  # noqa: B008
+    return await ai_response(_ctx(**turn_inputs), runtime_paths_for(config), config, sinks=sinks)
+
+
+async def _stream(config: Config, *, sinks: TurnSinks = TurnSinks(), **turn_inputs: object) -> list[AIStreamChunk]:  # noqa: B008
     return [
         chunk
-        async for chunk in stream_agent_response(
-            make_turn_context("general", session_id="session-1"),
-            prompt="test",
-            runtime_paths=runtime_paths_for(config),
-            config=config,
-            **kwargs,
-        )
+        async for chunk in stream_agent_response(_ctx(**turn_inputs), runtime_paths_for(config), config, sinks=sinks)
     ]
 
 
@@ -231,7 +226,7 @@ async def test_ai_response_returns_fallback_notice_when_retry_is_also_empty(
 
     result = await _respond(config)
 
-    # The retry's blank text streamed before the notice, as a streamed reply shows it.
+    # The retry's whitespace streamed before the notice, as a streamed reply shows it.
     assert result == f"  {EMPTY_RESPONSE_NOTICE}"
     assert len(model.requests) == 2
     # The retry's empty run is discarded too; the notice is delivery-only.
@@ -249,8 +244,8 @@ async def test_a_blocking_reply_that_ends_empty_publishes_the_error_status_a_str
     blocking: dict[str, Any] = {}
     streamed: dict[str, Any] = {}
 
-    result = await _respond(config, run_metadata_collector=blocking)
-    chunks = await _stream(config, run_metadata_collector=streamed)
+    result = await _respond(config, sinks=TurnSinks(run_metadata_collector=blocking))
+    chunks = await _stream(config, sinks=TurnSinks(run_metadata_collector=streamed))
 
     assert result == EMPTY_RESPONSE_NOTICE
     assert streamed_text(chunks) == [EMPTY_RESPONSE_NOTICE]
@@ -268,7 +263,7 @@ async def test_ai_response_fallback_notice_stays_out_of_the_turn_recorder(
     install_model_providers(monkeypatch, {"default": ScriptedModel([answer(""), answer("")])})
     recorder = TurnRecorder(user_message="test")
 
-    result = await _respond(config, turn_recorder=recorder)
+    result = await _respond(config, sinks=TurnSinks(turn_recorder=recorder))
 
     assert result == EMPTY_RESPONSE_NOTICE
     assert recorder.outcome == "completed"
@@ -276,22 +271,16 @@ async def test_ai_response_fallback_notice_stays_out_of_the_turn_recorder(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 async def test_the_turn_recorder_holds_the_run_id_of_the_attempt_that_answered(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    stream: bool,
 ) -> None:
     """After an empty attempt's retry, the recorder names the retry's stored run, which an interruption would record."""
     config = _config(tmp_path)
     install_model_providers(monkeypatch, {"default": ScriptedModel([answer(""), answer("Recovered")])})
     recorder = TurnRecorder(user_message="test")
 
-    if stream:
-        await _stream(config, turn_recorder=recorder)
-    else:
-        await _respond(config, turn_recorder=recorder)
+    await _stream(config, sinks=TurnSinks(turn_recorder=recorder))
 
     [run] = stored_runs(config, runtime_paths_for(config), "session-1")
     assert recorder.run_id == run.run_id
@@ -343,7 +332,7 @@ async def test_stream_agent_response_fallback_notice_stays_out_of_the_turn_recor
     install_model_providers(monkeypatch, {"default": ScriptedModel([answer(""), answer("")])})
     recorder = TurnRecorder(user_message="test")
 
-    chunks = await _stream(config, turn_recorder=recorder)
+    chunks = await _stream(config, sinks=TurnSinks(turn_recorder=recorder))
 
     assert streamed_text(chunks) == [EMPTY_RESPONSE_NOTICE]
     assert recorder.outcome == "completed"

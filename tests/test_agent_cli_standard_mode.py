@@ -22,7 +22,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
-from mindroom.llm.events import TextDelta
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -35,6 +34,7 @@ from tests.minimal_agent_fixtures import ScriptedProvider, offered_tools
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
 from tests.test_agent_cli_shell_access import running_api  # noqa: F401 - pytest fixture
 from tests.tool_job_helpers import job_owner
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -62,31 +62,16 @@ def _helper_runtime(
 
 
 async def _respond(runtime: ToolRuntimeContext) -> str:
+    turn = replace(
+        _turn_context(),
+        agent_mode="standard",
+        run_id=None,
+        prompt="Add two and three",
+        execution_identity=build_execution_identity_from_runtime_context(runtime),
+        supports_native_tool_approval=True,
+    )
     with tool_runtime_context(runtime):
-        return await ai.ai_response(
-            replace(_turn_context(), agent_mode="standard", run_id=None),
-            prompt="Add two and three",
-            runtime_paths=runtime.runtime_paths,
-            config=runtime.config,
-            execution_identity=build_execution_identity_from_runtime_context(runtime),
-            supports_native_tool_approval=True,
-        )
-
-
-async def _respond_streaming(runtime: ToolRuntimeContext) -> str:
-    with tool_runtime_context(runtime):
-        chunks = [
-            chunk
-            async for chunk in ai.stream_agent_response(
-                replace(_turn_context(), agent_mode="standard", run_id=None),
-                prompt="Add two and three",
-                runtime_paths=runtime.runtime_paths,
-                config=runtime.config,
-                execution_identity=build_execution_identity_from_runtime_context(runtime),
-                supports_native_tool_approval=True,
-            )
-        ]
-    return "".join(chunk.text for chunk in chunks if isinstance(chunk, TextDelta))
+        return await ai.ai_response(turn, runtime.runtime_paths, runtime.config)
 
 
 def _tool_outputs(provider: ScriptedProvider, request: int = 1) -> list[str]:
@@ -342,7 +327,7 @@ def test_a_shell_that_needs_approval_gets_the_cli_only_as_a_job(tmp_path: Path, 
             agent_cli_in_shell=True,
             supports_native_tool_approval=True,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
         )
     finally:
         clear_api_server_address()
@@ -369,7 +354,7 @@ def test_a_shell_gets_the_cli_whether_or_not_it_runs_as_a_job(tmp_path: Path, *,
             agent_cli_in_shell=True,
             supports_native_tool_approval=True,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
         )
     finally:
         clear_api_server_address()
@@ -401,7 +386,7 @@ def test_cli_shell_agent_needs_a_matrix_response_turn_and_the_running_api(
             identity,
             agent_cli_in_shell=response_turn,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
         )
     finally:
         clear_api_server_address()
@@ -424,7 +409,7 @@ def test_a_subagent_gets_no_cli_of_its_own_or_its_callers(tmp_path: Path) -> Non
             agent_cli_in_shell=True,
             delegation_depth=1,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
         )
     finally:
         clear_api_server_address()
@@ -485,13 +470,10 @@ async def test_cli_calls_share_state_with_the_run_a_subagent_result_continues(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("streaming", [False, True], ids=["blocking", "streaming"])
 async def test_a_timer_cancelled_during_a_reply_does_not_keep_its_agent_alive(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     running_api: TurnToolRegistry,  # noqa: F811 - pytest fixture
-    *,
-    streaming: bool,
 ) -> None:
     """A cancelled timer keeps the context it was scheduled from until its deadline, which must not hold the CLI catalog."""
     runtime = _helper_runtime(tmp_path, running_api)
@@ -521,7 +503,7 @@ async def test_a_timer_cancelled_during_a_reply_does_not_keep_its_agent_alive(
     provider.install(monkeypatch)
     provider.steps = [[("wait", {})], "done"]
 
-    assert "done" in await (_respond_streaming if streaming else _respond)(runtime)
+    assert "done" in await _respond(runtime)
     gc.collect()
 
     assert _tool_output(provider) == "waited"

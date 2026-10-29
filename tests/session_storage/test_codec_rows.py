@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -13,8 +12,9 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.session_storage.codec import run_columns, run_kind, run_record
 from mindroom.session_storage.legacy_agno3_schema import run_from_row
+from tests.session_storage.goldens import LEGACY_AGNO3
 
-_RUNS = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "runs"
+_RUNS = LEGACY_AGNO3 / "runs"
 # The stored-dict keys a run row keeps in columns of its own or in rows of other tables, never in ``record``.
 _NOT_IN_RECORD = {
     "run_id",

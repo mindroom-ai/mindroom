@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Protocol, TypedDict, cast, runtime_checkable
 from weakref import WeakValueDictionary
 
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
+from mindroom.config.resolution import agent_policy
 from mindroom.constants import CONTROL_STATE_PATH_ENV
 from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
@@ -25,7 +26,6 @@ from mindroom.path_confinement import (
     resolve_path_within_root,
     write_file_within_root,
 )
-from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.script_runs.models import (
     ScriptRunRecord,
     ScriptRunState,
@@ -56,7 +56,6 @@ from mindroom.shell.supervisor import (
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.sandbox_proxy import runner_config_snapshot, sandbox_proxy_config
 from mindroom.tool_system.worker_routing import (
-    agent_workspace_root_path,
     build_agent_toolkit_worker_target,
     serialize_tool_execution_identity,
 )
@@ -865,7 +864,7 @@ class ScriptRunManager:
         source: bytes,
         token: str,
     ) -> ScriptRunRecord:
-        workspace = await asyncio.to_thread(_agent_workspace, context)
+        workspace = await asyncio.to_thread(context.agent_workspace_root, create=True)
         await self._record_snapshot_locator(run, workspace)
         source_path, token_path = await asyncio.to_thread(
             _write_snapshot,
@@ -1201,33 +1200,16 @@ class ScriptRunManager:
         await asyncio.to_thread(_require_script_worker_backend(backend).retire_worker, worker_key)
 
 
-def _agent_workspace(context: ToolRuntimeContext) -> Path:
-    execution_identity = build_execution_identity_from_runtime_context(context)
-    runtime = resolve_agent_runtime(
-        context.agent_name,
-        context.config,
-        context.runtime_paths,
-        execution_identity=execution_identity,
-        create=True,
-    )
-    workspace = (
-        runtime.workspace.root
-        if runtime.workspace is not None
-        else agent_workspace_root_path(context.runtime_paths.storage_root, context.agent_name)
-    )
-    workspace.mkdir(parents=True, exist_ok=True)
-    return workspace.resolve()
-
-
 def _resolve_and_read_workspace_source(context: ToolRuntimeContext, relative_path: str) -> bytes:
     """Resolve and read one script source while keeping workspace I/O off the request loop."""
-    return _read_workspace_source(_agent_workspace(context), relative_path)
+    return _read_workspace_source(context.agent_workspace_root(create=True), relative_path)
 
 
 def _require_supported_private_script_worker_scope(context: ToolRuntimeContext) -> None:
     agent_config = context.config.get_agent(context.agent_name)
-    if agent_config.private is not None and context.config.resolve_entity(context.agent_name).execution_scope != (
-        "user_agent"
+    if (
+        agent_config.private is not None
+        and agent_policy(context.config, context.agent_name).effective_execution_scope != "user_agent"
     ):
         msg = "Background-script workers for private agents require private.per=user_agent."
         raise ScriptRunManagerError(msg)

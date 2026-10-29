@@ -33,7 +33,9 @@ Matrix sync callback
 | `origins.py` | Shared browser-origin normalization and allowlist validation for dashboard auth, CORS, Connections same-origin checks, the Computers and Connections MindRoom Chat allowlists, and MCP gateway origins |
 | `matrix_openid.py` | Matrix OpenID verification at the configured homeserver and audience binding, shared by Computers and the Connections portal |
 | `atomic_file.py` | Shared atomic byte publication and cleanup relative to an opened directory |
+| `delivery_replay.py` | Durable per-scope claims for inbound deliveries: event ids, Matrix thread roots, and nonces, each scope in its own file under its own lock; external triggers also split their old shared file through it |
 | `orchestrator.py` | MultiAgentOrchestrator - boots agents, manages sync loops, hot-reload |
+| `integrations.py` | The built-in integration registry, the one place core wires an integration's runtime: each integration's public routes, its binding to the live bots and the shutdown drain of what it bound, final-reply mirroring, config checks, and created-agent tool edits |
 | `orchestration/` | Extracted orchestrator helpers (config update plans, plugin watch, rooms, runtime) |
 | `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: queueing, response drain, and update-plan dispatch |
 | `config/bundle.py` | Native staged bundle validation, drift protection, directory publication, and recovery journals |
@@ -90,8 +92,10 @@ Matrix sync callback
 | `visible_response_reconciliation.py` | Visible Matrix response recovery, adoption, and replay reconciliation |
 | `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
-| `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |
-| `response_turn.py` | The shared streaming response-turn driver behind the agent and team envelopes, which blocking replies collect (attempt loop, model-switch continuation, empty-run retry, interrupt recording), and the run metadata and request-log context a turn binds around its model requests and stream pulls |
+| `response_runner.py` | Response lifecycle execution: the one locked turn agents and teams share, streamed or collected delivery, how a reply's span ends, and cancellation; it delegates a reply's approval lifecycle to `approval/continuation_runner.py` |
+| `reply_turn/inbox.py` | `InboxResponses`: owns detached inbox response tasks until they finish, and proves their journal recovery when a shutdown drain cancels them |
+| `reply_turn/enrichment.py` | Request enrichment for one reply turn: Matrix targeting context, silent-schedule guidance, timestamped model context, and the account of an interrupted attempt |
+| `response_turn.py` | The streaming response-turn driver behind agent and team turns and the collector blocking callers read it with (attempt loop, model-switch continuation, empty-run retry, the turn record and its interrupted row), `ResponseTurnContext` with a turn's inputs, and the run metadata and request-log context a turn binds around its model requests and stream pulls |
 | `loop_hooks.py` | The hooks every run or resume installs on the agent loop, composed once in the order the turn applies them; `agent_loop_hooks` and `leader_loop_hooks` name what an agent's and a team leader's run differ by, and `HookTurn` holds what every run takes from its turn |
 | `run_storage.py` | Where an agent or team run stores (`RunStorage`, taken from a scope context or bound to a turn), the terminal record it hands over and the error when it hands none, and the persist callback that keeps and stores it |
 | `response_attempt.py` | Runs one visible response attempt as its reply span's cancellable task |
@@ -103,7 +107,7 @@ Matrix sync callback
 | `personal_room_lifecycle.py` | Personal-room command and membership policy, target-service routing, reconciliation, and separate rejoin/cleanup retention projections |
 | `personal_agents.py` | Onboarding one user's personal agent: name choice, Matrix account registration, then the roster entry |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
-| `file_access.py` | Agent `file_access` resolution and the shared path authorization every path-taking tool opens files through |
+| `file_access.py` | Agent `file_access` resolution and the shared path authorization every path-taking tool opens files through, and the size-checked reads of files that upload tools send |
 | `orchestration/config_warnings.py` | Startup and reload warnings for risky but allowed config choices (foreign homeserver authorities, unconfined primary-process tools next to worker code tools, Agent Keys opt-ins without a worker-routed shell or python) |
 | `approval/tool_approval.py` | Tool-call approval rule evaluation and public approval API |
 | `approval/execution.py` | Agent reconstruction and exact-call execution for persisted native approval continuations |
@@ -176,8 +180,10 @@ Matrix sync callback
 | `worker_computer/worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
 | `agents.py` | `create_agent`: builds one configured agent's toolkits, prompt, model provider, store, and surface into an `AgentBuild` |
 | `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |
+| `config/resolution.py` | What one agent, team, or scope gets from the config, every inherited value filled in (`resolve_scope`, `resolve_agent`, and one function per fact) |
 | `config/personal_rooms.py` | Opt-in personal-room settings and validation for commands, aliases, and message templates |
 | `config/personal_agents.py` | `personal_agents` templates, the roster store, and expansion of roster entries into ordinary agents before config validation |
+| `config/slack.py` | The top-level `slack:` section: the email domain and Matrix user ID template that map Slack workspace members to Matrix users; also validates the `slack` tool's `channels` and `room` across agents and lists the agents that answer Slack channels |
 | `routing.py` | Intelligent responder selection when no agent or team is mentioned |
 | `routing_judgment.py` | Opt-in bounded System One or OpenAI Decisions responder selection, with explicit no-fit outcomes and existing LLM routing fallback |
 | `teams/formation.py` | Forming a team from one turn: who was asked, who is eligible, which members can be materialized, and the execution-time mode choice for an ad hoc team |
@@ -187,11 +193,11 @@ Matrix sync callback
 | `teams/delegate_tools.py` | `delegate_task_to_member` and `delegate_task_to_members`, the member result texts, the pause a paused member propagates to the team run, and the answer its resumed run gives the waiting call |
 | `teams/runtime.py` | `run_team` and `continue_team` over the agent loop: members as child runs, member decisions routed by member and call, team usage |
 | `teams/presentation.py` | The team reply document: header, member slots, consensus, tool trace, the durable `team_stream` snapshot an approval resume restores, the live document a resumed run publishes, and the document's text without tool markers that a reply records |
-| `teams/envelope.py` | `team_response_stream`: prepare a team turn, run its leader through the turn driver, and render the reply, which `team_response` collects for a blocking reply; `run_prepared_team` runs an OpenAI-compatible API team turn under the same leader hooks and storage |
+| `teams/envelope.py` | `team_response_stream`: prepare a team turn, run its leader through the turn driver, and render the reply; `run_prepared_team` runs an OpenAI-compatible API team turn under the same leader hooks and storage |
 | `teams/leader.py` | `LeaderRun`: how a team's leader runs in one turn or resume, its storage, hooks, request settings, and model, which a live turn and a saved approval's resume both build to start or continue the leader's run |
 | `teams/attempt.py` | One attempt of a team run, a turn's or a resume's: the reply document its events build, the records the run hands over, the text an interrupted turn records (its document without tool markers), and its run metadata |
 | `teams/resume.py` | Resuming a paused team run: `TeamResume` routes decisions to the calls the team waits for, `drive_team_delegations` runs a member's delegations and continues with their results, `continue_paused_team_run` rebuilds the team from a saved approval, and the document a team pause shows |
-| `agent_policy.py` | Canonical execution-policy derivation from authored agent config |
+| `agent_policy.py` | Execution-policy derivation from one typed input, `PolicyInputs`, for validated agents, dashboard drafts, and worker config files |
 | `agent_cli/minimal_agent.py` | Minimal mode: the bootstrap prompt and context documents from the build surface, and the turn's one provider-facing Bash tool over the build's catalog |
 | `agent_cli/checkpoint.py` | Minimal Bash's provider batch, saved as a `before_dispatch` hook before any Bash call takes effect |
 | `agent_cli/cli_shell_agent.py` | Standard agents whose native shell commands call their other tools through `mindroom-agent`, bound per attempt |
@@ -247,7 +253,7 @@ Matrix sync callback
 | `tools/` | 100+ tool integrations |
 | `tools/lumalabs.py` | Configurable SDK model binding for both inherited Luma video-generation methods |
 | `tool_system/dependencies.py` | Auto-install per-tool optional dependencies at runtime |
-| `ai.py` | AI response generation, streaming, and Matrix run metadata |
+| `ai.py` | The agent turn: `stream_agent_response` runs an agent through the turn driver, `ai_response` collects that stream, and delegated children run through it too |
 | `providers/credentials.py` | Which key a configured model authenticates with: the dashboard key and the missing-key checks the CLI and dashboard report |
 | `providers/key_checks.py` | The request that proves a provider API key valid, which `mindroom doctor` and the dashboard's provider setup send |
 | `providers/names.py` | `provider_route`, the route a configured provider value selects with aliases such as `gemini` resolved, which model dispatch, pricing, and the wire adapters compare, and `PROVIDER_ROUTES`, the routes the provider registry builds, which config validation accepts as a model's `provider`, in a module that imports nothing |
@@ -282,7 +288,7 @@ Matrix sync callback
 | `budgets/pricing.py` | Per-model USD pricing of token counters, keyed by the provider and model ID usage records |
 | `budgets/spend.py` | Month-to-date per-requester spend derived from retained usage |
 | `budgets/caps.py` | Per-user monthly caps kept as runtime state under the storage root, written atomically and read lock-free |
-| `budgets/monitor.py` | Background spend refresh, the per-user cap store, and the per-reply decision to use the fallback model |
+| `budgets/monitor.py` | Background spend refresh, the per-user cap store, and the fallback-model decision `turn_model.py` applies |
 | `config/budgets.py` | Opt-in budgets: default monthly cap and fallback model |
 | `session_storage/agent_storage.py` | Opens an agent's, a team scope's, or the system usage ledger's conversation store: the preflight archive check, the link-refusing connect, the tables of a new database, the conversion of one in an older layout, and an agent's layout version upgrade |
 | `session_storage/store.py` | The conversation store: one SQLite database of sessions, runs with a row per stored message and per tool execution, summary rows, and the usage ledger, with full run saves refused once a run is final and single facts patched onto stored rows, each operation in one transaction on its own connection |
@@ -299,6 +305,7 @@ Matrix sync callback
 | `history/summary_rows.py` | The conversation log's summary rows: compare-and-append of compaction chunks and mid-turn folds, the event ids each row covers, the tool calls folds took, and edit and redaction cuts |
 | `history/legacy_compaction_state.py` | The conversion's step that turns earlier compaction state, the compaction archive, and unpositioned run rows into summary rows and positioned runs before they convert |
 | `history/mid_turn_compaction.py` | Compaction between the model requests of one reply: request sizing, folding, and the scoped or run-local summary |
+| `history/turn_recorder.py` | `TurnRecorder`: what one turn did, which the turn driver writes, and the interrupted-replay snapshot the driver stores when the turn stops |
 | `history/legacy_summary_system_prompt.py` | Approval resume of runs paused with the summary inside their saved system message |
 | `history/legacy_stored_tool_calls.py` | Tool-call shapes earlier releases stored, which the conversion to storage v2 stores in the current shape in every message a converted run replays |
 | `history/summary_message.py` | The compaction summary as a user message: its text, its scope or run-local marker, and the marker that replays the scope's summary after a mid-turn compacted prompt |
@@ -360,7 +367,8 @@ Matrix sync callback
 | `matrix_rtc/audio_process.py` | Main-process side of a GPT-Live call whose media runs in its own process, plus the idle process started ahead of the next call |
 | `matrix_rtc/audio_child.py` | Child process that runs one GPT-Live call's LiveKit room, frame encryption, and agent session away from the MindRoom event loop |
 | `matrix_rtc/audio_protocol.py` | Length-prefixed JSON frames between MindRoom and a call's audio process |
-| `tool_system/sandbox_proxy.py` | Container sandbox proxy for isolating shell/python tools |
+| `tool_system/agent_tools.py` | The toolkits one agent may use per turn (`AgentTools.candidates`) and where each runs |
+| `tool_system/sandbox_proxy.py` | The one tool placement decision (`ToolPlacement`) and the proxy that routes worker calls |
 | `api/sandbox_request_cancellation.py` | Stops an in-flight sandbox runner request when the primary stops waiting for it |
 | `api/sandbox_execute_stream.py` | Streams one runner call's progress and keep-alives before its result, and stops the call when the primary hangs up |
 | `tool_system/progress.py` | Live progress a running tool call reports to whatever owns it |
@@ -371,7 +379,7 @@ Matrix sync callback
 | `shell/output_capture.py` | Bounded shell output spools, completion validation, and atomic output-file publication |
 | `shell/execution.py` | Shell command execution core: spawning, output buffering, stopping at a timeout, and the handle registry of Desktop shell and script runs |
 | `shell/supervisor.py` | Worker-local shell supervisor process that runs shell commands and script handles for sandbox request subprocesses, stopping a command whose relay dies |
-| `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |
+| `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, and the terminal write of a stream that finished; a stopped or failed stream raises for its span exit to end |
 | `prompts.py` | Built-in prompt defaults and prompt override registry |
 | `attachments/storage.py` | Attachment persistence, registration, and context-scoped resolution |
 | `attachments/ids.py` | Leaf attachment-ID helpers kept free of matrix-client imports |
@@ -379,6 +387,7 @@ Matrix sync callback
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `api/` | FastAPI REST API (dashboard, credentials, OpenAI-compatible endpoint) |
 | `api/open_access.py` | Host allow-list and browser-origin guard for requests served without a credential (open dashboard auth, unauthenticated `/v1`) |
+| `api/slack_events.py` | Public `POST /api/slack/events`: verifies Slack's signature, answers `url_verification`, and delivers events within Slack's 3-second limit, finishing slower deliveries in the background |
 | `api/request_body_limit.py` | Pure ASGI middleware answering 413 for dashboard API request bodies over 16 MiB, except knowledge uploads |
 | `api/validation_errors.py` | 422 handler for the dashboard API and sandbox runner that returns FastAPI's validation error detail without the rejected request values |
 | `api/budgets.py` | Dashboard and budget-service routes for budget status and setting or clearing one user's cap |
@@ -453,6 +462,7 @@ Matrix sync callback
 | `config/legacy_access.py` | One-shot migration from retired access fields to the membership schema; delete with the retired fields |
 | `thread_utils.py` | Thread analysis and agent detection |
 | `session_ids.py` | Leaf helpers for the canonical persisted room/thread session ID |
+| `turn_model.py` | The model one turn runs: explicit choice, thread and room overrides, authored model, the team rule, then the budget fallback |
 | `thread_models.py` | Durable per-thread model overrides backing `!model` and the `thread_model` tool |
 | `room_model_overrides.py` | Durable per-room runtime model defaults backing `!room_model` |
 | `file_watcher.py` | File change detection for config hot-reload |
@@ -481,6 +491,21 @@ Matrix sync callback
 | `tools/chat_ui.py` | Tool-catalog registration and discovery metadata for Chat UI actions |
 | `voice/visible_voice_echo.py` | Immediate router voice-placeholder delivery, replacement ordering, and deduplication |
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
+| `slack/` | Native Slack: the minimal Web API client, personal and project tools, events, and agent reply mirroring |
+| `slack/api.py` | Minimal async Slack Web API client over `httpx`, with Slack error and rate-limit mapping, parsing of conversation, message, permalink, and user targets, and message permalinks |
+| `slack/app.py` | The Slack app's workspace-wide credentials from the shared credential store, and the bot identity `auth.test` reports for them, cached per bot token |
+| `slack/events.py` | Pure Slack event handling: the signing-secret check, which Events API messages may wake anyone, the thread keys, which project agent answers an event, and which personal watches an event may be for |
+| `slack/files.py` | Slack file transfers: a download from Slack's file host, refused past 50 MB and written into the workspace's `slack-downloads/` without following links, and the external upload flow, which never sends the token to Slack's presigned upload link |
+| `slack/identity.py` | Maps a Slack author to a MindRoom account: the Slack display name and, for full workspace members whose profile email is in `slack.email_domain`, the Matrix user ID from `slack.matrix_user_id_template`; cached for ten minutes per team and user; also looks up a channel with `conversations.info`, cached the same way for names but fresh for deciding whether the app may act there, and holds that project channel rule |
+| `slack/integration.py` | Slack's entry in the integration registry: the events route, the runtime those events reach bound to the live bots, project-turn reply mirroring, and the Slack config checks; it loads the Slack runtime only on first use, because config validation reads the registry |
+| `slack/oauth.py` | The built-in `slack` OAuth provider: each requester's own Slack user token requested as `user_scope`, accepted only from the workspace the bot token belongs to |
+| `slack/render.py` | Plain dictionaries for agents from Slack answers: messages with author names and permalinks, people, conversations, and the display-name rule; Slack message markup as plain text |
+| `slack/delivery.py` | Delivers a Slack event to the project agent answering its channel, while the app is still in it, as the mapped author, then to personal watches; retries after the route acknowledged, reacts 👀, and sends notices only the author sees |
+| `slack/turns.py` | Posts a Slack message as one target agent's own hook dispatch, mentioning only that agent with the Slack text fenced as plain text; claims each message once per target and keeps a Slack thread on its Matrix thread |
+| `slack/reply_mirror.py` | Posts the final reply of an agent's Slack project turn into its Slack thread as the app, in the background after the Matrix reply; only a managed account's hook dispatch whose Slack thread delivery bound to this room and Matrix thread, in a channel and room the agent currently answers |
+| `slack/watch_delivery.py` | Delivers a Slack event to the personal watches it is for, once Slack confirms the owner can see it and while the watch room may receive it |
+| `slack/watches.py` | Personal Slack watches: the durable store of who receives which Slack mentions and direct messages in which room, the check that a room holds only the owner and MindRoom's accounts and hides earlier messages from people who join later, and the `slack_watch` actions that start, stop, and report a watch |
+| `custom_tools/slack.py` | The `slack` toolkit: personal calls with the requester's own Slack user token, project calls with the app's bot token only in listed channels the bot belongs to; search, recent conversations, read, post, edit, delete, react, workspace downloads and uploads through `slack/files.py`, rendered by `slack/render.py`; in a personal toolkit built for a Matrix room, `slack_watch` runs the watch actions of `slack/watches.py` |
 
 ## Persistent State
 

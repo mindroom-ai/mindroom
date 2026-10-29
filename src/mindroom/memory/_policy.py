@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.config.resolution import memory_backend
 from mindroom.memory_scope_ids import agent_name_from_scope_user_id, agent_scope_user_id
 from mindroom.runtime_resolution import resolve_agent_runtime
 
@@ -19,11 +20,11 @@ if TYPE_CHECKING:
 
 
 def _agent_uses_file_memory_backend(config: Config, agent_name: str) -> bool:
-    return config.resolve_entity(agent_name).memory_backend == "file"
+    return memory_backend(config, agent_name) == "file"
 
 
 def _agent_uses_disabled_memory_backend(config: Config, agent_name: str) -> bool:
-    return config.resolve_entity(agent_name).memory_backend == "none"
+    return memory_backend(config, agent_name) == "none"
 
 
 def caller_uses_file_memory_backend(config: Config, caller_context: str | list[str]) -> bool:
@@ -216,7 +217,7 @@ def resolve_file_memory_resolution(
             create=private_agent,
         )
         resolved_storage_path = agent_runtime.state_root
-        agent_memory_scope_path = agent_runtime.file_memory_root
+        agent_memory_scope_path = agent_runtime.workspace.file_memory_path
     resolution = _file_memory_resolution_from_paths(
         original_storage_path=base_storage_path,
         resolved_storage_path=resolved_storage_path,

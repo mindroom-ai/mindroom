@@ -431,7 +431,7 @@ Only declared values are passed; MindRoom does not detect them from parameter na
 | `FILE_ACCESS` | `file_access` | The constructing agent's effective `file_access` setting |
 | `WORKER_TARGET` | `worker_target` | Resolved worker routing context (scope, execution identity, worker key) |
 | `TOOL_OUTPUT_WORKSPACE_ROOT` | `tool_output_workspace_root` | Workspace root used for managed tool-output saves |
-| `WORKER_TOOLS_OVERRIDE` | `worker_tools_override` | Effective worker-routed tool override |
+| `WORKSPACE_IN_WORKER` | `workspace_in_worker` | Whether the constructing agent's workspace-path tools run in a worker, which is where its attachments are saved |
 | `CURRENT_ROOM_ID` | `current_room_id` | Active Matrix room ID when available |
 | `AGENT_STATE_ROOT` | `agent_state_root` | The constructing agent's state root in the primary runtime, requester-scoped for private agents; `None` inside workers |
 
@@ -513,6 +513,7 @@ worker_target = context.resolve_worker_target()
 ```
 
 A plugin tool always runs as an agent, inside a team as the member that called it, so `resolve_worker_target()` returns that agent's target.
+A sub-toolkit built with that target runs in a worker when the sandbox settings and the tool's default target route it there; with `runtime_config=context.config` it also does when the agent's explicit `worker_tools` list names it, and a list that leaves it out never moves it to the primary runtime.
 
 ## OAuth providers
 
@@ -799,7 +800,7 @@ from mindroom.plugin_api import Ask, AutomationContext, Done, automation, read_r
 # The digest lives in the agent's file memory, so skip agents without it.
 @automation("weekly_digest", requires_file_memory=True)
 def check(ctx: AutomationContext) -> Ask | None:
-    if ctx.workspace is None or not ctx.workspace.is_dir():
+    if not ctx.workspace.is_dir():
         return None
     target = ctx.options.get("target", "digest.md")
     # A stamp only this run asks for tells its result apart from last week's file.
@@ -827,7 +828,7 @@ plugins:
 agents:
   mind:
     display_name: Mind
-    memory_backend: file   # gives the agent a workspace
+    memory_backend: file   # weekly_digest requires file memory
     tools: [file]          # the agent writes the digest
     automations:
       - {name: weekly_digest, cron: "0 9 * * 1", options: {target: digest.md}}
@@ -855,7 +856,7 @@ agents:
 | `settings` | The plugin's `settings`, set once per plugin, read-only |
 | `requester_id` | For a [private agent](scheduling.md#automations), the requester whose instance this run maintains; `None` for a shared agent |
 | `execution_identity` | The identity that resolves that requester's instance, for helpers that take one; `None` for a shared agent |
-| `workspace` | The workspace root, which may not exist yet: a private agent's is the requester's private root; `None` for a shared agent without `memory_backend: file`, which has no workspace |
+| `workspace` | The workspace root, which may not exist yet: a shared agent's own workspace, or for a private agent the requester's private root |
 | `state_dir` | The automation state directory of the agent, or of the requester's instance, in MindRoom storage outside the workspace; name your files after your automation and create the directory when you first write |
 
 ### What MindRoom guarantees

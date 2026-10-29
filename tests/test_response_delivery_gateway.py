@@ -26,7 +26,6 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, _LargeMessageStrategy
 from mindroom.constants import (
     ACTING_REQUESTER_KEY,
-    DURABLE_FINAL_OUTCOME_KEY,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
 )
 from mindroom.delivery_gateway import (
@@ -723,7 +722,6 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             ("Finding", SILENT_SCHEDULE_SOURCE_KIND),
             (f"Finding mentions {SILENT_SCHEDULE_NO_REPLY_TOKEN}", SILENT_SCHEDULE_SOURCE_KIND),
             (f"[{SILENT_SCHEDULE_NO_REPLY_TOKEN}]", SILENT_SCHEDULE_SOURCE_KIND),
-            ("", MESSAGE_SOURCE_KIND),
             (SILENT_SCHEDULE_NO_REPLY_TOKEN, MESSAGE_SOURCE_KIND),
         ],
     )
@@ -746,6 +744,25 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.event_id == "$sent"
         assert outcome.suppressed is False
         send.assert_awaited_once()
+
+    async def test_an_ordinary_response_with_nothing_to_show_ends_without_an_answer(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """An ordinary empty response is not suppressed: it ends like a stream that showed only its placeholder."""
+        gateway = _gateway(tmp_path, alice)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": ""}))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await final_in_span(gateway, alice, self._final_request("", source_kind=MESSAGE_SOURCE_KIND))
+
+        assert outcome.terminal_status == "error"
+        assert outcome.failure_reason == "stream_completed_without_visible_body"
+        assert outcome.event_id is None
+        assert outcome.suppressed is False
+        send.assert_not_awaited()
 
     @pytest.mark.parametrize("generated_text", ["", SILENT_SCHEDULE_NO_REPLY_TOKEN])
     async def test_silent_schedule_hook_finding_delivers_after_no_report_generation(
@@ -1289,7 +1306,6 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert prompt["question_text"] == "Pick"
         assert prompt["options"] == {"1": "yes", "✅": "yes"}
         # The reply's records hold the body and its success; the result keeps only the question's registration facts.
-        assert DURABLE_FINAL_OUTCOME_KEY not in new_content
         assert delivery.result is not None
         assert set(delivery.result) == {"interactive"}
         assert delivery.result["interactive"]["question_text"] == "Pick"
@@ -3030,7 +3046,7 @@ class TestTurnDeliverySerialization:
 
         delivery = gateway._response_delivery(send, handoff=handoff)
         runner = ResponseRunner(deps=MagicMock())
-        response_task = runner.track_inbox_response(
+        response_task = runner.inbox.track_inbox_response(
             delivery.deliver(
                 delivery_id=source_event_id,
                 stage=DeliveryStage.FINAL,
@@ -3043,11 +3059,11 @@ class TestTurnDeliverySerialization:
             room_id=_ROOM_ID,
         )
         await send_started.wait()
-        runner.begin_process_shutdown()
+        runner.inbox.begin_process_shutdown()
         finish_send.set()
 
         assert (
-            await runner.drain_inbox_responses(
+            await runner.inbox.drain_inbox_responses(
                 cancel_after_seconds=_SHUTDOWN_DRAIN_WINDOW_SECONDS,
                 shutdown_intent=ORDERLY_SHUTDOWN,
             )
@@ -3119,7 +3135,7 @@ class TestTurnDeliverySerialization:
 
         delivery = gateway._response_delivery(send, handoff=handoff)
         runner = ResponseRunner(deps=MagicMock())
-        response_task = runner.track_inbox_response(
+        response_task = runner.inbox.track_inbox_response(
             delivery.deliver(
                 delivery_id=source_event_id,
                 stage=DeliveryStage.FINAL,
@@ -3143,14 +3159,14 @@ class TestTurnDeliverySerialization:
                 allow_publication.set()
 
         with patch(
-            "mindroom.response_runner.request_task_cancel",
+            "mindroom.reply_turn.inbox.request_task_cancel",
             side_effect=cancel_and_release_publication,
         ):
-            runner.begin_process_shutdown()
+            runner.inbox.begin_process_shutdown()
             finish_send.set()
             await publication_started.wait()
             assert (
-                await runner.drain_inbox_responses(
+                await runner.inbox.drain_inbox_responses(
                     # Exercise repeated cancellation without imposing a database deadline.
                     cancel_after_seconds=_SHUTDOWN_DRAIN_WINDOW_SECONDS,
                     shutdown_intent=ORDERLY_SHUTDOWN,
@@ -3223,7 +3239,7 @@ class TestTurnDeliverySerialization:
 
         delivery = gateway._response_delivery(send, handoff=handoff)
         runner = ResponseRunner(deps=MagicMock())
-        response_task = runner.track_inbox_response(
+        response_task = runner.inbox.track_inbox_response(
             delivery.deliver(
                 delivery_id=source_event_id,
                 stage=DeliveryStage.FINAL,
@@ -3237,11 +3253,11 @@ class TestTurnDeliverySerialization:
             room_id=_ROOM_ID,
         )
         await send_started.wait()
-        runner.begin_process_shutdown()
+        runner.inbox.begin_process_shutdown()
         finish_send.set()
 
         assert (
-            await runner.drain_inbox_responses(
+            await runner.inbox.drain_inbox_responses(
                 cancel_after_seconds=_SHUTDOWN_DRAIN_WINDOW_SECONDS,
                 shutdown_intent=ORDERLY_SHUTDOWN,
             )

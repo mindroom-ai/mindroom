@@ -174,6 +174,9 @@ async def test_reload_drains_active_responses_before_applying(
     assert gate.closed is False
 
 
+_AGENT1_YAML = "models:\n  default: {provider: openai, id: test-model}\nagents:\n  agent1:\n    display_name: Agent 1\n"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("apply_fails", [False, True])
 async def test_a_reload_ends_the_script_launch_fence_once_published_or_failed(
@@ -239,9 +242,6 @@ async def test_another_update_waiting_for_the_config_lock_starts_after_the_launc
     await asyncio.wait_for(asyncio.gather(reload_task, queued), timeout=1)
 
     assert order == ["fence ended", "queued update"]
-
-
-_AGENT1_YAML = "agents:\n  agent1:\n    display_name: Agent 1\n"
 
 
 @pytest.mark.asyncio

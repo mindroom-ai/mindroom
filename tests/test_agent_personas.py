@@ -38,6 +38,7 @@ from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.history_helpers import compact_runs
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -114,7 +115,7 @@ def _child(runtime: ToolRuntimeContext, tools: list[str] | None, prompt: str = "
         "execution_identity": None,
         "persist_runtime_state": False,
         "knowledge": None,
-        "active_model_name": None,
+        "model": turn_model(runtime.config, runtime.runtime_paths, "helper"),
         **options,
     }
     return agents.create_agent(
@@ -137,11 +138,14 @@ async def _persona_request(
     install_model_providers(monkeypatch, {"default": model})
     with tool_runtime_context(runtime):
         await ai_response(
-            replace(_turn_context(), persona=persona),
-            prompt=prompt,
-            runtime_paths=runtime.runtime_paths,
-            config=runtime.config,
-            execution_identity=build_execution_identity_from_runtime_context(runtime),
+            replace(
+                _turn_context(),
+                persona=persona,
+                prompt=prompt,
+                execution_identity=build_execution_identity_from_runtime_context(runtime),
+            ),
+            runtime.runtime_paths,
+            runtime.config,
         )
     [request] = model.requests
     return request
@@ -182,7 +186,7 @@ async def test_persona_prompt_replaces_identity_and_keeps_runtime_sections(
         None,
         persist_runtime_state=False,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
     )
     assert "Configured personality" in str(configured.prompt.role)
 
@@ -320,7 +324,7 @@ def test_persona_tools_are_never_wire_deferred(tmp_path: Path) -> None:
         runtime.runtime_paths,
         execution_identity=None,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
     )
     persona = _child(runtime, ["file"])
 
@@ -346,7 +350,13 @@ def test_delegate_lists_its_caller_as_a_fresh_copy(tmp_path: Path) -> None:
     """Every caller's own delegate entry reads as a fresh copy and never repeats its configured role."""
     runtime = _runtime(tmp_path)
 
-    toolkit = DelegateTools("helper", ["helper"], runtime.runtime_paths, runtime.config)
+    toolkit = DelegateTools(
+        "helper",
+        ["helper"],
+        runtime.runtime_paths,
+        runtime.config,
+        agent_workspace_root_path(runtime.runtime_paths.storage_root, "helper"),
+    )
 
     assert "helper\n  - Yourself, run as a fresh copy." in str(toolkit.instructions)
     assert "Configured role" not in str(toolkit.instructions)
@@ -382,7 +392,7 @@ def test_persona_with_tools_searches_the_knowledge_it_names(tmp_path: Path) -> N
         persist_runtime_state=False,
         persona=inline_persona("P", ["file"], None, ["docs"]),
         knowledge=_knowledge(),
-        active_model_name=None,
+        model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
     )
 
     assert "search_knowledge_base" in _function_names(build)
@@ -408,7 +418,7 @@ def test_persona_inherits_its_callers_skills_without_the_authoring_note(tmp_path
             identity,
             persist_runtime_state=False,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
         ),
     )
     authored = _system_prompt(_child(runtime, None, execution_identity=identity))
@@ -435,7 +445,7 @@ def test_only_the_configured_agent_learns_which_workspace_skills_did_not_load(tm
             identity,
             persist_runtime_state=False,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
         ),
     )
     authored = _system_prompt(_child(runtime, None, execution_identity=identity))
@@ -463,7 +473,7 @@ def test_persona_lists_only_the_skills_it_names(tmp_path: Path, skills: list[str
         persist_runtime_state=False,
         persona=inline_persona("P", None, skills, None),
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
     )
     prompt = _system_prompt(build)
 
@@ -487,7 +497,7 @@ def test_persona_with_tools_and_no_skill_list_builds_without_skills(tmp_path: Pa
         persist_runtime_state=False,
         persona=persona,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
     )
 
     assert build.prompt.skills_block is None
@@ -507,7 +517,7 @@ def test_persona_whose_named_skills_are_gone_gets_no_skill_functions(tmp_path: P
         persist_runtime_state=False,
         persona=inline_persona("P", ["file"], ["removed"], None),
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
     )
 
     assert build.prompt.skills_block is None
@@ -529,7 +539,7 @@ def test_persona_with_tools_keeps_its_skill_functions(tmp_path: Path) -> None:
             persist_runtime_state=False,
             persona=inline_persona("P", ["file"], ["scripted"], None),
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
         ),
     )
 
@@ -552,7 +562,7 @@ def test_minimal_persona_reads_its_skills_as_context_documents(tmp_path: Path) -
         agent_mode="minimal",
         persona=inline_persona("P", ["shell"], ["scripted"], None),
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
     )
 
     assert build.surface.mode == "minimal"
@@ -656,7 +666,7 @@ def test_persona_refuses_an_mcp_function_a_collision_hides(tmp_path: Path, monke
             persist_runtime_state=False,
             persona=inline_persona("P", ["mcp_demo.demo_list_tools", "sleep"], None, None),
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, runtime_paths, "code"),
         )
 
 
@@ -726,7 +736,7 @@ def test_agent_without_persona_is_unchanged(tmp_path: Path) -> None:
         persist_runtime_state=False,
         persona=None,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
     )
     minimal = agents.create_agent(
         "helper",
@@ -737,7 +747,7 @@ def test_agent_without_persona_is_unchanged(tmp_path: Path) -> None:
         agent_mode="minimal",
         persona=None,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
     )
     assert standard.spec.system_messages == ()
     assert standard.prompt.persona is None

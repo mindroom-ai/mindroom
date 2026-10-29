@@ -42,7 +42,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.reply_span_helpers import reply_span, response_span, seed_finished_reply
-from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
+from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target, streamed_answer
 from tests.test_response_runner_focused import _admit_approval_source
 from tests.test_turn_store import _store
 
@@ -112,7 +112,7 @@ class _ApprovalCase:
             patch_response_runner_module(
                 typing_indicator=_noop_typing,
                 should_use_streaming=AsyncMock(return_value=False),
-                ai_response=model,
+                stream_agent_response=streamed_answer(model),
             ),
             patch.object(self.bot, "_delivery_gateway", self.gateway),
         ):
@@ -145,7 +145,7 @@ class _ApprovalCase:
         continuation = await self.principal.approvals.approval_continuation_for_source("$edit")
         if continuation is not None and continuation.state == "failing":
             await self.runner.handoff_approval_source("$edit")
-        await self.runner.wait_for_source_owned_inbox_responses()
+        await self.runner.inbox.wait_for_source_owned_inbox_responses()
 
     async def failed_stop(self) -> None:
         """A Stop whose note cannot be sent yet still fences the approval; its settlement retries later."""
@@ -167,7 +167,7 @@ class _ApprovalCase:
         resumed = AsyncMock(side_effect=AssertionError("Stopped approval must not execute"))
         with patch.object(self.runner._approvals, "_continue_entity_call", resumed):
             await self.runner.handoff_approval_source("$edit")
-            await self.runner.wait_for_source_owned_inbox_responses()
+            await self.runner.inbox.wait_for_source_owned_inbox_responses()
         resumed.assert_not_awaited()
 
     async def freeze_final(self) -> ApprovalContinuation:
@@ -216,7 +216,7 @@ class _ApprovalCase:
         result = AsyncMock(return_value=CompletedApprovalRun(response_text="Edited answer", metadata_content={}))
         with patch.object(self.runner._approvals, "_continue_entity_call", result):
             assert await self.runner.handoff_approval_source("$edit") is False
-            await self.runner.wait_for_source_owned_inbox_responses()
+            await self.runner.inbox.wait_for_source_owned_inbox_responses()
 
     async def restart(self) -> None:
         _reset_handled_turn_ledger_runtime()
@@ -315,6 +315,7 @@ async def _paused_case(  # noqa: PLR0915
             complete_turn=store.publish_completed_turn,
         ),
     )
+    runner.inbox.replies = runner.deps.replies
     await runner.deps.replies.start()
     regenerator = unwrap_extracted_collaborator(bot._edit_regenerator)
     regenerator.deps = replace(
@@ -389,7 +390,7 @@ async def _paused_case(  # noqa: PLR0915
             patch_response_runner_module(
                 typing_indicator=_noop_typing,
                 should_use_streaming=AsyncMock(return_value=False),
-                ai_response=model,
+                stream_agent_response=streamed_answer(model),
             ),
             patch("mindroom.approval.response.evaluate_tool_approval", approval_evaluation),
             # Inspect the durable checkpoint before the test claims resumed execution.
@@ -476,7 +477,7 @@ class TestEditApprovalOwnership:
         assert await case.principal.is_pending("$newer-edit")
         assert ("$newer-edit",) not in retried
         await case.runner.handoff_approval_source("$edit")
-        await case.runner.wait_for_source_owned_inbox_responses()
+        await case.runner.inbox.wait_for_source_owned_inbox_responses()
         assert await case.principal.approvals.approval_continuation(case.approval.approval_id) is None
         assert ("$newer-edit",) in retried
         # The retried edit regenerates the reply in place from the newer text.
@@ -556,7 +557,7 @@ class TestEditApprovalOwnership:
         resumed = AsyncMock(side_effect=AssertionError("A deleted message's approval must not execute"))
         with patch.object(case.runner._approvals, "_continue_entity_call", resumed):
             await case.runner.handoff_approval_source("$edit")
-            await case.runner.wait_for_source_owned_inbox_responses()
+            await case.runner.inbox.wait_for_source_owned_inbox_responses()
         resumed.assert_not_awaited()
         assert await case.principal.approvals.approval_continuation(case.approval.approval_id) is None
         assert not await case.principal.is_pending("$edit")
@@ -615,6 +616,7 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
         delivery_gateway=gateway,
         replies=replace(runner.deps.replies, store=principal, complete_turn=store.publish_completed_turn),
     )
+    runner.inbox.replies = runner.deps.replies
     request = replace(
         _plain_request(_target(), source_event_id="$edit"),
         existing_event_id="$waiting",
@@ -628,7 +630,7 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
     progress = DeliveryProgress()
     pause = ResponsePausedForApproval(PausedAttempt(session_id="session", run_id="run", tools=(), toolkit_owners={}))
 
-    async def fail_handoff(_paused: PausedAttempt) -> None:
+    async def fail_handoff(_pause: ResponsePausedForApproval) -> None:
         message = "Approval handoff failed"
         raise RuntimeError(message)
 
@@ -652,7 +654,6 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
                 build_post_response_outcome=lambda _outcome: ResponseOutcome(),
                 post_response_deps=PostResponseEffectsDeps(logger=runner.deps.logger),
                 approval_suspension_handler=fail_handoff,
-                show_tool_calls=False,
             )
     assert progress.delivery_outcome is not None
     assert progress.delivery_outcome.terminal_status == "error"

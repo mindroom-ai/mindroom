@@ -25,6 +25,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.response_attempt_helpers import install_direct_response_admission
+from tests.response_runner_helpers import streamed_answer
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
     _make_client_mock,
@@ -152,7 +153,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         # Make AI fast.
         resolver = unwrap_extracted_collaborator(bot._conversation_resolver)
         with (
-            patch("mindroom.response_runner.ai_response", AsyncMock(return_value="OK")),
+            patch("mindroom.response_runner.stream_agent_response", new=streamed_answer(AsyncMock(return_value="OK"))),
             patch.object(
                 resolver,
                 "fetch_thread_history",

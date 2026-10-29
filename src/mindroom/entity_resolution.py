@@ -427,20 +427,6 @@ def router_agents_for_room(
     return router_agents or set(agents)
 
 
-def effective_entity_model_name(
-    config: Config,
-    entity_name: str,
-    room_id: str | None,
-    runtime_paths: RuntimePaths,
-) -> str:
-    """Return the effective model for one entity in one room context."""
-    if entity_name not in config.agents and entity_name not in config.teams and entity_name != ROUTER_AGENT_NAME:
-        return "default"
-    if room_override := resolve_room_scoped_model_override(config.room_models, room_id, runtime_paths):
-        return room_override
-    return config.resolve_entity(entity_name).model_name
-
-
 def resolve_room_scoped_model_override(
     overrides: Mapping[str, str],
     room_id: str | None,

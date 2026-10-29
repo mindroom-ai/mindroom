@@ -7,7 +7,9 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from mindroom.config.resolution import authored_tool_entries
 from mindroom.constants import RESERVED_ENTITY_NAMES
+from mindroom.integrations import adapt_created_agent_tools
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -41,7 +43,7 @@ def _generated_agent_data(
             if (value := getattr(edits, field)) is not None:
                 data[field] = value
         if edits.tools is not None:
-            offered = {entry.name: entry for entry in base._get_agent_authored_tool_configs(base_agent)}
+            offered = {entry.name: entry for entry in authored_tool_entries(base, base_agent)}
             chosen = list(dict.fromkeys(edits.tools))
             dropped = [name for name in chosen if name not in offered]
             kept = [name for name in chosen if name in offered]
@@ -70,6 +72,9 @@ def _generated_agent_data(
             "allow_self_config": False,
             "created_agents_per_owner": 0,
         }
+        # A created agent has no rooms, so each integration removes the tool settings that need one.
+        if "tools" in data:
+            adapt_created_agent_tools(data["tools"])
     return data, dropped
 
 

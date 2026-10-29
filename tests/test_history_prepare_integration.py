@@ -62,6 +62,7 @@ from tests.history_helpers import (
     stored_turn,
 )
 from tests.identity_helpers import persist_entity_accounts
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -132,7 +133,7 @@ def test_create_agent_replays_the_configured_number_of_runs(tmp_path: Path) -> N
         execution_identity=None,
         include_interactive_questions=False,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "test_agent"),
     )
 
     assert build.history_settings.policy == HistoryPolicy(mode="runs", limit=2)
@@ -187,7 +188,7 @@ def test_create_agent_uses_active_model_override(tmp_path: Path, provider: _Prov
         config,
         runtime_paths,
         execution_identity=None,
-        active_model_name="large",
+        model=turn_model(config, runtime_paths, "test_agent", "large"),
         include_interactive_questions=False,
         knowledge=None,
     )
@@ -569,10 +570,9 @@ async def test_a_reply_replays_recent_stored_history_without_persisting_the_repl
 
     with _no_memory():
         response = await ai_response(
-            make_turn_context("test_agent", session_id="session-1"),
-            prompt="Current prompt",
-            runtime_paths=runtime_paths,
-            config=config,
+            replace(make_turn_context("test_agent", session_id="session-1"), prompt="Current prompt"),
+            runtime_paths,
+            config,
         )
 
     assert response == "ok"
@@ -718,10 +718,9 @@ async def test_memory_md_reloads_in_the_request_that_carries_a_compaction(
 
     async def system_prompt_of_turn(prompt: str) -> str:
         await ai_response(
-            make_turn_context("test_agent", session_id="session-1"),
-            prompt=prompt,
-            runtime_paths=runtime_paths,
-            config=config,
+            replace(make_turn_context("test_agent", session_id="session-1"), prompt=prompt),
+            runtime_paths,
+            config,
         )
         return system_text(provider.model.requests[-1].messages)
 
@@ -774,14 +773,16 @@ async def _three_turns(
     with patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(side_effect=memory_for)):
         for prompt in transient_by_prompt:
             await ai_response(
-                make_turn_context("test_agent", session_id="session-1", requester_id="@alice:localhost")
-                if timestamps is not None
-                else make_turn_context("test_agent", session_id="session-1"),
-                prompt=prompt,
-                runtime_paths=runtime_paths,
-                config=config,
-                model_prompt=(model_prompts or {}).get(prompt),
-                current_timestamp_ms=(timestamps or {}).get(prompt),
+                replace(
+                    make_turn_context("test_agent", session_id="session-1", requester_id="@alice:localhost")
+                    if timestamps is not None
+                    else make_turn_context("test_agent", session_id="session-1"),
+                    prompt=prompt,
+                    model_prompt=(model_prompts or {}).get(prompt),
+                    current_timestamp_ms=(timestamps or {}).get(prompt),
+                ),
+                runtime_paths,
+                config,
             )
             request = provider.model.requests[-1]
             assert _SESSION_PREAMBLE in system_text(request.messages)

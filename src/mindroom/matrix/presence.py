@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import nio
 
+from mindroom.config.resolution import entity_model_name
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 
@@ -68,8 +69,7 @@ def build_agent_status_message(
     """
     status_parts = []
 
-    entity_view = config.resolve_entity(agent_name)
-    model_name = entity_view.model_name
+    model_name = entity_model_name(config, agent_name)
 
     # Format model info
     if model_name in config.models:
@@ -93,7 +93,7 @@ def build_agent_status_message(
         if agent_config.role:
             status_parts.append(f"💼 {agent_config.role[:100]}")  # Limit length
         # Add tool count
-        effective_tools = entity_view.available_tools
+        effective_tools = config.resolve_agent(agent_name).tools.tool_names
         if effective_tools:
             status_parts.append(f"🔧 {len(effective_tools)} tools available")
         if voice_calls_available:

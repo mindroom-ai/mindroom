@@ -17,7 +17,8 @@ from urllib.parse import urlsplit
 
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
 from mindroom.runtime_state import get_api_server_address
-from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool
+from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.workers.backends.docker_config import DOCKER_HOST_ALIAS
 from mindroom.workers.runtime import primary_worker_backend_name
 
@@ -38,11 +39,7 @@ _LAUNCHER = (
 
 
 def _shell_runs_in_primary(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> bool:
-    return not sandbox_proxy_enabled_for_tool(
-        "shell",
-        runtime_paths=runtime_paths,
-        worker_tools_override=config.get_agent_worker_tools(agent_name),
-    )
+    return not resolve_agent_tools(config, agent_name).runs_in_worker("shell", tool_placement(runtime_paths))
 
 
 def _local_bin_dir(runtime_paths: RuntimePaths) -> str:

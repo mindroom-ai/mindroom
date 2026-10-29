@@ -127,6 +127,7 @@ _ALLOWED_THIRD_PARTY_ROOTS: dict[str, frozenset[str]] = {
     # provider, storage, or other feature-specific dependency.
     "mindroom.cli.doctor": _CLI_ROOTS | _REGISTRY_ROOTS,
     "mindroom.config.main": _CONFIG_LAYER_ROOTS,
+    "mindroom.slack.integration": _CONFIG_LAYER_ROOTS,
     "mindroom.providers.credentials": _CONFIG_LAYER_ROOTS,
     "mindroom.tool_system.declarations": frozenset({"dotenv"}),
     # The owned tool values import no Agno module; agno_toolkits builds them from Agno's tool objects.
@@ -194,6 +195,7 @@ import importlib, json, sys
 stdlib = set(sys.stdlib_module_names)
 baseline = {{name.split(".")[0] for name in sys.modules}}
 importlib.import_module({module!r})
+{build_config}
 banned_roots = {banned_roots!r}
 banned = sorted(
     name
@@ -230,6 +232,10 @@ def _run_slim_probe(module: str) -> tuple[list[str], frozenset[str]]:
             "-c",
             _SLIM_PROBE_TEMPLATE.format(
                 module=module,
+                # Building a config runs every integration's validation hook, so its footprint is measured after one.
+                build_config="importlib.import_module('mindroom.config.main').Config(agents={})"
+                if module == "mindroom.config.main"
+                else "",
                 banned_roots=_PROVIDER_SDK_ROOTS + _SLIM_ONLY_ROOTS,
             ),
         ],

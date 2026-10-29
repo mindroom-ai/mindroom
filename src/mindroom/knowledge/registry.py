@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, ParamSpec, TypeVar
 
+from mindroom.agent_policy import PRIVATE_KNOWLEDGE_BASE_ID_PREFIX
 from mindroom.embeddings.factory import create_configured_embedder, embedder_client_signature
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.index_metadata import (
@@ -99,7 +100,6 @@ class PublishedIndexResolution:
 
 _published_indexes: dict[PublishedIndexKey, _PublishedIndexHandle] = {}
 _CONSECUTIVE_REFRESH_FAILURE_ALERT_THRESHOLD = 3
-_PRIVATE_KNOWLEDGE_BASE_ID_PREFIX = "__agent_private__:"
 _MAX_PRIVATE_PUBLISHED_INDEXES = 128
 #: Vectors one search may load from a base whose files worker code can write, so code that grows those files cannot
 #: make a search exhaust the primary's memory. About 43,000 chunks of the default 1,536-dimension embedder.
@@ -650,7 +650,7 @@ def _same_physical_source(left: PublishedIndexKey, right: PublishedIndexKey) -> 
 
 
 def _published_index_key_is_private(key: PublishedIndexKey) -> bool:
-    return key.base_id.startswith(_PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
+    return key.base_id.startswith(PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
 
 
 def prune_private_index_bookkeeping() -> None:

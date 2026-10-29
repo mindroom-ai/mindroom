@@ -5,10 +5,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.script_runs.models import ScriptToolGrant
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
+from mindroom.tool_system.sandbox_proxy import tool_placement
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -38,6 +39,8 @@ _SCRIPT_RESTRICTED_TOOLKITS = frozenset(
         "memory",
         "self_config",
         "skill_manage",
+        # A script's calls rebuild the tool context without the turn's hook source, which Slack's write guard reads.
+        "slack",
     },
 )
 
@@ -95,10 +98,7 @@ def _visible_script_tool_entries(
     ensure_tool_registry_loaded(context.runtime_paths, config)
     return tuple(
         entry
-        for entry in visible_tool_surface(
-            agent_name=context.agent_name,
-            config=config,
-        ).runtime_tool_configs
+        for entry in resolve_agent_tools(config, context.agent_name).candidates()
         if entry.name in TOOL_METADATA and entry.name not in _SCRIPT_RESTRICTED_TOOLKITS
     )
 
@@ -109,10 +109,12 @@ def _build_script_toolkits(
     tool_entries: Sequence[EffectiveToolConfig],
 ) -> dict[str, Toolkit]:
     # Imported lazily to keep script-run state imports independent of the agent/model graph.
-    from mindroom.agents import build_agent_toolkit, resolve_runtime_worker_tools  # noqa: PLC0415
+    from mindroom.agents import build_agent_toolkit  # noqa: PLC0415
     from mindroom.runtime_resolution import resolve_agent_runtime  # noqa: PLC0415
 
-    entity_view = config.resolve_entity(context.agent_name)
+    agent_tools = resolve_agent_tools(config, context.agent_name)
+    placement = tool_placement(context.runtime_paths)
+    workspace_in_worker = agent_tools.workspace_in_worker([entry.name for entry in tool_entries], placement)
     execution_identity = build_execution_identity_from_runtime_context(context)
     agent_runtime = resolve_agent_runtime(
         context.agent_name,
@@ -121,22 +123,14 @@ def _build_script_toolkits(
         execution_identity=execution_identity,
         create=True,
     )
-    worker_tools = resolve_runtime_worker_tools(
-        context.agent_name,
-        config,
-        context.runtime_paths,
-        [entry.name for entry in tool_entries],
-        tool_registry_preloaded=True,
-    )
     toolkits: dict[str, Toolkit] = {}
     for tool_entry in tool_entries:
         toolkit = build_agent_toolkit(
             tool_entry.name,
-            agent_name=context.agent_name,
-            config=config,
+            agent_tools=agent_tools,
+            placement=placement,
             runtime_paths=context.runtime_paths,
-            worker_tools=worker_tools,
-            runtime_overrides=entity_view.tool_runtime_overrides(tool_entry.name),
+            workspace_in_worker=workspace_in_worker,
             agent_runtime=agent_runtime,
             tool_config_overrides=tool_entry.tool_config_overrides,
             execution_identity=execution_identity,

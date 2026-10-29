@@ -76,6 +76,7 @@ from tests.conftest import (
 from tests.fakes.scripted_model import ScriptedModel
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.tool_job_helpers import job_tool, tool_job_runtime
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -1959,7 +1960,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
             execution_identity=execution_identity,
             hook_registry=bot.hook_registry,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, runtime_paths_for(config), "code"),
         )
         echo = build.spec.functions["echo"]
 
@@ -2224,7 +2225,7 @@ async def test_create_agent_runs_the_hook_policy_around_its_tool_calls(
             execution_identity=None,
             hook_registry=registry,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, runtime_paths_for(config), "code"),
         )
 
         echo = build.spec.functions["echo"]

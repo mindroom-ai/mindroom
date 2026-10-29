@@ -14,8 +14,7 @@ import asyncio
 import hashlib
 import time
 import weakref
-from dataclasses import dataclass
-from functools import partial
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Annotated, Any, cast
 from uuid import uuid4
 
@@ -26,7 +25,7 @@ from starlette.background import BackgroundTask
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_run_context import prepend_knowledge_availability_notice
-from mindroom.ai import AIStreamChunk, ResponseTurnContext, ai_response, stream_agent_response
+from mindroom.ai import AIStreamChunk, ai_response, stream_agent_response
 from mindroom.api import config_lifecycle
 from mindroom.api.open_access import open_access_rejection
 from mindroom.api.openai_request_parsing import (
@@ -57,8 +56,8 @@ from mindroom.api.openai_streaming_protocol import (
 )
 from mindroom.api.response_activity import track_openai_request
 from mindroom.authorization import is_sender_allowed_for_responder
-from mindroom.budgets.monitor import budget_model
 from mindroom.config.access import validate_concrete_matrix_user_ids
+from mindroom.config.resolution import entity_timezone
 from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
 from mindroom.error_handling import needs_provider_key
 from mindroom.failure_text import failure_text
@@ -72,14 +71,19 @@ from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
 from mindroom.redaction import redact_sensitive_text
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
-from mindroom.response_activity import ResponseIdentity  # noqa: TC001 - FastAPI evaluates dependency annotations.
-from mindroom.response_turn import CompletedAttempt, build_llm_request_log_context, stream_with_llm_request_log_context
+from mindroom.response_activity import ActiveResponseIdentity  # noqa: TC001 - FastAPI evaluates dependency annotations.
+from mindroom.response_turn import (
+    CompletedAttempt,
+    ResponseTurnContext,
+    TurnSinks,
+    build_llm_request_log_context,
+    stream_with_llm_request_log_context,
+)
 from mindroom.routing import suggest_responder
 from mindroom.run_storage import TerminalRecord
 from mindroom.teams.envelope import prepare_materialized_team_execution, run_prepared_team
 from mindroom.teams.members import (
     BuiltTeam,
-    TeamTurnModelSelection,
     build_team_spec,
     resolve_exact_team_members,
 )
@@ -93,9 +97,16 @@ from mindroom.tool_system.worker_routing import (
     stream_with_tool_execution_identity,
     tool_execution_identity,
 )
+from mindroom.turn_model import (
+    ModelScope,
+    TeamTurnModelSelection,
+    TurnBudget,
+    resolve_team_turn_models,
+    resolve_turn_model,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 
     from mindroom.api.openai_request_parsing import ChatCompletionRequest
     from mindroom.api.openai_streaming_protocol import ToolStreamState
@@ -513,6 +524,10 @@ def _openai_turn_context(
     session_id: str | None,
     execution_identity: ToolExecutionIdentity,
     model_name: str | None = None,
+    prompt: str = "",
+    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
+    knowledge: AgentKnowledge | None = None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
 ) -> ResponseTurnContext:
     """Build the turn context for one OpenAI-compatible completion, which has no Matrix conversation."""
     return ResponseTurnContext(
@@ -526,6 +541,12 @@ def _openai_turn_context(
         requester_id=execution_identity.requester_id,
         matrix_run_metadata=None,
         active_model_name=model_name,
+        prompt=prompt,
+        thread_history=thread_history,
+        execution_identity=execution_identity,
+        refresh_scheduler=refresh_scheduler,
+        knowledge=knowledge,
+        include_interactive_questions=False,
     )
 
 
@@ -603,7 +624,7 @@ async def list_models(
 @router.post("/chat/completions", response_model=None)
 async def chat_completions(
     request: Request,
-    activity: Annotated[ResponseIdentity, Depends(track_openai_request, scope="request")],
+    activity: Annotated[ActiveResponseIdentity, Depends(track_openai_request, scope="request")],
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse | StreamingResponse:
     """Create a chat completion (non-streaming or streaming)."""
@@ -648,7 +669,7 @@ async def _chat_completions(  # noqa: C901, PLR0912
     prompt: str,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     authority: DetachedRequesterContext | None,
-    activity: ResponseIdentity,
+    activity: ActiveResponseIdentity,
     *,
     session_namespace: str,
 ) -> JSONResponse | StreamingResponse:
@@ -697,7 +718,7 @@ async def _chat_completions(  # noqa: C901, PLR0912
     )
     knowledge_refresh_scheduler = config_lifecycle.app_state(request.app).knowledge_refresh_scheduler
     budget_monitor = config_lifecycle.app_state(request.app).budget_monitor
-    budget = partial(budget_model, config, runtime_paths, budget_monitor, execution_identity.requester_id)
+    budget = TurnBudget(monitor=budget_monitor, requester_id=execution_identity.requester_id)
     completion_lock = _openai_completion_lock(
         runtime_paths=runtime_paths,
         agent_name=agent_name,
@@ -709,7 +730,14 @@ async def _chat_completions(  # noqa: C901, PLR0912
         # Team execution path
         if agent_name.startswith(TEAM_MODEL_PREFIX):
             team_name = agent_name.removeprefix(TEAM_MODEL_PREFIX)
-            team_models = _openai_team_models(team_name, config, budget)
+            # No room or thread: the team and each member run their authored models, under the requester's budget.
+            team_models = resolve_team_turn_models(
+                config,
+                runtime_paths,
+                ModelScope(entity=team_name),
+                config.teams[team_name].agents,
+                budget,
+            )
             if req.stream:
                 response: JSONResponse | StreamingResponse = await _stream_team_completion(
                     team_name,
@@ -754,34 +782,21 @@ async def _chat_completions(  # noqa: C901, PLR0912
                 knowledge = knowledge_resolution.knowledge
                 unavailable_bases = dict(knowledge_resolution.unavailable)
             prompt = prepend_knowledge_availability_notice(prompt, unavailable_bases)
-            model_name = budget(config.resolve_runtime_model(entity_name=agent_name).model_name)
+            turn = _openai_turn_context(
+                agent_name,
+                session_id=session_id,
+                model_name=resolve_turn_model(config, runtime_paths, ModelScope(entity=agent_name), budget).model_name,
+                execution_identity=execution_identity,
+                prompt=prompt,
+                thread_history=thread_history,
+                knowledge=knowledge,
+                refresh_scheduler=knowledge_refresh_scheduler,
+            )
             if req.stream:
-                response = await _stream_completion(
-                    agent_name,
-                    prompt,
-                    session_id,
-                    config,
-                    runtime_paths,
-                    thread_history,
-                    knowledge,
-                    model_name=model_name,
-                    execution_identity=execution_identity,
-                    refresh_scheduler=knowledge_refresh_scheduler,
-                )
+                response = await _stream_completion(turn, config, runtime_paths)
             else:
                 with tool_execution_identity(execution_identity):
-                    response = await _non_stream_completion(
-                        agent_name,
-                        prompt,
-                        session_id,
-                        config,
-                        runtime_paths,
-                        thread_history,
-                        knowledge,
-                        model_name=model_name,
-                        execution_identity=execution_identity,
-                        refresh_scheduler=knowledge_refresh_scheduler,
-                    )
+                    response = await _non_stream_completion(turn, config, runtime_paths)
     except BaseException:
         _release_openai_completion_lock(completion_lock)
         raise
@@ -795,42 +810,24 @@ async def _chat_completions(  # noqa: C901, PLR0912
 
 
 async def _non_stream_completion(
-    agent_name: str,
-    prompt: str,
-    session_id: str,
+    turn: ResponseTurnContext,
     config: Config,
     runtime_paths: RuntimePaths,
-    thread_history: Sequence[ResolvedVisibleMessage] | None,
-    knowledge: AgentKnowledge | None,
-    *,
-    model_name: str,
-    execution_identity: ToolExecutionIdentity,
-    refresh_scheduler: KnowledgeRefreshScheduler | None,
 ) -> JSONResponse:
     """Handle non-streaming chat completion: the streamed turn, collected into one answer."""
+    agent_name, session_id = turn.entity_label, turn.session_id
     run_metadata: dict[str, Any] = {}
     completed: list[CompletedAttempt] = []
     failures: list[Exception] = []
     response_text = await ai_response(
-        _openai_turn_context(
-            agent_name,
-            session_id=session_id,
-            model_name=model_name,
-            execution_identity=execution_identity,
+        replace(turn, show_tool_calls=False),
+        runtime_paths,
+        config,
+        sinks=TurnSinks(
+            run_metadata_collector=run_metadata,
+            on_completed=completed.append,
+            on_failed=failures.append,
         ),
-        prompt=prompt,
-        runtime_paths=runtime_paths,
-        config=config,
-        thread_history=thread_history,
-        knowledge=knowledge,
-        include_interactive_questions=False,
-        include_openai_compat_guidance=True,
-        show_tool_calls=False,
-        run_metadata_collector=run_metadata,
-        execution_identity=execution_identity,
-        refresh_scheduler=refresh_scheduler,
-        on_completed=completed.append,
-        on_failed=failures.append,
     )
 
     # A failed turn completes no attempt, also when it failed after part of its answer, which its text then holds. One
@@ -866,40 +863,17 @@ async def _non_stream_completion(
 
 
 async def _stream_completion(
-    agent_name: str,
-    prompt: str,
-    session_id: str,
+    turn: ResponseTurnContext,
     config: Config,
     runtime_paths: RuntimePaths,
-    thread_history: Sequence[ResolvedVisibleMessage] | None,
-    knowledge: AgentKnowledge | None,
-    *,
-    model_name: str,
-    execution_identity: ToolExecutionIdentity,
-    refresh_scheduler: KnowledgeRefreshScheduler | None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming chat completion via SSE."""
+    agent_name, session_id = turn.entity_label, turn.session_id
     stream = cast(
         "AsyncGenerator[AIStreamChunk, None]",
         stream_with_tool_execution_identity(
-            execution_identity,
-            stream_factory=lambda: stream_agent_response(
-                _openai_turn_context(
-                    agent_name,
-                    session_id=session_id,
-                    model_name=model_name,
-                    execution_identity=execution_identity,
-                ),
-                prompt=prompt,
-                runtime_paths=runtime_paths,
-                config=config,
-                thread_history=thread_history,
-                knowledge=knowledge,
-                include_interactive_questions=False,
-                include_openai_compat_guidance=True,
-                execution_identity=execution_identity,
-                refresh_scheduler=refresh_scheduler,
-            ),
+            turn.execution_identity,
+            stream_factory=lambda: stream_agent_response(turn, runtime_paths, config),
         ),
     )
 
@@ -966,23 +940,13 @@ async def _stream_completion(
         media_type="text/event-stream",
     )
     response.completion_predicate = lambda: stream_completed
+    response.close_stream = stream.aclose
     return response
 
 
 # ---------------------------------------------------------------------------
 # Team completion
 # ---------------------------------------------------------------------------
-
-
-def _openai_team_models(team_name: str, config: Config, budget: Callable[[str], str]) -> TeamTurnModelSelection:
-    """Freeze the coordinator and member models of one team completion under the requester's budget."""
-    team_config = config.teams[team_name]
-    return TeamTurnModelSelection(
-        team_model_name=budget(team_config.model or "default"),
-        member_model_names={
-            member: budget(config.resolve_runtime_model(entity_name=member).model_name) for member in team_config.agents
-        },
-    )
 
 
 def _build_team(
@@ -1022,7 +986,7 @@ def _build_team(
         execution_identity=execution_identity,
         model_name=models.team_model_name,
         configured_team_name=team_name,
-        timezone=config.get_entity_timezone(team_name),
+        timezone=entity_timezone(config, team_name),
         include_openai_compat_guidance=True,
     )
 
@@ -1048,7 +1012,12 @@ async def _prepare_openai_team_execution(
         thread_history=thread_history,
         config=config,
         runtime_paths=runtime_paths,
-        runtime_model=config.resolve_runtime_model(entity_name=team_name, active_model_name=team_model_name),
+        runtime_model=resolve_turn_model(
+            config,
+            runtime_paths,
+            ModelScope(entity=team_name, explicit=team_model_name),
+            None,
+        ),
         response_sender_id=None,
         current_sender_id=None,
         configured_team_name=team_name,
@@ -1327,6 +1296,7 @@ async def _stream_team_completion(  # noqa: C901
         media_type="text/event-stream",
     )
     response.completion_predicate = lambda: stream_completed
+    response.close_stream = _cleanup
     return response
 
 

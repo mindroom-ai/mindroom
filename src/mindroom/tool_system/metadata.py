@@ -47,7 +47,11 @@ from mindroom.tool_system.registry_state import (
     scoped_plugin_registration_owner,
     scoped_plugin_registration_store,
 )
-from mindroom.tool_system.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy, primary_owns_tool_settings
+from mindroom.tool_system.sandbox_proxy import (
+    primary_owns_tool_settings,
+    tool_placement,
+    wrap_toolkit_for_sandbox_proxy,
+)
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     supports_tool_name_for_worker_scope,
@@ -583,7 +587,7 @@ def _build_managed_tool_init_kwargs(
     worker_target: ResolvedWorkerTarget | None,
     runtime_config: Config | None,
     tool_output_workspace_root: Path | None,
-    worker_tools_override: list[str] | None,
+    workspace_in_worker: bool | None,
     agent_state_root: Path | None,
 ) -> dict[str, object]:
     """Build declared MindRoom-managed constructor kwargs for one tool."""
@@ -594,7 +598,11 @@ def _build_managed_tool_init_kwargs(
         ToolManagedInitArg.WORKER_TARGET: lambda: worker_target,
         ToolManagedInitArg.RUNTIME_CONFIG: lambda: runtime_config,
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT: lambda: tool_output_workspace_root,
-        ToolManagedInitArg.WORKER_TOOLS_OVERRIDE: lambda: worker_tools_override,
+        ToolManagedInitArg.WORKSPACE_IN_WORKER: lambda: (
+            _sandbox_settings_route_workspace_tools(runtime_paths)
+            if workspace_in_worker is None
+            else workspace_in_worker
+        ),
         ToolManagedInitArg.CURRENT_ROOM_ID: lambda: (
             execution_identity.room_id if execution_identity is not None else None
         ),
@@ -631,33 +639,78 @@ def _resolve_tool_credentials_manager(
     return None
 
 
+def _constructing_agent_runs_in_worker(
+    tool_name: str,
+    runtime_paths: RuntimePaths,
+    runtime_config: Config | None,
+    worker_target: ResolvedWorkerTarget | None,
+) -> bool:
+    """Place a toolkit a tool builds for its agent, such as a plugin's sub-toolkit.
+
+    It runs in a worker when the sandbox settings route it there, or when the agent's own toolkit of that name would:
+    an agent's explicit ``worker_tools`` can move it into a worker, never out of one, since the agent may not have
+    that toolkit itself.
+    """
+    # Imported here: agent tool resolution validates tool settings through this module.
+    from mindroom.tool_system.agent_tools import resolve_agent_tools  # noqa: PLC0415
+
+    placement = tool_placement(runtime_paths)
+    if placement.runs_in_worker(tool_name, None):
+        return True
+    agent_name = worker_target.routing_agent_name if worker_target is not None else None
+    return (
+        runtime_config is not None
+        and agent_name in runtime_config.agents
+        and resolve_agent_tools(runtime_config, agent_name).runs_in_worker(tool_name, placement)
+    )
+
+
+def _sandbox_settings_route_workspace_tools(runtime_paths: RuntimePaths) -> bool:
+    """Return whether the sandbox settings route any tool that works on workspace paths to a worker."""
+    placement = tool_placement(runtime_paths)
+    return any(
+        placement.runs_in_worker(name, None)
+        for name, metadata in TOOL_METADATA.items()
+        if metadata.consumes_workspace_paths
+    )
+
+
 def get_tool_by_name(
     tool_name: str,
     runtime_paths: RuntimePaths,
     *,
-    disable_sandbox_proxy: bool = False,
+    runs_in_worker: bool | None = None,
     credential_overrides: dict[str, object] | None = None,
     credentials_manager: CredentialsManager | None = None,
     runtime_config: Config | None = None,
     tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
-    worker_tools_override: list[str] | None = None,
     runtime_overrides: dict[str, object] | None = None,
     allowed_shared_services: frozenset[str] | None = None,
     tool_output_workspace_root: Path | None = None,
     agent_state_root: Path | None = None,
     tool_output_auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
+    workspace_in_worker: bool | None = None,
     worker_target: ResolvedWorkerTarget | None,
 ) -> Toolkit:
     """Get a tool instance by its registered name.
 
+    ``runs_in_worker`` says whether the toolkit's calls go to a worker; None routes them there when the sandbox
+    settings would, or when the worker tools of the agent ``worker_target`` names would.
     ``agent_state_root`` is the constructing agent's resolved state root in the primary runtime;
     worker runtimes leave it unset because their own storage root is the state they own.
+    ``workspace_in_worker`` says whether the agent's workspace-path tools run in a worker, where attachments are saved;
+    None follows the sandbox settings for those tools.
     """
     if tool_name not in TOOL_REGISTRY:
         available = ", ".join(sorted(TOOL_REGISTRY.keys()))
         msg = f"Unknown tool: {tool_name}. Available tools: {available}"
         raise ToolMetadataValidationError(msg)
+    routed = (
+        _constructing_agent_runs_in_worker(tool_name, runtime_paths, runtime_config, worker_target)
+        if runs_in_worker is None
+        else runs_in_worker
+    )
 
     def build() -> Toolkit:
         worker_scope = worker_target.worker_scope if worker_target is not None else None
@@ -727,7 +780,7 @@ def get_tool_by_name(
                 worker_target=worker_target,
                 runtime_config=runtime_config,
                 tool_output_workspace_root=tool_output_workspace_root,
-                worker_tools_override=worker_tools_override,
+                workspace_in_worker=workspace_in_worker,
                 agent_state_root=agent_state_root,
             ),
         )
@@ -754,8 +807,8 @@ def get_tool_by_name(
             else None
         )
         wrap_toolkit_for_output_files(toolkit, output_file_policy)
-        if not disable_sandbox_proxy:
-            toolkit = maybe_wrap_toolkit_for_sandbox_proxy(
+        if routed:
+            toolkit = wrap_toolkit_for_sandbox_proxy(
                 tool_name,
                 toolkit,
                 runtime_paths=runtime_paths,
@@ -763,7 +816,6 @@ def get_tool_by_name(
                 tool_init_overrides=proxy_tool_init_overrides or None,
                 tool_config_overrides=validated_tool_config_overrides,
                 extra_env_passthrough=extra_env_passthrough if isinstance(extra_env_passthrough, str) else None,
-                worker_tools_override=worker_tools_override,
                 worker_target=worker_target,
                 runtime_config=runtime_config,
             )
@@ -1402,80 +1454,3 @@ def _normalize_string_array_override(
     if normalized or preserve_empty_list:
         return normalized
     return None
-
-
-def _normalize_agent_override_field_value(field: ConfigField, value: object) -> object | None:
-    """Normalize one authored agent override value according to its declared schema."""
-    if field.type == "string[]":
-        return _normalize_string_array_override(value)
-    if field.type == "boolean":
-        if value is None or isinstance(value, bool):
-            return value
-        msg = "expected a boolean or null"
-        raise ValueError(msg)
-    if field.type == "number":
-        if value is None or (isinstance(value, (int, float)) and not isinstance(value, bool)):
-            return value
-        msg = "expected a number or null"
-        raise ValueError(msg)
-    if field.type in {"password", "select", "text", "url"}:
-        if value is None:
-            return None
-        if isinstance(value, str):
-            stripped = value.strip()
-            return stripped or None
-        msg = "expected a string or null"
-        raise ValueError(msg)
-    return value
-
-
-def normalize_authored_tool_overrides(tool_name: str, overrides: dict[str, object] | None) -> dict[str, object]:
-    """Validate and normalize one tool's authored per-agent overrides."""
-    if not overrides:
-        return {}
-
-    metadata = TOOL_METADATA.get(tool_name)
-    if metadata is None:
-        msg = f"Unknown tool '{tool_name}' cannot declare per-agent overrides."
-        raise ValueError(msg)
-
-    field_map = {field.name: field for field in metadata.agent_override_fields or []}
-    if not field_map:
-        msg = f"Tool '{tool_name}' does not support per-agent overrides."
-        raise ValueError(msg)
-
-    unexpected_fields = sorted(set(overrides) - set(field_map))
-    if unexpected_fields:
-        allowed = ", ".join(sorted(field_map)) or "none"
-        unexpected = ", ".join(unexpected_fields)
-        msg = f"Unsupported per-agent override(s) for '{tool_name}': {unexpected}. Allowed overrides: {allowed}."
-        raise ValueError(msg)
-
-    normalized: dict[str, object] = {}
-    for field_name, raw_value in overrides.items():
-        field = field_map[field_name]
-        try:
-            normalized_value = _normalize_agent_override_field_value(field, raw_value)
-        except (TypeError, ValueError) as exc:
-            msg = f"Invalid per-agent override for '{tool_name}.{field_name}': {exc}"
-            raise ValueError(msg) from exc
-        if normalized_value is not None:
-            normalized[field_name] = normalized_value
-    _run_authored_override_validator(
-        tool_name,
-        normalized,
-        validator=metadata.authored_override_validator,
-    )
-    return normalized
-
-
-def authored_tool_overrides_to_runtime(tool_name: str, overrides: dict[str, object] | None) -> dict[str, object] | None:
-    """Convert normalized authored per-agent overrides into runtime kwargs."""
-    normalized = normalize_authored_tool_overrides(tool_name, overrides)
-    if not normalized:
-        return None
-    field_types = {field.name: field.type for field in TOOL_METADATA[tool_name].agent_override_fields or []}
-    return {
-        field_name: ", ".join(cast("list[str]", value)) if field_types[field_name] == "string[]" else value
-        for field_name, value in normalized.items()
-    }

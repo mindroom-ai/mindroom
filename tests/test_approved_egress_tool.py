@@ -43,7 +43,7 @@ def test_full_access_rejects_non_boolean_credentials(tmp_path: Path, value: obje
             "approved_egress",
             resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage"),
             credential_overrides={"allow_full_access": value},
-            disable_sandbox_proxy=True,
+            runs_in_worker=False,
             worker_target=None,
         )
 
@@ -55,7 +55,7 @@ def test_full_access_reads_dashboard_boolean_spellings(tmp_path: Path, value: st
         "approved_egress",
         resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage"),
         credential_overrides={"allow_full_access": value},
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
     )
 
@@ -121,7 +121,7 @@ def test_full_access_option_is_configurable(tmp_path: Path) -> None:
         entry.name,
         resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage"),
         tool_config_overrides=entry.overrides,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
     )
     assert 'hostnames=["*"]' in tool.async_functions["request_network_access"].description

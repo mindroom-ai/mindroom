@@ -37,6 +37,7 @@ from mindroom.session_storage.store import ConversationStore
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, get_plugin_skill_roots, set_plugin_skill_roots
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity
 from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -115,7 +116,7 @@ def _build(config: Config, runtime_paths: RuntimePaths, **kwargs: Any) -> AgentB
         config,
         runtime_paths,
         identity,
-        **({"knowledge": None, "active_model_name": None} | kwargs),
+        **({"knowledge": None, "model": turn_model(config, runtime_paths, "assistant")} | kwargs),
     )
 
 
@@ -143,7 +144,7 @@ def test_create_agent_builds_the_spec_prompt_store_and_owners(tmp_path: Path) ->
     assert build.spec.system_messages == ()
     assert [toolkit.name for toolkit in build.spec.toolkits] == ["calculator", "search_knowledge_base", "skills"]
     assert set(_offered(build)) == _CALCULATOR_FUNCTIONS | {"search_knowledge_base"} | SKILL_FUNCTION_NAMES
-    assert build.spec.max_tool_calls_per_turn == config.resolve_entity("assistant").max_tool_calls_per_turn
+    assert build.spec.max_tool_calls_per_turn == config.resolve_scope("assistant").max_tool_calls_per_turn
     assert _owners(build) == dict.fromkeys(_CALCULATOR_FUNCTIONS, "calculator")
     workspace = agent_workspace_root_path(runtime_paths.storage_root, "assistant")
     assert f"### {workspace / 'SOUL.md'}\nYou are calm and precise." in build.prompt.role
@@ -155,7 +156,7 @@ def test_create_agent_builds_the_spec_prompt_store_and_owners(tmp_path: Path) ->
     assert build.prompt.turn_context is not None
     assert build.prompt.turn_context.startswith("<mindroom_session_context>")
     assert build.request_template == ModelRequest(messages=())
-    assert build.history_settings == config.resolve_entity("assistant").history_settings
+    assert build.history_settings == config.resolve_scope("assistant").history_settings
     assert isinstance(build.store, ConversationStore)
     # Large CLI results and their media are saved in the agent's own workspace.
     assert build.surface.output_file_policy is not None
@@ -608,7 +609,7 @@ def test_matrix_message_guidance_reaches_the_prompt_only_with_the_matrix_message
         runtime_paths,
         identity,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "assistant"),
         persist_runtime_state=False,
         tool_function_filter=call_filter if realtime_call else None,
         # Chat asks for the approval; the realtime call builds as build_call_tools does.

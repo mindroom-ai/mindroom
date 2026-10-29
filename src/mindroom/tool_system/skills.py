@@ -29,7 +29,6 @@ from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_function_for_output_files
 from mindroom.tool_system.skill_usage import record_skill_use
-from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -454,7 +453,7 @@ def build_skills_toolkit(
     config: Config,
     runtime_paths: RuntimePaths,
     *,
-    workspace_root: Path | None,
+    workspace_root: Path,
     output_file_policy: ToolOutputFilePolicy | None = None,
     only: Collection[str] | None = None,
     refused: list[RefusedWorkspaceSkill] | None = None,
@@ -484,11 +483,7 @@ def build_skills_toolkit(
         config=config,
         runtime_paths=runtime_paths,
         credential_keys=credential_keys,
-        workspace_root=(
-            workspace_root
-            if workspace_root is not None
-            else agent_workspace_root_path(runtime_paths.storage_root, agent_name)
-        ),
+        workspace_root=workspace_root,
     )
 
     loaders = [loader for loader in (configured_loader, workspace_loader) if loader is not None]
@@ -577,14 +572,9 @@ def _get_default_skill_roots() -> list[Path]:
     return _unique_paths([_get_bundled_skills_dir(), *_PLUGIN_SKILL_ROOTS, get_user_skills_dir()])
 
 
-def agent_workspace_skills_root(runtime_paths: RuntimePaths, agent_name: str, *, workspace_root: Path | None) -> Path:
-    """Return the ``skills`` directory of a resolved workspace, or of the agent's canonical shared workspace."""
-    root = (
-        workspace_root
-        if workspace_root is not None
-        else agent_workspace_root_path(runtime_paths.storage_root, agent_name)
-    )
-    return root / _WORKSPACE_SKILLS_DIRNAME
+def agent_workspace_skills_root(workspace_root: Path) -> Path:
+    """Return the ``skills`` directory of an agent's workspace."""
+    return workspace_root / _WORKSPACE_SKILLS_DIRNAME
 
 
 def list_skill_listings(roots: Sequence[Path] | None = None) -> list[_SkillListing]:

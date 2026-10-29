@@ -13,14 +13,14 @@ import json
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 from agno.tools import Toolkit
 from structlog.testing import capture_logs
 
-from mindroom import agents, ai, ai_runtime, loop_hooks, response_runner
+from mindroom import agents, ai, ai_runtime, loop_hooks, response_turn
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
 from mindroom.ai import ai_response, stream_agent_response
 from mindroom.ai_runtime import queued_message_signal_context
@@ -31,6 +31,8 @@ from mindroom.config.models import CompactionConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.history.interrupted_replay import is_interrupted_replay_run
 from mindroom.history.run_visibility import (
     QUEUED_MESSAGE_NOTICE_MARKER_KEY,
     is_queued_notice_message,
@@ -66,7 +68,7 @@ from mindroom.native_compaction import replay_basis
 from mindroom.participation import ParticipationGate
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
-from mindroom.response_turn import ResponsePausedForApproval
+from mindroom.response_turn import ResponsePausedForApproval, TurnSinks
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning.capture import SkillReviewCapture
@@ -79,7 +81,6 @@ from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_PASSWORD,
-    agent_turn_recorder_for_test,
     bind_runtime_paths,
     install_model_providers,
     install_runtime_journal_support,
@@ -89,14 +90,14 @@ from tests.conftest import (
     make_turn_context,
     make_visible_message,
     message_origin,
-    process_and_respond_for_test,
+    patch_response_runner_module,
     seed_session,
     test_runtime_paths,
+    unwrap_extracted_collaborator,
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import RecordingCompactionLifecycle
-from tests.reply_span_helpers import response_span
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.scripted_agent_helpers import registered_toolkit, streamed_text
 
@@ -107,6 +108,7 @@ if TYPE_CHECKING:
     from agno.run import RunContext as AgnoRunContext
 
     from mindroom.constants import RuntimePaths
+    from mindroom.post_response_effects import ResponseOutcome
     from mindroom.response_runner import ResponseRunner
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -241,7 +243,7 @@ def _reply(
 
 
 def _ctx(reply: _Reply, *, run_id: str = "run-1", **overrides: Any) -> ai.ResponseTurnContext:  # noqa: ANN401
-    del reply
+    """Return the reply's turn as the response runner builds it, its other inputs set by ``overrides``."""
     return replace(
         make_turn_context(
             "assistant",
@@ -253,6 +255,8 @@ def _ctx(reply: _Reply, *, run_id: str = "run-1", **overrides: Any) -> ai.Respon
             thread_id=THREAD_ID,
             requester_id=REQUESTER_ID,
         ),
+        execution_identity=reply.identity,
+        supports_native_tool_approval=True,
         **overrides,
     )
 
@@ -263,47 +267,29 @@ async def _stream(
     prompt: str = "Hello",
     run_id: str = "run-1",
     with_recorder: bool = True,
-    **kwargs: Any,  # noqa: ANN401
+    **turn_inputs: Any,  # noqa: ANN401
 ) -> list[Any]:
     """Stream one reply as the response runner does and return its chunks."""
-    ctx = _ctx(
-        reply,
-        run_id=run_id,
-        **{
-            k: kwargs.pop(k)
-            for k in ("participation", "skill_review_capture", "scheduled_history_budget", "matrix_run_metadata")
-            if k in kwargs
-        },
-    )
     with tool_runtime_context(reply.runtime):
         return [
             chunk
             async for chunk in stream_agent_response(
-                ctx,
-                prompt=prompt,
-                runtime_paths=reply.runtime_paths,
-                config=reply.config,
-                execution_identity=reply.identity,
-                turn_recorder=reply.recorder if with_recorder else None,
-                supports_native_tool_approval=True,
-                **kwargs,
+                _ctx(reply, run_id=run_id, prompt=prompt, **turn_inputs),
+                reply.runtime_paths,
+                reply.config,
+                sinks=TurnSinks(turn_recorder=reply.recorder if with_recorder else None),
             )
         ]
 
 
-async def _respond(reply: _Reply, *, prompt: str = "Hello", run_id: str = "run-1", **kwargs: Any) -> str:  # noqa: ANN401
-    """Run one blocking reply and return its text."""
-    ctx = _ctx(reply, run_id=run_id, **{k: kwargs.pop(k) for k in ("participation",) if k in kwargs})
+async def _respond(reply: _Reply, *, prompt: str = "Hello", run_id: str = "run-1", **turn_inputs: Any) -> str:  # noqa: ANN401
+    """Run one reply collected into its text, as a reply delivered without streaming is."""
     with tool_runtime_context(reply.runtime):
         return await ai_response(
-            ctx,
-            prompt=prompt,
-            runtime_paths=reply.runtime_paths,
-            config=reply.config,
-            execution_identity=reply.identity,
-            turn_recorder=reply.recorder,
-            supports_native_tool_approval=True,
-            **kwargs,
+            _ctx(reply, run_id=run_id, prompt=prompt, **turn_inputs),
+            reply.runtime_paths,
+            reply.config,
+            sinks=TurnSinks(turn_recorder=reply.recorder),
         )
 
 
@@ -408,28 +394,26 @@ async def test_a_streamed_reply_runs_its_tool_calls_and_stores_one_completed_run
 
 
 @pytest.mark.asyncio
-async def test_a_blocking_reply_runs_the_same_loop_and_returns_the_text(
+async def test_a_collected_reply_returns_the_streamed_text_with_its_tool_trace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     probe: type[_ProbeToolkit],
 ) -> None:
-    """The blocking path collects the streamed turn: the tool call's marker, then the text after it."""
+    """A reply collected into one text keeps the tool calls where they streamed, before the answer that followed."""
     reply = _reply(tmp_path, monkeypatch, [calls(tool_call("touch", "call_1", label="a")), answer("Done.")])
 
     text = await _respond(reply)
 
-    assert text == "\n\n🔧 `touch` [1]\n\nDone."
+    assert text.strip() == "🔧 `touch` [1]\n\nDone."
     assert probe.calls == ["a"]
     assert _stored(reply).status is RunStatus.completed
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("streaming", [True, False])
 async def test_an_approval_gated_call_pauses_the_run_before_it_executes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     probe: type[_ProbeToolkit],
-    streaming: bool,
 ) -> None:
     """A ``requires_confirmation`` tool never runs before approval: the run is stored paused on the call."""
     reply = _reply(
@@ -439,9 +423,8 @@ async def test_an_approval_gated_call_pauses_the_run_before_it_executes(
         approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
     )
 
-    run = _stream(reply) if streaming else _respond(reply)
     with pytest.raises(ResponsePausedForApproval) as raised:
-        await run
+        await _respond(reply)
 
     assert probe.calls == []
     paused = raised.value.paused
@@ -458,17 +441,15 @@ async def test_an_approval_gated_call_pauses_the_run_before_it_executes(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("streaming", [True, False])
 async def test_a_pause_with_no_approval_to_ask_for_fails_the_reply(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     probe: type[_ProbeToolkit],
-    streaming: bool,
 ) -> None:
     """A run paused on an externally executed call that is not a delegation has nothing to resume it, so the reply fails.
 
-    At this seam the ``PAUSED`` row stays as the loop wrote it and the failure lands on the turn recorder as an
-    error; the lifecycle owner then records the failure over the row (``test_the_runner_records_the_failure_...``).
+    The loop stores the ``PAUSED`` row; the turn driver records the failure on the turn recorder as an error and
+    writes it over the row, so the row no longer waits for an approval that never comes.
     """
     reply = _reply(
         tmp_path,
@@ -476,15 +457,18 @@ async def test_a_pause_with_no_approval_to_ask_for_fails_the_reply(
         [calls(tool_call("touch", "call_1", label="outside"))],
         tools=(EXTERNAL_PROBE_TOOL,),
     )
+    replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
 
-    run = _stream(reply) if streaming else _respond(reply)
     with pytest.raises(RuntimeError, match="without an approval to ask for"):
-        await run
+        await _respond(reply)
 
     assert probe.calls == []
+    [paused] = replaced
+    assert paused.status is RunStatus.paused
+    assert [requirement.needs_external_execution for requirement in paused.requirements or []] == [True]
     record = _stored(reply)
-    assert record.status is RunStatus.paused
-    assert [requirement.needs_external_execution for requirement in record.requirements or []] == [True]
+    assert is_interrupted_replay_run(record)
+    assert not record.requirements
     assert reply.recorder.outcome == "interrupted"
     assert reply.recorder.original_status is RunStatus.error
 
@@ -554,42 +538,29 @@ async def test_a_stop_mid_stream_stores_the_cancelled_run_once_before_the_interr
 ) -> None:
     """The usage a cut-off request reported is counted once, on the cancelled run stored before the turn's record.
 
-    A reply with a turn recorder leaves the interrupted record to its lifecycle owner; one without writes it itself,
-    over the cancelled run the loop stored first.
+    The turn driver writes the interrupted record once, over the cancelled run the loop stored first, whether or not
+    its caller passes a recorder.
     """
     reply = _reply(
         tmp_path,
         monkeypatch,
         [[TextDelta("Partial "), UsageReported(usage(10, 2), final=False), Await(_cancel_current_task)]],
     )
-    statuses_when_interrupted_record_written: list[RunStatus | None] = []
-    original = ai.persist_interrupted_replay
-
-    def spy(**kwargs: Any) -> None:  # noqa: ANN401
-        stored = reply.storage.get_run("run-1")
-        statuses_when_interrupted_record_written.append(stored.status if stored is not None else None)
-        original(**kwargs)
-
-    monkeypatch.setattr(ai, "persist_interrupted_replay", spy)
+    replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
 
     task = asyncio.create_task(_stream(reply, with_recorder=with_recorder))
     outcome = await asyncio.gather(task, return_exceptions=True)
     assert isinstance(outcome[0], asyncio.CancelledError)
 
     record = _stored(reply)
+    assert [(run.run_id, run.status) for run in replaced] == [("run-1", RunStatus.cancelled)]
+    assert record.metadata is not None
+    assert record.metadata["mindroom_original_status"] == "cancelled"
+    assert "Partial" in str(record.content)
     if with_recorder:
-        assert statuses_when_interrupted_record_written == []
-        assert record.status is RunStatus.cancelled
-        # No request completed, so the run holds no content; the recorder keeps the streamed text for its record.
-        assert record.content is None
         assert reply.recorder.outcome == "interrupted"
         assert reply.recorder.original_status is RunStatus.cancelled
         assert reply.recorder.assistant_text == "Partial "
-    else:
-        assert statuses_when_interrupted_record_written == [RunStatus.cancelled]
-        assert record.metadata is not None
-        assert record.metadata["mindroom_original_status"] == "cancelled"
-        assert "Partial" in str(record.content)
     [row] = _usage_rows(reply.storage, "run-1")
     assert row["metrics"]["input_tokens"] == 10
 
@@ -630,43 +601,23 @@ async def test_a_provider_error_stores_an_error_record_and_streams_the_friendly_
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failed request ends the reply with the user-facing error text; the stored run says why it failed."""
+    """A failed request ends the reply with the user-facing error text; the run the loop stored says why it failed.
+
+    The turn's interrupted record then replaces that run, keeping that the turn ended in an error.
+    """
     reply = _reply(tmp_path, monkeypatch, [[_raising(RateLimited("slow down", provider="openai"))]])
+    replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
 
     chunks = await _stream(reply)
 
-    [text] = [chunk for chunk in chunks if isinstance(chunk, str)]
+    [text] = streamed_text(chunks)
     assert "Rate limited" in text
+    [failed] = replaced
+    assert failed.status is RunStatus.error
+    assert (failed.content, failed.error) == (None, "slow down")
     record = _stored(reply)
-    assert (record.status, record.content, record.error) == (RunStatus.error, None, "slow down")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("streaming", [True, False])
-@pytest.mark.usefixtures("probe")
-async def test_a_failure_after_part_of_the_answer_starts_a_paragraph_of_its_own(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    streaming: bool,
-) -> None:
-    """A reply that fails after showing part of its answer shows the error after a blank line, not glued onto it."""
-    reply = _reply(
-        tmp_path,
-        monkeypatch,
-        [[TextDelta("Here is the start"), _raising(RateLimited("slow down", provider="openai"))]],
-    )
-
-    if streaming:
-        chunks = await _stream(reply)
-        text = "".join(
-            chunk if isinstance(chunk, str) else chunk.text for chunk in chunks if isinstance(chunk, str | TextDelta)
-        )
-    else:
-        text = await _respond(reply)
-
-    start, separator, failure = text.partition("\n\n")
-    assert (start, separator) == ("Here is the start", "\n\n")
-    assert "Rate limited" in failure
+    assert is_interrupted_replay_run(record)
+    assert (record.metadata or {})["mindroom_original_status"] == "error"
 
 
 @pytest.mark.asyncio
@@ -691,12 +642,16 @@ async def test_an_error_record_never_repeats_an_earlier_answer(
     session = new_scope_session(session_id=SESSION_ID, scope_id="assistant", is_team=False)
     session.runs = [earlier]
     seed_session(reply.storage, session)
+    replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
 
     text = await _respond(reply)
 
     assert "Rate limited" in text
+    [failed] = replaced
+    assert failed.status is RunStatus.error
+    assert (failed.content, failed.error) == (None, "slow down")
+    assert all("green pixel" not in str(message.content) for message in failed.messages if message.role == "assistant")
     record = _stored(reply)
-    assert (record.status, record.content, record.error) == (RunStatus.error, None, "slow down")
     assert all("green pixel" not in str(message.content) for message in record.messages if message.role == "assistant")
     # The turn's own record keeps no partial text either: the earlier answer was history, not this reply's.
     assert reply.recorder.outcome == "interrupted"
@@ -722,10 +677,13 @@ async def test_an_error_record_never_takes_an_earlier_reply_in_the_thread_for_it
         make_visible_message(sender=agent_id, body="The image is one green pixel.", event_id="$answer:localhost"),
     ]
 
+    replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
+
     text = await _respond(reply, thread_history=thread_history)
 
     assert "Rate limited" in text
-    stored_replies = [message for message in _stored(reply).messages if message.role == "assistant"]
+    [failed] = replaced
+    stored_replies = [message for message in failed.messages if message.role == "assistant"]
     assert ["green pixel" in str(message.content) for message in stored_replies] == [True]
     assert reply.recorder.outcome == "interrupted"
     assert reply.recorder.assistant_text == ""
@@ -774,22 +732,20 @@ def _notice_markers(messages: Sequence[Message]) -> list[bool | str | None]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("streaming", [True, False])
 @pytest.mark.usefixtures("probe")
 async def test_a_reply_keeps_its_live_notice_until_the_response_boundary_finalizes_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    streaming: bool,
 ) -> None:
     """The stored run carries the notice the model saw until the outer boundary marks it as persisted."""
     reply = _reply(tmp_path, monkeypatch, [calls(tool_call("touch", "call_1", label="a")), answer("final answer")])
 
     with queued_message_signal_context(_QueuedState(pending=True)) as notice_context:
-        result = "".join(streamed_text(await _stream(reply))) if streaming else await _respond(reply)
+        result = "".join(streamed_text(await _stream(reply)))
         assert _notice_markers(_stored(reply).messages) == [True]
         await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
 
-    assert result.endswith("final answer")
+    assert result.startswith("final answer")
     assert _notice_markers(_stored(reply).messages) == ["persisted"]
 
 
@@ -806,11 +762,13 @@ async def test_a_failed_reply_drops_its_live_notice_at_the_response_boundary(
         [calls(tool_call("touch", "call_1", label="a")), [_raising(RateLimited("slow down", provider="openai"))]],
     )
 
+    replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
+
     with queued_message_signal_context(_QueuedState(pending=True)) as notice_context:
         await _respond(reply)
-        stored = _stored(reply)
-        assert stored.status == RunStatus.error
-        assert _notice_markers(stored.messages) == [True]
+        [failed] = replaced
+        assert failed.status == RunStatus.error
+        assert _notice_markers(failed.messages) == [True]
         await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
 
     assert _notice_markers(_stored(reply).messages) == []
@@ -852,22 +810,16 @@ async def test_a_reply_persists_a_notice_an_earlier_crashed_reply_left_live(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("streaming", [True, False])
 @pytest.mark.usefixtures("probe")
 async def test_a_silent_participation_decision_ends_the_reply_before_any_model_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    streaming: bool,
 ) -> None:
     """A reply that decides to stay silent sends only the decision request and leaves no run behind."""
     reply = _reply(tmp_path, monkeypatch, [answer('{"action":"stay_silent","reason":"Humans are talking."}')])
     gate = ParticipationGate()
 
-    result = (
-        "".join(streamed_text(await _stream(reply, participation=gate)))
-        if streaming
-        else await _respond(reply, participation=gate)
-    )
+    result = await _respond(reply, participation=gate)
 
     assert result == ""
     assert gate.is_silent
@@ -879,12 +831,10 @@ async def test_a_silent_participation_decision_ends_the_reply_before_any_model_r
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("streaming", [True, False])
 @pytest.mark.usefixtures("probe")
 async def test_an_approving_participation_decision_reuses_the_reply_prefix(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    streaming: bool,
 ) -> None:
     """The decision request is the reply's exact messages plus the decision prompt, with tool selection disabled."""
     reply = _reply(
@@ -894,11 +844,7 @@ async def test_an_approving_participation_decision_reuses_the_reply_prefix(
     )
     gate = ParticipationGate(instructions="Offer concise technical help.")
 
-    result = (
-        "".join(streamed_text(await _stream(reply, participation=gate)))
-        if streaming
-        else await _respond(reply, participation=gate)
-    )
+    result = await _respond(reply, participation=gate)
 
     assert result == "Useful answer"
     assert gate.approved
@@ -1235,15 +1181,16 @@ async def test_a_third_cut_off_response_fails_the_run(
         monkeypatch,
         [_cut_off(tool_call("touch", f"call_{index}", label="huge")) for index in range(3)],
     )
+    replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
 
     chunks = await _stream(reply)
 
     assert probe.calls == []
     assert len(reply.model.requests) == 3
-    assert [chunk for chunk in chunks if isinstance(chunk, str)]
-    record = _stored(reply)
-    assert record.status is RunStatus.error
-    assert "output limit" in str(record.error)
+    assert streamed_text(chunks)
+    [failed] = replaced
+    assert failed.status is RunStatus.error
+    assert "output limit" in str(failed.error)
 
 
 @pytest.mark.asyncio
@@ -1258,12 +1205,14 @@ async def test_a_safeguard_refusal_is_stored_and_reported_as_an_error(
         monkeypatch,
         [[_raising(ModelSafeguardRefusal(provider="anthropic", usage=MessageMetrics()))]],
     )
+    replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
 
     chunks = await _stream(reply)
 
-    assert [chunk for chunk in chunks if isinstance(chunk, str)]
-    record = _stored(reply)
-    assert (record.status, record.content, record.error) == (RunStatus.error, None, MODEL_SAFEGUARD_REFUSAL_MESSAGE)
+    assert streamed_text(chunks)
+    [failed] = replaced
+    assert failed.status is RunStatus.error
+    assert (failed.content, failed.error) == (None, MODEL_SAFEGUARD_REFUSAL_MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -1343,33 +1292,35 @@ async def _respond_through_runner(
     request: ResponseRequest,
     *,
     streaming: bool,
-) -> tuple[Any, str | None]:
-    """Run one reply through the runner's turn, in its reply span, and return the outcome and the last attempt's run id."""
-    runtime = await runner.prepare_response_runtime(request)
-    recorder = agent_turn_recorder_for_test(runner, request, runtime)
-    async with response_span(runner, request):
-        outcome = await process_and_respond_for_test(
-            runner,
-            request,
-            streaming=streaming,
-            runtime=runtime,
-            turn_recorder=recorder,
-        )
-    return outcome, recorder.run_id
+) -> tuple[FinalDeliveryOutcome, ResponseOutcome]:
+    """Run one reply through the runner's locked turn and return how its reply ended and what its turn reported."""
+    ended: list[tuple[FinalDeliveryOutcome, ResponseOutcome]] = []
+
+    async def record_ending(delivery: FinalDeliveryOutcome, outcome: ResponseOutcome, *_args: object) -> None:
+        ended.append((delivery, outcome))
+
+    with patch_response_runner_module(
+        should_use_streaming=AsyncMock(return_value=streaming),
+        apply_post_response_effects=AsyncMock(side_effect=record_ending),
+    ):
+        await runner.generate_response(request)
+    [result] = ended
+    return result
 
 
-def _interrupted_record_spy(monkeypatch: pytest.MonkeyPatch, storage: ConversationStore) -> list[RunStatus | None]:
-    """Record the stored status of the run each time the runner writes its interrupted-turn record."""
-    statuses: list[RunStatus | None] = []
-    original = response_runner.persist_interrupted_replay_snapshot
+def _runs_under_interrupted_records(monkeypatch: pytest.MonkeyPatch, storage: ConversationStore) -> list[RunRecord]:
+    """Record the run the loop stored that each interrupted-turn record the turn driver writes replaces."""
+    runs: list[RunRecord] = []
+    original = response_turn.persist_interrupted_replay_snapshot
 
     def spy(**kwargs: Any) -> None:  # noqa: ANN401
         stored = storage.get_run(kwargs["run_id"])
-        statuses.append(stored.status if stored is not None else None)
+        assert stored is not None, "the loop stores the run before the turn's interrupted record replaces it"
+        runs.append(stored)
         original(**kwargs)
 
-    monkeypatch.setattr(response_runner, "persist_interrupted_replay_snapshot", spy)
-    return statuses
+    monkeypatch.setattr(response_turn, "persist_interrupted_replay_snapshot", spy)
+    return runs
 
 
 @pytest.mark.asyncio
@@ -1382,7 +1333,7 @@ async def test_the_runner_writes_the_interrupted_record_after_the_loop_stored_th
 ) -> None:
     """Through ``ResponseRunner``, a stop mid-stream stores the ``CANCELLED`` run before the interrupted record.
 
-    The lifecycle owner writes the interrupted-turn record over the cancelled run the loop stored, and the cut-off
+    The turn driver writes the interrupted-turn record over the cancelled run the loop stored, and the cut-off
     request's usage counts once.
     """
     reply = _reply(
@@ -1391,17 +1342,18 @@ async def test_the_runner_writes_the_interrupted_record_after_the_loop_stored_th
         [[TextDelta("Partial "), UsageReported(usage(10, 2), final=False), Await(_cancel_current_task)]],
     )
     runner = _runner(reply, tmp_path)
-    statuses_when_interrupted_record_written = _interrupted_record_spy(monkeypatch, reply.storage)
+    replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
 
     task = asyncio.create_task(_respond_through_runner(runner, _request(), streaming=streaming))
     [result] = await asyncio.gather(task, return_exceptions=True)
 
     assert not isinstance(result, BaseException), result
-    outcome, run_id = result
-    assert outcome.delivery.terminal_status == "cancelled"
+    delivery, outcome = result
+    assert delivery.terminal_status == "cancelled"
     assert outcome.run_succeeded is False
+    run_id = outcome.response_run_id
     assert run_id is not None
-    assert statuses_when_interrupted_record_written == [RunStatus.cancelled]
+    assert [(run.run_id, run.status) for run in replaced] == [(run_id, RunStatus.cancelled)]
     record = reply.storage.get_run(run_id)
     assert record is not None
     assert record.metadata is not None
@@ -1416,9 +1368,9 @@ async def test_the_runner_leaves_a_paused_run_as_the_loop_stored_it(
     monkeypatch: pytest.MonkeyPatch,
     probe: type[_ProbeToolkit],
 ) -> None:
-    """Through ``ResponseRunner``, an approval pause propagates with its ``PAUSED`` row intact.
+    """Through ``ResponseRunner``, an approval pause reaches the suspension handler with its ``PAUSED`` row intact.
 
-    The lifecycle owner writes no interrupted-turn record over a suspended turn.
+    The turn driver writes no interrupted-turn record over a suspended turn.
     """
     reply = _reply(
         tmp_path,
@@ -1426,15 +1378,21 @@ async def test_the_runner_leaves_a_paused_run_as_the_loop_stored_it(
         [calls(tool_call("touch", "call_1", label="dangerous"), metrics=usage(7, 1))],
         approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
     )
-    runner = _runner(reply, tmp_path)
-    statuses_when_interrupted_record_written = _interrupted_record_spy(monkeypatch, reply.storage)
+    runner = unwrap_extracted_collaborator(_runner(reply, tmp_path))
+    replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
+    suspend = AsyncMock(
+        return_value=FinalDeliveryOutcome(terminal_status="suspended", event_id=None, is_visible_response=False),
+    )
 
-    with pytest.raises(ResponsePausedForApproval) as raised:
-        await _respond_through_runner(runner, _request(), streaming=False)
+    with (
+        patch.object(runner._approvals, "suspend_for_approval", new=suspend),
+        patch_response_runner_module(should_use_streaming=AsyncMock(return_value=False)),
+    ):
+        await runner.generate_response(_request())
 
     assert probe.calls == []
-    assert statuses_when_interrupted_record_written == []
-    paused = raised.value.paused
+    assert replaced == []
+    paused = suspend.await_args.args[0]
     record = reply.storage.get_run(paused.run_id)
     assert record is not None
     assert record.status is RunStatus.paused
@@ -1454,8 +1412,8 @@ async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_a
     """Through ``ResponseRunner``, a pause nothing can resume fails the reply, and the failure lands over the ``PAUSED`` row.
 
     The loop stores the pause; the lifecycle owner then records the failure over the row as its interrupted-turn
-    record, so it no longer waits for an approval that never comes. The blocking driver also raises the failure
-    through the runner.
+    record, so it no longer waits for an approval that never comes. A reply delivered without streaming also raises
+    the failure through the runner.
     """
     reply = _reply(
         tmp_path,

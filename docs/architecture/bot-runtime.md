@@ -158,6 +158,6 @@ Clients consume approval events under these rules, which this repository's code 
 ## Simplifications Still Planned
 
 - `TurnController` is the only normal-turn owner but is still too large: interactive-selection execution and response-action assembly should move out of it.
-- `ResponseRunner` still owns too much execution detail: its team turn driver, interrupted persistence, inbox tracking, and enrichment helpers should become their own modules.
+- `ResponseRunner` still builds `InboxResponses`, which `bot.py`, `turn_controller.py`, and `text_ingress_dispatch.py` reach through it; building the inbox in `bot.py` would leave the runner only the locked turn and its delivery.
 - `IngressHookRunner` is a thin hook adapter with a vague name; it may stay a helper but must not grow into another top-level orchestration object.
 - Only after those steps, revisit `MessageTarget`, which combines conversation identity and delivery placement, and split them only if the runtime still needs it.

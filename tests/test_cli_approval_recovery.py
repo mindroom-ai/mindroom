@@ -51,6 +51,7 @@ from mindroom.response_turn import (
     CompletedApprovalRun,
     PausedAnswer,
     ResponsePausedForApproval,
+    TurnResume,
     apply_exact_approval_decisions,
 )
 from mindroom.run_storage import RunStorage
@@ -88,6 +89,7 @@ from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a py
 )
 from tests.response_runner_helpers import _bot
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -106,7 +108,7 @@ def _minimal_build(runtime: ToolRuntimeContext, **options) -> AgentBuild:
         build_execution_identity_from_runtime_context(runtime),
         agent_mode="minimal",
         supports_native_tool_approval=True,
-        **({"knowledge": None, "active_model_name": None} | options),
+        **({"knowledge": None, "model": turn_model(runtime.config, runtime.runtime_paths, "helper")} | options),
     )
 
 
@@ -158,6 +160,7 @@ async def test_approval_tool_restore_requires_current_tool_search_assignment(tmp
         config=runtime.config,
         runtime_paths=runtime.runtime_paths,
         execution_identity=identity,
+        delegation_depth=0,
     )
     assert required == ("dynamic_tools",)
     runtime.config.agents["helper"].tools = ["shell"]
@@ -168,6 +171,7 @@ async def test_approval_tool_restore_requires_current_tool_search_assignment(tmp
             config=runtime.config,
             runtime_paths=runtime.runtime_paths,
             execution_identity=identity,
+            delegation_depth=0,
         )
 
 
@@ -308,10 +312,10 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
     monkeypatch.setattr(
         approval_execution,
         "stream_agent_response",
-        lambda *args, **kwargs: stream_agent_response(
+        lambda *args, sinks, **kwargs: stream_agent_response(
             *args,
+            sinks=replace(sinks, on_attempt_start=lambda run_id, _model_name: run_ids.append(run_id)),
             **kwargs,
-            on_attempt_start=lambda run_id, _model_name: run_ids.append(run_id),
         ),
     )
     with approval_receipt_context(RECEIPT_CALLS, run_id=continuation.run_id):
@@ -1087,7 +1091,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
             recovered.presentation,
             prompt=recovered.prompt,
             reusable_build=recovered.reusable_build,
-            initial_continuation_count=recovered.initial_continuation_count,
+            resume=TurnResume(continuation_count=recovered.initial_continuation_count),
             delegation_depth=recovered.delegation_depth,
             media=MediaInputs(images=recovered.media.images),
             config=runtime.config,
@@ -1312,12 +1316,16 @@ async def test_an_approved_call_of_an_implied_toolkit_runs_after_its_bash_stoppe
     ScriptedProvider(steps=[[("bash", {"command": "list my attachments"})]]).install(monkeypatch)
     with tool_runtime_context(runtime), pytest.raises(ResponsePausedForApproval) as raised:
         await ai.ai_response(
-            replace(_turn_context(), agent_mode="minimal", run_id=None),
-            prompt="list my attachments",
-            runtime_paths=runtime.runtime_paths,
-            config=runtime.config,
-            execution_identity=identity,
-            supports_native_tool_approval=True,
+            replace(
+                _turn_context(),
+                agent_mode="minimal",
+                run_id=None,
+                prompt="list my attachments",
+                execution_identity=identity,
+                supports_native_tool_approval=True,
+            ),
+            runtime.runtime_paths,
+            runtime.config,
         )
     paused = raised.value.paused
     assert paused.cli_call is not None

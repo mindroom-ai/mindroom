@@ -69,7 +69,7 @@ async def shell_runtime(tmp_path: Path, request: pytest.FixtureRequest) -> Async
         "shell",
         paths,
         worker_target=None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         tool_init_overrides={"base_dir": str(tmp_path)},
         tool_output_workspace_root=tmp_path,
     )

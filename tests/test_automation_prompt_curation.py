@@ -43,7 +43,7 @@ def _setup(tmp_path: Path, **settings: object) -> tuple[Config, PromptCurationAu
     )
     config = Config(agents={"mind": agent}, router=RouterConfig(model="default"))
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    root = resolve_agent_runtime("mind", config, paths, None, create=True).file_memory_root
+    root = resolve_agent_runtime("mind", config, paths, None, create=True).workspace.file_memory_path
     assert root is not None
     root.mkdir(parents=True, exist_ok=True)
     (root / "MEMORY.md").write_text(MEMORY, encoding="utf-8")
@@ -412,7 +412,7 @@ def test_a_private_instance_curates_its_own_context_files_not_the_shared_ones(tm
         runtime_paths=paths,
         requester_id="@alice:example.test",
     )
-    root = resolve_agent_runtime("mind", config, paths, identity, create=True).file_memory_root
+    root = resolve_agent_runtime("mind", config, paths, identity, create=True).workspace.file_memory_path
     assert root is not None
     for name, text in (("MEMORY.md", MEMORY), ("SOUL.md", SOUL), ("SHARED.md", MEMORY)):
         (root / name).write_text(text, encoding="utf-8")

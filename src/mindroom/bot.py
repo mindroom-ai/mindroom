@@ -23,6 +23,7 @@ from mindroom.approval.inbound import (
 from mindroom.approval.tool_approval import is_process_active_approval_card
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
+from mindroom.config.resolution import entity_timezone
 from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_live_bot
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
 from mindroom.entity_resolution import entity_identity_registry, persisted_bot_user_ids
@@ -45,6 +46,7 @@ from mindroom.hooks import (
     emit,
     send_hook_message,
 )
+from mindroom.integrations import reply_mirror_for
 from mindroom.legacy_handled_turns import legacy_responses_file_path
 from mindroom.matrix.decrypt_diagnostics import DecryptionDiagnostics
 from mindroom.matrix.durable_ingestion import run_ingestion_pump
@@ -595,7 +597,7 @@ class AgentBot:
             dispatch_allowed_now=self._coalesced_dispatch_allowed_now,
             timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
                 timestamp_ms,
-                timezone=self.config.get_entity_timezone(self.agent_name),
+                timezone=entity_timezone(self.config, self.agent_name),
             ),
             on_dispatch_failure=self._retry_failed_coalesced_dispatch,
             on_undelivered_source=self._retry_pending_dispatch_source,
@@ -671,6 +673,13 @@ class AgentBot:
                 redact_message_event=self._redact_message_event,
                 response_hooks=ResponseHookService(
                     hook_context=self._hook_context_support,
+                    # Reads the live config, which a reload replaces.
+                    reply_mirror=lambda envelope, response_text: reply_mirror_for(
+                        envelope,
+                        response_text,
+                        config=self.config,
+                        runtime_paths=self.runtime_paths,
+                    ),
                 ),
                 outbox=self._journal_store.principal(self._journal_principal_id),
                 turn_handoff=TurnHandoff(
@@ -729,7 +738,7 @@ class AgentBot:
                 on_approval_continuation=lambda event_id: self._response_runner.handoff_approval_source(event_id),
                 source_has_live_owner=lambda event_id: (
                     self._coalescing_gate.has_pending_source_event(event_id)
-                    or self._response_runner.has_live_inbox_response(event_id)
+                    or self._response_runner.inbox.has_live_inbox_response(event_id)
                 ),
                 turn_has_live_claim=self._turn_store.has_live_turn_claim,
                 replies_ended=self._replies_ended,
@@ -797,7 +806,7 @@ class AgentBot:
                 turn_store=self._turn_store,
                 ingress_hook_runner=self._ingress_hook_runner,
                 generate_response=self._run_regenerated_response,
-                track_inbox_response=lambda response, **ownership: self._response_runner.track_inbox_response(
+                track_inbox_response=lambda response, **ownership: self._response_runner.inbox.track_inbox_response(
                     response,
                     **ownership,
                 ),
@@ -809,7 +818,7 @@ class AgentBot:
                 receipt_order=self._journal_dispatcher.receipt_order,
                 timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
                     timestamp_ms,
-                    timezone=self.config.get_entity_timezone(self.agent_name),
+                    timezone=entity_timezone(self.config, self.agent_name),
                 ),
                 reply_for_sources=self._reply_runtime.store.replies.for_sources,
                 later_human_message=self._later_human_message,
@@ -1077,12 +1086,12 @@ class AgentBot:
     @property
     def pending_response_owner_count(self) -> int:
         """Return response tasks that still own runtime resources."""
-        return self._response_runner.pending_inbox_response_count
+        return self._response_runner.inbox.pending_inbox_response_count
 
     @property
     def pending_response_phase_counts(self) -> dict[str, int]:
         """Return non-sensitive fixed-phase counts for retained response owners."""
-        return self._response_runner.pending_response_phase_counts
+        return self._response_runner.inbox.pending_response_phase_counts
 
     @property
     def deferred_stop_required(self) -> bool:
@@ -2231,7 +2240,7 @@ class AgentBot:
             failures,
             defer_expected_response_timeout=shutdown_intent.stop_reason == "shutdown",
         )
-        pending_response_count = self._response_runner.pending_inbox_response_count
+        pending_response_count = self._response_runner.inbox.pending_inbox_response_count
         pending_callback_count = (
             self._journal_dispatcher.pending_task_count if shutdown_intent.stop_reason == "shutdown" else 0
         )
@@ -2280,7 +2289,7 @@ class AgentBot:
                 msg = "journal callback cleanup exceeded bounded finalization"
                 raise ResponseShutdownTimeoutError(msg)
             self._deferred_stop_phase = DeferredStopPhase.RECOVERY_PROOF
-            recoverable = await self._response_runner.finish_process_shutdown_recovery(
+            recoverable = await self._response_runner.inbox.finish_process_shutdown_recovery(
                 timeout_seconds=shutdown_budget.remaining_seconds(),
             )
             if not recoverable:
@@ -2330,7 +2339,7 @@ class AgentBot:
                 failures,
             )
             if shutdown_intent.stop_reason == "restart":
-                await self._response_runner.wait_for_source_owned_inbox_responses()
+                await self._response_runner.inbox.wait_for_source_owned_inbox_responses()
             if self._ingestion_session is not None:
                 self._mark_deferred_stop_phase(DeferredStopPhase.INGESTION_SESSION)
                 await self._release("ingestion session", self._ingestion_session.close(), failures)
@@ -2435,7 +2444,7 @@ class AgentBot:
         self._delivery_recovery_wake.set()
         self._response_runner.refuse_pending_admissions()
         self._journal_dispatcher.begin_shutdown(shutdown_intent=ORDERLY_SHUTDOWN)
-        self._response_runner.begin_process_shutdown()
+        self._response_runner.inbox.begin_process_shutdown()
 
     async def prepare_for_sync_shutdown(
         self,
@@ -2485,18 +2494,18 @@ class AgentBot:
                 agent_name=self.agent_name,
                 admission_deferred_count=drain_result.admission_deferred_count,
             )
-        responses_drained = await self._response_runner.drain_inbox_responses(
+        responses_drained = await self._response_runner.inbox.drain_inbox_responses(
             cancel_after_seconds=shutdown_budget.per_window_seconds(windows=2),
             shutdown_intent=shutdown_intent,
         )
-        pending_response_count = self._response_runner.pending_inbox_response_count
+        pending_response_count = self._response_runner.inbox.pending_inbox_response_count
         if not responses_drained:
             self.logger.warning(
                 "matrix_agent_response_drain_incomplete",
                 agent_name=self.agent_name,
                 active_response_count=self.in_flight_response_count,
                 pending_response_count=pending_response_count,
-                response_recovery_complete=self._response_runner.incomplete_inbox_responses_recoverable,
+                response_recovery_complete=self._response_runner.inbox.incomplete_inbox_responses_recoverable,
                 restart_reason_category=restart_reason_category_for(shutdown_intent),
             )
         post_drain_background_tasks_completed = await wait_for_background_tasks(
@@ -2518,7 +2527,7 @@ class AgentBot:
                 callbacks_drained=callbacks_drained,
                 coalescing_drain_completed=drain_result.completed,
                 responses_drained=responses_drained,
-                response_recovery_complete=self._response_runner.incomplete_inbox_responses_recoverable,
+                response_recovery_complete=self._response_runner.inbox.incomplete_inbox_responses_recoverable,
                 post_drain_background_tasks_completed=post_drain_background_tasks_completed,
                 released_reservation_count=drain_result.released_reservation_count,
                 cancelled_unready_count=drain_result.cancelled_unready_count,

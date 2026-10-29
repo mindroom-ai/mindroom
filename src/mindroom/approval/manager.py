@@ -63,10 +63,6 @@ _ResolutionStatus = Literal["approved", "denied"]
 _STARTUP_RECOVERY_SCAN_PAGE = 256
 _DEADLINE_SWEEP_SECONDS = 60.0
 _EVENT_TYPE = "io.mindroom.tool_approval"
-DEFAULT_ROUTER_MANAGED_ROOM_REASON = (
-    "Tool approval needs the router in this room. If `router.accept_invites` allows this Matrix transport account, "
-    "call `invite_router` and wait for the router to join; otherwise enable it or add the router manually, then retry."
-)
 # What an approval request or settlement meets before the approval runtime and the router's card store are bound.
 RUNTIME_NOT_READY_REASON = "Tool approval runtime is not ready."
 _DEFAULT_TRUNCATED_APPROVAL_REASON = (

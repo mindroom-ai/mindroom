@@ -107,13 +107,11 @@ def _stream_outcome(
     event_id: str | None,
     body: str,
     *,
-    terminal_status: str = "completed",
     visible_body_state: str = "visible_body",
     failure_reason: str | None = None,
 ) -> StreamTransportOutcome:
     return StreamTransportOutcome(
         last_physical_stream_event_id=event_id,
-        terminal_status=terminal_status,
         rendered_body=body,
         visible_body_state=visible_body_state,
         failure_reason=failure_reason,

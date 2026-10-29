@@ -1,6 +1,6 @@
 # Agno parity goldens
 
-These fixtures pin what MindRoom sends to providers and models and what it publishes, so a change to model-visible bytes shows as a golden diff, and they hold the data Agno wrote, which MindRoom must keep reading.
+These fixtures pin what MindRoom sends to providers and models and what it publishes, so a change to model-visible bytes shows as a golden diff, and they and the legacy inputs in `tests/fixtures/legacy_agno3/` hold the data Agno wrote, which MindRoom must keep reading.
 They were first captured while Agno 3.0.9 ran MindRoom, so the owned runtime could prove it changed neither (`docs/dev/2026-10-20-replace-agno-design.md`).
 The goldens of what owned code produces now regenerate from it, in the encodings this file describes, while the data Agno wrote stays as captured, as legacy inputs.
 The capture scripts that wrote them and the tests that checked them against Agno were deleted with Agno's runtime.
@@ -23,9 +23,9 @@ A conflict in a read-only golden is resolved on its own, as data, since no comma
 
 ## Legacy inputs
 
-`storage/`, `runs/`, `history/`, `codecs.json`, and the `bases` of `knowledge/rows.json` hold what Agno 3.0.9 wrote and computed, so the data a deployment kept from before the replacement stays pinned as it was; they are read-only and never change.
+`tests/fixtures/legacy_agno3/` (`legacy_agno3/storage/`, `legacy_agno3/runs/`, `legacy_agno3/history/`, and `legacy_agno3/codecs.json`) and the `bases` of `knowledge/rows.json` hold what Agno 3.0.9 wrote and computed, so the data a deployment kept from before the replacement stays pinned as it was; they are read-only and never change.
 Tests read them as inputs: the storage conversion, the legacy codec tests, and the resumes of runs paused before the upgrade start from them.
-Three families still compare owned results with them on purpose: history selection (`history/`), which MindRoom keeps as Agno selected; the knowledge rows, which an owned refresh must keep writing; and the storage replay in `tests/session_storage/test_store_goldens.py`, whose usage ledger, session totals, and first-turn session rows must equal what Agno wrote to `storage/`, so an upgraded conversation's totals keep adding up.
+Three families still compare owned results with them on purpose: history selection (`legacy_agno3/history/`), which MindRoom keeps as Agno selected; the knowledge rows, which an owned refresh must keep writing; and the storage replay in `tests/session_storage/test_store_goldens.py`, whose usage ledger, session totals, and first-turn session rows must equal what Agno wrote to `legacy_agno3/storage/`, so an upgraded conversation's totals keep adding up.
 A deliberate change to the ledger or the session row replaces that replay's comparison with authored values.
 Every other test of what MindRoom stores builds the typed records it expects itself (`tests/run_record_helpers.py`), and MindRoom's own stored schema is pinned in `tests/llm/test_stored_dicts.py`, so a deliberate change to run records edits those tests and leaves these files alone.
 
@@ -208,7 +208,7 @@ Agno behavior the golden pins as it is:
 ### `tools/schemas_all_enabled.json`
 
 The file maps each captured tool that has function switches to `{"overrides", "instructions", "guidance", "functions"}`, built as for `tools/schemas.json` but with `overrides` as the agent's authored tool config.
-`overrides` sets every boolean `all` and `enable_*` field to true, plus the extra settings in `EXTRA_ENABLING_OVERRIDES` that some functions need (`agentql_query`, `google_drive`'s `download_file`, `usage_stats`'s `admin_scope`); the dummy Slack credentials include a user token so `search_messages` registers.
+`overrides` sets every boolean `all` and `enable_*` field to true, plus the extra settings in `EXTRA_ENABLING_OVERRIDES` that some functions need (`agentql_query`, `google_drive`'s `download_file`, `usage_stats`'s `admin_scope`).
 Some switches replace a default function instead of adding one, such as `tavily`'s `enable_search_context`, so a tool's functions are the union of both files.
 
 When the files were captured, every name in a tool's `ToolMetadata.function_names` appeared in one of them, except async method names that Agno registers under their sync name, helper methods, and `wikipedia`'s knowledge-base function, which needs a knowledge base object that config cannot supply.
@@ -228,13 +228,13 @@ The probes import no Agno code, so owned implementations keep using them after A
 Normalization: the pydantic version in error links (`https://errors.pydantic.dev/2.13/v/...`) is replaced by `<PYDANTIC_VERSION>`.
 Decoding errors embed the message of Python's `ast.literal_eval`, and probes that skip validation fail with Python's own `TypeError` text, so both depend on the interpreter version (Python 3.13).
 
-## Storage, history, and event goldens (`storage/`, `runs/`, `history/`, `events/`)
+## Storage, history, and event goldens (`legacy_agno3/storage/`, `legacy_agno3/runs/`, `legacy_agno3/history/`, `events/`)
 
-A capture script, deleted with Agno's runtime, wrote `storage/`, `runs/`, `history/`, and `events/`.
+A capture script, deleted with Agno's runtime, wrote `legacy_agno3/storage/`, `legacy_agno3/runs/`, `legacy_agno3/history/`, and `events/`.
 Every scenario ran MindRoom's real code path with real Agno agents and teams: `ai_response`, `stream_agent_response`, `team_response`, `team_response_stream`, the approval resume (`AgentApprovalExecution.continue_run` and `continue_paused_team_run`, called with the decisions, receipt, and continuation `ResponseRunner` builds), the OpenAI-compatible API, and MindRoom's storage, compaction, and reply-linkage functions.
 Only the provider was replaced, by the synthetic provider answering from a script.
-The `storage/`, `runs/`, and `history/` files hold data Agno wrote and are never rewritten; the `events/` files hold what MindRoom published and regenerate from owned code.
-`tests/session_storage/test_store_goldens.py` proves that every `storage/` file converts to storage v2 and then reads and writes with nothing lost or changed.
+The `legacy_agno3/` files hold data Agno wrote and are never rewritten; the `events/` files hold what MindRoom published and regenerate from owned code.
+`tests/session_storage/test_store_goldens.py` proves that every `legacy_agno3/storage/` file converts to storage v2 and then reads and writes with nothing lost or changed.
 
 ### Scenarios
 
@@ -257,15 +257,15 @@ Every run with a provider request also has its usage row in `<table>_usage`.
 
 ### Files
 
-- `storage/<store>.sql`: `iterdump` of each database; restore it with `sqlite3` `executescript`, as `tests.conftest.create_agno_2_sessions_db` does.
-- `storage/stores.json`: each store's database path under the storage root and its sessions with their stored session type.
+- `legacy_agno3/storage/<store>.sql`: `iterdump` of each database; restore it with `sqlite3` `executescript`, as `tests.conftest.create_agno_2_sessions_db` does.
+- `legacy_agno3/storage/stores.json`: each store's database path under the storage root and its sessions with their stored session type.
   The database `<name>.db` holds the sessions table `<name>_sessions`.
   Open a restored store with `create_state_storage(name, <storage root>/<path without sessions/<name>.db>)`.
-- `storage/loaded_sessions.json`: `AgentSession.to_dict()` or `TeamSession.to_dict()` of every session as `get_agent_session` or `get_team_session` loads it: runs after the scope's latest summary row plus every non-visible run and its descendants, folded messages removed, and the summary taken from the latest summary row.
-- `runs/<type>.json`: `{case: dict}` for every value of that type nested in the stored `run_data` columns, summary-row segments, and `session_data`, exactly as stored.
+- `legacy_agno3/storage/loaded_sessions.json`: `AgentSession.to_dict()` or `TeamSession.to_dict()` of every session as `get_agent_session` or `get_team_session` loads it: runs after the scope's latest summary row plus every non-visible run and its descendants, folded messages removed, and the summary taken from the latest summary row.
+- `legacy_agno3/runs/<type>.json`: `{case: dict}` for every value of that type nested in the stored `run_data` columns, summary-row segments, and `session_data`, exactly as stored.
   A case key is `<store>:<run id or segment:<row id>>` followed by its path, such as `agent_code:run-tools.messages[3].metrics`.
   The types are `run_output` (`RunOutput`), `team_run_output` (`TeamRunOutput`), `message` (`Message`), `image`, `audio`, `video`, and `file` (media dicts, read through `Message.from_dict` because Agno media has no `from_dict`), `tool_execution` (`ToolExecution`), `run_requirement` (`RunRequirement`), `message_metrics` (`MessageMetrics`), `run_metrics` (`RunMetrics`), `model_metrics` (`ModelMetrics`), and `session_metrics` (`SessionMetrics`).
-- `history/<store>__<session>.json`: `get_messages` results for the loaded session under each selection's keyword arguments, and `filter_tool_calls` applied to `copy_history_message` copies of a selection, as Agno's message builder does.
+- `legacy_agno3/history/<store>__<session>.json`: `get_messages` results for the loaded session under each selection's keyword arguments, and `filter_tool_calls` applied to `copy_history_message` copies of a selection, as Agno's message builder does.
   Agno's builder passes `num_history_runs` as `last_n_runs`, `num_history_messages` as `limit`, `[system_message_role]` as `skip_roles` only for a role other than `user`, `assistant`, or `tool`, and the member's id as `agent_id` only for a team member.
 - `events/ai_run.json`: the `io.mindroom.ai_run` Matrix metadata each golden run publishes, keyed by run id, as the owned reply or approval resume publishes it; a turn stopped by cancelling its task and a turn paused for approval publish none.
   `tests/test_ai_run_metadata_goldens.py` replays every run through the reply entry point that published it, with scripted models that answer as the stored run's assistant messages did and a history preparation that returns what the run's metadata says it prepared, and continues each approval resume from its pre-resume dump (`tests/ai_run_golden_helpers.py`, `tests/approval_resume_helpers.py`).
@@ -274,9 +274,9 @@ Every run with a provider request also has its usage row in `<table>_usage`.
   The capture also recorded two turns that Agno's own run cancellation ended with their reply still running, which Stop never caused because it cancels the reply's task first; that file was dropped, so no golden holds a cancelled run's metadata.
 - `events/openai_compat.json`: each `/v1/chat/completions` request with its status and body, parsed JSON when blocking and the raw lines of the SSE stream when streaming.
   `tests/test_openai_compat_goldens.py` sends the same requests through the owned API path and compares the bodies; completion ids are numbered in first-appearance order and every `created` clock reading is `0`.
-- `storage/<store>__before_<run id>.sql`: the sessions one approval resume reads, dumped just before it ran: the paused run's session and, for a delegation, its child's session in the child's store, with only those sessions' rows in every table keyed by session.
+- `legacy_agno3/storage/<store>__before_<run id>.sql`: the sessions one approval resume reads, dumped just before it ran: the paused run's session and, for a delegation, its child's session in the child's store, with only those sessions' rows in every table keyed by session.
   Restore one like its store; the store golden holds the same sessions after the resume, so the two form a paused and resumed pair.
-- `history/scoped_selections.json`: for every `<store>:<session>`, `get_messages` with the scope filter history replay passes (`agent_id` in agent stores, `team_id` in team stores), its run and message limits, and the prompt roles it skips, plus one selection by another scope of the same kind, which owns no run in the store.
+- `legacy_agno3/history/scoped_selections.json`: for every `<store>:<session>`, `get_messages` with the scope filter history replay passes (`agent_id` in agent stores, `team_id` in team stores), its run and message limits, and the prompt roles it skips, plus one selection by another scope of the same kind, which owns no run in the store.
 
 Agno's own readers are not lossless.
 Re-serializing a stored run adds `"events": []` to it and to every member response, drops an empty `tools` list, and drops `Audio.format`, so a row written back after Agno read it carries those changes.
@@ -329,8 +329,8 @@ A search records `documents`, the tool's JSON result parsed, or `text` for `No d
 The tool lays its result out with `indent=2` and `ensure_ascii=False`, each document's keys as `name`, `meta_data`, `content`, and each `meta_data` holds the chunk's `source_path`, its reader keys, and its `distance`.
 Each cosine distance is summed in float32 in an order the CPU's vector width decides, so a distance's last bits differ between machines; a regeneration keeps a recorded `distance` that the new value matches within a relative `1e-6` (`DISTANCE_RELATIVE_TOLERANCE` in `tests/agno_parity/knowledge_goldens.py`), so every machine writes the same file, and a larger difference is written and fails the parity test.
 
-## Codec goldens (`codecs.json`)
+## Codec goldens (`legacy_agno3/codecs.json`)
 
-`codecs.json` maps a case name to what Agno 3.0.9 objects produced for it: the `to_dict()` of messages, media, metrics, tool executions, requirements, and agent and team runs built field by field, the results of Agno's metric addition and accumulation, requirement decisions, and lenient reads, and the names and values of Agno's `RunStatus`.
+`legacy_agno3/codecs.json` maps a case name to what Agno 3.0.9 objects produced for it: the `to_dict()` of messages, media, metrics, tool executions, requirements, and agent and team runs built field by field, the results of Agno's metric addition and accumulation, requirement decisions, and lenient reads, and the names and values of Agno's `RunStatus`.
 `tests/llm/test_codecs.py` reads each case it uses with the owned types and checks that it writes back as the case, minus the keys the owned records drop (`tests/llm/agno_dict_helpers.py`).
 Dicts keep Agno's key order and its base64 media content, and a case built without an id or a timestamp keeps the random id and capture-time timestamp Agno filled in.

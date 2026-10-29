@@ -160,6 +160,7 @@ const SETTINGS_SECTIONS: readonly SettingsSection[] = [
       { root: "bot_accounts" },
       { root: "mindroom_user" },
       { root: "external_trigger_policy" },
+      { root: "slack" },
     ],
   },
   {

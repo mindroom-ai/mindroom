@@ -32,7 +32,6 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
 )
-from mindroom.legacy_delivery_payloads import DURABLE_FINAL_OUTCOME_KEY, without_inline_final_result
 from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_event_metadata import encryption_visible_metadata
 from mindroom.matrix.media import prepare_media_upload, upload_content_uri, upload_media_bytes
@@ -103,12 +102,7 @@ def _is_passthrough_preview_key(key: object) -> bool:
 
 def _is_passthrough_edit_wrapper_key(key: object) -> bool:
     """Return whether one source key should be mirrored onto the edit wrapper."""
-    return (
-        isinstance(key, str)
-        and key.startswith("io.mindroom.")
-        and key not in _SIDECAR_ONLY_MINDROOM_KEYS
-        and key != DURABLE_FINAL_OUTCOME_KEY
-    )
+    return isinstance(key, str) and key.startswith("io.mindroom.") and key not in _SIDECAR_ONLY_MINDROOM_KEYS
 
 
 def _copy_preview_metadata(source_content: dict[str, Any], target_content: dict[str, Any]) -> None:
@@ -836,7 +830,6 @@ async def prepare_large_message(
         when this coroutine completed without yielding.
 
     """
-    content = without_inline_final_result(content)
     is_edit = is_edit_message(content)
     size_limit = EDIT_MESSAGE_SIZE_LIMIT if is_edit else _NORMAL_MESSAGE_LIMIT
     if room_encrypted is None:

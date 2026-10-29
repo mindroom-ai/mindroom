@@ -23,6 +23,7 @@ from mindroom.matrix.olm_to_device import (
 from mindroom.model_catalog import ModelCatalog
 from mindroom.model_selection_scope import validate_model_picker_scope
 from mindroom.thread_models import resolve_thread_model_override
+from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -155,11 +156,11 @@ class _Receiver:
             "inherited": [
                 {
                     "entity": name,
-                    "model": config.resolve_runtime_model(
-                        entity_name=name,
-                        room_id=request.room_id,
-                        thread_id=None,
-                        runtime_paths=self.paths,
+                    "model": resolve_turn_model(
+                        config,
+                        self.paths,
+                        ModelScope(entity=name, room_id=request.room_id),
+                        None,
                     ).model_name,
                 }
                 for name in scope.entity_names

@@ -139,7 +139,7 @@ def test_google_sheets_saved_dashboard_config_maps_to_upstream_init_args(tmp_pat
         _runtime_paths(tmp_path),
         credentials_manager=credentials_manager,
         worker_target=None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
     )
 
     assert isinstance(tool, GoogleSheetsTools)
@@ -157,7 +157,7 @@ def test_google_sheets_disabled_update_omits_batch_update(tmp_path: Path) -> Non
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         tool_config_overrides={"update": False},
         worker_target=None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
     )
 
     assert isinstance(tool, GoogleSheetsTools)
@@ -170,7 +170,7 @@ def test_google_sheets_default_config_enables_read_and_write_methods(tmp_path: P
         _runtime_paths(tmp_path),
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         worker_target=None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
     )
 
     assert isinstance(tool, GoogleSheetsTools)

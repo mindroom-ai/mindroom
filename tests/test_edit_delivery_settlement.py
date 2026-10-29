@@ -15,7 +15,6 @@ from mindroom.cancellation import request_task_cancel
 from mindroom.conversation_resolver import MessageContext
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
-from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
@@ -27,11 +26,10 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.reply_span_helpers import seed_finished_reply
-from tests.response_runner_helpers import _bot, _noop_typing
+from tests.response_runner_helpers import _bot, _noop_typing, streamed_answer
 from tests.test_turn_store import _store
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.event_journal import EventJournalStore
@@ -118,6 +116,7 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
         approval_store=principal.approvals,
         replies=replace(runner.deps.replies, store=principal, complete_turn=store.publish_completed_turn),
     )
+    runner.inbox.replies = runner.deps.replies
     regenerator = unwrap_extracted_collaborator(bot._edit_regenerator)
     regenerator.deps = replace(
         regenerator.deps,
@@ -140,13 +139,7 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
 
     async def model(*_args: object, **_kwargs: object) -> str:
         generated.append("answer")
-        recorder = _kwargs["turn_recorder"]
-        assert isinstance(recorder, TurnRecorder)
-        recorder.mark_completed()
         return "edited answer"
-
-    async def stream_model(*args: object, **kwargs: object) -> AsyncIterator[str]:
-        yield await model(*args, **kwargs)
 
     async def post_response(*_args: object, **_kwargs: object) -> None:
         outcomes.append(_args[0])
@@ -160,8 +153,7 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
         patch_response_runner_module(
             typing_indicator=_noop_typing,
             should_use_streaming=AsyncMock(return_value=streaming),
-            ai_response=model,
-            stream_agent_response=stream_model,
+            stream_agent_response=streamed_answer(model),
             apply_post_response_effects=post_response,
         ),
     ):
@@ -171,7 +163,7 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
             EventInfo.from_event(event.source),
             "@user:localhost",
         )
-        (task,) = runner._inbox_response_tasks
+        (task,) = runner.inbox._inbox_response_tasks
         try:
             async with asyncio.timeout(10):
                 await effects_started.wait()

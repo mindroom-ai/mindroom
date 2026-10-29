@@ -20,7 +20,7 @@ Examples use `chat.example.com` for that host, `admin.example.com` for the dashb
 
 The first rule keeps a request from passing Access as one path and reaching a service as another, because Access, the tunnel, and the origin can resolve such paths differently.
 The client chart serves `/.well-known/matrix/client` only with MatrixRTC or bug reports enabled; otherwise send it to Tuwunel as well.
-Runtime features with public paths include the [OpenAI-compatible API](../openai-api.md), the [Connections portal](../connections-portal.md#trusted-upstream-sign-in), the [MCP gateway](mcp-gateway.md#route-browser-and-machine-traffic), the [worker computer](../tools/worker-computer.md#reverse-proxy-and-host-routing), [external triggers](../external-triggers.md), the [usage export](../usage.md#usage-export-service) and [budget](../budgets.md#budget-service) services, and [published](../tools/agent-orchestration.md#report_publishing) and [private](../tools/agent-orchestration.md#dynamic_workflow) reports.
+Runtime features with public paths include the [OpenAI-compatible API](../openai-api.md), the [Connections portal](../connections-portal.md#trusted-upstream-sign-in), the [MCP gateway](mcp-gateway.md#route-browser-and-machine-traffic), the [worker computer](../tools/worker-computer.md#reverse-proxy-and-host-routing), [external triggers](../external-triggers.md), [Slack events](../tools/slack.md#set-up-the-slack-app), the [usage export](../usage.md#usage-export-service) and [budget](../budgets.md#budget-service) services, and [published](../tools/agent-orchestration.md#report_publishing) and [private](../tools/agent-orchestration.md#dynamic_workflow) reports.
 `admin.example.com` sends every path to the runtime, as described in [Dashboard On Its Own Host](trusted-upstream-auth.md#dashboard-on-its-own-host), behind the same first rule.
 
 ```yaml
@@ -60,6 +60,7 @@ Access applies the most specific path application, so every other path keeps the
 | `/livekit/jwt/*`, `/livekit/sfu/*` | MindRoom voice agents, which request call tokens and join LiveKit from the server, and the MatrixRTC authorization service, which calls LiveKit through its public `auth.livekitUrl` |
 | `/.well-known/matrix/server`, `/_matrix/federation/v1/openid/userinfo` | The MatrixRTC authorization service, which checks each caller's Matrix OpenID token with the caller's homeserver |
 | The MCP paths that the [route table](mcp-gateway.md#route-browser-and-machine-traffic) marks public or pass-through | MCP clients; with Cloudflare Managed OAuth, follow [External authorization](mcp-gateway.md#external-authorization) instead |
+| `POST /api/slack/events` | Slack, whose [event requests](../tools/slack.md#set-up-the-slack-app) MindRoom accepts only with a valid Slack signature |
 | `/_matrix/client/versions` (optional) | External uptime checks; it answers without a Matrix login, so a passing check shows that Cloudflare, the tunnel, and Tuwunel respond |
 
 Machine callers of runtime routes need their own Access application with a service token, as the [usage export](../usage.md#usage-export-service) and [budget](../budgets.md#budget-service) services expect, or a bypass that leaves authentication to the route, such as the signed requests of [external triggers](../external-triggers.md) or the API keys of the [OpenAI-compatible API](../openai-api.md).

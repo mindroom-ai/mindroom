@@ -33,7 +33,6 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
 from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.background_tasks import wait_for_future_until_complete
-from mindroom.budgets.monitor import budget_model
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context, record_helper_usage
 from mindroom.history.interrupted_replay import persist_interrupted_replay
 from mindroom.history.session_context import create_scope_session_storage, load_scope_session
@@ -51,6 +50,7 @@ from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.execution import agent_tool_middleware
+from mindroom.tool_system.agent_tools import room_turn_offers
 from mindroom.tool_system.agno_toolkits import AGNO_EMPTY_PARAMETERS
 from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
@@ -59,9 +59,10 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.invocation import CallResult, ToolCallContext, client_tool_result, run_tool_call
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import close_toolkits, connect_toolkits
+from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator, Sequence
+    from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
     from contextlib import AbstractAsyncContextManager
 
     from livekit.agents.llm import RawFunctionTool
@@ -436,7 +437,12 @@ class _CallAgentCache:
             hook_registry=self.context.hook_registry,
             knowledge=knowledge,
             history_storage=history_storage,
-            active_model_name=self.active_model_name,
+            model=resolve_turn_model(
+                self.config,
+                self.runtime_paths,
+                ModelScope(entity=self.agent_name, explicit=self.active_model_name),
+                None,
+            ),
             refresh_scheduler=refresh_scheduler,
             supports_native_tool_approval=True,
             eager_deferred_tools=True,
@@ -462,17 +468,8 @@ async def build_call_tools(
 ) -> CallAgentTooling:
     """Materialize the agent for the selected voice backend."""
     session_id = session_id or create_session_id(room_id, None)
-    runtime_model = await asyncio.to_thread(
-        functools.partial(
-            config.resolve_runtime_model,
-            entity_name=agent_name,
-            active_model_name=active_model_name,
-            room_id=room_id,
-            thread_id=None,
-            runtime_paths=runtime_paths,
-        ),
-    )
-    active_model_name = runtime_model.model_name
+    scope = ModelScope(entity=agent_name, room_id=room_id, explicit=active_model_name)
+    requested_model_name = (await asyncio.to_thread(resolve_turn_model, config, runtime_paths, scope, None)).model_name
     target = MessageTarget(
         room_id=room_id,
         source_thread_id=None,
@@ -484,20 +481,19 @@ async def build_call_tools(
         target,
         user_id=requester_id,
         agent_name=agent_name,
-        active_model_name=active_model_name,
+        active_model_name=requested_model_name,
     )
     if context is None:
         msg = f"Tool runtime context unavailable for voice agent {agent_name}"
         raise RuntimeError(msg)
-    requested_model_name = active_model_name
     # Realtime tools such as claude_agent also run on this model, so every backend applies the caller's budget.
-    active_model_name = budget_model(
+    turn_model = resolve_turn_model(
         config,
         runtime_paths,
-        context.budget_monitor,
-        requester_id,
-        active_model_name,
+        replace(scope, explicit=requested_model_name),
+        TurnBudget(monitor=context.budget_monitor, requester_id=requester_id),
     )
+    active_model_name = turn_model.model_name
     context = replace(
         context,
         active_model_name=active_model_name,
@@ -585,7 +581,7 @@ async def build_call_tools(
                 tool_function_filter=context.tool_function_filter,
                 refresh_scheduler=refresh_scheduler,
                 eager_deferred_tools=True,
-                active_model_name=active_model_name,
+                model=turn_model,
             ),
         ),
     )
@@ -725,13 +721,21 @@ async def _run_authorized_call_agent(
     reconcile_spoken_response: bool = True,
 ) -> CallAgentResponse:
     """Run one admitted call transcript through the normal MindRoom agent."""
-    from mindroom.ai import ResponseTurnContext, ai_response  # noqa: PLC0415 - heavy optional call path
+    from mindroom.ai import ai_response  # noqa: PLC0415 - heavy optional call path
+    from mindroom.response_turn import ResponseTurnContext, TurnSinks  # noqa: PLC0415 - heavy optional call path
 
     if active_model_name is not None:
         # Spend can cross the cap during a call, so each reply checks the budget again.
-        active_model_name = budget_model(config, runtime_paths, context.budget_monitor, requester_id, active_model_name)
+        active_model_name = resolve_turn_model(
+            config,
+            runtime_paths,
+            ModelScope(entity=context.agent_name, room_id=room_id, explicit=active_model_name),
+            TurnBudget(monitor=context.budget_monitor, requester_id=requester_id),
+        ).model_name
         context = replace(context, active_model_name=active_model_name)
+    # Seeded here too: a cancellation before the turn driver starts still stores the transcript it answered.
     recorder = TurnRecorder(user_message=transcript)
+    run_metadata: dict[str, Any] = {}
     fallback_run_id = f"{session_id}:turn:{uuid4().hex}"
     try:
         refresh_scheduler = (
@@ -762,27 +766,22 @@ async def _run_authorized_call_agent(
             transient_enrichment_items=transient_enrichment_items,
             system_enrichment_items=voice_enrichment_items,
             inline_tools=True,
+            prompt=transcript,
+            show_tool_calls=False,
+            execution_identity=execution_identity,
+            refresh_scheduler=refresh_scheduler,
+            knowledge=knowledge_resolution.knowledge,
+            eager_deferred_tools=True,
         )
-        run_metadata: dict[str, Any] = {}
 
         async def _respond(build: AgentBuild) -> str:
-            try:
-                return await ai_response(
-                    turn,
-                    prompt=transcript,
-                    runtime_paths=runtime_paths,
-                    config=config,
-                    knowledge=knowledge_resolution.knowledge,
-                    show_tool_calls=False,
-                    run_metadata_collector=run_metadata,
-                    execution_identity=execution_identity,
-                    refresh_scheduler=refresh_scheduler,
-                    turn_recorder=recorder,
-                    eager_deferred_tools=True,
-                    reusable_build=build,
-                )
-            finally:
-                recorder.set_run_metadata({**(recorder.run_metadata or {}), **run_metadata})
+            return await ai_response(
+                replace(turn, reusable_build=build),
+                runtime_paths,
+                config,
+                # The call stores what it spoke of an interrupted reply itself.
+                sinks=TurnSinks(turn_recorder=recorder, run_metadata_collector=run_metadata, persist_interrupted=False),
+            )
 
         async def _run_with_build(build: AgentBuild) -> str:
             return await tool_support.run_in_context(
@@ -797,18 +796,18 @@ async def _run_authorized_call_agent(
             operation=_run_with_build,
         )
     except asyncio.CancelledError:
-        state = _call_agent_run_state(recorder, session_id=session_id, fallback_run_id=fallback_run_id)
+        state = _call_agent_run_state(recorder, run_metadata, session_id=session_id, fallback_run_id=fallback_run_id)
         await response_tracker.persist_unspoken(state, default_status=RunStatus.cancelled)
         raise
     except Exception:
-        state = _call_agent_run_state(recorder, session_id=session_id, fallback_run_id=fallback_run_id)
+        state = _call_agent_run_state(recorder, run_metadata, session_id=session_id, fallback_run_id=fallback_run_id)
         await response_tracker.persist_unspoken(state, default_status=RunStatus.error)
         raise
     finally:
         tool_names = tuple(dict.fromkeys(entry.tool_name for entry in recorder.completed_tools))
         if on_tools_executed is not None and tool_names:
             on_tools_executed(list(tool_names))
-    state = _call_agent_run_state(recorder, session_id=session_id, fallback_run_id=fallback_run_id)
+    state = _call_agent_run_state(recorder, run_metadata, session_id=session_id, fallback_run_id=fallback_run_id)
     # Live commentary can be paraphrased or omitted; only cascaded TTS owns a
     # one-to-one mapping between this answer and the eventual spoken turn.
     turn_id = response_tracker.register(state) if response and reconcile_spoken_response else None
@@ -819,11 +818,12 @@ async def _run_authorized_call_agent(
 
 def _call_agent_run_state(
     recorder: TurnRecorder,
+    published_metadata: Mapping[str, Any],
     *,
     session_id: str,
     fallback_run_id: str,
 ) -> _CallAgentRunState:
-    """Snapshot one real agent run for later spoken-text reconciliation.
+    """Snapshot one real agent run, with the run metadata its reply published, for later spoken-text reconciliation.
 
     The recorder's snapshot leaves out the calls a mid-turn fold summarized, as any interrupted record does.
     """
@@ -834,7 +834,7 @@ def _call_agent_run_state(
         user_message=recorder.user_message,
         completed_tools=snapshot.completed_tools,
         interrupted_tools=snapshot.interrupted_tools,
-        run_metadata=dict(recorder.run_metadata or {}),
+        run_metadata={**(recorder.run_metadata or {}), **published_metadata},
         outcome=recorder.outcome,
         original_status=recorder.original_status,
     )
@@ -912,7 +912,7 @@ def _refuse_text_chat_functions(build: AgentBuild, config: Config) -> AgentBuild
 
 def matrix_message_available_during_call(config: Config, agent_name: str) -> bool:
     """Return whether the call agent can send Matrix messages; tools that may need approval are unavailable in calls."""
-    return "matrix_message" in config.resolve_entity(agent_name).available_tools and not tool_may_require_approval(
+    return room_turn_offers(config, agent_name, "matrix_message") and not tool_may_require_approval(
         config,
         "matrix_message",
     )

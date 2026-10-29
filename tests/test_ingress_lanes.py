@@ -870,7 +870,7 @@ async def test_long_running_turn_never_delays_other_ingress_from_same_sender(tmp
 
         release_first_response.set()
         await bot._coalescing_gate.drain_all()
-        await bot._response_runner.drain_inbox_responses()
+        await bot._response_runner.inbox.drain_inbox_responses()
 
 
 def _audio_event(
@@ -1090,7 +1090,7 @@ async def test_voice_echo_and_follow_up_slots_never_hold_another_conversation(tm
 
         release_first_response.set()
         await bot._coalescing_gate.drain_all()
-        await bot._response_runner.drain_inbox_responses()
+        await bot._response_runner.inbox.drain_inbox_responses()
 
     follow_up_turns = [source_event_id for source_event_id in generated if source_event_id not in {"$a0", "$b1"}]
     assert len(follow_up_turns) == 1
@@ -1187,7 +1187,7 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
 
             release_first_response.set()
             await bot._coalescing_gate.drain_all()
-            await bot._response_runner.drain_inbox_responses()
+            await bot._response_runner.inbox.drain_inbox_responses()
             assert ack_sent.is_set()
             assert "$f1" in generated
     finally:
@@ -1394,7 +1394,7 @@ async def test_response_failure_drains_follow_up_queue(tmp_path: Path) -> None:
 
         await _wait_for(lambda: len(generated) == 3)
         assert [source_event_id for source_event_id, _prompt in generated[1:]] == ["$f1", "$f2"]
-        await runner.drain_inbox_responses()
+        await runner.inbox.drain_inbox_responses()
 
 
 @pytest.mark.asyncio
@@ -1423,7 +1423,7 @@ async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> N
             queued_signal.finish_response_turn()
             lifecycle_lock.release()
 
-    response_task = runner.track_inbox_response(
+    response_task = runner.inbox.track_inbox_response(
         blocked_response(),
         name="test_blocked_response",
         recovery_proof_ready=lambda: False,
@@ -1446,7 +1446,7 @@ async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> N
         assert calls == []
 
         response_task.cancel()
-        assert await runner.drain_inbox_responses() is True
+        assert await runner.inbox.drain_inbox_responses() is True
 
         await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in calls] == [["$f1"], ["$f2"]])
     assert [batch.requester_user_id for batch in calls] == ["@alice:localhost", "@bob:localhost"]
@@ -1633,7 +1633,7 @@ async def test_bounded_inbox_drain_cancels_stuck_response(tmp_path: Path) -> Non
         finally:
             cleanup_count += 1
 
-    task = runner.track_inbox_response(
+    task = runner.inbox.track_inbox_response(
         stuck_response(),
         name="test_stuck_response",
         recovery_proof_ready=lambda: False,
@@ -1641,12 +1641,12 @@ async def test_bounded_inbox_drain_cancels_stuck_response(tmp_path: Path) -> Non
     )
     await asyncio.wait_for(started.wait(), timeout=1.0)
 
-    assert await runner.drain_inbox_responses(cancel_after_seconds=0.05) is False
+    assert await runner.inbox.drain_inbox_responses(cancel_after_seconds=0.05) is False
     assert task.cancelled()
     assert cleanup_count == 1
     await asyncio.sleep(0)
-    assert not runner._inbox_response_tasks
-    assert await runner.drain_inbox_responses() is True
+    assert not runner.inbox._inbox_response_tasks
+    assert await runner.inbox.drain_inbox_responses() is True
 
 
 @pytest.mark.asyncio
@@ -1669,7 +1669,7 @@ async def test_bounded_inbox_drain_rejects_indefinitely_resistant_response(tmp_p
                 if release.is_set():
                     raise
 
-    task = runner.track_inbox_response(
+    task = runner.inbox.track_inbox_response(
         cancellation_resistant_response(),
         name="test_cancellation_resistant_response",
         recovery_proof_ready=lambda: False,
@@ -1677,7 +1677,7 @@ async def test_bounded_inbox_drain_rejects_indefinitely_resistant_response(tmp_p
     )
     await asyncio.wait_for(started.wait(), timeout=1.0)
     drain_task = asyncio.create_task(
-        runner.drain_inbox_responses(cancel_after_seconds=0.01),
+        runner.inbox.drain_inbox_responses(cancel_after_seconds=0.01),
     )
 
     try:
@@ -1685,7 +1685,7 @@ async def test_bounded_inbox_drain_rejects_indefinitely_resistant_response(tmp_p
             await asyncio.wait_for(asyncio.shield(drain_task), timeout=0.25)
         assert cancel_count >= 1
         assert not task.done()
-        assert runner.pending_inbox_response_count == 1
+        assert runner.inbox.pending_inbox_response_count == 1
     finally:
         release.set()
         if not task.done():
@@ -1709,7 +1709,7 @@ async def test_bounded_inbox_drain_preserves_cancel_message(tmp_path: Path) -> N
             cancelled_args.append(exc.args)
             raise
 
-    task = runner.track_inbox_response(
+    task = runner.inbox.track_inbox_response(
         stuck_response(),
         name="test_sync_restart_cancelled_response",
         recovery_proof_ready=lambda: False,
@@ -1718,7 +1718,7 @@ async def test_bounded_inbox_drain_preserves_cancel_message(tmp_path: Path) -> N
     await asyncio.wait_for(started.wait(), timeout=1.0)
 
     try:
-        completed = await runner.drain_inbox_responses(
+        completed = await runner.inbox.drain_inbox_responses(
             cancel_after_seconds=0.05,
             shutdown_intent=SYNC_RESTART_SHUTDOWN,
         )
@@ -1731,7 +1731,7 @@ async def test_bounded_inbox_drain_preserves_cancel_message(tmp_path: Path) -> N
     assert task.cancelled()
     assert cancelled_args == [(SYNC_RESTART_CANCEL_MSG,)]
     await asyncio.sleep(0)
-    assert not runner._inbox_response_tasks
+    assert not runner.inbox._inbox_response_tasks
 
 
 @pytest.mark.asyncio
@@ -1744,7 +1744,7 @@ async def test_failed_inbox_response_is_contained_and_unregistered(tmp_path: Pat
         msg = "response failed"
         raise RuntimeError(msg)
 
-    task = runner.track_inbox_response(
+    task = runner.inbox.track_inbox_response(
         failing_response(),
         name="test_failing_response",
         recovery_proof_ready=lambda: False,
@@ -1753,6 +1753,6 @@ async def test_failed_inbox_response_is_contained_and_unregistered(tmp_path: Pat
     await asyncio.gather(task, return_exceptions=True)
     await asyncio.sleep(0)
 
-    assert not runner._inbox_response_tasks
-    assert await runner.drain_inbox_responses() is True
-    assert await runner.drain_inbox_responses(cancel_after_seconds=0.05) is True
+    assert not runner.inbox._inbox_response_tasks
+    assert await runner.inbox.drain_inbox_responses() is True
+    assert await runner.inbox.drain_inbox_responses(cancel_after_seconds=0.05) is True

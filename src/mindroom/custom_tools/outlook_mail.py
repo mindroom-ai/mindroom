@@ -18,20 +18,20 @@ from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # re
 from mindroom.custom_tools.microsoft_graph import (
     GraphSession,
     MicrosoftGraphError,
-    checked_upload_source,
     graph_error_payload,
     graph_session,
     graph_time,
+    graph_upload_errors,
     html_to_text,
     mailbox_next_page_token,
     mailbox_page_path,
     mailbox_path,
     mailbox_tool_result,
     path_segment,
-    read_upload_source,
     text_to_html,
     time_zone_name,
 )
+from mindroom.file_access import checked_upload_source, read_upload_source
 from mindroom.oauth.microsoft import outlook_mail_oauth_provider
 
 if TYPE_CHECKING:
@@ -403,14 +403,15 @@ class OutlookMailTools(Toolkit):
             if not isinstance(local_path, str):
                 msg = "attachments must be a list of workspace file paths."
                 raise _invalid(msg)
-            source = checked_upload_source(
-                local_path,
-                workspace_root=self._workspace_root,
-                file_access=self._file_access,
-                max_bytes=_MAX_ATTACHMENT_BYTES,
-                field_name="attachments",
-            )
-            content = read_upload_source(source, _MAX_ATTACHMENT_BYTES)
+            with graph_upload_errors():
+                source = checked_upload_source(
+                    local_path,
+                    workspace_root=self._workspace_root,
+                    file_access=self._file_access,
+                    max_bytes=_MAX_ATTACHMENT_BYTES,
+                    field_name="attachments",
+                )
+                content = read_upload_source(source, _MAX_ATTACHMENT_BYTES)
             raw_bytes += len(content)
             # Base64 turns every 3 bytes into 4.
             _check_request_size((raw_bytes + 2) // 3 * 4)

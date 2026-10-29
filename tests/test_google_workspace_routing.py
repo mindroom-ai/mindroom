@@ -11,7 +11,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.catalog import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import isolated_plugin_runtime
-from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool
+from mindroom.tool_system.sandbox_proxy import tool_placement
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -88,19 +88,13 @@ def test_workspace_tools_stay_in_primary_runtime(
     with isolated_plugin_runtime(config, paths):
         metadata = TOOL_METADATA[tool_name]
         assert metadata.requires_primary_runtime is True
-        assert (
-            sandbox_proxy_enabled_for_tool(
-                tool_name,
-                runtime_paths=paths,
-                worker_tools_override=worker_tools,
-            )
-            is False
-        )
+        runs_in_worker = tool_placement(paths).runs_in_worker(tool_name, worker_tools)
+        assert runs_in_worker is False
 
         tool = get_tool_by_name(
             tool_name,
             paths,
-            worker_tools_override=worker_tools,
+            runs_in_worker=runs_in_worker,
             worker_target=None,
         )
         function_name, kwargs = _SERVICE_CALLS[service]

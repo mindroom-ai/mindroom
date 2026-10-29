@@ -115,7 +115,7 @@ def test_composio_registry_loads_selected_actions(tmp_path: Path, with_workspace
             "lock": False,
         },
         tool_output_workspace_root=tmp_path / "workspace" if with_workspace else None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
     )
 

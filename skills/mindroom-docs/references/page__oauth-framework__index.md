@@ -116,7 +116,7 @@ See [Authorization](https://docs.mindroom.chat/authorization/#platform-and-crede
 
 ### Where Connections Are Stored
 
-Providers that store credentials per requester, such as GitHub, Atlassian, and Microsoft 365, always save the token in the requester's `user` scope and never fall back to a shared or global token.
+Providers that store credentials per requester, such as GitHub, Atlassian, Microsoft 365, and Slack, always save the token in the requester's `user` scope and never fall back to a shared or global token.
 For other providers, the token follows the agent's effective execution scope: `private.per`, then `agents.<name>.worker_scope`, then `defaults.worker_scope`.
 
 | Scope | Whose connection is used |
@@ -127,7 +127,7 @@ For other providers, the token follows the agent's effective execution scope: `p
 | _(unset)_ | One installation-level connection in the global credential store |
 
 Private agents derive the scope from `private.per` and cannot also set `worker_scope`.
-OAuth tokens and OAuth client configuration stay in the primary runtime and are never mirrored into worker containers, and GitHub, Google, and Microsoft 365 OAuth tools always run in the primary runtime.
+OAuth tokens and OAuth client configuration stay in the primary runtime and are never mirrored into worker containers, and GitHub, Google, Microsoft 365, and Slack OAuth tools always run in the primary runtime.
 
 ### Built-In Providers
 
@@ -137,6 +137,7 @@ OAuth tokens and OAuth client configuration stay in the primary runtime and are 
 | Atlassian Cloud (Jira and Confluence) | [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/) |
 | Google Drive, Docs, Calendar, Sheets, Tasks, Gmail, and Google Cloud | [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) |
 | Microsoft 365 (OneDrive, SharePoint, Outlook mail and calendar, To Do, Teams, OneNote, and the people directory) | [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) |
+| Slack (each person's own Slack account) | [Slack](https://docs.mindroom.chat/tools/slack/#set-up-the-slack-app) |
 | Remote MCP servers with `auth.type: oauth` | [OAuth-Backed Remote MCP](https://docs.mindroom.chat/mcp/#oauth-backed-remote-mcp) |
 
 A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom or the browser opened the dashboard at `MINDROOM_DASHBOARD_URL`, and the authorization server confirmed that callback when registering.

@@ -145,7 +145,7 @@ class LiveTurnTools(TurnToolBridge):
         catalog: PreparedAgentToolCatalog,
         authorize: Callable[[ToolKey, dict[str, object]], Awaitable[None]],
         context: Mapping[str, str],
-        output_file_policy: ToolOutputFilePolicy | None,
+        output_file_policy: ToolOutputFilePolicy,
         delegation_depth: int,
         refresh_scheduler: KnowledgeRefreshScheduler | None,
     ) -> None:

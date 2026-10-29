@@ -8,7 +8,7 @@ Use it to pick a tool, configure its credentials, and understand why a tool is u
 | Tool | Use it for | Setup |
 | --- | --- | --- |
 | [`gmail`](#gmail) | Reading, searching, drafting, sending, and labeling mail in a Gmail mailbox | Google Gmail OAuth |
-| [`slack`](#slack) | Slack messages, threaded replies, channel and user lookups, history, search, and files | Bot or user token |
+| [`slack`](https://docs.mindroom.chat/tools/slack/) | Searching, reading, posting, and reacting in Slack as the connected person or in a project's channels, and answering mentions of the MindRoom app | Slack app with OAuth |
 | [`discord`](#discord) | Discord channel messages, channel info and history, and message deletion | Bot token |
 | [`telegram`](#telegram) | Text and media sent by a Telegram bot to one fixed chat | Bot token and chat ID |
 | [`whatsapp`](#whatsapp) | WhatsApp Business text, template, interactive, and media messages | Access token and phone number ID |
@@ -27,7 +27,7 @@ For Outlook mail, see `outlook_mail` in [Microsoft 365](https://docs.mindroom.ch
 
 Set fields of type `password` through the dashboard or credential store; see [Security Restrictions](https://docs.mindroom.chat/tools/#security-restrictions).
 Many credential fields below are optional in the dashboard but required in practice, and the tool fails to load or errors on its first call without them.
-Instead of stored fields, these tools also read the environment variables `SLACK_TOKEN`, `SLACK_USER_TOKEN`, `DISCORD_BOT_TOKEN`, `TELEGRAM_TOKEN`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_API_KEY`, `TWILIO_API_SECRET`, `WEBEX_ACCESS_TOKEN`, `RESEND_API_KEY`, `X_BEARER_TOKEN`, `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `ZOOM_ACCOUNT_ID`, `ZOOM_CLIENT_ID`, and `ZOOM_CLIENT_SECRET`.
+Instead of stored fields, these tools also read the environment variables `DISCORD_BOT_TOKEN`, `TELEGRAM_TOKEN`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_API_KEY`, `TWILIO_API_SECRET`, `WEBEX_ACCESS_TOKEN`, `RESEND_API_KEY`, `X_BEARER_TOKEN`, `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `ZOOM_ACCOUNT_ID`, `ZOOM_CLIENT_ID`, and `ZOOM_CLIENT_SECRET`.
 `gmail` instead connects through Google OAuth; see [Google Services OAuth For Local Installs](https://docs.mindroom.chat/deployment/google-services-user-oauth/) or [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) for custom and hosted setups.
 Most tools enable or disable individual functions with `enable_<function>` flags, and `all: true` enables every function; `include_tools` and `exclude_tools` filter further, as described in [Filtering Toolkit Functions](https://docs.mindroom.chat/tools/#filtering-toolkit-functions).
 
@@ -43,9 +43,9 @@ Archiving, trashing, attachment downloads, and sending existing drafts are not a
 `send_email_to_self(subject, body)` always sends to the connected account's own address, so an approval rule can allow it while still requiring approval for `send_email`; see [Tool Approval](https://docs.mindroom.chat/tool-approval/).
 
 Draft and send functions accept attachment file paths, not Matrix attachment IDs.
-Allowed paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting: with the default `workspace`, attachments must be files inside the agent workspace, and an agent without a workspace cannot attach files.
+Allowed paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting: with the default `workspace`, attachments must be files inside the agent workspace.
 With `unrestricted`, any file MindRoom can read is allowed.
-Relative paths resolve from the workspace root, or from the MindRoom working directory when an `unrestricted` agent has no workspace.
+Relative paths resolve from the workspace root.
 Attachments may total at most 25 MiB per message; larger sets fail with `Gmail attachments exceed the 25 MiB limit`.
 
 Each option below defaults to `true`, and setting it to `false` removes the matching function.
@@ -62,50 +62,6 @@ Each option below defaults to `true`, and setting it to `false` removes the matc
 | `send_email_reply` | `boolean` | `true` | `send_email_reply()` |
 
 Use `exclude_tools` to remove other functions, such as `delete_custom_label`.
-
-## [`slack`]
-
-`slack` sends messages and threaded replies, lists channels and users, reads channel history and threads, searches messages, and uploads or downloads files.
-Use channel IDs rather than names, especially for threaded replies and history reads.
-`get_channel_history()` returns only top-level messages; to read a thread's replies, enable `get_thread()` and pass the parent message's timestamp.
-`slack` always runs in the primary runtime, and its file uploads and downloads are not confined by the agent's `file_access`, so enable it only for agents trusted with what the MindRoom process can reach; see [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access).
-
-To search messages, set `enable_search_messages: true` and store a user token with the [`search:read`](https://docs.slack.dev/reference/methods/search.messages/) scope in `user_token`; a bot token alone cannot search.
-A user token stored as the primary `token` also works for search.
-`search_workspace()` works only when Slack itself invokes the agent and supplies an action token, so it fails in ordinary Matrix conversations; use `search_messages()` there.
-Slack's tool-selection guide reaches the agent's prompt only while every function it names is enabled, and with messaging enabled it names `list_users()`, so set `enable_list_users: true` to include it.
-
-| Option | Type | Default | Notes |
-| --- | --- | --- | --- |
-| `token` | `password` | `null` | Bot or user token, or `SLACK_TOKEN`; required. |
-| `user_token` | `password` | `null` | User token for `search_messages()`, or `SLACK_USER_TOKEN`. |
-| `markdown` | `boolean` | `true` | Render Slack markdown in sent messages. |
-| `output_directory` | `text` | `null` | Directory for saved downloads; setting it also enables saving. |
-| `save_downloads` | `boolean` | `false` | Save downloads to disk instead of returning their content; without `output_directory`, files go to the current working directory. |
-| `enable_send_message` | `boolean` | `true` | Enable `send_message()`. |
-| `enable_send_message_thread` | `boolean` | `true` | Enable `send_message_thread()`. |
-| `enable_list_channels` | `boolean` | `true` | Enable `list_channels()`. |
-| `enable_get_channel_history` | `boolean` | `true` | Enable `get_channel_history()`. |
-| `enable_upload_file` | `boolean` | `true` | Enable `upload_file()`. |
-| `enable_download_file` | `boolean` | `true` | Enable `download_file()`. |
-| `enable_search_messages` | `boolean` | `false` | Enable `search_messages()`; needs a user token. |
-| `enable_search_workspace` | `boolean` | `false` | Enable `search_workspace()`. |
-| `enable_get_thread` | `boolean` | `false` | Enable `get_thread()`. |
-| `enable_list_users` | `boolean` | `false` | Enable `list_users()`. |
-| `enable_get_user_info` | `boolean` | `false` | Enable `get_user_info()`. |
-| `enable_get_channel_info` | `boolean` | `false` | Enable `get_channel_info()`. |
-| `all` | `boolean` | `false` | Enable every function. |
-| `max_file_size` | `number` | `1073741824` | Maximum upload or download size in bytes. |
-| `thread_message_limit` | `number` | `20` | Maximum messages returned by `get_thread()`. |
-
-```yaml
-agents:
-  support:
-    tools:
-      - slack:
-          enable_get_thread: true
-          enable_search_messages: true
-```
 
 ## [`discord`]
 
