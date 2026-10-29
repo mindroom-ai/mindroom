@@ -117,7 +117,10 @@ async def test_unsupported_documents_become_text_notes_while_pdf_stays_inline(tm
 
 @pytest.mark.asyncio
 async def test_claude_reads_every_text_type_and_notes_an_untyped_file_unread(tmp_path: Path) -> None:
-    """Any text type goes as a plain-text document; a file nothing types is noted, never read, instead of sent as PDF."""
+    """Any text type goes as a plain-text document; a file nothing types is noted, never read, instead of sent as PDF.
+
+    A byte that is not UTF-8 reads as a replacement character, so a Latin-1 file still reads.
+    """
     wire = Wire(sse_reply([{"type": "text", "text": "Read."}]))
     turn = Message(
         role="user",
@@ -126,6 +129,7 @@ async def test_claude_reads_every_text_type_and_notes_an_untyped_file_unread(tmp
             File(content=b"echo hi", filename="run.sh"),
             File(content=b"key: value", mime_type="application/yaml", filename="settings.yaml"),
             File(filepath=str(tmp_path / "att_missing"), filename="blob"),
+            File(content=b"caf\xe9,ok", filename="latin.csv"),
         ],
     )
 
@@ -135,6 +139,7 @@ async def test_claude_reads_every_text_type_and_notes_an_untyped_file_unread(tmp
         {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "echo hi"}},
         {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "key: value"}},
         {"type": "text", "text": unreadable_type_note("blob", "application/octet-stream")},
+        {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "caf\ufffd,ok"}},
     ]
 
 

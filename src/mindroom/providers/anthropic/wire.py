@@ -24,7 +24,13 @@ from mindroom.model_defaults import CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES, CLAUDE
 from mindroom.providers.anthropic.repairs import replay_safe_blocks
 from mindroom.providers.anthropic.stored_turns import replayed_blocks
 from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY, as_dict
-from mindroom.providers.media_files import file_mime_type, is_text_mime_type, read_media_bytes, unreadable_file_note
+from mindroom.providers.media_files import (
+    file_mime_type,
+    file_text,
+    is_text_mime_type,
+    read_media_bytes,
+    unreadable_file_note,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -282,7 +288,7 @@ def _document_block(file: File, provider: str) -> dict[str, Any] | None:
         return None
     if text:
         # The text document source accepts only text/plain; every text type is sent as plain text.
-        source = {"type": "text", "media_type": "text/plain", "data": data.decode("utf-8", errors="replace")}
+        source = {"type": "text", "media_type": "text/plain", "data": file_text(data)}
     else:
         source = {"type": "base64", "media_type": _PDF, "data": base64.b64encode(data).decode("utf-8")}
     return {"type": "document", "source": source}

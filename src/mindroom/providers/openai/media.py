@@ -15,7 +15,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.media import image_mime_type
-from mindroom.providers.media_files import file_mime_type, read_media_bytes, unreadable_file_note
+from mindroom.providers.media_files import (
+    file_mime_type,
+    file_text,
+    is_text_mime_type,
+    read_media_bytes,
+    unreadable_file_note,
+)
 
 if TYPE_CHECKING:
     from mindroom.llm.media import Audio, File, Image
@@ -29,8 +35,9 @@ __all__ = [
 ]
 
 # OpenAI's file inputs guide (https://developers.openai.com/api/docs/guides/pdf-files): "Chat Completions accepts only
-# PDF files as ``file`` content parts", while Responses also reads spreadsheets, documents, presentations, and text and
-# code, which are every ``text/*`` type the guide lists and these types outside ``text/``.
+# PDF files as ``file`` content parts", and the guide sends another file's text as a ``text`` part, while Responses also
+# reads spreadsheets, documents, presentations, and text and code, which are every ``text/*`` type the guide lists and
+# these types outside ``text/``.
 _PDF = "application/pdf"
 _RESPONSES_FILE_TYPES = frozenset(
     {
@@ -154,17 +161,21 @@ def _file_part_name(file: File, fallback: str) -> str:
 
 
 def chat_file_part(file: File, *, provider: str) -> dict[str, Any] | None:
-    """Return a Chat Completions ``file`` part for a PDF, a text part noting a file of another type, or None.
+    """Return a Chat Completions ``file`` part for a PDF, a text part for a text file, or None.
 
-    None is for a file without bytes or an empty local file. The part is named and typed as a Responses file part is.
+    A text file goes as its text (``file_text``), and a file of another type as a text part noting it. None is for a
+    file without bytes or an empty local file. A file part is named and typed as a Responses file part is.
     """
     if not _has_bytes(file):
         return None
     mime_type = file_mime_type(file)
-    if mime_type != _PDF:
+    text_file = is_text_mime_type(mime_type)
+    if mime_type != _PDF and not text_file:
         return {"type": "text", "text": unreadable_file_note(file, mime_type)}
     if (data := _content_bytes(file, provider)) is None:
         return None
+    if text_file:
+        return {"type": "text", "text": file_text(data)}
     return {
         "type": "file",
         "file": {"filename": _file_part_name(file, "file"), "file_data": _data_url(mime_type, data)},

@@ -1420,10 +1420,11 @@ def test_an_attachment_s_type_comes_from_its_original_filename(
 
 
 def _sent_type(part: dict[str, Any] | None) -> str:
-    """Return the type a file part sends its data as, or ``note (<type>)`` for a part noting a file it cannot send."""
+    """Return the type a file part sends its data as, ``note <type>`` for a note, or ``text`` for the file's text."""
     assert part is not None
     if part["type"] in {"text", "input_text"}:
-        return "note " + re.findall(r"\((.+?)\) is a file type", part["text"])[0]
+        noted = re.findall(r"^\[Attachment omitted: .+? \((.+?)\) is a file type", part["text"])
+        return f"note {noted[0]}" if noted else "text"
     data_url = part["file"]["file_data"] if part["type"] == "file" else part["file_data"]
     return data_url.removeprefix("data:").split(";", 1)[0]
 
@@ -1436,10 +1437,10 @@ def _sent_type(part: dict[str, Any] | None) -> str:
         (File(content=b"PK", filename="sheet.xlsx", mime_type="application/octet-stream"), "note " + _XLSX, _XLSX),
         (
             File(content=b"notes", filename="notes.txt", mime_type="application/octet-stream"),
-            "note text/plain",
+            "text",
             "text/plain",
         ),
-        (File(content=b"{}", filename="data.json"), "note application/json", "application/json"),
+        (File(content=b"{}", filename="data.json"), "text", "application/json"),
         (
             File(content=b"a,b", filename="report.csv.gz"),
             "note application/octet-stream",
@@ -1454,12 +1455,28 @@ def _sent_type(part: dict[str, Any] | None) -> str:
     ],
 )
 def test_chat_and_responses_send_only_the_file_types_their_api_reads(file: File, chat: str, responses: str) -> None:
-    """Both wires type a file by one rule; Chat reads only PDF, Responses also documents and text, as OpenAI documents.
+    """Both wires type a file by one rule; Chat reads PDF and text, Responses also documents, as OpenAI documents.
 
-    Any other file goes as a text part naming it and its type, and a compressed name has no type.
+    Chat sends a text file's contents as a text part. Any other file goes as a text part naming it and its type, and a
+    compressed name has no type.
     """
     assert _sent_type(chat_file_part(file, provider="OpenAI Chat")) == chat
     assert _sent_type(responses_file_part(file, provider="OpenAI Responses")) == responses
+
+
+def test_chat_sends_a_text_file_s_contents_read_as_claude_reads_them(tmp_path: Path) -> None:
+    """Chat Completions takes only PDF file parts, so a text file goes as its UTF-8 text; other bytes read as U+FFFD."""
+    notes = tmp_path / "att_notes.txt"
+    notes.write_bytes("Café notes\n".encode())
+
+    assert chat_file_part(File(filepath=str(notes), filename="notes.md"), provider="OpenAI Chat") == {
+        "type": "text",
+        "text": "Café notes\n",
+    }
+    assert chat_file_part(File(content=b"caf\xe9,ok", filename="latin.csv"), provider="OpenAI Chat") == {
+        "type": "text",
+        "text": "caf\ufffd,ok",
+    }
 
 
 def test_a_file_of_a_type_the_api_does_not_read_is_never_read(tmp_path: Path) -> None:

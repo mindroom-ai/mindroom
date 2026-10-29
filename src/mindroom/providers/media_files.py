@@ -21,7 +21,14 @@ from mindroom.logging_config import get_logger
 if TYPE_CHECKING:
     from mindroom.llm.media import File
 
-__all__ = ["file_mime_type", "is_text_mime_type", "read_media_bytes", "read_media_file", "unreadable_file_note"]
+__all__ = [
+    "file_mime_type",
+    "file_text",
+    "is_text_mime_type",
+    "read_media_bytes",
+    "read_media_file",
+    "unreadable_file_note",
+]
 
 logger = get_logger(__name__)
 
@@ -105,6 +112,15 @@ def file_mime_type(file: File) -> str:
 def is_text_mime_type(mime_type: str) -> bool:
     """Return whether ``mime_type``, as ``file_mime_type`` gives it, is a text type."""
     return mime_type.startswith("text/") or mime_type in _TEXT_MIME_TYPES
+
+
+def file_text(data: bytes) -> str:
+    """Return a text file's bytes as text, read as UTF-8, the encoding MindRoom keeps text in.
+
+    Every wire that sends a text file as text reads it here. A byte that is not UTF-8 reads as a replacement character,
+    so a file in another encoding, such as a Latin-1 CSV, still reads except for those characters.
+    """
+    return data.decode("utf-8", errors="replace")
 
 
 def unreadable_file_note(file: File, mime_type: str) -> str:
