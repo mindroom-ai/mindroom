@@ -26,7 +26,11 @@ from mindroom.external_triggers.store import (
     ExternalTriggerTarget,
 )
 from mindroom.runtime_state import get_api_server_address
-from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tool_system.worker_routing import shared_storage_root
+from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.runtime import worker_visible_storage_root
 
 if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -77,6 +81,9 @@ class CallbackManagerTools(Toolkit):
         try:
             context = self._context()
             normalized_label = _callback_label(label)
+            # The agent's own workspace: a private agent's is its requester's, which only that requester's worker mounts.
+            workspace_root = context.agent_workspace_root(create=True)
+            shell_workspace_root = _shell_workspace_root(context, workspace_root)
             store = ExternalTriggerStore(context.runtime_paths)
             token, token_hash = mint_trigger_capability()
             record = store.create_single_use_capability_record(
@@ -97,7 +104,7 @@ class CallbackManagerTools(Toolkit):
             )
             callback_url = f"{_callback_base_url(context)}/api/triggers/{record.trigger_id}"
             script_path = write_callback_script(
-                agent_workspace_root_path(context.runtime_paths.storage_root, context.agent_name),
+                workspace_root,
                 _CALLBACKS_DIR,
                 callback_id=record.trigger_id,
                 script_text=build_callback_script(
@@ -106,14 +113,21 @@ class CallbackManagerTools(Toolkit):
                     label=normalized_label,
                 ),
             )
-            instruction = f'When finished, run: bash {shlex.quote(str(script_path))} "<short result summary>"'
+            shell_path = str(shell_workspace_root / script_path.relative_to(workspace_root))
             return custom_tool_payload(
                 "callback_manager",
                 "ok",
-                script_path=str(script_path),
-                instruction=instruction,
+                script_path=shell_path,
+                instruction=f'When finished, run: bash {shlex.quote(shell_path)} "<short result summary>"',
             )
-        except (ExternalTriggerContextError, ExternalTriggerStoreError, OSError, ValidationError, ValueError) as exc:
+        except (
+            ExternalTriggerContextError,
+            ExternalTriggerStoreError,
+            OSError,
+            ValidationError,
+            ValueError,
+            WorkerBackendError,
+        ) as exc:
             if record is not None and store is not None and context is not None:
                 with suppress(ExternalTriggerStoreError):
                     store.delete_record(
@@ -122,6 +136,20 @@ class CallbackManagerTools(Toolkit):
                         config=context.config,
                     )
             return custom_tool_payload("callback_manager", "error", message=str(exc))
+
+
+def _shell_workspace_root(context: ToolRuntimeContext, workspace_root: Path) -> Path:
+    """Return the absolute path at which the agent's shell, in the primary or in its worker, sees its workspace."""
+    agent_tools = resolve_agent_tools(context.config, context.agent_name)
+    if not agent_tools.runs_in_worker("shell", tool_placement(context.runtime_paths)):
+        return workspace_root
+    # Read only for a worker shell: an unconfigured worker backend must not stop a local shell from minting.
+    worker_root = worker_visible_storage_root(context.runtime_paths)
+    if worker_root is None:
+        # A static_runner sandbox that sees agent workspaces mounts them at MindRoom's paths, as the Kubernetes sidecar does.
+        return workspace_root
+    # A dedicated worker mounts each workspace at its path below the storage root, under its own storage mount.
+    return worker_root / workspace_root.relative_to(shared_storage_root(context.runtime_paths.storage_root))
 
 
 def _callback_label(label: str) -> str:
