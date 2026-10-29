@@ -729,12 +729,6 @@ class _MultiAgentOrchestrator:
         )
         return bots
 
-    def _bots_to_setup_after_background_start(self, entity_name: str) -> list[AgentBot]:
-        """Return the bots whose room memberships should be reconciled after a background start."""
-        if entity_name == ROUTER_AGENT_NAME:
-            return self._running_bots_for_entities(self.agent_bots)
-        return self._running_bots_for_entities((entity_name,))
-
     def _running_bots_for_entities(self, entity_names: Iterable[str]) -> list[AgentBot]:
         """Return running bots for the given entity names."""
         running_bots: list[AgentBot] = []
@@ -1047,8 +1041,10 @@ class _MultiAgentOrchestrator:
         self._schedule_ready_turn_dispatch_recovery()
 
     async def _setup_rooms_after_retry(self, entity_name: str) -> None:
-        """Reconcile rooms after a background retry started one entity."""
-        bots_to_setup = self._bots_to_setup_after_background_start(entity_name)
+        """Reconcile rooms after a background retry started one entity, and every bot's rooms after the router started."""
+        bots_to_setup = self._running_bots_for_entities(
+            self.agent_bots if entity_name == ROUTER_AGENT_NAME else (entity_name,),
+        )
         if bots_to_setup:
             await run_with_retry(
                 f"Updating Matrix room memberships for {entity_name}",
@@ -1842,12 +1838,6 @@ def _recover_failed_plugin_reload(
     )
 
 
-async def _handle_config_change(orchestrator: _MultiAgentOrchestrator) -> None:
-    """Handle configuration file changes."""
-    logger.info("Configuration file changed; queueing hot reload")
-    orchestrator.config_reload.request_reload()
-
-
 async def _watch_config_task(config_path: Path, orchestrator: _MultiAgentOrchestrator) -> None:
     """Watch the config file plus every file it pulls in via !include."""
 
@@ -1855,7 +1845,8 @@ async def _watch_config_task(config_path: Path, orchestrator: _MultiAgentOrchest
         return {config_path, *orchestrator.config_reload.watched_source_files}
 
     async def on_config_change() -> None:
-        await _handle_config_change(orchestrator)
+        logger.info("Configuration file changed; queueing hot reload")
+        orchestrator.config_reload.request_reload()
 
     await file_watcher.watch_paths(config_source_paths, on_config_change)
 
