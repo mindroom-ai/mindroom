@@ -88,9 +88,9 @@ logger = get_logger(__name__)
 class _StartClaim:
     """Decide, once, whether a leaf's real work began before its call was cancelled."""
 
-    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    _started: bool = False
-    _cancelled_before_start: bool = False
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _started: bool = field(default=False, init=False)
+    _cancelled_before_start: bool = field(default=False, init=False)
 
     def claim_start(self) -> bool:
         """Atomically claim actual entrypoint start against request cancellation."""
