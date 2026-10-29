@@ -452,7 +452,11 @@ def iter_usage_storage_rows(
         return
     try:
         with read_only_snapshot(source.path) as connection:
-            problem = unreadable_layout(connection, source.names)
+            problem = (
+                "session table unavailable"
+                if _IDENTIFIER.fullmatch(source.names.sessions) is None
+                else unreadable_layout(connection, source.names)
+            )
             if problem is not None:
                 yield _source_diagnostic(source, "unsupported_schema", problem)
                 return

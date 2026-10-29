@@ -7,7 +7,6 @@ They never create, convert, or write a database.
 
 from __future__ import annotations
 
-import re
 import sqlite3
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Literal, NamedTuple
@@ -22,7 +21,6 @@ if TYPE_CHECKING:
 
 type UnreadableLayout = Literal["session table unavailable", "session schema unsupported", "usage schema unsupported"]
 
-_IDENTIFIER = re.compile(r"[A-Za-z0-9_]+\Z")
 _SESSION_COLUMNS = frozenset({"session_id", "user_id", "session_data"})
 _OWNER_COLUMNS = frozenset({"owner_kind", "owner_id"})
 _USAGE_COLUMNS = frozenset({"id", "session_id", "run_id", "usage_data"})
@@ -60,7 +58,7 @@ def unreadable_layout(connection: sqlite3.Connection, names: TableNames) -> Unre
     The sessions table is required; the usage ledger only when the database has one.
     """
     tables = table_names(connection)
-    if _IDENTIFIER.fullmatch(names.sessions) is None or names.sessions not in tables:
+    if names.sessions not in tables:
         return "session table unavailable"
     if not _SESSION_COLUMNS.issubset(table_columns(connection, names.sessions)):
         return "session schema unsupported"

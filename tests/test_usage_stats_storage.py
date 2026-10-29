@@ -619,6 +619,21 @@ def test_a_read_leaves_a_crashed_writers_journal_for_the_store_to_roll_back(tmp_
     assert (database.read_bytes(), journal.read_bytes()) == before
 
 
+def test_a_database_without_its_sessions_table_is_not_read(tmp_path: Path) -> None:
+    """A file that lacks the sessions table its name gives reads as having none, whatever else it holds."""
+    database = tmp_path / "code.db"
+    # Named before the file exists, so the source reads the file as written, without the conversion an open runs.
+    source = _source(database)
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("CREATE TABLE other_sessions (session_id TEXT PRIMARY KEY, user_id TEXT, session_data TEXT)")
+
+    result = list(iter_usage_storage_rows(source))
+
+    assert result == [
+        UsageStorageDiagnostic(path_label="code.db", status="unsupported_schema", detail="session table unavailable"),
+    ]
+
+
 def test_a_database_not_named_by_a_plain_identifier_is_not_read(tmp_path: Path) -> None:
     """A source whose file name is not a plain identifier reads as having no sessions table, whatever the file holds."""
     database = tmp_path / "code-x.db"
