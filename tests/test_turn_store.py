@@ -47,7 +47,7 @@ from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
 from mindroom.session_storage.types import ConversationSession
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamResolution, TeamResolutionMember
@@ -322,7 +322,7 @@ def _seeded_storage(
     """
     if session is not None:
         write_agno_database(AgnoTableNames(name).database_path(tmp_path / name), session, usage=False)
-    return create_state_storage(name, tmp_path / name)
+    return create_agent_state_storage(name, tmp_path / name)
 
 
 _EPOCH = datetime.fromtimestamp(0, UTC)
@@ -2598,7 +2598,7 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
     await store.record_turn(original)
 
     def storage_factory(*_args: object, **_kwargs: object) -> ConversationStore:
-        return create_state_storage("agent", tmp_path)
+        return create_agent_state_storage("agent", tmp_path)
 
     store.deps.state_writer.create_storage.side_effect = storage_factory
     store.deps.state_writer.history_scope.return_value = scope
@@ -3047,7 +3047,7 @@ async def test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen(
     )
 
     def storage_factory(*_args: object, **_kwargs: object) -> ConversationStore:
-        return create_state_storage("agent", tmp_path)
+        return create_agent_state_storage("agent", tmp_path)
 
     later_run = RunRecord(
         run_id="later",

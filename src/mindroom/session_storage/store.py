@@ -41,7 +41,6 @@ from mindroom.session_storage.schema import (
     NON_VISIBLE_RUN_STATUS_SQL,
     NON_VISIBLE_RUN_STATUS_VALUES,
     TableNames,
-    owner_scope_key,
 )
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from mindroom.usage.storage import project_helper_usage, project_usage, quote_identifier, usage_upsert_sql
@@ -152,21 +151,22 @@ class ConversationStore:
         return None if row is None else decoded_mapping(row[0])
 
     def load_session(self, session_id: str, kind: SessionKind) -> ConversationSession | None:
-        """Load one session with the runs a reply reasons over, or None when it is missing or of another kind.
+        """Load one session with the runs a reply reasons over, or None when it is missing or ``kind`` is not its kind.
 
-        The runs are every top-level run its scope's latest summary row does not cover, every paused, cancelled, or
-        errored one wherever it sits, and the member runs of those, in ``seq`` order, each in its replay view.
+        The session's kind and owner are the database's owner. The runs are every top-level run its scope's latest
+        summary row does not cover, every paused, cancelled, or errored one wherever it sits, and the member runs of
+        those, in ``seq`` order, each in its replay view.
         """
         with self.transaction(write=False) as connection:
             loaded = self._read_load(connection, session_id, kind)
         if loaded is None:
             return None
-        _, agent_id, team_id, session_data, metadata, created_at = loaded.row
-        state = _session_state(session_data)
+        session_state, metadata, created_at = loaded.row
+        state = _session_state(session_state)
         return ConversationSession(
             session_id=session_id,
-            kind=kind,
-            owner_id=(team_id if kind == "team" else agent_id) or "",
+            kind=loaded.owner.kind,
+            owner_id=loaded.owner.scope_id,
             metadata=decoded_mapping(metadata),
             session_state=state,
             stored_session_state=copy.deepcopy(state),
@@ -177,20 +177,25 @@ class ConversationStore:
 
     def _read_load(self, connection: sqlite3.Connection, session_id: str, kind: SessionKind) -> _Load | None:
         """Read what a load of session ``session_id`` returns, in the caller's transaction."""
-        row = self._session_row(connection, session_id, kind)
-        if row is None:
-            return None
-        stored_kind, agent_id, team_id = row[:3]
         names = self.names
+        owner = database_owner(connection, names)
+        row = connection.execute(
+            f"SELECT session_state, metadata, created_at FROM {quote_identifier(names.sessions)} "  # noqa: S608
+            "WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None or owner.kind != kind:
+            return None
         runs, summaries = quote_identifier(names.log_runs), quote_identifier(names.log_summaries)
         loaded = (
             f"run.session_id = ? AND ({_loads_sql('run', summaries)} OR run.parent_run_id IN "  # noqa: S608
             f"(SELECT top.run_id FROM {runs} AS top WHERE top.session_id = ? AND {_loads_sql('top', summaries)}))"
         )
         return _Load(
+            owner=owner,
             row=row,
             runs=_read_runs(connection, names, loaded, (session_id, session_id)),
-            summary=_replay_summary(connection, summaries, session_id, owner_scope_key(stored_kind, agent_id, team_id)),
+            summary=_replay_summary(connection, summaries, session_id, owner.key),
         )
 
     @contextmanager
@@ -216,20 +221,6 @@ class ConversationStore:
         with self.transaction(write=False) as connection:
             loaded = self._read_load(connection, session.session_id, session.kind)
         _adopt_log(session, loaded)
-
-    def _session_row(
-        self,
-        connection: sqlite3.Connection,
-        session_id: str,
-        kind: SessionKind,
-    ) -> tuple[Any, ...] | None:
-        """Read session ``session_id``'s row, or None when it is missing or of another kind."""
-        row = connection.execute(
-            "SELECT session_type, agent_id, team_id, session_data, metadata, created_at "  # noqa: S608
-            f"FROM {quote_identifier(self.names.sessions)} WHERE session_id = ?",
-            (session_id,),
-        ).fetchone()
-        return None if row is None or row[0] != kind else row
 
     def save_run(
         self,
@@ -439,15 +430,18 @@ class ConversationStore:
     def list_updated_sessions(self, agent_id: str, *, since: int) -> list[tuple[str, int]]:
         """Return ``(session_id, updated_at)`` of agent ``agent_id``'s sessions updated after ``since``, oldest first.
 
-        A session's update time moves when its row is written: a changed state a run save carries, a metadata change,
-        or a run save that records its usage, as a run's terminal save through ``persist_to`` does.
+        Every session of a database belongs to its owner, so another owner's database lists none. A session's update
+        time moves when its row is written: a changed state a run save carries, a metadata change, or a run save that
+        records its usage, as a run's terminal save through ``persist_to`` does.
         """
         with self.transaction(write=False) as connection:
+            if database_owner(connection, self.names) != HistoryScope(kind="agent", scope_id=agent_id):
+                return []
             return connection.execute(
                 "SELECT session_id, COALESCE(updated_at, created_at) AS updated "  # noqa: S608
-                f"FROM {quote_identifier(self.names.sessions)} WHERE session_type = 'agent' AND agent_id = ? "
-                "AND COALESCE(updated_at, created_at) > ? ORDER BY updated, session_id",
-                (agent_id, since),
+                f"FROM {quote_identifier(self.names.sessions)} WHERE COALESCE(updated_at, created_at) > ? "
+                "ORDER BY updated, session_id",
+                (since,),
             ).fetchall()
 
     def save_independent_usage(
@@ -477,8 +471,9 @@ class ConversationStore:
 
 @dataclass(frozen=True, slots=True)
 class _Load:
-    """What one load of a session read: its row, its runs, and its summary."""
+    """What one load of a session read: the database's owner, the session's row, its runs, and its summary."""
 
+    owner: HistoryScope
     row: tuple[Any, ...]
     runs: list[AnyRunRecord]
     summary: ScopeSummary | None
@@ -593,10 +588,17 @@ def decoded_mapping(raw_value: object, *, null: dict[str, Any] | None = None) ->
     return cast("dict[str, Any]", value) if isinstance(value, dict) else None
 
 
-def _session_state(raw_session_data: object) -> dict[str, Any]:
-    """Return the ``session_state`` object inside a row's ``session_data``, or an empty one."""
-    state = (decoded_mapping(raw_session_data) or {}).get("session_state")
-    return state if isinstance(state, dict) else {}
+def _session_state(raw_session_state: object) -> dict[str, Any]:
+    """Return a row's ``session_state`` object, or an empty one when it holds none or no object."""
+    return decoded_mapping(raw_session_state) or {}
+
+
+def database_owner(connection: sqlite3.Connection, names: TableNames) -> HistoryScope:
+    """Return the agent, team scope, or system usage ledger that owns the database, as its meta row records it."""
+    kind, scope_id = connection.execute(
+        f"SELECT owner_kind, owner_id FROM {quote_identifier(names.log_meta)} WHERE id = 1",  # noqa: S608
+    ).fetchone()
+    return HistoryScope(kind=kind, scope_id=scope_id)
 
 
 def ensure_session_row(
@@ -606,29 +608,26 @@ def ensure_session_row(
 ) -> dict[str, Any] | None:
     """Create ``session``'s row in the caller's write transaction unless one exists, keeping one another writer made.
 
-    Returns the copy of ``session.session_state`` a created row holds, for the caller to record as
-    ``session.stored_session_state`` once its transaction commits, or None when the row existed. A caller whose
-    write created the row reports it once the write commits (``report_created_row``).
+    The row names no owner, since the database's owner owns every session in it. Returns the copy of
+    ``session.session_state`` a created row holds, for the caller to record as ``session.stored_session_state`` once
+    its transaction commits, or None when the row existed. A caller whose write created the row reports it once the
+    write commits (``report_created_row``).
     """
-    owner_column = "team_id" if session.kind == "team" else "agent_id"
     # One encode reads the live state, as ``session_state_snapshot`` does, and the created row's copy decodes from it.
-    session_data = json.dumps({"session_state": session.session_state})
+    session_state = json.dumps(session.session_state)
     cursor = connection.execute(
-        f"INSERT INTO {quote_identifier(names.sessions)} (session_id, session_type, {owner_column}, "  # noqa: S608
-        "session_data, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(session_id) DO NOTHING",
+        f"INSERT INTO {quote_identifier(names.sessions)} (session_id, session_state, metadata, created_at, "  # noqa: S608
+        "updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(session_id) DO NOTHING",
         (
             session.session_id,
-            session.kind,
-            session.owner_id,
-            session_data,
+            session_state,
             # No metadata is stored as the JSON text ``null``, never SQL NULL.
             json.dumps(session.metadata),
             session.created_at,
             session.created_at,
         ),
     )
-    return json.loads(session_data)["session_state"] if cursor.rowcount else None
+    return json.loads(session_state) if cursor.rowcount else None
 
 
 @dataclass(slots=True)
@@ -700,15 +699,10 @@ def _write_session_state(
     session_id: str,
     state: dict[str, Any],
 ) -> None:
-    """Replace the ``session_state`` of an existing session row, leaving the rest of its ``session_data`` alone."""
-    sessions = quote_identifier(names.sessions)
-    (stored,) = connection.execute(
-        f"SELECT session_data FROM {sessions} WHERE session_id = ?",  # noqa: S608
-        (session_id,),
-    ).fetchone()
+    """Replace the ``session_state`` of an existing session row."""
     connection.execute(
-        f"UPDATE {sessions} SET session_data = ?, updated_at = ? WHERE session_id = ?",  # noqa: S608
-        (json.dumps({**(decoded_mapping(stored) or {}), "session_state": state}), int(time()), session_id),
+        f"UPDATE {quote_identifier(names.sessions)} SET session_state = ?, updated_at = ? WHERE session_id = ?",  # noqa: S608
+        (json.dumps(state), int(time()), session_id),
     )
 
 
@@ -956,11 +950,9 @@ def _replay_summary(
     connection: sqlite3.Connection,
     summaries: str,
     session_id: str,
-    owner_scope: str | None,
+    owner_scope: str,
 ) -> ScopeSummary | None:
     """Return the text of the owner scope's latest summary row, which the session replays; a barrier has none."""
-    if owner_scope is None:
-        return None
     latest = connection.execute(
         f"SELECT summary, created_at FROM {summaries} WHERE session_id = ? AND scope_key = ? "  # noqa: S608
         "ORDER BY id DESC LIMIT 1",
@@ -1174,6 +1166,7 @@ __all__ = [
     "begun",
     "connect_by_name",
     "connect_conversation_database",
+    "database_owner",
     "decoded_mapping",
     "delete_runs_in_transaction",
     "ensure_session_row",

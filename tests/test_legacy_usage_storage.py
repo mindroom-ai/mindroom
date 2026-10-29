@@ -23,6 +23,7 @@ from mindroom.session_storage.schema import TableNames
 from mindroom.usage import legacy_usage_storage
 from mindroom.usage.stats_storage import UsageSessionRow, UsageStorageSource, iter_usage_storage_rows
 from tests.conftest import create_agno_2_sessions_db
+from tests.session_storage.agno_layout import recorded_owner
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -31,7 +32,7 @@ _NAMES = AgnoTableNames("code")
 
 
 def _convert(path: Path) -> None:
-    prepare_conversation_database(path, TableNames.of_database(path), agent_name=None)
+    prepare_conversation_database(path, TableNames.of_database(path), recorded_owner(path))
 
 
 def _usage(path: Path) -> list[tuple[str | None, object]]:

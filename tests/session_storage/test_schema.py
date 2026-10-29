@@ -9,8 +9,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.history.types import HistoryScope
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql, agno_schema_sql
-from mindroom.session_storage.schema import LOG_VERSION, TableNames, log_schema_sql, table_names
+from mindroom.session_storage.schema import LOG_VERSION, TableNames, create_log_schema, log_schema_sql, table_names
 from tests.session_storage.goldens import golden_stores
 
 if TYPE_CHECKING:
@@ -100,16 +101,20 @@ def test_the_runs_table_keeps_the_name_agno_gave_it(storage_name: str, runs: str
 _LOG_COLUMNS = {
     "code_sessions": [
         "session_id VARCHAR NOT NULL PK1",
-        "session_type VARCHAR NOT NULL",
-        "agent_id VARCHAR",
-        "team_id VARCHAR",
         "user_id VARCHAR",
         "session_data JSON",
         "metadata JSON",
         "created_at BIGINT NOT NULL",
         "updated_at BIGINT",
+        "session_state JSON",
     ],
-    "code_sessions_log_meta": ["id INTEGER PK1", "version INTEGER NOT NULL", "next_seq INTEGER NOT NULL"],
+    "code_sessions_log_meta": [
+        "id INTEGER PK1",
+        "version INTEGER NOT NULL",
+        "next_seq INTEGER NOT NULL",
+        "owner_kind TEXT",
+        "owner_id TEXT",
+    ],
     "code_sessions_log_runs": [
         "run_id TEXT NOT NULL PK1",
         "session_id TEXT NOT NULL",
@@ -175,7 +180,6 @@ _LOG_OBJECTS = [
     ("index", "idx_code_sessions_log_runs_parent_run_id", "code_sessions_log_runs"),
     ("index", "idx_code_sessions_log_runs_session_id_seq", "code_sessions_log_runs"),
     ("index", "idx_code_sessions_log_summaries_session_id_scope_key_id", "code_sessions_log_summaries"),
-    ("index", "idx_code_sessions_session_type", "code_sessions"),
     ("index", "sqlite_autoindex_code_sessions_1", "code_sessions"),
     ("index", "sqlite_autoindex_code_sessions_log_messages_1", "code_sessions_log_messages"),
     ("index", "sqlite_autoindex_code_sessions_log_removed_1", "code_sessions_log_removed"),
@@ -219,16 +223,18 @@ def _layout(connection: sqlite3.Connection) -> dict[str, object]:
     }
 
 
+_OWNER = HistoryScope(kind="agent", scope_id="code")
+
+
 def _log_database(path: Path | str = ":memory:") -> sqlite3.Connection:
     connection = sqlite3.connect(path, isolation_level=None)
     connection.execute("PRAGMA foreign_keys = ON")
-    for statement in log_schema_sql(TableNames("code")):
-        connection.execute(statement)
+    create_log_schema(connection, TableNames("code"), _OWNER)
     return connection
 
 
-def test_the_v2_schema_creates_exactly_its_tables_indexes_and_meta_row(tmp_path: Path) -> None:
-    """An empty file gets the nine-column sessions table, the six log tables, the ledger, and version 2's meta row."""
+def test_the_schema_creates_exactly_its_tables_indexes_and_meta_row(tmp_path: Path) -> None:
+    """An empty file gets the seven-column sessions table, the six log tables, the ledger, and a meta row naming its owner."""
     with closing(_log_database(tmp_path / "code.db")) as connection:
         layout = _layout(connection)
 
@@ -236,36 +242,35 @@ def test_the_v2_schema_creates_exactly_its_tables_indexes_and_meta_row(tmp_path:
         "objects": _LOG_OBJECTS,
         "columns": _LOG_COLUMNS,
         "foreign_keys": _LOG_FOREIGN_KEYS,
-        "meta": [(1, LOG_VERSION, 1)],
+        "meta": [(1, LOG_VERSION, 1, "agent", "code")],
     }
-    assert LOG_VERSION == 3
+    assert LOG_VERSION == 4
 
 
-def test_the_v2_schema_changes_nothing_when_run_again() -> None:
+def test_the_schema_changes_nothing_when_run_again() -> None:
     """A second run leaves every schema object and a counter that moved since alone, as a converted file needs."""
     with closing(_log_database()) as connection:
         connection.execute("UPDATE code_sessions_log_meta SET next_seq = 7")
         before = connection.execute("SELECT * FROM sqlite_master ORDER BY name").fetchall()
-        for statement in log_schema_sql(TableNames("code")):
-            connection.execute(statement)
+        create_log_schema(connection, TableNames("code"), HistoryScope(kind="team", scope_id="other"))
         after = connection.execute("SELECT * FROM sqlite_master ORDER BY name").fetchall()
         meta = connection.execute("SELECT * FROM code_sessions_log_meta").fetchall()
 
     assert after == before
-    assert meta == [(1, LOG_VERSION, 7)]
+    assert meta == [(1, LOG_VERSION, 7, "agent", "code")]
 
 
 @pytest.mark.parametrize("row_id", [1, 2])
 def test_the_meta_table_holds_one_row(row_id: int) -> None:
     """Its constant primary key refuses a second row, under the same key or another."""
     with closing(_log_database()) as connection, pytest.raises(sqlite3.IntegrityError):
-        connection.execute("INSERT INTO code_sessions_log_meta VALUES (?, 2, 1)", (row_id,))
+        connection.execute("INSERT INTO code_sessions_log_meta VALUES (?, 2, 1, 'agent', 'code')", (row_id,))
 
 
 def test_a_summary_id_is_never_handed_out_again() -> None:
     """Deleting the newest summary row does not let the next one reuse its id, which an append's compare reads."""
     with closing(_log_database()) as connection:
-        connection.execute("INSERT INTO code_sessions VALUES ('s', 'agent', 'code', NULL, NULL, NULL, NULL, 1, 1)")
+        connection.execute("INSERT INTO code_sessions (session_id, created_at) VALUES ('s', 1)")
         insert = (
             "INSERT INTO code_sessions_log_summaries (session_id, scope_key, through, created_at) VALUES (?, ?, ?, ?)"
         )

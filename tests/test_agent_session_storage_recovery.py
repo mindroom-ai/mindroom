@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.llm.runs import RunRecord, TeamRunRecord
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
 from mindroom.session_storage.preflight import session_storage_preflight
 from mindroom.session_storage.schema import TableNames, table_names
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 
 def _storage(state_root: Path) -> ConversationStore:
-    return create_state_storage("general", state_root)
+    return create_agent_state_storage("general", state_root)
 
 
 def _row(session_id: str, *, kind: SessionKind = "agent", owner: str = "general") -> ConversationSession:
@@ -412,7 +412,7 @@ def test_compatible_old_fixture_and_current_run_rows_survive_reopen(tmp_path: Pa
             connection.commit()
 
     def open_storage() -> ConversationStore:
-        return create_state_storage("code", tmp_path)
+        return create_agent_state_storage("code", tmp_path)
 
     storage = open_storage()
     storage.save_run(

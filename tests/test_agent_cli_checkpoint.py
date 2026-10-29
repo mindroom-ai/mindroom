@@ -20,7 +20,7 @@ from mindroom.history.run_visibility import is_model_history_visible_run
 from mindroom.llm.media import Audio, Image
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import ConversationStore, persist_to, write_with_session_state
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from mindroom.tool_system.tool_function import ToolOutcome
@@ -70,7 +70,7 @@ async def _capture(checkpoint: BatchCheckpoint, record: RunRecord, messages: lis
 
 async def _stored_catalog(tmp_path: Path) -> PreparedAgentToolCatalog:
     catalog = await _catalog(tmp_path, [])
-    catalog.store = create_state_storage("helper", tmp_path)
+    catalog.store = create_agent_state_storage("helper", tmp_path)
     return catalog
 
 
@@ -292,7 +292,7 @@ async def test_a_checkpoint_saves_a_session_state_another_thread_keeps_changing(
     A copy that walks the state in Python, even after a shallow copy of its top level, fails with "dictionary changed
     size during iteration" once the interpreter hands over mid-walk; the tiny switch interval makes it do so.
     """
-    store = create_state_storage("helper", tmp_path)
+    store = create_agent_state_storage("helper", tmp_path)
     nested: dict[str, Any] = {f"key-{index}": [index] for index in range(2_000)}
     live: dict[str, Any] = {"nested": nested}
     session = ConversationSession(session_id="session", kind="agent", owner_id="helper", session_state=live)

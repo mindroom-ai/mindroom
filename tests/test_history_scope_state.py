@@ -26,7 +26,7 @@ from mindroom.history.types import (
 )
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.session_storage import store as store_module
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import (
     seed_session,
@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 @pytest.fixture
 def storage(tmp_path: Path) -> ConversationStore:
     """Conversation storage for reading seen ids, which include the summary rows'."""
-    return create_state_storage("test_agent", tmp_path / "seen")
+    return create_agent_state_storage("test_agent", tmp_path / "seen")
 
 
 def _shared_session(*, is_team: bool) -> ConversationSession:

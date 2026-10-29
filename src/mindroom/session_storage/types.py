@@ -29,7 +29,7 @@ def session_state_snapshot(state: dict[str, Any]) -> dict[str, Any]:
 class ConversationSession:
     """One conversation's session row and the runs a load returns.
 
-    ``owner_id`` is the agent or team the session belongs to (the row's ``agent_id`` or ``team_id``).
+    ``kind`` and ``owner_id`` are the agent or team scope the session belongs to: as loaded, the database's owner.
     ``runs`` holds, as loaded, every top-level run its scope's latest summary row does not cover, every paused,
     cancelled, or errored run, and their member runs, in log order. The store's saves leave each run they write here as
     the store holds it and take a removed run out; a final save leaves the session's copy, or its absence, as it was,

@@ -28,7 +28,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.media_inputs import MediaInputs
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
 from tests.history_helpers import compact_runs, log_of, replay_settings, stored_run_ids
@@ -48,7 +48,7 @@ _ALL_HISTORY = replay_settings()
 @pytest.fixture
 def storage(tmp_path: Path) -> ConversationStore:
     """Use the production conversation storage owner."""
-    return create_state_storage("code", tmp_path)
+    return create_agent_state_storage("code", tmp_path)
 
 
 def _run(

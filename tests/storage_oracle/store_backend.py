@@ -212,7 +212,7 @@ class StoreBackend(Driver):
 
     @override
     def open_store(self) -> None:
-        self.store = create_state_storage(self.owner, self.root)
+        self.store = create_state_storage(self.owner, self.root, self.scope)
 
     @override
     def load(self) -> ConversationSession | None:

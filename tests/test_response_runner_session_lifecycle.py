@@ -47,7 +47,7 @@ from mindroom.response_runner import (
     _NonStreamingGeneration,
 )
 from mindroom.response_sources import ResponseSources
-from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage, create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.tool_system.events import ToolTraceEntry, strip_visible_tool_markers
@@ -101,7 +101,7 @@ THREAD_SESSION_ID = "!test:localhost:$thread-root"
 
 def _history_store(tmp_path: Path) -> ConversationStore:
     """Return the agent scope's store the runner opens for its session probe and its interrupted-turn records."""
-    return create_state_storage("general", tmp_path / "scope_history")
+    return create_agent_state_storage("general", tmp_path / "scope_history")
 
 
 def _first_session(session_id: str) -> ConversationSession:

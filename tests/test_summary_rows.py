@@ -17,7 +17,7 @@ from mindroom.history.summary_rows import CoveredRun, Fold
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import watch_session_row
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session_row
@@ -241,7 +241,7 @@ def test_fresh_storage_has_summary_tables(store: ConversationStore, tmp_path: Pa
     _execute(store, "INSERT INTO code_sessions_log_removed (session_id, run_id) VALUES ('s1', 'gone')")
 
     _execute(store, "DELETE FROM code_sessions WHERE session_id = 's1'")
-    create_state_storage("code", tmp_path)
+    create_agent_state_storage("code", tmp_path)
 
     tables = {name for (name,) in _query(store, "SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert {"code_sessions_log_summaries", "code_sessions_log_removed"} <= tables

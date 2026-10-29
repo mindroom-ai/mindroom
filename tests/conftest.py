@@ -174,7 +174,7 @@ from mindroom.response_runner import (
 )
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedAttempt
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import _session_state, _write_session_state, ensure_session_row, persist_to
 from mindroom.thread_utils import decide_agent_response
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
@@ -3868,7 +3868,7 @@ def unstored_team_scope_context(
 @pytest.fixture
 def store(tmp_path: Path) -> "ConversationStore":
     """Open the conversation database ``code`` under ``tmp_path`` as production opens one, with every table."""
-    return create_state_storage("code", tmp_path)
+    return create_agent_state_storage("code", tmp_path)
 
 
 def seed_session_row(storage: "ConversationStore", session: "ConversationSession") -> None:
@@ -3895,11 +3895,11 @@ def seed_session_state(storage: "ConversationStore", session: "ConversationSessi
 def stored_session_state(storage: "ConversationStore", session_id: str) -> "dict[str, Any]":
     """Return the ``session_state`` the row of session ``session_id`` holds, as a load reads it, without its runs."""
     with storage.transaction(write=False) as connection:
-        (session_data,) = connection.execute(
-            f"SELECT session_data FROM {quote_identifier(storage.names.sessions)} WHERE session_id = ?",  # noqa: S608
+        (session_state,) = connection.execute(
+            f"SELECT session_state FROM {quote_identifier(storage.names.sessions)} WHERE session_id = ?",  # noqa: S608
             (session_id,),
         ).fetchone()
-    return _session_state(session_data)
+    return _session_state(session_state)
 
 
 def seed_session(storage: "ConversationStore", session: "ConversationSession") -> "ConversationSession":

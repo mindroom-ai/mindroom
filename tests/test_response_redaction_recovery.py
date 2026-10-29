@@ -22,7 +22,7 @@ from mindroom.llm.runs import RunRecord
 from mindroom.matrix.journal_ingress import replayable_redaction_target
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRunner
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.turn_store import TurnStore
 from tests.conftest import seed_session
@@ -175,7 +175,7 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
     store = await _store(journal_store)
 
     def storage_factory(*_args: object, **_kwargs: object) -> ConversationStore:
-        return create_state_storage("agent", tmp_path)
+        return create_agent_state_storage("agent", tmp_path)
 
     store.deps.state_writer.create_storage.side_effect = storage_factory
     store.deps.state_writer.history_scope.return_value = scope

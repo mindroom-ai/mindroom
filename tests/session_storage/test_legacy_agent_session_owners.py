@@ -16,12 +16,12 @@ from mindroom.history.storage import remove_history_of_redacted_events
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
-from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
 from mindroom.session_storage.schema import LOG_VERSION, TableNames
 from mindroom.session_storage.types import ConversationSession
-from mindroom.usage.storage import SYSTEM_USAGE_ENTITY, SYSTEM_USAGE_STORAGE_NAME, quote_identifier
+from mindroom.usage.storage import SYSTEM_USAGE_ENTITY, SYSTEM_USAGE_OWNER, SYSTEM_USAGE_STORAGE_NAME, quote_identifier
 from tests.conftest import seed_session
 from tests.history_helpers import compact_runs, stored_run_ids, summary_rows_of
 from tests.session_storage.agno_layout import write_agno_database
@@ -54,11 +54,37 @@ def _session(session_id: str, owner_id: str, *, kind: str = "agent") -> Conversa
 
 def _v2_database(directory: Path, *sessions: ConversationSession) -> Path:
     """Write ``sessions`` into the storage v2 database of the store directory ``directory``, at layout version 2."""
-    store = create_state_storage(directory.name, directory)
+    store = create_agent_state_storage(directory.name, directory)
     for session in sessions:
         seed_session(store, session)
+    return _as_layout_2(store, *sessions)
+
+
+def _as_layout_2(store: ConversationStore, *sessions: ConversationSession) -> Path:
+    """Rewrite ``store``'s database in storage v2's layout at version 2, its rows naming ``sessions``' owners.
+
+    That layout's session rows named their kind and owner and kept their state inside ``session_data``, and its meta
+    row named no owner.
+    """
+    names = store.names
+    table, meta = quote_identifier(names.sessions), quote_identifier(names.log_meta)
     with closing(sqlite3.connect(store.path)) as connection, connection:
-        connection.execute(f"UPDATE {quote_identifier(store.names.log_meta)} SET version = 2")  # noqa: S608
+        for column in ("session_type VARCHAR NOT NULL DEFAULT 'agent'", "agent_id VARCHAR", "team_id VARCHAR"):
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+        for session in sessions:
+            connection.execute(
+                f"UPDATE {table} SET session_type = ?, {'team_id' if session.kind == 'team' else 'agent_id'} = ? "  # noqa: S608
+                "WHERE session_id = ?",
+                (session.kind, session.owner_id, session.session_id),
+            )
+        connection.execute(
+            f"UPDATE {table} SET session_data = json_set(COALESCE(session_data, '{{}}'), '$.session_state', "  # noqa: S608
+            "json(session_state))",
+        )
+        connection.execute(f"ALTER TABLE {table} DROP COLUMN session_state")
+        for column in ("owner_kind", "owner_id"):
+            connection.execute(f"ALTER TABLE {meta} DROP COLUMN {column}")
+        connection.execute(f"UPDATE {meta} SET version = 2")  # noqa: S608
     return store.path
 
 
@@ -66,46 +92,55 @@ def _agno_database(directory: Path, *sessions: ConversationSession) -> Path:
     return write_agno_database(AgnoTableNames(directory.name).database_path(directory), *sessions, usage=False)
 
 
-def _rows(database: Path) -> tuple[int, list[tuple[str, str, str | None, str | None]]]:
-    """Return the layout version and each session row's id, kind, agent, and team."""
+def _owner(database: Path) -> tuple[int, HistoryScope]:
+    """Return the layout version and the owner the database's meta row records."""
     names = TableNames.of_database(database)
     with closing(sqlite3.connect(database)) as connection:
-        (version,) = connection.execute(f"SELECT version FROM {quote_identifier(names.log_meta)}").fetchone()  # noqa: S608
-        rows = connection.execute(
-            f"SELECT session_id, session_type, agent_id, team_id FROM {quote_identifier(names.sessions)} "  # noqa: S608
-            "ORDER BY session_id",
-        ).fetchall()
-    return version, rows
+        version, kind, owner_id = connection.execute(
+            f"SELECT version, owner_kind, owner_id FROM {quote_identifier(names.log_meta)}",  # noqa: S608
+        ).fetchone()
+    return version, HistoryScope(kind=kind, scope_id=owner_id)
+
+
+def _run_agents(database: Path) -> dict[str, str]:
+    """Return each stored run's agent, by run id."""
+    names = TableNames.of_database(database)
+    with closing(sqlite3.connect(database)) as connection:
+        return dict(
+            connection.execute(
+                f"SELECT run_id, json_extract(record, '$.agent_id') FROM {quote_identifier(names.log_runs)}",  # noqa: S608
+            ),
+        )
 
 
 def test_an_agents_open_converts_rows_naming_another_owner_to_the_agent(tmp_path: Path) -> None:
-    """A converted row naming the display-name id, or no owner, names the agent, and so do its runs."""
+    """A converted session whose row named the display-name id, or no owner, is the agent's, and so are its runs."""
     database = _agno_database(tmp_path / "code", _session("old", _DISPLAY_NAME_ID), _session("unowned", ""))
     with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute("UPDATE code_sessions SET agent_id = NULL WHERE session_id = 'unowned'")
 
     store = create_agent_state_storage("code", tmp_path / "code")
 
-    assert _rows(store.path) == (LOG_VERSION, [("old", "agent", "code", None), ("unowned", "agent", "code", None)])
-    session = store.load_session("old", "agent")
-    assert session is not None
-    assert [run.agent_id for run in session.runs] == ["code"]
+    assert _owner(store.path) == (LOG_VERSION, _SCOPE)
+    for session_id in ("old", "unowned"):
+        session = store.load_session(session_id, "agent")
+        assert session is not None
+        assert session.owner_id == "code"
+        assert [run.agent_id for run in session.runs] == ["code"]
 
 
 def test_a_storage_v2_database_adopts_its_rows_once_at_its_agents_open(tmp_path: Path) -> None:
-    """Only the agent's open upgrades a version 2 database, and an open after that reads only the version."""
+    """The agent's open upgrades a version 2 database once, and an open after that reads only the version."""
     database = _v2_database(tmp_path / "code", _session("old", _DISPLAY_NAME_ID))
-
-    create_state_storage("code", tmp_path / "code")
-    assert _rows(database) == (2, [("old", "agent", _DISPLAY_NAME_ID, None)])
+    assert _run_agents(database) == {"old-run": _DISPLAY_NAME_ID}
 
     create_agent_state_storage("code", tmp_path / "code")
-    assert _rows(database) == (LOG_VERSION, [("old", "agent", "code", None)])
+    assert (_owner(database), _run_agents(database)) == ((LOG_VERSION, _SCOPE), {"old-run": "code"})
 
     with closing(sqlite3.connect(database)) as connection, connection:
-        connection.execute("UPDATE code_sessions SET agent_id = 'planted'")
+        connection.execute("UPDATE code_sessions_log_runs SET record = json_set(record, '$.agent_id', 'planted')")
     create_agent_state_storage("code", tmp_path / "code")
-    assert _rows(database)[1] == [("old", "agent", "planted", None)]
+    assert _run_agents(database) == {"old-run": "planted"}
 
 
 @pytest.mark.asyncio
@@ -116,8 +151,9 @@ async def test_the_startup_sweep_adopts_agent_rows_and_leaves_team_and_system_ro
     shared = _v2_database(root / "agents/code", _session("old", _DISPLAY_NAME_ID))
     private = _agno_database(root / "private_instances/scope/code", _session("old", _DISPLAY_NAME_ID))
     # A team bot's turn on an agent path saves an agent row its team scope owns.
+    crew = HistoryScope(kind="team", scope_id="crew")
     team = _v2_database(
-        root / "teams/team_crew_000000000000",
+        root / "teams" / TableNames.of_team(crew).storage_name,
         _session("team-row", "crew", kind="team"),
         _session("agent-row", "crew"),
     )
@@ -125,10 +161,13 @@ async def test_the_startup_sweep_adopts_agent_rows_and_leaves_team_and_system_ro
 
     await migrate_conversation_storage(paths)
 
-    assert _rows(shared) == (LOG_VERSION, [("old", "agent", "code", None)])
-    assert _rows(private) == (LOG_VERSION, [("old", "agent", "code", None)])
-    assert _rows(team) == (LOG_VERSION, [("agent-row", "agent", "crew", None), ("team-row", "team", None, "crew")])
-    assert _rows(system) == (LOG_VERSION, [("usage", "agent", SYSTEM_USAGE_ENTITY, None)])
+    assert (_owner(shared), _run_agents(shared)) == ((LOG_VERSION, _SCOPE), {"old-run": "code"})
+    assert (_owner(private), _run_agents(private)) == ((LOG_VERSION, _SCOPE), {"old-run": "code"})
+    assert (_owner(team), _run_agents(team)) == (
+        (LOG_VERSION, crew),
+        {"team-row-run": _DISPLAY_NAME_ID, "agent-row-run": _DISPLAY_NAME_ID},
+    )
+    assert _owner(system) == (LOG_VERSION, SYSTEM_USAGE_OWNER)
 
 
 def test_a_compaction_after_the_adoption_replays_its_summary(tmp_path: Path) -> None:
@@ -211,12 +250,13 @@ def test_a_summary_stored_under_the_display_name_id_still_replays_after_the_upgr
     old_scope = HistoryScope(kind="agent", scope_id=_DISPLAY_NAME_ID)
     session = _session("session", _DISPLAY_NAME_ID)
     session.runs.append(_run("later"))
-    _v2_database(tmp_path / "code", session)
-    stored = create_state_storage("code", tmp_path / "code")
+    stored = create_agent_state_storage("code", tmp_path / "code")
+    seed_session(stored, session)
     loaded = stored.load_session("session", "agent")
     assert loaded is not None
     compact_runs(stored, loaded, old_scope, ["session-run"], "first summary")
     compact_runs(stored, loaded, old_scope, ["later"], "second summary")
+    _as_layout_2(stored, session)
 
     store = create_agent_state_storage("code", tmp_path / "code")
 

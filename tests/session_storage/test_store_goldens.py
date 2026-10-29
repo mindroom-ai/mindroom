@@ -22,6 +22,7 @@ from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, run_fro
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import persist_runs
 from tests.llm.agno_dict_helpers import stored_run_record
+from tests.session_storage.agno_layout import named_owner
 from tests.session_storage.goldens import GoldenStore, agno_loaded_session, golden_sessions, golden_stores, stored_rows
 
 if TYPE_CHECKING:
@@ -240,7 +241,7 @@ def test_replaying_golden_runs_with_usage_reproduces_rows_ledger_and_totals(
     golden = store.restore(tmp_path / "golden")
     rows = stored_rows(golden, store.names.runs, session_id)
     [golden_session] = _query(golden, f'SELECT * FROM "{store.names.sessions}" WHERE session_id = ?', session_id)  # noqa: S608
-    fresh = create_state_storage(store.names.storage_name, tmp_path / "fresh")
+    fresh = create_state_storage(store.names.storage_name, tmp_path / "fresh", named_owner(store.names))
     # As the runtime builds the session of a conversation's first turn: it does not know the requester.
     session = ConversationSession(
         session_id=session_id,
@@ -302,7 +303,7 @@ def test_a_first_turns_session_row_stores_no_metadata_as_agno_stored_it(
         scope_id=golden_row["team_id"] or golden_row["agent_id"],
         is_team=golden_row["session_type"] == "team",
     )
-    fresh = create_state_storage(store.names.storage_name, tmp_path / "fresh")
+    fresh = create_state_storage(store.names.storage_name, tmp_path / "fresh", named_owner(store.names))
 
     persist_runs(fresh, session, *_replayed(rows))
 
@@ -372,7 +373,7 @@ def _schema_objects(db_file: Path) -> list[tuple[str, str]]:
 def test_a_converted_golden_has_the_layout_a_new_database_gets(store: GoldenStore, tmp_path: Path) -> None:
     """Every column, key, index, and schema object of a converted database is what a new database is created with."""
     converted = store.open(tmp_path / "converted").path
-    fresh = create_state_storage(store.names.storage_name, tmp_path / "fresh").path
+    fresh = create_state_storage(store.names.storage_name, tmp_path / "fresh", named_owner(store.names)).path
     names = store.names
     tables = (
         names.sessions,

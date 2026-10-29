@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal, cast, get_args
 
+from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import MODEL_PROVENANCE_KEY, read_model_provenance, usage_sums_attempts
 from mindroom.llm.usage import TOKEN_FIELDS
 
@@ -39,6 +40,8 @@ USAGE_KINDS: frozenset[str] = frozenset({"run", *get_args(IndependentUsageKind._
 
 SYSTEM_USAGE_ENTITY = "system:internal"
 SYSTEM_USAGE_STORAGE_NAME = "system"
+# The owner the system usage database records: the internal entity, as an agent.
+SYSTEM_USAGE_OWNER = HistoryScope(kind="agent", scope_id=SYSTEM_USAGE_ENTITY)
 
 
 def quote_identifier(value: str) -> str:

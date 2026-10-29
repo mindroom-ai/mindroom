@@ -12,15 +12,16 @@ import pytest
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord
 from mindroom.session_storage import agent_storage
 from mindroom.session_storage import store as store_module
 from mindroom.session_storage.agent_storage import (
+    create_agent_state_storage,
     create_session_storage,
-    create_state_storage,
     prepare_conversation_database,
 )
-from mindroom.session_storage.legacy_agno3_backup import BACKUP_SUFFIX
+from mindroom.session_storage.legacy_conversion_backup import BACKUP_SUFFIX
 from mindroom.session_storage.schema import TableNames, table_names
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
@@ -34,10 +35,11 @@ if TYPE_CHECKING:
 
 
 _NAMES = TableNames("code")
+_OWNER = HistoryScope(kind="agent", scope_id="code")
 
 
 def _open(tmp_path: Path) -> ConversationStore:
-    return create_state_storage("code", tmp_path)
+    return create_agent_state_storage("code", tmp_path)
 
 
 def _tables(db_file: Path) -> set[str]:
@@ -100,7 +102,7 @@ def test_a_new_database_gets_every_table_when_it_opens(tmp_path: Path) -> None:
 def test_a_storage_name_that_leaves_the_sessions_directory_opens_nothing(tmp_path: Path) -> None:
     """The opener refuses a name that is not a file directly inside the sessions directory, and creates nothing."""
     with pytest.raises(ValueError, match="must identify a file directly inside its sessions directory"):
-        create_state_storage("../outside", tmp_path)
+        create_agent_state_storage("../outside", tmp_path)
 
     assert list(tmp_path.iterdir()) == []
 
@@ -165,8 +167,8 @@ def test_a_private_agents_store_is_the_requesters_own(tmp_path: Path) -> None:
     assert for_bob.load_session("session-alice", "agent") is None
 
 
-def test_a_current_database_costs_one_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Opening a database in the current layout reads only its marker, beside checking which file SQLite opened."""
+def test_a_current_database_costs_reading_its_version(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opening a database in the current layout reads only its marker and version, beside checking SQLite's file."""
     database, names = _open(tmp_path).path, _NAMES
     statements: list[str] = []
     connect = store_module.connect_conversation_database
@@ -177,13 +179,14 @@ def test_a_current_database_costs_one_read(tmp_path: Path, monkeypatch: pytest.M
         return connection
 
     monkeypatch.setattr(store_module, "connect_conversation_database", traced)
-    prepare_conversation_database(database, names, agent_name=None)
+    prepare_conversation_database(database, names, _OWNER)
 
     # SQLite traces the pragma a table-valued function runs as a comment of its own.
     run = [statement for statement in statements if not statement.startswith("--")]
-    assert len(run) == 2
+    assert len(run) == 3
     assert "pragma_database_list" in run[0]
     assert run[1].startswith("SELECT 1 FROM sqlite_master")
+    assert run[2].startswith("SELECT version FROM")
 
 
 @pytest.mark.parametrize("link", ["database", "dangling", "directory"])
@@ -200,7 +203,7 @@ def test_a_link_at_the_database_or_its_directory_is_refused(tmp_path: Path, link
         database.symlink_to(target if link == "database" else tmp_path / "created.db")
 
     with pytest.raises(ValueError, match="link"):
-        prepare_conversation_database(database, names, agent_name=None)
+        prepare_conversation_database(database, names, _OWNER)
 
     assert target.read_bytes() == before
     assert not (tmp_path / "created.db").exists()
@@ -221,7 +224,7 @@ def test_a_link_planted_after_the_check_is_refused(tmp_path: Path, monkeypatch: 
 
     monkeypatch.setattr(store_module, "connect_conversation_database", swapped)
     with pytest.raises(ValueError, match="instead"):
-        prepare_conversation_database(database, names, agent_name=None)
+        prepare_conversation_database(database, names, _OWNER)
 
     assert target.read_bytes() == before
 
@@ -244,7 +247,7 @@ def test_a_sessions_directory_swapped_for_a_link_after_the_check_is_refused(
 
     monkeypatch.setattr(store_module, "connect_conversation_database", swapped)
     with pytest.raises(ValueError, match="instead"):
-        prepare_conversation_database(database, _NAMES, agent_name=None)
+        prepare_conversation_database(database, _NAMES, _OWNER)
 
     # SQLite's open may have left an empty file at the link's target, never a database with tables.
     planted = outside / database.name
@@ -267,7 +270,7 @@ def test_a_sessions_directory_swapped_for_a_link_before_the_resolve_is_refused(t
 
     database = SwappedOnFirstResolve(_NAMES.database_path(tmp_path / "store"))
     with pytest.raises(ValueError, match="instead"):
-        prepare_conversation_database(database, _NAMES, agent_name=None)
+        prepare_conversation_database(database, _NAMES, _OWNER)
 
     assert sessions.is_symlink()
     planted = outside / database.name

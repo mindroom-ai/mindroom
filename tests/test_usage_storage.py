@@ -14,7 +14,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.stats_storage import UsageSessionRow, UsageStorageSource, iter_usage_storage_rows
@@ -34,7 +34,7 @@ def _session() -> ConversationSession:
 @pytest.fixture
 def usage_db(tmp_path: Path) -> ConversationStore:
     """Use the production storage owner with a real session row."""
-    storage = create_state_storage("code", tmp_path)
+    storage = create_agent_state_storage("code", tmp_path)
     seed_session_row(storage, _session())
     return storage
 

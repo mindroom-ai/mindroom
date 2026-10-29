@@ -7,7 +7,7 @@ import threading
 from contextlib import closing
 from typing import TYPE_CHECKING
 
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 def _storage(tmp_path: Path) -> ConversationStore:
-    return create_state_storage("probe", tmp_path)
+    return create_agent_state_storage("probe", tmp_path)
 
 
 def test_a_state_database_keeps_rollback_journal_and_waits_for_locks(tmp_path: Path) -> None:

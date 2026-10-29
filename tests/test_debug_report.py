@@ -39,8 +39,8 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.providers.pipeline import request_log as request_log_stage
 from mindroom.session_ids import create_session_id
-from mindroom.session_storage.agent_storage import create_state_storage, prepare_conversation_database
-from mindroom.session_storage.legacy_agno3_backup import BACKUP_SUFFIX
+from mindroom.session_storage.agent_storage import create_agent_state_storage, prepare_conversation_database
+from mindroom.session_storage.legacy_conversion_backup import BACKUP_SUFFIX
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system import tool_calls
@@ -52,6 +52,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.usage.storage import SYSTEM_USAGE_STORAGE_NAME
 from tests.conftest import postgres_journal_schema_url, seed_session, test_runtime_paths
 from tests.history_helpers import store_fold
+from tests.session_storage.agno_layout import recorded_owner
 from tests.session_storage.goldens import golden_stores
 
 if TYPE_CHECKING:
@@ -278,7 +279,7 @@ def test_postgres_query_reads_the_journal_and_cannot_write(postgres_journal_url:
 
 def _seed_runs(state_root: Path, session_id: str, runs: Sequence[tuple[str, int]]) -> None:
     """Persist one session holding `(run_id, created_at)` runs in the conversation database under `state_root`."""
-    storage = create_state_storage(state_root.name, state_root)
+    storage = create_agent_state_storage(state_root.name, state_root)
     seed_session(
         storage,
         ConversationSession(
@@ -329,7 +330,7 @@ def test_read_runs_matches_session_and_decodes_its_rows(tmp_path: Path) -> None:
 def test_read_runs_names_the_fold_that_took_a_message(tmp_path: Path) -> None:
     """A message a mid-turn fold took follows the run's stored messages and names that fold's summary row."""
     _seed_general_runs(tmp_path)
-    storage = create_state_storage("general", tmp_path / "agents" / "general")
+    storage = create_agent_state_storage("general", tmp_path / "agents" / "general")
     scope = HistoryScope(kind="agent", scope_id="general")
     fold_id = store_fold(storage, f"{ROOM}:$root", scope, "run-1", tool_call_ids=["call-1"])
 
@@ -344,7 +345,7 @@ def test_read_runs_names_the_fold_that_took_a_message(tmp_path: Path) -> None:
 
 def test_read_runs_lists_a_folds_messages_in_its_order_when_some_were_stored(tmp_path: Path) -> None:
     """A fold that takes messages the run already stored, beside ones it did not, lists them in the fold's order."""
-    storage = create_state_storage("general", tmp_path / "agents" / "general")
+    storage = create_agent_state_storage("general", tmp_path / "agents" / "general")
     session = ConversationSession(kind="agent", session_id=f"{ROOM}:$root", owner_id="general")
     stored = [Message(role="user", content=f"m{index}", id=f"m{index}") for index in range(1, 6)]
     run = RunRecord(
@@ -398,7 +399,7 @@ def test_read_runs_reads_converted_goldens_and_names_unconverted_databases(tmp_p
     assert unconverted.error.count("not converted to the current storage layout") == len(databases)
 
     for store, database in zip(goldens, databases, strict=True):
-        prepare_conversation_database(database, store.names, agent_name=None)
+        prepare_conversation_database(database, store.names, recorded_owner(database))
         assert database.with_name(f"{database.name}{BACKUP_SUFFIX}").is_file()
     converted = _read_runs(tmp_path, ids)
 

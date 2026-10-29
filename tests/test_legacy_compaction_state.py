@@ -17,13 +17,17 @@ from mindroom.history import legacy_compaction_state, summary_rows
 from mindroom.history.legacy_compaction_state import _legacy_tombstones
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.runs import RunRecord
-from mindroom.session_storage.agent_storage import create_state_storage, prepare_conversation_database
+from mindroom.session_storage.agent_storage import (
+    create_agent_state_storage,
+    create_state_storage,
+    prepare_conversation_database,
+)
 from mindroom.session_storage.schema import TableNames, table_names
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import create_agno_2_sessions_db
 from tests.history_helpers import StoredSummaryRow, stored_run_ids, summary_rows_of
-from tests.session_storage.agno_layout import write_agno_database
+from tests.session_storage.agno_layout import recorded_owner, write_agno_database
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -34,7 +38,7 @@ _NAMES = TableNames("code")
 
 
 def _open(tmp_path: Path) -> ConversationStore:
-    db = create_state_storage("code", tmp_path)
+    db = create_state_storage("code", tmp_path, recorded_owner(_NAMES.database_path(tmp_path)))
     assert isinstance(db, ConversationStore)
     return db
 
@@ -322,7 +326,7 @@ def test_an_agent_named_agno_migrates_the_agno_runs_table(tmp_path: Path) -> Non
     with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute("UPDATE agno_runs SET run_index = NULL WHERE run_id = 'r2'")
 
-    storage = create_state_storage("agno", tmp_path)
+    storage = create_agent_state_storage("agno", tmp_path)
     assert stored_run_ids(storage, "session") == ["r2", "r1"]
     assert summary_rows_of(storage, scope.key, "session") == [
         StoredSummaryRow(summary="legacy summary", legacy=True),
@@ -362,7 +366,7 @@ def test_an_agno_2_database_migrates_before_the_owned_store_opens_it(tmp_path: P
     """The conversion needs no Agno storage, and the store then loads the runs after the adopted summary."""
     db_file = _agno_2_database_with_summary(tmp_path)
 
-    prepare_conversation_database(db_file, _NAMES, agent_name=None)
+    prepare_conversation_database(db_file, _NAMES, recorded_owner(db_file))
 
     assert _migrated_log(db_file) == _MIGRATED_LOG
     session = ConversationStore(db_file).load_session("session-1", "agent")
@@ -387,10 +391,10 @@ def test_an_interrupted_migration_changes_nothing_and_runs_again(
     with monkeypatch.context() as patch:
         patch.setattr(legacy_compaction_state, "delete_run_subtrees_in_transaction", interrupt)
         with pytest.raises(RuntimeError, match="interrupted adoption"):
-            prepare_conversation_database(db_file, _NAMES, agent_name=None)
+            prepare_conversation_database(db_file, _NAMES, recorded_owner(db_file))
 
     assert _dump(db_file) == before
-    prepare_conversation_database(db_file, _NAMES, agent_name=None)
+    prepare_conversation_database(db_file, _NAMES, recorded_owner(db_file))
     assert _migrated_log(db_file) == _MIGRATED_LOG
 
 
@@ -401,7 +405,7 @@ def test_owners_migrating_at_once_adopt_the_summary_once(tmp_path: Path) -> None
 
     def migrate(_index: int) -> None:
         start.wait()
-        prepare_conversation_database(db_file, _NAMES, agent_name=None)
+        prepare_conversation_database(db_file, _NAMES, recorded_owner(db_file))
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(migrate, range(4)))

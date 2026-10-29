@@ -82,7 +82,7 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
 )
 from mindroom.response_sources import ResponseSources
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.session_storage.types import ConversationSession, SessionKind
 from mindroom.turn_controller import _PrecheckedEvent
@@ -387,7 +387,7 @@ def _notice_count(
 
 
 def _queued_notice_storage(tmp_path: Path) -> ConversationStore:
-    return create_state_storage("queued_notice", tmp_path)
+    return create_agent_state_storage("queued_notice", tmp_path)
 
 
 def _register_notice_storage(
@@ -463,7 +463,7 @@ class _RecordingStore(ConversationStore):
 
 
 def _recording_store(tmp_path: Path, name: str, *, held: threading.Event | None = None) -> _RecordingStore:
-    store = create_state_storage(name, tmp_path)
+    store = create_agent_state_storage(name, tmp_path)
     return _RecordingStore(store.path, held=held)
 
 

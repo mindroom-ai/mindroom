@@ -63,7 +63,7 @@ from mindroom.model_usage import message_context_tokens
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.run_storage import RunStorage
-from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage, create_session_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.runtime_context import (
@@ -1060,7 +1060,7 @@ async def test_run_local_summary_usage_goes_to_the_replys_usage_owner(
     summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path)
-    owner_storage = create_state_storage("owner", tmp_path)
+    owner_storage = create_agent_state_storage("owner", tmp_path)
     owner = HelperUsageOwner(
         storage_factory=lambda: owner_storage,
         session_id="owner-session",

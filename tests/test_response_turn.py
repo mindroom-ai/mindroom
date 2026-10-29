@@ -41,7 +41,7 @@ from mindroom.response_turn import (
     TurnSinks,
     stream_response_turn,
 )
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.events import ToolTraceEntry
@@ -634,7 +634,7 @@ async def test_turn_removes_history_derived_from_a_redacted_event_no_turn_owns(
     Redacting it, or the reply that read it, must remove that run and everything after it
     before the history is used again, while the history before it stays.
     """
-    storage = create_state_storage("crew", tmp_path)
+    storage = create_agent_state_storage("crew", tmp_path)
     runs = [
         _history_run("earlier", team=team, event_id="$earlier", seen=["$earlier"]),
         _history_run("newer", team=team, event_id="$newer", seen=["$older", "$newer"]),

@@ -24,7 +24,14 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _RECOVERY_LOCK = ".sessions-recovery.lock"
-_REQUIRED_SESSION_COLUMNS = frozenset(SESSION_COLUMNS)
+# LEGACY_COMPAT: Sessions tables from before layout version 4, which lack `session_state`.
+# Legacy format: A sessions table of the Agno layout or of layout version 2 or 3, which keeps the state inside
+# `session_data` and has no `session_state` column.
+# Last legacy release: v2026.10.667; replacement: the next release, whose sessions table has the column.
+# Handling: The preflight does not require the column, which the database's conversion adds
+# (`legacy_session_columns`), so such a database converts instead of being archived.
+# Coverage: tests/session_storage/test_legacy_session_columns.py.
+_REQUIRED_SESSION_COLUMNS = frozenset(SESSION_COLUMNS) - {"session_state"}
 
 
 # LEGACY_COMPAT: Session databases missing required schema columns.

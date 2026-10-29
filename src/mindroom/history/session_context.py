@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import re
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING
@@ -13,6 +11,7 @@ from mindroom.history.storage import first_scope_session
 from mindroom.history.team_scope import ad_hoc_team_scope_id
 from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
+from mindroom.session_storage.schema import TableNames
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -26,8 +25,6 @@ if TYPE_CHECKING:
 
 
 _TEAM_STATE_ROOT_DIRNAME = "teams"
-
-_TEAM_STORAGE_NAME_PATTERN = re.compile(r"[^a-zA-Z0-9_]+")
 
 
 @dataclass(frozen=True)
@@ -148,14 +145,14 @@ def create_scope_session_storage(
     """Open the canonical conversation store of one persisted history scope; an agent scope's id is its agent."""
     if scope.kind == "agent":
         return create_session_storage(scope.scope_id, config, runtime_paths, execution_identity=execution_identity)
-    normalized_scope_id = _TEAM_STORAGE_NAME_PATTERN.sub("_", scope.scope_id).strip("_") or "team"
-    storage_name = f"team_{normalized_scope_id}_{hashlib.sha256(scope.key.encode()).hexdigest()[:12]}"
+    storage_name = TableNames.of_team(scope).storage_name
     return create_state_storage(
         storage_name,
         resolve_session_state_root(
             _team_scope_state_root(storage_name=storage_name, runtime_paths=runtime_paths),
             runtime_paths,
         ),
+        scope,
     )
 
 

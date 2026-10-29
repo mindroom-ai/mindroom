@@ -402,8 +402,8 @@ class MaskedBackend(StoreBackend):
 
     def _stored_state(self) -> object:
         sessions = quote_identifier(self.names.sessions)
-        [(session_data,)] = self._query(f"SELECT session_data FROM {sessions} WHERE session_id = ?", (SESSION_ID,))  # noqa: S608
-        return json.loads(session_data)["session_state"]
+        [(session_state,)] = self._query(f"SELECT session_state FROM {sessions} WHERE session_id = ?", (SESSION_ID,))  # noqa: S608
+        return json.loads(session_state)
 
     @override
     def _save(

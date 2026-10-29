@@ -23,7 +23,7 @@ from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.native_compaction import replay_basis
-from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
@@ -47,7 +47,7 @@ _EPOCH = datetime.fromtimestamp(0, UTC)
 
 
 def _open(tmp_path: Path) -> ConversationStore:
-    db = create_state_storage("code", tmp_path)
+    db = create_agent_state_storage("code", tmp_path)
     assert isinstance(db, ConversationStore)
     return db
 

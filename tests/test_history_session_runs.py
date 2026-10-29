@@ -11,7 +11,7 @@ from mindroom.history.session_runs import session_runs, unredacted_runs, updated
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
@@ -28,7 +28,7 @@ SESSION = f"{ROOM}:$thread"
 @pytest.fixture
 def storage(tmp_path: Path) -> Iterator[ConversationStore]:
     """The production conversation storage owner."""
-    db = create_state_storage("mind", tmp_path)
+    db = create_agent_state_storage("mind", tmp_path)
     assert isinstance(db, ConversationStore)
     return db
 
