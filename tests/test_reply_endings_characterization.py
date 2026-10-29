@@ -1216,3 +1216,94 @@ async def test_an_approval_pause_holds_the_reply(
     assert not is_interrupted_replay_run(run)
     assert run.content == "Before approval"
     assert await turn.pending()
+
+
+@pytest.mark.xfail(strict=True, reason="bug: an agent attempt's unexpected error reaches the note raw")
+@pytest.mark.parametrize("streaming", [True, False], ids=["streamed", "whole"])
+async def test_an_unexpected_agent_turn_error_answers_with_redacted_friendly_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    streaming: bool,
+) -> None:
+    """An error outside the model run answers as a team's does: friendly text, credentials redacted, never raw."""
+    # Assembled at runtime, so no credential-shaped literal sits in the source.
+    secret = "sk-" + "proj" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4"
+    turn = await _turn(tmp_path, monkeypatch, streaming=streaming, scripts={"default": [answer("Never shown.")]})
+
+    def broken_attempt(*_args: object, **_kwargs: object) -> None:
+        msg = f"attempt setup broke with api_key={secret}"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr("mindroom.ai._begin_attempt", broken_attempt)
+
+    await turn.runner.generate_response(_plain_request(_target()))
+
+    shown = "[general] ⚠️ Error: attempt setup broke with api_key=***redacted***"
+    assert all(secret not in body for body in turn.homeserver.bodies)
+    reply = await turn.reply()
+    assert reply.state is rl.ReplyState.COMPLETED
+    presentation = await turn.presentation()
+    assert [(segment.kind, segment.text) for segment in presentation.segments] == [("answer", shown)]
+    assert presentation.trailing_note is None
+    assert turn.homeserver.bodies[-1] == shown
+    assert not await turn.pending()
+
+
+@pytest.mark.xfail(strict=True, reason="bug: a failed pause shows an error note with internal text")
+@pytest.mark.usefixtures("echo_tool")
+async def test_a_pause_whose_progress_edit_fails_shows_the_approval_start_note(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A streamed reply whose progress edit fails as it pauses ends with the approval-start note.
+
+    The note never carries an internal code or the transport error's text.
+    """
+    turn = await _turn(
+        tmp_path,
+        monkeypatch,
+        streaming=True,
+        tools=[_ECHO_TOOL],
+        scripts={"default": [calls(tool_call("echo", "call-1", text="hi"), content="Before approval")]},
+    )
+    turn.bot.config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="echo", action="require_approval")],
+    )
+    # The edit that would show the paused tool call is the one the homeserver refuses.
+    turn.homeserver.fail_text = "🔧 `echo` [1]"
+
+    async def prepare_event(_room: str, _thread: str | None, content: dict) -> dict:
+        return content
+
+    async def send_card(_delivery: MatrixDelivery) -> str:
+        return "$approval-card"
+
+    initialize_approval_store_for_test(
+        turn.bot.runtime_paths,
+        prepare_approval_event=prepare_event,
+        send_approval_delivery=send_card,
+        resolve_approval_delivery=AsyncMock(return_value=None),
+        cards=turn.bot._journal_store.principal("router@shared"),
+        transport_sender_id=lambda: "@router:localhost",
+        transport_device_id=lambda: "DEVICE",
+    )
+    try:
+        await turn.runner.generate_response(_plain_request(_target()))
+    finally:
+        await shutdown_approval_runtime()
+
+    assert all(
+        "suspension_presentation_delivery_failed" not in body and "Failed to edit streaming message" not in body
+        for body in turn.homeserver.bodies
+    )
+    reply = await turn.reply()
+    assert reply.state is rl.ReplyState.FAILED
+    presentation = await turn.presentation()
+    assert presentation.trailing_note is not None
+    assert (presentation.trailing_note.note, presentation.trailing_note.text) == (
+        rl.NoteKind.APPROVAL_FAILED,
+        "Tool approval could not be started. Please try again.",
+    )
+    assert turn.homeserver.bodies[-1].endswith("Tool approval could not be started. Please try again.")
+    assert await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE) is None
+    assert not await turn.pending()
