@@ -45,8 +45,9 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls
 from tests.llm.agno_dict_helpers import stored_run_record
+from tests.session_storage.goldens import LEGACY_AGNO3, STORAGE
 from tests.team_turn_helpers import authored_team_config, build_team_turn
-from tests.teams.squad import SQUAD_APPROVED, STORAGE, approval, scripted
+from tests.teams.squad import SQUAD_APPROVED, approval, scripted
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "agno_parity"
 GOLDEN = _FIXTURES / "events" / "ai_run.json"
+_STORED_RUNS = LEGACY_AGNO3 / "runs"
 GOLDEN_RUN_METADATA: dict[str, dict[str, Any]] = json.loads(GOLDEN.read_text(encoding="utf-8"))
 
 _CLOCK = "<clock>"
@@ -104,7 +106,7 @@ def _stored_runs() -> dict[str, AnyRunRecord]:
     """Return each run row the run goldens hold, by run id, skipping values nested in a row."""
     runs: dict[str, AnyRunRecord] = {}
     for name in ("run_output.json", "team_run_output.json"):
-        for key, data in json.loads((_FIXTURES / "runs" / name).read_text(encoding="utf-8")).items():
+        for key, data in json.loads((_STORED_RUNS / name).read_text(encoding="utf-8")).items():
             _, path = key.split(":", 1)
             if path == data["run_id"]:
                 assert path not in runs

@@ -22,6 +22,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.schema import TableNames
 from mindroom.usage.storage import quote_identifier
+from tests.session_storage.goldens import STORAGE
 from tests.storage_oracle.determinism import deterministic
 from tests.storage_oracle.observe import observe
 
@@ -30,7 +31,7 @@ TESTS = Path(__file__).resolve().parents[1]
 # Every recorded sequence: the generated seeds and the named sequences, each a ``.json`` recording and a ``.sql`` dump.
 SEQUENCES = sorted([*(FIXTURES / "generated").glob("*.json"), *(FIXTURES / "named").glob("*.json")])
 GOLDEN_DUMPS = (
-    *sorted((TESTS / "fixtures" / "agno_parity" / "storage").glob("*.sql")),
+    *sorted(STORAGE.glob("*.sql")),
     TESTS / "fixtures" / "agno_2_6_12_code_sessions.sql",
 )
 _SESSIONS_TABLE = re.compile(r'CREATE TABLE "?([A-Za-z0-9_]+)_sessions"? \(')
