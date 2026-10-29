@@ -8156,7 +8156,6 @@ depends_on = [
     "mindroom.workspaces",
     "mindroom.delegation.hooks",
     "mindroom.turn_continuation",
-    "mindroom.history.types",
     "mindroom.redaction",
     "mindroom.delegation.storage",
     "mindroom.session_storage.agent_storage",
@@ -8199,7 +8198,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.delegation.state"
-depends_on = ["mindroom.tool_system.worker_routing"]
+depends_on = ["mindroom.history.types", "mindroom.tool_system.worker_routing"]
 
 [[modules]]
 path = "mindroom.delegation.hooks"

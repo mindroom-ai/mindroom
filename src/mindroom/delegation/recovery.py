@@ -15,6 +15,7 @@ from mindroom.delegation.state import (
     DelegationChild,
     DelegationState,
     child_execution_identity,
+    child_scope,
 )
 from mindroom.delegation.storage import delegation_storage_config
 from mindroom.history.session_context import create_scope_session_storage
@@ -58,7 +59,7 @@ async def resolve_subagent(
 def _child_storage(child: DelegationChild, config: Config, paths: RuntimePaths) -> ConversationStore:
     """Open the child's agent-scope storage, frozen at delegation; ``config`` already carries the child's bindings."""
     return create_scope_session_storage(
-        scope=HistoryScope(kind="agent", scope_id=child.child_agent_name),
+        scope=child_scope(child),
         config=config,
         runtime_paths=paths,
         execution_identity=child_execution_identity(child),
@@ -160,10 +161,7 @@ async def interrupt_child(
 
         def persist() -> None:
             # The run exists; this rewrites its row without touching the usage ledger, through a stand-in session.
-            stand_in = new_scope_session(
-                session_id=child.session_id,
-                scope=HistoryScope(kind="agent", scope_id=child.child_agent_name),
-            )
+            stand_in = new_scope_session(session_id=child.session_id, scope=child_scope(child))
             _child_storage(child, config, runtime_paths).save_run(stand_in, response, record_usage=False)
 
         await asyncio.to_thread(persist)
