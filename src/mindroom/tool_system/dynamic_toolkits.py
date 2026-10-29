@@ -17,7 +17,7 @@ class ToolDeferral:
 
     domain_name: str
     description: str
-    # Instructions the toolkit and its functions would render when eager, which the prompt leaves out.
+    # Instructions the toolkit and its functions would render when eager, which portable tool search returns.
     instructions: str | None
     function_instructions: Mapping[str, str]
 
@@ -35,16 +35,38 @@ class DeferredToolkit:
         return tuple(function.name for function in self.functions)
 
 
-def defer_toolkit(domain_name: str, description: str, toolkit: AdaptedToolkit) -> tuple[ToolDeferral, AdaptedToolkit]:
-    """Return what tool search shows of a wire-deferred toolkit beside its functions, and the toolkit without them.
+def defer_toolkit(
+    domain_name: str,
+    description: str,
+    toolkit: AdaptedToolkit,
+    *,
+    portable_search: bool,
+) -> tuple[ToolDeferral, AdaptedToolkit]:
+    """Return what tool search shows of a wire-deferred toolkit beside its functions, and the toolkit to offer.
 
-    The system prompt is sent before tool search finds a toolkit, so the instructions it and its functions would
-    render travel with search results instead.
+    Portable tool search returns the instructions the toolkit and its functions would render beside the definitions
+    it finds, so the toolkit offered carries none.
+    Native tool search expands only function definitions, so the toolkit keeps its instructions for the system
+    prompt and each function's own instructions go in its description.
     """
     deferral = ToolDeferral(
         domain_name=domain_name,
         description=description,
-        instructions=toolkit.instructions,
-        function_instructions=toolkit.function_instructions,
+        instructions=toolkit.instructions if portable_search else None,
+        function_instructions=toolkit.function_instructions if portable_search else {},
     )
-    return deferral, replace(toolkit, instructions=None, function_instructions={})
+    if portable_search:
+        return deferral, replace(toolkit, instructions=None, function_instructions={})
+    functions = tuple(
+        _with_own_instructions(function, toolkit.function_instructions[function.name])
+        if function.name in toolkit.function_instructions
+        else function
+        for function in toolkit.functions
+    )
+    return deferral, replace(toolkit, functions=functions, function_instructions={})
+
+
+def _with_own_instructions(function: ToolFunction, instructions: str) -> ToolFunction:
+    """Return ``function`` with the instructions it asks the prompt to show after its description."""
+    description = f"{function.description}\n\n{instructions}" if function.description else instructions
+    return replace(function, description=description)

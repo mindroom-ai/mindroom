@@ -15,9 +15,9 @@ from mindroom.llm.usage import HelperUsage, RunMetrics, TokenCounts, VoiceDurati
 from mindroom.matrix_rtc.call_tools import record_call_token_usage, record_call_voice_usage
 from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage, RealtimeCallUsage, _RealtimeResponseUsage
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.schema import quote_identifier, usage_upsert_sql
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.stats import collect_admin_usage, collect_private_usage
-from mindroom.usage.storage import quote_identifier, usage_upsert_sql
 from tests.conftest import test_runtime_paths
 from tests.test_request_usage import request_usage  # noqa: F401
 
@@ -218,7 +218,7 @@ def test_invalid_voice_duration_is_excluded_without_discarding_delegate_tokens(
     }
     with storage.transaction(write=True) as connection:
         connection.execute(
-            usage_upsert_sql(storage.names.sessions),
+            usage_upsert_sql(storage.names),
             ("session", "live_voice:invalid", json.dumps(stored)),
         )
     report = collect_admin_usage(config=config, runtime_paths=paths).to_dict()

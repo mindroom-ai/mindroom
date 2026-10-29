@@ -31,7 +31,6 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import TURN_INTENT_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.custom_tools.skill_manage import SkillManageTools
-from mindroom.history import summary_rows
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
@@ -53,6 +52,7 @@ from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.registry import build_model_provider
 from mindroom.providers.tool_policy import disables_tools
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.session_storage import summary_rows
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning import library

@@ -37,7 +37,6 @@ from mindroom.history.summary_message import (
     is_scope_summary,
     mark_summary_follows,
 )
-from mindroom.history.summary_rows import Fold, summarized_tool_call_ids
 from mindroom.llm.messages import is_own_model_message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
@@ -45,6 +44,7 @@ from mindroom.native_compaction import checkpoint_items, native_replay_messages
 from mindroom.providers.anthropic.prompt_cache import claude_loaded_tool_names
 from mindroom.session_storage.agent_storage import save_compaction_usage
 from mindroom.session_storage.lanes import run_session_storage_operation
+from mindroom.session_storage.summary_rows import Fold, summarized_tool_call_ids
 from mindroom.token_budget import estimate_text_tokens
 from mindroom.tool_system.runtime_context import current_requester_id
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_requests

@@ -48,11 +48,23 @@ _REQUEST_TOO_LARGE = (
         (400, "too long", "context_length_exceeded", ContextWindowExceeded, False),
         (None, "prompt is too long", None, ContextWindowExceeded, False),
         (500, "context window service unavailable", None, ProviderUnavailable, True),
+        # llama.cpp sends an input larger than its physical batch, such as an embedding, with a 500.
+        (
+            500,
+            "input (9000 tokens) is too large to process. increase the physical batch size (current batch size: 512)",
+            None,
+            ContextWindowExceeded,
+            False,
+        ),
         (503, "The model is overloaded", None, ProviderUnavailable, True),
         (409, "conflict", None, ProviderUnavailable, True),
         (400, "Invalid JSON payload received.", None, InvalidRequest, False),
         (404, "model not found", None, InvalidRequest, False),
         (413, "payload", None, InvalidRequest, False),
+        # A client-error status outranks a transient name, which Ollama's OpenAI-compatible endpoint gives every status
+        # but 400 and 404.
+        (413, "request body must not exceed 32 MiB", "api_error", InvalidRequest, False),
+        (403, "Forbidden", "api_error", ProviderError, False),
         (401, "invalid api key", None, AuthenticationFailed, False),
         (403, "Permission denied", None, ProviderError, False),
         (
@@ -113,9 +125,12 @@ def test_a_retry_after_header_is_read_as_the_sdks_read_it(headers: dict[str, str
     assert retry_after_seconds(headers, now=now) == seconds
 
 
-@pytest.mark.parametrize("status", [429, None])
+@pytest.mark.parametrize("status", [429, 413, None])
 def test_a_request_above_the_tokens_per_minute_limit_is_too_large_not_rate_limited(status: int | None) -> None:
-    """Only a smaller request passes, and the marker keeps its reply from blaming the context window."""
+    """Only a smaller request passes, and the marker keeps its reply from blaming the context window.
+
+    Groq sends it with a 413 and the same ``rate_limit_exceeded`` code.
+    """
     error = classify_provider_error(_REQUEST_TOO_LARGE, provider="Test", status_code=status, code="rate_limit_exceeded")
 
     assert (type(error), error.retryable, error.code, error.provider_code, error.status_code) == (
@@ -216,6 +231,15 @@ def test_an_error_event_without_a_status_is_classified_by_its_name_and_wording(
         ("This request would exceed the context window", None, ContextWindowExceeded),
         ("input length and `max_tokens` exceed context limit: 197000 + 8192 > 200000", None, ContextWindowExceeded),
         ("the request exceeds the available context size, try increasing it", None, ContextWindowExceeded),
+        (
+            "Unable to submit request because the input token count is 106244 but model only supports up to 65536.",
+            None,
+            ContextWindowExceeded,
+        ),
+        # Neither Vertex AI's empty-text rejection, which opens the same way, nor an invented limit that closes the same
+        # way is about the window.
+        ("Unable to submit request because it has an empty text parameter.", None, InvalidRequest),
+        ("This model only supports up to 3 images per request.", None, InvalidRequest),
         ("max_tokens must be positive", None, InvalidRequest),
         ("The context size of a slot must be a positive number", None, InvalidRequest),
     ],

@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom import constants
-from mindroom.history import summary_rows
 from mindroom.history.replay import estimate_prompt_visible_history_tokens, estimate_request_messages_tokens
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.storage import (
@@ -23,13 +22,14 @@ from mindroom.history.storage import (
     run_folded_tool_call_ids,
 )
 from mindroom.history.summary_message import is_scope_summary, mark_summary_follows
-from mindroom.history.summary_rows import Fold
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.media_inputs import MediaInputs
+from mindroom.session_storage import summary_rows
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import watch_session_row
+from mindroom.session_storage.summary_rows import Fold
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
 from tests.history_helpers import compact_runs, log_of, replay_settings, stored_run_ids

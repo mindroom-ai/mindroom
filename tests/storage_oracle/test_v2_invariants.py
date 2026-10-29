@@ -24,9 +24,8 @@ from hypothesis import strategies as st
 
 from mindroom.history.run_visibility import replays_in_scope
 from mindroom.llm.runs import RunStatus, TeamRunRecord
-from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_VALUES
+from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_VALUES, quote_identifier
 from mindroom.session_storage.store import seen_event_ids, source_event_ids
-from mindroom.usage.storage import quote_identifier
 from tests.storage_oracle.actions import KIND_WEIGHTS, NAMED, OPENING_KINDS, Action, Scenario
 from tests.storage_oracle.backend import SESSION_ID, summary_tokens
 from tests.storage_oracle.determinism import deterministic

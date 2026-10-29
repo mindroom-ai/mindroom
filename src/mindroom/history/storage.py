@@ -8,7 +8,7 @@ row covering the run, the open-time conversion in
 ``session_storage/legacy_agent_session_owners.py``, which moves summary rows to their
 agent's scope, read or write summary rows directly:
 
-- the summary rows of the conversation log (``history/summary_rows.py``), positioned
+- the summary rows of the conversation log (``session_storage/summary_rows.py``), positioned
   between the runs by ``seq``; replay is the scope's latest summary row and the
   runs it does not cover, and ``session.summary`` is derived from that row on read
 - per-scope control state under ``MINDROOM_COMPACTION_METADATA_KEY`` (force flag)
@@ -39,9 +39,9 @@ from mindroom.constants import (
     MINDROOM_COMPACTION_METADATA_KEY,
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
 )
-from mindroom.history import summary_rows
 from mindroom.history.run_visibility import is_model_history_visible_run, replays_in_scope, run_in_scope
 from mindroom.history.types import HistoryScope, HistoryScopeState, owner_scope, replayed_summary_text
+from mindroom.session_storage import summary_rows
 from mindroom.session_storage.agent_storage import save_compaction_usage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.store import seen_event_ids, source_event_ids

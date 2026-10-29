@@ -14,11 +14,11 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom import constants
-from mindroom.history import summary_rows
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
+from mindroom.session_storage import summary_rows
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.legacy_conversion_backup import ConversionSpaceError
 from mindroom.session_storage.store import ConversationStore

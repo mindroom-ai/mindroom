@@ -2,8 +2,9 @@
 """Inline media content parts for Chat Completions and Responses requests.
 
 Attachments are filepath-backed, so parts are read and base64 encoded here; a file that cannot be read raises
-``InvalidRequest`` (``read_media_file``), and ``provider`` names the adapter in that error. Image URLs, and file URLs
-on Responses, go for the provider to fetch; the pipeline downloaded every other URL (``Capabilities.url_media``).
+``InvalidRequest``, and an empty one adds no part (``read_media_file``); ``provider`` names the adapter in that error.
+Image URLs, and file URLs on Responses, go for the provider to fetch; the pipeline downloaded every other URL
+(``Capabilities.url_media``).
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.media import image_mime_type
-from mindroom.providers.media_files import read_media_file
+from mindroom.providers.media_files import read_media_bytes
 
 if TYPE_CHECKING:
     from mindroom.llm.media import Audio, File, Image
@@ -39,15 +40,16 @@ _FILE_MIME_TYPES = {
 def _image_url(image: Image, provider: str) -> str | None:
     if image.url is not None:
         return image.url
-    if image.filepath is not None:
-        _, data = read_media_file(image.filepath, kind="image", provider=provider)
-    elif (data := image.content) is None:
+    data = (
+        image.content if image.filepath is None else read_media_bytes(image.filepath, kind="image", provider=provider)
+    )
+    if data is None:
         return None
     return f"data:{image_mime_type(image, data)};base64,{base64.b64encode(data).decode('utf-8')}"
 
 
 def chat_image_part(image: Image, *, provider: str) -> dict[str, Any] | None:
-    """Return a Chat Completions ``image_url`` part, or None for an image without a source."""
+    """Return a Chat Completions ``image_url`` part, or None for an empty file."""
     url = _image_url(image, provider)
     if url is None:
         return None
@@ -73,11 +75,11 @@ def chat_audio_part(audio: Audio, *, provider: str) -> dict[str, Any] | None:
     if audio.content:
         data, audio_format = audio.content, audio.format or "wav"
     elif audio.filepath is not None:
-        _, data = read_media_file(audio.filepath, kind="audio", provider=provider)
+        data = read_media_bytes(audio.filepath, kind="audio", provider=provider)
         audio_format = audio.format or Path(audio.filepath).suffix.lstrip(".")
     else:
         return None
-    if not audio_format:
+    if data is None or not audio_format:
         return None
     return {
         "type": "input_audio",
@@ -87,7 +89,7 @@ def chat_audio_part(audio: Audio, *, provider: str) -> dict[str, Any] | None:
 
 def _content_bytes(file: File, provider: str) -> bytes | None:
     if file.filepath is not None:
-        return read_media_file(file.filepath, kind="file", provider=provider)[1]
+        return read_media_bytes(file.filepath, kind="file", provider=provider)
     if isinstance(file.content, str):
         return file.content.encode("utf-8")
     return file.content
@@ -118,7 +120,7 @@ def _file_part_data_url(file: File, name: str, data: bytes) -> str:
 
 
 def chat_file_part(file: File, *, provider: str) -> dict[str, Any] | None:
-    """Return a Chat Completions ``file`` part with an inline data URL, or None for a file without bytes.
+    """Return a Chat Completions ``file`` part with an inline data URL, or None for a file without bytes or an empty one.
 
     It is named and typed as a Responses file part is (``_file_part_name``, ``_file_part_data_url``).
     """

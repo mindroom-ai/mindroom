@@ -41,9 +41,11 @@ from mindroom.session_storage.schema import (
     NON_VISIBLE_RUN_STATUS_SQL,
     NON_VISIBLE_RUN_STATUS_VALUES,
     TableNames,
+    quote_identifier,
+    usage_upsert_sql,
 )
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
-from mindroom.usage.storage import project_helper_usage, project_usage, quote_identifier, usage_upsert_sql
+from mindroom.usage.storage import project_helper_usage, project_usage
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, Sequence
@@ -460,7 +462,7 @@ class ConversationStore:
         with self.transaction(write=True) as connection:
             if initial_session is not None and ensure_session_row(connection, self.names, initial_session) is not None:
                 created = initial_session
-            connection.execute(usage_upsert_sql(self.names.sessions), (session_id, usage_id, json.dumps(snapshot)))
+            connection.execute(usage_upsert_sql(self.names), (session_id, usage_id, json.dumps(snapshot)))
         if created is not None:
             report_created_row(created)
 
@@ -1104,7 +1106,7 @@ def _record_run_usage(
         f"SELECT usage_data FROM {usage} WHERE session_id = ? AND run_id = ?",  # noqa: S608
         (session_id, run_id),
     ).fetchone()
-    connection.execute(usage_upsert_sql(names.sessions), (session_id, run_id, json.dumps(snapshot)))
+    connection.execute(usage_upsert_sql(names), (session_id, run_id, json.dumps(snapshot)))
     (raw_session_data,) = connection.execute(
         f"SELECT session_data FROM {sessions} WHERE session_id = ?",  # noqa: S608
         (session_id,),

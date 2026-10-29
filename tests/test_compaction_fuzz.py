@@ -24,7 +24,6 @@ from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
 from mindroom import constants
-from mindroom.history import summary_rows
 from mindroom.history.replay import current_summary_text
 from mindroom.history.storage import (
     _remove_redacted_event_from_history,
@@ -37,6 +36,7 @@ from mindroom.history.storage import (
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.session_storage import summary_rows
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot

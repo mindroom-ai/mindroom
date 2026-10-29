@@ -16,12 +16,11 @@ rows, flagged so it never replays.
 from __future__ import annotations
 
 import json
-from contextlib import contextmanager
 from dataclasses import dataclass
 from time import time
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_SQL, NON_VISIBLE_RUN_STATUS_VALUES
+from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_SQL, NON_VISIBLE_RUN_STATUS_VALUES, quote_identifier
 from mindroom.session_storage.store import (
     decoded_mapping,
     delete_runs_in_transaction,
@@ -33,11 +32,10 @@ from mindroom.session_storage.store import (
     store_fold,
     summary_event_sets,
 )
-from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:
     import sqlite3
-    from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Collection, Iterable, Mapping, Sequence
 
     from mindroom.llm.messages import Message
     from mindroom.llm.runs import AnyRunRecord
@@ -90,31 +88,20 @@ class Fold:
     member_run_ids: frozenset[str]
 
 
-class _Tables(NamedTuple):
-    """The log's table names, quoted for SQL, beside the names they come from."""
-
-    names: TableNames
-    runs: str
-    messages: str
-    tools: str
-    summaries: str
-    removed: str
-
-
 def latest_row(storage: ConversationStore, *, session_id: str, scope_key: str) -> _SummaryRow | None:
     """Return the scope's latest summary row, whose text replays."""
-    with _read_transaction(storage) as (connection, tables):
-        rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key, latest_only=True)
+    with storage.transaction(write=False) as connection:
+        rows = _rows(connection, storage.names, session_id=session_id, scope_key=scope_key, latest_only=True)
     return rows[-1] if rows else None
 
 
 def covered_runs(storage: ConversationStore, *, session_id: str, run_ids: Sequence[str]) -> list[CoveredRun]:
     """Return how the given runs are stored now, in ``seq`` order, for a later append to check."""
-    with _read_transaction(storage) as (connection, tables):
+    with storage.transaction(write=False) as connection:
         return [
             CoveredRun(run_id=run_id, seq=seq, status=status)
             for run_id, seq, status in connection.execute(
-                f"SELECT run_id, seq, status FROM {tables.runs} "  # noqa: S608
+                f"SELECT run_id, seq, status FROM {quote_identifier(storage.names.log_runs)} "  # noqa: S608
                 "WHERE session_id = ? AND run_id IN (SELECT value FROM json_each(?)) ORDER BY seq",
                 (session_id, json.dumps(list(run_ids))),
             )
@@ -143,15 +130,15 @@ def append_summary(
     the empty session row the append creates first when no write has yet, as a first turn's fold needs when its
     summary call reported no usage. ``session``, when given, then holds the runs and summary a load returns.
     """
-    created = None
-    with _write_transaction(storage, session_id, session) as (connection, tables):
-        latest = _rows(connection, tables, session_id=session_id, scope_key=scope_key, latest_only=True)
+    created, names = None, storage.names
+    with storage.log_transaction(session_id, session=session) as connection:
+        latest = _rows(connection, names, session_id=session_id, scope_key=scope_key, latest_only=True)
         through = latest[-1].through if latest else 0
         # A row never sorts behind the latest one: that would return what it folded to replay.
         if (latest[-1].id if latest else None) != based_on or any(run.seq <= through for run in covered):
             return None
         stored = connection.execute(
-            f"SELECT run_id, seq, status, metadata FROM {tables.runs} "  # noqa: S608
+            f"SELECT run_id, seq, status, metadata FROM {quote_identifier(names.log_runs)} "  # noqa: S608
             "WHERE session_id = ? AND run_id IN (SELECT value FROM json_each(?))",
             (session_id, json.dumps([run.run_id for run in covered])),
         ).fetchall()
@@ -161,20 +148,20 @@ def append_summary(
         run_metadata = [decoded_mapping(metadata) for *_, metadata in stored]
         provenance: tuple[str | None, ...] = (None, None, None)
         if fold is not None:
-            if is_removed(connection, tables.names, session_id, fold.run.run_id, fold.run.parent_run_id):
+            if is_removed(connection, names, session_id, fold.run.run_id, fold.run.parent_run_id):
                 return None
             live = fold.run.metadata
             # The running run's events count even when it later ends paused, cancelled, or failed.
             run_metadata.append(live)
             provenance = (fold.run.run_id, _encoded(source_event_ids(live)), _encoded(seen_event_ids(live)))
         # The summary row references the session row, which a first turn's fold may be the first to need.
-        if initial_session is not None and ensure_session_row(connection, tables.names, initial_session) is not None:
+        if initial_session is not None and ensure_session_row(connection, names, initial_session) is not None:
             created = initial_session
         event_ids, seen = summary_event_sets(run_metadata)
         (row_id,) = connection.execute(
-            f"INSERT INTO {tables.summaries} (session_id, scope_key, through, summary, event_ids, seen_event_ids, "  # noqa: S608
-            "created_at, fold_run_id, fold_event_ids, fold_seen_event_ids) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "RETURNING id",
+            f"INSERT INTO {quote_identifier(names.log_summaries)} (session_id, scope_key, through, summary, "  # noqa: S608
+            "event_ids, seen_event_ids, created_at, fold_run_id, fold_event_ids, fold_seen_event_ids) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
             (
                 session_id,
                 scope_key,
@@ -188,7 +175,7 @@ def append_summary(
             ),
         ).fetchone()
         if fold is not None:
-            store_fold(connection, tables.names, session_id, fold.run, fold.messages, fold.member_run_ids, row_id)
+            store_fold(connection, names, session_id, fold.run, fold.messages, fold.member_run_ids, row_id)
     if created is not None:
         report_created_row(created)
     return row_id
@@ -200,14 +187,17 @@ def folded_tool_call_ids(storage: ConversationStore, *, session_id: str, run_id:
     They are the calls and results of the run's folded messages and the calls of its folded member runs, since the
     whole delegation folds with each member run that ended before the fold.
     """
-    with _read_transaction(storage) as (connection, tables):
+    names = storage.names
+    runs = quote_identifier(names.log_runs)
+    with storage.transaction(write=False) as connection:
         messages = connection.execute(
-            f"SELECT data FROM {tables.messages} WHERE folded_by IS NOT NULL AND run_id = "  # noqa: S608
-            f"(SELECT run_id FROM {tables.runs} WHERE session_id = ? AND run_id = ?)",
+            f"SELECT data FROM {quote_identifier(names.log_messages)} WHERE folded_by IS NOT NULL AND run_id = "  # noqa: S608
+            f"(SELECT run_id FROM {runs} WHERE session_id = ? AND run_id = ?)",
             (session_id, run_id),
         ).fetchall()
         member_tools = connection.execute(
-            f"SELECT tool.data FROM {tables.tools} AS tool JOIN {tables.runs} AS run ON run.run_id = tool.run_id "  # noqa: S608
+            f"SELECT tool.data FROM {quote_identifier(names.log_tools)} AS tool JOIN {runs} AS run "  # noqa: S608
+            "ON run.run_id = tool.run_id "
             "WHERE run.session_id = ? AND run.parent_run_id = ? AND run.folded_by IS NOT NULL",
             (session_id, run_id),
         ).fetchall()
@@ -241,11 +231,12 @@ def history_event_ids(
 ) -> set[str]:
     """Return the event ids the scope's summary rows after its latest barrier fold, as seen or as redaction matches them."""
     column = "seen_event_ids" if kind == "seen" else "event_ids"
-    with _read_transaction(storage) as (connection, tables):
+    summaries = quote_identifier(storage.names.log_summaries)
+    with storage.transaction(write=False) as connection:
         rows = connection.execute(
-            f"SELECT value FROM {tables.summaries} AS row, json_each(row.{column}) "  # noqa: S608
+            f"SELECT value FROM {summaries} AS row, json_each(row.{column}) "  # noqa: S608
             "WHERE row.session_id = ? AND row.scope_key = ? AND row.id > COALESCE("
-            f"(SELECT MAX(id) FROM {tables.summaries} WHERE session_id = ? AND scope_key = ? AND summary IS NULL), 0)",
+            f"(SELECT MAX(id) FROM {summaries} WHERE session_id = ? AND scope_key = ? AND summary IS NULL), 0)",
             (session_id, scope_key, session_id, scope_key),
         ).fetchall()
     return {row[0] for row in rows}
@@ -268,12 +259,14 @@ def cut_at_event(
     ``session``, when given, is the loaded session whose log is cut, named by ``session_id``; it then holds the runs
     and summary a load returns.
     """
-    with _write_transaction(storage, session_id, session) as (connection, tables):
-        rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key)
+    names = storage.names
+    with storage.log_transaction(session_id, session=session) as connection:
+        rows = _rows(connection, names, session_id=session_id, scope_key=scope_key)
         retired_through, barrier_id = _barrier_key(rows)
         runs = connection.execute(
-            f"SELECT seq, metadata FROM {tables.runs} WHERE session_id = ? AND parent_run_id IS NULL "  # noqa: S608
-            f"AND scope_key = ? AND (status IN ({NON_VISIBLE_RUN_STATUS_SQL}) OR seq > ?) ORDER BY seq",
+            f"SELECT seq, metadata FROM {quote_identifier(names.log_runs)} WHERE session_id = ? "  # noqa: S608
+            "AND parent_run_id IS NULL AND scope_key = ? "
+            f"AND (status IN ({NON_VISIBLE_RUN_STATUS_SQL}) OR seq > ?) ORDER BY seq",
             (session_id, scope_key, retired_through),
         ).fetchall()
         holders = [
@@ -288,7 +281,7 @@ def cut_at_event(
                 break
         if not holders:
             return False
-        _cut(connection, tables, session_id, scope_key, rows, min(holders))
+        _cut(connection, names, session_id, scope_key, rows, min(holders))
     return True
 
 
@@ -306,8 +299,8 @@ def cut_at_event(
 # tests/test_summary_rows.py::test_a_retired_legacy_summary_stays_retired_after_a_later_cut.
 def legacy_event_ids(storage: ConversationStore, *, session_id: str, scope_key: str) -> frozenset[str] | None:
     """Return the event ids a legacy summary in force may contain, or ``None`` when none is in force."""
-    with _read_transaction(storage) as (connection, tables):
-        in_force = _legacy_in_force(_rows(connection, tables, session_id=session_id, scope_key=scope_key))
+    with storage.transaction(write=False) as connection:
+        in_force = _legacy_in_force(_rows(connection, storage.names, session_id=session_id, scope_key=scope_key))
     return frozenset().union(*(row.event_ids for row in in_force)) if in_force else None
 
 
@@ -316,11 +309,11 @@ def cut_at_legacy_row(storage: ConversationStore, *, session: ConversationSessio
 
     ``session`` is the loaded session whose log is cut; it then holds the runs and summary a load returns.
     """
-    session_id = session.session_id
-    with _write_transaction(storage, session_id, session) as (connection, tables):
-        rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key)
+    session_id, names = session.session_id, storage.names
+    with storage.log_transaction(session_id, session=session) as connection:
+        rows = _rows(connection, names, session_id=session_id, scope_key=scope_key)
         if legacy := _legacy_in_force(rows):
-            _cut(connection, tables, session_id, scope_key, rows, legacy[0].key)
+            _cut(connection, names, session_id, scope_key, rows, legacy[0].key)
 
 
 def _legacy_in_force(rows: Sequence[_SummaryRow]) -> list[_SummaryRow]:
@@ -335,21 +328,22 @@ def retire(storage: ConversationStore, *, session: ConversationSession, scope_ke
     A run that folded mid-turn goes with its member runs, since its stored part would replay without what it built
     on. ``session`` is the loaded session whose summaries retire; it then holds the runs and summary a load returns.
     """
-    session_id = session.session_id
-    with _write_transaction(storage, session_id, session) as (connection, tables):
-        rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key)
+    session_id, names = session.session_id, storage.names
+    with storage.log_transaction(session_id, session=session) as connection:
+        rows = _rows(connection, names, session_id=session_id, scope_key=scope_key)
         connection.execute(
-            f"INSERT INTO {tables.summaries} (session_id, scope_key, through, created_at) VALUES (?, ?, ?, ?)",  # noqa: S608
+            f"INSERT INTO {quote_identifier(names.log_summaries)} (session_id, scope_key, through, created_at) "  # noqa: S608
+            "VALUES (?, ?, ?, ?)",
             (session_id, scope_key, rows[-1].through if rows else 0, int(time())),
         )
         owners = {row.fold_run_id for row in rows if row.fold_run_id is not None}
-        removed = delete_runs_in_transaction(connection, tables.names, owners, session_id=session_id)
-        _record_removed(connection, tables, session_id, owners | removed)
+        removed = delete_runs_in_transaction(connection, names, owners, session_id=session_id)
+        _record_removed(connection, names, session_id, owners | removed)
 
 
 def _cut(
     connection: sqlite3.Connection,
-    tables: _Tables,
+    names: TableNames,
     session_id: str,
     scope_key: str,
     rows: Sequence[_SummaryRow],
@@ -362,7 +356,8 @@ def _cut(
     removed, which also fences a running run whose row is gone.
     """
     runs = connection.execute(
-        f"SELECT run_id, seq FROM {tables.runs} WHERE session_id = ? AND parent_run_id IS NULL AND scope_key = ?",  # noqa: S608
+        f"SELECT run_id, seq FROM {quote_identifier(names.log_runs)} "  # noqa: S608
+        "WHERE session_id = ? AND parent_run_id IS NULL AND scope_key = ?",
         (session_id, scope_key),
     ).fetchall()
     while True:
@@ -373,17 +368,24 @@ def _cut(
         if not earlier:
             break
         cut = min(earlier)
-    removed = delete_runs_in_transaction(connection, tables.names, top_level, session_id=session_id)
-    _record_removed(connection, tables, session_id, owners | removed)
+    removed = delete_runs_in_transaction(connection, names, top_level, session_id=session_id)
+    _record_removed(connection, names, session_id, owners | removed)
     connection.execute(
-        f"DELETE FROM {tables.summaries} WHERE id IN (SELECT value FROM json_each(?))",  # noqa: S608
+        f"DELETE FROM {quote_identifier(names.log_summaries)} "  # noqa: S608
+        "WHERE id IN (SELECT value FROM json_each(?))",
         (json.dumps([row.id for row in deleted_rows]),),
     )
 
 
-def _record_removed(connection: sqlite3.Connection, tables: _Tables, session_id: str, run_ids: Collection[str]) -> None:
+def _record_removed(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    session_id: str,
+    run_ids: Collection[str],
+) -> None:
     connection.execute(
-        f"INSERT OR IGNORE INTO {tables.removed} (run_id, session_id) SELECT value, ? FROM json_each(?)",  # noqa: S608
+        f"INSERT OR IGNORE INTO {quote_identifier(names.log_removed)} (run_id, session_id) "  # noqa: S608
+        "SELECT value, ? FROM json_each(?)",
         (session_id, json.dumps(sorted(run_ids))),
     )
 
@@ -408,7 +410,7 @@ def _decoded(raw_event_ids: str | None) -> frozenset[str]:
 
 def _rows(
     connection: sqlite3.Connection,
-    tables: _Tables,
+    names: TableNames,
     *,
     session_id: str,
     scope_key: str,
@@ -428,33 +430,9 @@ def _rows(
         )
         for row_id, through, summary, legacy, ids, fold_run_id, answered, seen in connection.execute(
             "SELECT id, through, summary, legacy, event_ids, fold_run_id, fold_event_ids, fold_seen_event_ids "  # noqa: S608
-            f"FROM {tables.summaries} WHERE session_id = ? AND scope_key = ? "
+            f"FROM {quote_identifier(names.log_summaries)} WHERE session_id = ? AND scope_key = ? "
             f"ORDER BY id DESC{' LIMIT 1' if latest_only else ''}",
             (session_id, scope_key),
         )
     ]
     return rows[::-1]
-
-
-def _tables(storage: ConversationStore) -> _Tables:
-    names = storage.names
-    tables = (names.log_runs, names.log_messages, names.log_tools, names.log_summaries, names.log_removed)
-    return _Tables(names, *map(quote_identifier, tables))
-
-
-@contextmanager
-def _write_transaction(
-    storage: ConversationStore,
-    session_id: str,
-    session: ConversationSession | None,
-) -> Iterator[tuple[sqlite3.Connection, _Tables]]:
-    """Run one write transaction on the log, the write lock taken first; ``session`` then holds what a load returns."""
-    with storage.log_transaction(session_id, session=session) as connection:
-        yield connection, _tables(storage)
-
-
-@contextmanager
-def _read_transaction(storage: ConversationStore) -> Iterator[tuple[sqlite3.Connection, _Tables]]:
-    """Run one read of the log in a snapshot."""
-    with storage.transaction(write=False) as connection:
-        yield connection, _tables(storage)

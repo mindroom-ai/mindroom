@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.usage.storage import quote_identifier
+from mindroom.session_storage.schema import quote_identifier
 
 if TYPE_CHECKING:
     import sqlite3

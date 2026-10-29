@@ -28,8 +28,8 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.types import ConversationSession
-from mindroom.usage.storage import quote_identifier
 from tests.conftest import seed_session
 
 if TYPE_CHECKING:

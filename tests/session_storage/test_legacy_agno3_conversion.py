@@ -22,7 +22,6 @@ from structlog.testing import capture_logs
 from mindroom import constants
 from mindroom.constants import resolve_runtime_paths
 from mindroom.history.storage import has_queued_force_compaction
-from mindroom.history.summary_rows import folded_tool_call_ids, history_event_ids, legacy_event_ids, retire
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
@@ -38,6 +37,7 @@ from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_sc
 from mindroom.session_storage.legacy_conversion_backup import ConversionSpaceError
 from mindroom.session_storage.schema import LOG_VERSION, SESSION_COLUMNS, TableNames, table_names
 from mindroom.session_storage.store import ConversationStore, connect_by_name
+from mindroom.session_storage.summary_rows import folded_tool_call_ids, history_event_ids, legacy_event_ids, retire
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.storage import SYSTEM_USAGE_STORAGE_NAME
 from tests.llm.agno_dict_helpers import DROPPED_RUN_KEYS, DROPPED_TOOL_EXECUTION_KEYS, expected_run_dict

@@ -193,12 +193,12 @@ def _function_response(result: ToolResultView) -> dict[str, Any]:
 
 
 async def _with_media(message: Message, parts: list[dict[str, Any]], route: MediaRoute) -> list[dict[str, Any]]:
+    """Return the message's text parts followed by its images, audio, videos, and files, each in the order it came."""
     images = [part for image in message.images or () if (part := await _image_part(image, route)) is not None]
     videos = [part for video in message.videos or () if (part := await _video_part(video, route)) is not None]
     audio = [part for clip in message.audio or () if (part := await _audio_part(clip, route)) is not None]
     files = [part for file in message.files or () if (part := await _file_part(file, route)) is not None]
-    # Google recommends videos before the prompt; each video is placed first, so the last one leads.
-    return [*reversed(videos), *parts, *images, *audio, *files]
+    return [*parts, *images, *audio, *videos, *files]
 
 
 def _stored_parts(stored: list[Any], tool_calls: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -251,13 +251,13 @@ async def _local_part(
 ) -> dict[str, Any] | None:
     """Inline a local file up to the inline limit, or reference its Files API upload where the route has one.
 
-    ``mime_type`` gets the file's bytes, or only its header when the file is uploaded.
+    ``mime_type`` gets the file's bytes, or only its header when the file is uploaded. An empty file adds no part.
     """
     file_path = Path(path)
     read = partial(read_media_file, file_path, kind=kind, provider=route.provider, limit=_INLINE_MEDIA_LIMIT_BYTES)
-    size, data = await asyncio.to_thread(read)
-    if not size:
+    if (local := await asyncio.to_thread(read)) is None:
         return None
+    size, data = local
     if size <= _INLINE_MEDIA_LIMIT_BYTES:
         return _inline(data, mime_type(data))
     if route.upload is None:

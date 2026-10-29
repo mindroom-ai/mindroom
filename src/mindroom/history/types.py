@@ -142,7 +142,7 @@ class HistoryScopeState:
     """Persisted compaction control state stored in session metadata.
 
     Compaction history itself lives in the summary rows beside the runs table,
-    owned by ``history/summary_rows.py``.
+    owned by ``session_storage/summary_rows.py``.
     """
 
     force_compact_before_next_run: bool = False

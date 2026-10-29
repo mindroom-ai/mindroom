@@ -63,15 +63,15 @@
           "role": "user",
           "content": [
             {
+              "type": "text",
+              "text": "Use the attached file to plan my packing."
+            },
+            {
               "type": "file",
               "file": {
                 "filename": "itinerary.pdf",
                 "file_data": "data:application/pdf;base64,JVBERi0xLjQKJSVFT0YK"
               }
-            },
-            {
-              "type": "text",
-              "text": "Use the attached file to plan my packing."
             }
           ]
         }

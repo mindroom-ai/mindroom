@@ -15,8 +15,7 @@ from typing import TYPE_CHECKING, Any, cast
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.session_storage.codec import decode_json
 from mindroom.session_storage.legacy_tool_results import split_combined_tool_results
-from mindroom.session_storage.schema import TableNames, index_sql
-from mindroom.usage.storage import quote_identifier, usage_table_sql
+from mindroom.session_storage.schema import TableNames, index_sql, quote_identifier, usage_table_sql
 
 if TYPE_CHECKING:
     import sqlite3
@@ -96,7 +95,7 @@ class AgnoTableNames(TableNames):
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_a_database_missing_an_agno_table_converts.
 def agno_schema_sql(names: AgnoTableNames) -> tuple[str, ...]:
     """Return the idempotent DDL of every table and index of the last Agno-layout release."""
-    return (*agno_runs_sql(names), *agno_summary_rows_sql(names), usage_table_sql(names.sessions))
+    return (*agno_runs_sql(names), *agno_summary_rows_sql(names), usage_table_sql(names))
 
 
 def agno_runs_sql(names: AgnoTableNames) -> tuple[str, ...]:

@@ -35,14 +35,14 @@ from mindroom.history.storage import (
     remove_runs_answering,
     set_force_compaction,
 )
-from mindroom.history.summary_rows import Fold, latest_row
 from mindroom.llm.runs import RunStatus
 from mindroom.session_storage.agent_storage import create_state_storage, save_compaction_usage
 from mindroom.session_storage.codec import run_kind
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
+from mindroom.session_storage.schema import quote_identifier, usage_table_sql
 from mindroom.session_storage.store import connect_conversation_database
+from mindroom.session_storage.summary_rows import Fold, latest_row
 from mindroom.session_storage.types import session_state_snapshot
-from mindroom.usage.storage import quote_identifier, usage_table_sql
 from tests.conftest import seed_session_state
 from tests.storage_oracle.backend import (
     REQUESTER_ID,
@@ -453,7 +453,7 @@ class StoreBackend(Driver):
         names = AgnoTableNames(self.owner)
         self.database.unlink()
         with closing(sqlite3.connect(self.database)) as connection, connection:
-            for statement in (*agno_runs_sql(names), usage_table_sql(names.sessions)):
+            for statement in (*agno_runs_sql(names), usage_table_sql(names)):
                 connection.execute(statement)
             if variant == 0:
                 self._seed_pre_archive(connection)

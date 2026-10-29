@@ -311,7 +311,9 @@ Matrix sync callback
 | `config/budgets.py` | Opt-in budgets: default monthly cap and fallback model |
 | `session_storage/agent_storage.py` | Opens an agent's, a team scope's, or the system usage ledger's conversation store, naming its owner: the preflight archive check, the link-refusing connect, the tables of a new database, the conversion of one in an older layout, and the layout version upgrade |
 | `session_storage/store.py` | The conversation store: one SQLite database of sessions, runs with a row per stored message and per tool execution, summary rows, and the usage ledger, with full run saves refused once a run is final and single facts patched onto stored rows, each operation in one transaction on its own connection |
-| `session_storage/schema.py` | File and table names, a team scope's database name, table listing, and the layout of a conversation database: the sessions table, the six `*_log_*` tables, the meta row naming the owner, and the usage ledger |
+| `session_storage/schema.py` | File and table names, a team scope's database name, identifier quoting, table and column listing, and the layout of a conversation database: the sessions table, the six `*_log_*` tables, the meta row naming the owner, and the usage ledger with its upsert |
+| `session_storage/summary_rows.py` | The conversation log's summary rows: compare-and-append of compaction chunks and mid-turn folds, the event ids each row covers, the tool calls folds took, and edit and redaction cuts |
+| `session_storage/usage_reader.py` | Read-only reads of a conversation database's sessions, owner, and usage ledger for usage reports, returning what is stored unchecked for the report to validate |
 | `session_storage/codec.py` | A run record to its run row, message rows, and tool-execution rows and back, with the JSON keys stored runs carry, and the JSON decode that reads worker-written text without failing |
 | `session_storage/types.py` | `ConversationSession` and the other values the store reads and writes |
 | `session_storage/lanes.py` | One FIFO lane per conversation database for storage operations started from async code |
@@ -322,7 +324,7 @@ Matrix sync callback
 | `session_storage/legacy_session_columns.py` | The layout version upgrade: session rows that named their kind and owner and held their state inside `session_data` convert once to layout version 4, whose meta row names the owner, with the team owner the startup sweep reads from the rows |
 | `session_storage/legacy_conversion_backup.py` | The `<name>.db.pre-storage-v2` and `<name>.db.pre-storage-v4` copies a database gets before its conversions, after a free-space check, through no-follow descriptors |
 | `session_storage/legacy_agno3_schema.py` | The Agno layout's table names, DDL, run-row decoder, and member-subtree delete, read only by the conversion and its Agno-era steps |
-| `history/summary_rows.py` | The conversation log's summary rows: compare-and-append of compaction chunks and mid-turn folds, the event ids each row covers, the tool calls folds took, and edit and redaction cuts |
+| `session_storage/legacy_usage_ledger.py` | The conversion's step that seeds the usage ledger of an Agno-layout database without one from its run rows and Agno 2 blobs |
 | `history/legacy_compaction_state.py` | The conversion's step that turns earlier compaction state, the compaction archive, and unpositioned run rows into summary rows and positioned runs before they convert |
 | `history/mid_turn_compaction.py` | Compaction between the model requests of one reply: request sizing, folding, and the scoped or run-local summary |
 | `history/turn_recorder.py` | `TurnRecorder`: what one turn did, which the turn driver writes, and the interrupted-replay snapshot the driver stores when the turn stops |

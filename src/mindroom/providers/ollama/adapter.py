@@ -25,7 +25,7 @@ from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.providers.assistant_turn import ThinkTagSplitter, TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
-from mindroom.providers.media_files import read_media_file
+from mindroom.providers.media_files import read_media_bytes
 from mindroom.providers.ollama.errors import provider_error
 from mindroom.providers.ollama.settings import OllamaSettings, ollama_client_options
 from mindroom.providers.tool_policy import disables_tools
@@ -232,8 +232,7 @@ async def _format_message(message: Message, provider: str) -> dict[str, Any]:
 async def _image_bytes(image: Image, provider: str) -> bytes | None:
     if image.filepath is None:
         return image.content
-    _, data = await asyncio.to_thread(partial(read_media_file, image.filepath, kind="image", provider=provider))
-    return data
+    return await asyncio.to_thread(partial(read_media_bytes, image.filepath, kind="image", provider=provider))
 
 
 def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:

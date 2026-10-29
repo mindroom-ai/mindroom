@@ -1983,7 +1983,7 @@ async def _prepare_with_reported_usage(
     session = seed_session(storage, _session("session-1", runs=runs))
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     if folded_run_ids:
-        with patch("mindroom.history.summary_rows.time", return_value=_SUMMARY_WRITTEN_AT):
+        with patch("mindroom.session_storage.summary_rows.time", return_value=_SUMMARY_WRITTEN_AT):
             compact_runs(storage, session, list(folded_run_ids), "Earlier summary")
     estimate = estimate_prompt_visible_history_tokens(
         session=session,

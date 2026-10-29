@@ -21,8 +21,7 @@ from typing import Any, cast
 
 from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import create_state_storage
-from mindroom.session_storage.schema import TableNames
-from mindroom.usage.storage import quote_identifier
+from mindroom.session_storage.schema import TableNames, quote_identifier
 from tests.llm.agno_dict_helpers import MESSAGE_DEFAULTS, TOOL_EXECUTION_DEFAULTS
 from tests.session_storage.goldens import STORAGE
 from tests.storage_oracle.determinism import deterministic
