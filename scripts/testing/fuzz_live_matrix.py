@@ -6872,7 +6872,10 @@ class FinalStateAuditor:
         """Return the marker of the source's newest revision MindRoom answered.
 
         That is its current revision, unless edits MindRoom declined, which
-        regenerate nothing, came after the newest one an answer used.
+        regenerate nothing, came after the newest one an answer used. An edit
+        that reached its message while the message still waited in the
+        coalescing queue settles without a regeneration too, but the turn
+        itself answers it, so the model saw its marker.
         """
         current = self.source_current_markers[source_id]
         revisions = self.source_revision_markers.get(source_id, {})
@@ -6882,7 +6885,7 @@ class FinalStateAuditor:
         answered = [
             (_replacement_order(edit_id, events[edit_id].get("origin_server_ts"), is_edit=True), marker)
             for edit_id, marker in revisions.items()
-            if edit_id not in declined and edit_id not in redacted_targets and edit_id in events
+            if (edit_id not in declined or marker in observed) and edit_id not in redacted_targets and edit_id in events
         ]
         if answered:
             return max(answered)[1]

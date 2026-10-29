@@ -7695,6 +7695,58 @@ async def test_model_source_audit_accepts_a_declined_edit_only_after_a_later_mes
 
 
 @pytest.mark.asyncio
+async def test_model_source_audit_accepts_an_edit_applied_while_its_message_was_queued(tmp_path: Path) -> None:
+    """An edit that reached its message in the coalescing queue settles like a declined one, but the turn answers it."""
+    ledger_path = tmp_path / "event_journal.db"
+    queued = _source_marker("op:1", "edit:5")
+    late = _source_marker("op:1", "edit:9")
+    auditor = _model_source_auditor(
+        ledger_path=ledger_path,
+        expected_sources={"$a": "op:1"},
+        source_current_markers={"$a": late},
+        observed={4: frozenset({queued})},
+    )
+    auditor.source_revision_markers = {"$a": {"$queued": queued, "$late": late}}
+    # Neither edit drove a regeneration: the first changed the queued message, the second came after another message.
+    auditor.declined_edits = lambda: frozenset({"$queued", "$late"})  # type: ignore[method-assign]
+    try:
+        record = TurnRecord.create(source_event_ids=("$a",), response_event_id="$reply-a", completed=True)
+        _write_ledger(ledger_path, {"$a": record})
+        thread = {"rel_type": "m.thread", "event_id": "$a", "m.in_reply_to": {"event_id": "$a"}}
+
+        def message(event_id: str, ts: int, content: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "event_id": event_id,
+                "sender": "@user:example",
+                "type": "m.room.message",
+                "origin_server_ts": ts,
+                "content": content,
+            }
+
+        replace_a = {"m.relates_to": {"rel_type": "m.replace", "event_id": "$a"}}
+        events = {
+            "$a": message("$a", 10, {"body": "original", "msgtype": "m.text"}),
+            "$queued": message("$queued", 20, replace_a),
+            "$b": message("$b", 30, {"body": "next", "msgtype": "m.text", "m.relates_to": thread}),
+            "$late": message("$late", 40, replace_a),
+            "$reply-a": _agent_reply_event("$a", "$reply-a", _short_body_for(4)),
+        }
+        sent = [
+            _SentRecord(event_id, "!room:example", "m.room.message", sender="@user:example", content=event["content"])
+            for event_id, event in events.items()
+            if event_id != "$reply-a"
+        ]
+        auditor._assert_model_saw_current_sources(events, sent_records=sent)
+
+        # Once a regeneration answered the later edit, the queued revision is stale.
+        auditor.declined_edits = lambda: frozenset({"$queued"})  # type: ignore[method-assign]
+        with pytest.raises(AssertionError, match="without current source markers"):
+            auditor._assert_model_saw_current_sources(events, sent_records=sent)
+    finally:
+        await auditor.client.close()
+
+
+@pytest.mark.asyncio
 async def test_model_source_audit_rejects_coalesced_missing_one_source(tmp_path: Path) -> None:
     """A coalesced response missing ONE current source marker fails."""
     ledger_path = tmp_path / "event_journal.db"
