@@ -1,10 +1,10 @@
 """Token telemetry for every provider request, and the opt-in full request log.
 
 Each request emits one ``LLM usage`` log line once it ends, completed or not, attributed to the turn
-its request context names. With ``debug.log_llm_requests`` the body the route sends (``ModelRequest.on_send``),
-the model settings, and the request's usage are appended to the day's ``llm-requests-YYYY-MM-DD.jsonl``, joined by
-``request_log_id`` and attributed to the same turn. A request that never reaches its SDK, such as one whose
-attachment cannot be read, logs no record.
+its request context names. With ``debug.log_llm_requests`` the body each route hands its SDK
+(``ModelRequest.on_send``), the model settings, and the request's usage are appended to the day's
+``llm-requests-YYYY-MM-DD.jsonl``, joined by ``request_log_id`` and attributed to the same turn. A request that never
+reaches its SDK, such as one whose attachment cannot be read, logs no record.
 """
 
 from __future__ import annotations
