@@ -386,7 +386,7 @@ def _streaming_adapter(
     ],
     *,
     load_scope: Callable[[], ScopeSessionContext] | None = None,
-    unexpected_error_text: Callable[[Exception], str] | None = None,
+    unexpected_error_text: Callable[[Exception], str] = lambda error: f"failed: {error}",
 ) -> TurnAdapter[str]:
     async def _finalize(_scope: ScopeSessionContext | None) -> None:
         _bump(log, "finalized")
@@ -1868,44 +1868,45 @@ def test_streaming_finalize_runs_when_attempt_raises() -> None:
         msg = "stream blew up"
         raise RuntimeError(msg)
 
-    async def _run() -> None:
-        async for _chunk in stream_response_turn(
-            _ctx(),
-            _streaming_adapter(log, _attempt),
-            TurnSinks(),
-            continuation=_continuation(),
-        ):
-            pass
+    chunks = asyncio.run(
+        _collect(
+            stream_response_turn(_ctx(), _streaming_adapter(log, _attempt), TurnSinks(), continuation=_continuation()),
+        ),
+    )
 
-    with pytest.raises(RuntimeError, match="stream blew up"):
-        asyncio.run(_run())
+    assert chunks == ["chunk", "failed: stream blew up"]
     assert log.finalized == 1
 
 
 def test_streaming_unexpected_error_yields_its_shaped_error_text() -> None:
-    """An unexpected exception becomes the adapter's shaped error text, a bare string as every failed turn's reply is."""
+    """An unexpected exception becomes the adapter's shaped error text, a bare string as every failed turn's reply is.
+
+    The caller's failure sink receives the error, as it does for a failure an attempt handled.
+    """
     log = _AdapterLog()
+    error = RuntimeError("boom")
+    failures: list[Exception] = []
 
     async def _attempt(
         _run: TurnRunState,
         _c: TurnContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         yield "chunk"
-        msg = "boom"
-        raise RuntimeError(msg)
+        raise error
 
     chunks = asyncio.run(
         _collect(
             stream_response_turn(
                 _ctx(),
                 _streaming_adapter(log, _attempt, unexpected_error_text=lambda e: f"shaped: {e}"),
-                TurnSinks(),
+                TurnSinks(on_failed=failures.append),
                 continuation=_continuation(),
             ),
         ),
     )
 
     assert chunks == ["chunk", "shaped: boom"]
+    assert failures == [error]
 
 
 def test_streaming_completed_response_text_is_emitted_after_settle() -> None:
@@ -2013,8 +2014,8 @@ def test_streaming_continuation_does_not_emit_first_attempt_terminal_text() -> N
     assert chunks == ["notice:final"]
 
 
-def test_streaming_attempt_without_sentinel_raises() -> None:
-    """A streaming attempt that never yields its sentinel fails loudly."""
+def test_streaming_attempt_without_sentinel_fails_the_turn() -> None:
+    """A streaming attempt that never yields its sentinel fails the turn instead of ending it silently."""
     log = _AdapterLog()
     recorder = _FakeTurnRecorder()
 
@@ -2024,18 +2025,21 @@ def test_streaming_attempt_without_sentinel_raises() -> None:
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         yield "chunk"
 
-    async def _run() -> None:
-        async for _chunk in stream_response_turn(
-            _ctx(),
-            _streaming_adapter(log, _attempt),
-            TurnSinks(turn_recorder=recorder),
-            continuation=_continuation(),
-        ):
-            pass
+    chunks = asyncio.run(
+        _collect(
+            stream_response_turn(
+                _ctx(),
+                _streaming_adapter(log, _attempt),
+                TurnSinks(turn_recorder=recorder),
+                continuation=_continuation(),
+            ),
+        ),
+    )
 
-    with pytest.raises(RuntimeError, match="AttemptResolved sentinel"):
-        asyncio.run(_run())
+    assert chunks[0] == "chunk"
+    assert "AttemptResolved sentinel" in chunks[1]
     assert recorder.completed_calls == []
+    assert recorder.original_status is RunStatus.error
     assert log.finalized == 1
 
 

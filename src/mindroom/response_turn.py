@@ -401,7 +401,7 @@ class TurnSinks:
     turn_recorder: TurnRecorder | None = None
     run_metadata_collector: dict[str, Any] | None = None
     on_completed: Callable[[CompletedAttempt], None] | None = None
-    # Receives the failure an attempt that failed with a reply text reports.
+    # Receives the failure a turn that failed with a reply text reports.
     on_failed: Callable[[Exception], None] | None = None
     # Receives each attempt's run id and configured model name before the attempt starts.
     on_attempt_start: Callable[[str, str], None] | None = None
@@ -769,9 +769,10 @@ class TurnAdapter[ChunkT]:
     make_text_chunk: Callable[[str], ChunkT]
     # The current-turn user message the turn's record keeps, which an interrupted row stores.
     user_message: str
+    # The reply to an error no attempt handled, its credentials redacted.
+    unexpected_error_text: Callable[[Exception], str]
     on_scope_loaded: Callable[[ScopeSessionContext | None], None] | None = None
     finalize_attempt: Callable[[ScopeSessionContext | None], Awaitable[None]] | None = None
-    unexpected_error_text: Callable[[Exception], str] | None = None
 
 
 def _raise_continuation_budget_exhausted() -> NoReturn:
@@ -869,18 +870,15 @@ async def _failed_turn_text(
     continuation: TurnContinuationRunState,
     error: Exception,
 ) -> str | None:
-    """Settle a turn that raised: return its error reply, None when it is skipped before participation.
-
-    Raises ``error`` again, after recording the interrupted turn, when the adapter has no error reply.
-    """
+    """Settle a turn that raised: return its error reply, None when it is skipped before participation."""
     if skipped := skip_unapproved_attempt(ctx.participation, reason="run_failed_before_decision"):
         _settle_skipped_attempt(ctx, adapter, run, skipped)
         logger.exception("Response turn skipped before participation", entity=ctx.entity_label)
         return None
     await _record_interrupted(ctx, adapter, sinks, run, continuation, RunStatus.error)
-    if adapter.unexpected_error_text is None:
-        raise error
     logger.exception("Response turn failed", entity=ctx.entity_label)
+    if sinks.on_failed is not None:
+        sinks.on_failed(error)
     return adapter.unexpected_error_text(error)
 
 

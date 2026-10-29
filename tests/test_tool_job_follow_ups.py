@@ -98,6 +98,7 @@ async def _drive_jobs_turn(
         discard_empty_run=lambda _scope, _discard: None,
         make_text_chunk=str,
         user_message=prompt,
+        unexpected_error_text=str,
     )
     continuation = TurnContinuationRunState.initial(
         prompt=prompt,

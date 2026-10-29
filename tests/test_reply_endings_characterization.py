@@ -1218,7 +1218,6 @@ async def test_an_approval_pause_holds_the_reply(
     assert await turn.pending()
 
 
-@pytest.mark.xfail(strict=True, reason="bug: an agent attempt's unexpected error reaches the note raw")
 @pytest.mark.parametrize("streaming", [True, False], ids=["streamed", "whole"])
 async def test_an_unexpected_agent_turn_error_answers_with_redacted_friendly_text(
     tmp_path: Path,

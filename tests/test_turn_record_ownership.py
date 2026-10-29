@@ -120,6 +120,7 @@ def _adapter(run_attempt: Any, *, kind: str = "agent") -> TurnAdapter[str]:  # n
         discard_empty_run=lambda _scope, _discard: None,
         make_text_chunk=lambda text: f"notice:{text}",
         user_message="hello",
+        unexpected_error_text=str,
     )
 
 

@@ -312,6 +312,11 @@ def _agent_turn_adapter(
         finalize_attempt=finalize_attempt,
         make_text_chunk=TextDelta,
         user_message=user_message,
+        unexpected_error_text=partial(
+            get_user_friendly_error_message,
+            agent_name=agent_name,
+            runtime_paths=runtime_paths,
+        ),
     )
 
 

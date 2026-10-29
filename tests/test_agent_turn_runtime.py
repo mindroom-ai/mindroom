@@ -450,7 +450,7 @@ async def test_a_pause_with_no_approval_to_ask_for_fails_the_reply(
     """A run paused on an externally executed call that is not a delegation has nothing to resume it, so the reply fails.
 
     The loop stores the ``PAUSED`` row; the turn driver records the failure on the turn recorder as an error and
-    writes it over the row, so the row no longer waits for an approval that never comes.
+    writes it over the row, so the row no longer waits for an approval that never comes. The reply says why.
     """
     reply = _reply(
         tmp_path,
@@ -460,9 +460,13 @@ async def test_a_pause_with_no_approval_to_ask_for_fails_the_reply(
     )
     replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
 
-    with pytest.raises(RuntimeError, match="without an approval to ask for"):
-        await _respond(reply)
+    text = await _respond(reply)
 
+    # Below the call it had shown, the reply ends with the failure's own paragraph.
+    assert text.split("\n\n")[-2:] == [
+        "🔧 `touch` [1] ⏳",
+        "[assistant] ⚠️ Error: agent run 'run-1' paused on ['touch'] without an approval to ask for",
+    ]
     assert probe.calls == []
     [paused] = replaced
     assert paused.status is RunStatus.paused
@@ -1413,8 +1417,7 @@ async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_a
     """Through ``ResponseRunner``, a pause nothing can resume fails the reply, and the failure lands over the ``PAUSED`` row.
 
     The loop stores the pause; the lifecycle owner then records the failure over the row as its interrupted-turn
-    record, so it no longer waits for an approval that never comes. A reply delivered without streaming also raises
-    the failure through the runner.
+    record, so it no longer waits for an approval that never comes. The reply says why, streamed or delivered whole.
     """
     reply = _reply(
         tmp_path,
@@ -1428,12 +1431,11 @@ async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_a
     presence.last_active_ago = 0
     runner.deps.runtime.client.get_presence = AsyncMock(return_value=presence)
 
-    if streaming:
-        await runner.generate_response(_request())
-    else:
-        with pytest.raises(RuntimeError, match="without an approval to ask for"):
-            await runner.generate_response(_request())
+    await runner.generate_response(_request())
 
+    body = runner.deps.runtime.client.room_send.await_args.kwargs["content"]["body"]
+    assert body.split("\n\n")[-1].startswith("[assistant] ⚠️ Error: agent run ")
+    assert body.endswith(" paused on ['touch'] without an approval to ask for")
     assert probe.calls == []
     session = reply.storage.load_session(SESSION_ID)
     assert session is not None

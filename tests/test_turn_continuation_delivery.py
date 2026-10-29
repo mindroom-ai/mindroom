@@ -102,6 +102,7 @@ def _stream_turn(
             discard_empty_run=_noop,
             make_text_chunk=lambda text: text,
             user_message=ctx.prompt,
+            unexpected_error_text=str,
         ),
         sinks,
         continuation=TurnContinuationRunState.initial(
