@@ -216,20 +216,26 @@ async def test_upstream_answering_an_upload_from_its_head(
     tunnel: bool,
 ) -> None:
     """An upstream that answers a large upload from its head and closes has that answer relayed; silence is a 502."""
+    answered = asyncio.Event()
 
     async def answer_head(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await reader.readuntil(b"\r\n\r\n")
         writer.write(answer)
         await writer.drain()
         writer.close()
+        answered.set()
 
     port = await serve(answer_head, ssl_context=upstream_ca.server_context(tmp_path) if tunnel else None)
     await broker(single_rule_config(), secrets={"svc": SECRET})
     client, target = await client_for(broker, port, tunnel=tunnel)
     try:
-        # Below the broker's body limit; buffered at once, so the client reads while its transport sends.
         head = f"POST {{t}}/upload HTTP/1.1\r\nHost: {{h}}\r\n{{a}}Content-Length: {_UPLOAD_BYTES}\r\n\r\n"
-        client.send(target.render(head) + b"x" * _UPLOAD_BYTES)
+        client.send(target.render(head))
+        # The body follows the upstream's answer and close, so the broker reads the answer before a body write fails.
+        # An answer still unread when a write fails is lost, because asyncio closes the socket on the failed write.
+        await answered.wait()
+        # Below the broker's body limit; buffered at once, so the client reads while its transport sends.
+        client.send(b"x" * _UPLOAD_BYTES)
         reply = await client.reply()
         closed = await client.closed()
     finally:
