@@ -53,7 +53,6 @@ from mindroom.providers.openai.tool_search import openai_native_tool_search_supp
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.types import ConversationSession
 from tests.agent_loop.helpers import collect, context, gated
-from tests.providers.family_support import unreadable_type_note
 from tests.providers.golden_support import responses_events, streamed_reply
 from tests.providers.openai_family_support import openai_family_adapter, provider_runtime, responses_adapter
 
@@ -1384,10 +1383,6 @@ def test_rebuilding_a_request_leaves_a_message_s_content_list_unchanged() -> Non
 # --- Files ----------------------------------------------------------------------------------------------------
 
 
-_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-
-
 @pytest.mark.parametrize(
     ("filename", "declared_mime", "expected_mime"),
     [
@@ -1401,6 +1396,9 @@ _XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         ("report.pptx", None, "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
         ("report.xlsx", None, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
         ("notes.txt", "application/pdf", "application/pdf"),
+        ("unknown.bin", None, "application/octet-stream"),
+        ("archive.zip", "application/zip", "application/zip"),
+        ("notes.txt.gz", None, "application/octet-stream"),
     ],
 )
 def test_an_attachment_s_type_comes_from_its_original_filename(
@@ -1434,128 +1432,28 @@ def test_an_attachment_s_type_comes_from_its_original_filename(
     ]
 
 
-def _sent_type(part: dict[str, Any] | None) -> str:
-    """Return the type a file part sends its data as, ``note <type>`` for a note, or ``text`` for the file's text."""
-    assert part is not None
-    if part["type"] in {"text", "input_text"}:
-        noted = re.findall(r"^\[Attachment omitted: .+? \((.+?)\) is a file type", part["text"])
-        return f"note {noted[0]}" if noted else "text"
-    data_url = part["file"]["file_data"] if part["type"] == "file" else part["file_data"]
-    return data_url.removeprefix("data:").split(";", 1)[0]
-
-
 @pytest.mark.parametrize(
-    ("file", "chat", "responses"),
+    ("file", "expected_mime"),
     [
-        (File(content=b"%PDF", filename="report.pdf"), "application/pdf", "application/pdf"),
-        (File(content=b"PK", filename="report.docx"), "note " + _DOCX, _DOCX),
-        (File(content=b"PK", filename="sheet.xlsx", mime_type="application/octet-stream"), "note " + _XLSX, _XLSX),
-        (
-            File(content=b"notes", filename="notes.txt", mime_type="application/octet-stream"),
-            "text",
-            "text/plain",
-        ),
-        (File(content=b"{}", filename="data.json"), "text", "application/json"),
-        (File(content=b"From: a@example.org\n\nHi", filename="mail.eml"), "text", "message/rfc822"),
-        (File(content=b"a: 1", filename="config.yaml"), "text", "application/yaml"),
-        (File(content=b"x = 1", filename="app.toml"), "text", "application/toml"),
-        (File(content=b"started", filename="server.log"), "text", "text/plain"),
-        (File(content=b"let x = 1", filename="app.ts"), "text", "text/x-typescript"),
-        (File(content=b'syntax = "proto3";', filename="api.proto"), "text", "text/x-protobuf"),
-        (File(content=b"SELECT 1;", filename="q.sql", mime_type="application/sql"), "text", "note application/sql"),
-        (File(content=b"print 1;", filename="a.pl", mime_type="application/x-perl"), "text", "note application/x-perl"),
-        (File(content=b"puts 1", filename="a.rb", mime_type="application/x-ruby"), "text", "note application/x-ruby"),
-        (
-            File(content=b'{"cells": []}', filename="nb.ipynb", mime_type="application/x-ipynb+json"),
-            "text",
-            "note application/x-ipynb+json",
-        ),
-        (
-            File(content=b"\x08\x96\x01", filename="payload.bin", mime_type="application/x-protobuf"),
-            "note application/x-protobuf",
-            "application/x-protobuf",
-        ),
-        (
-            File(content=b"let x = 1", filename="app.js", mime_type="application/javascript"),
-            "text",
-            "application/javascript",
-        ),
-        (
-            File(content=b"echo hi", filename="run", mime_type="application/x-shellscript"),
-            "text",
-            "note application/x-shellscript",
-        ),
-        (
-            File(content=b"a,b", filename="report.csv.gz"),
-            "note application/octet-stream",
-            "note application/octet-stream",
-        ),
-        (File(content=b"PK", filename="bundle.zip"), "note application/zip", "note application/zip"),
-        (
-            File(content=b"blob", filename="unknown.bin"),
-            "note application/octet-stream",
-            "note application/octet-stream",
-        ),
+        (File(content=b"a,b", filename="report.csv.gz"), "application/octet-stream"),
+        (File(content=b"notes", filename="notes.txt", mime_type="application/octet-stream"), "text/plain"),
+        (File(content=b"%PDF", filename="report.pdf"), "application/pdf"),
     ],
 )
-def test_chat_and_responses_send_only_the_file_types_their_api_reads(file: File, chat: str, responses: str) -> None:
-    """Both wires type a file by one rule; Chat reads PDF and text, Responses also documents, as OpenAI documents.
+def test_chat_and_responses_type_a_file_by_one_rule(file: File, expected_mime: str) -> None:
+    """Both wires name a file by its original filename and type it by the same rule; a compressed name has no type."""
+    chat = chat_file_part(file, provider="OpenAI Chat")
+    responses = responses_file_part(file, provider="OpenAI Responses")
 
-    Chat sends a text file's contents as a text part. Any other file goes as a text part naming it and its type, and a
-    compressed name has no type.
-    """
-    assert _sent_type(chat_file_part(file, provider="OpenAI Chat")) == chat
-    assert _sent_type(responses_file_part(file, provider="OpenAI Responses")) == responses
-
-
-def test_chat_sends_a_text_file_s_contents_read_as_claude_reads_them(tmp_path: Path) -> None:
-    """Chat Completions takes only PDF file parts, so a text file goes as its UTF-8 text; other bytes read as U+FFFD."""
-    notes = tmp_path / "att_notes.txt"
-    notes.write_bytes("Café notes\n".encode())
-
-    assert chat_file_part(File(filepath=str(notes), filename="notes.md"), provider="OpenAI Chat") == {
-        "type": "text",
-        "text": "Café notes\n",
-    }
-    assert chat_file_part(File(content=b"caf\xe9,ok", filename="latin.csv"), provider="OpenAI Chat") == {
-        "type": "text",
-        "text": "caf\ufffd,ok",
-    }
+    assert chat is not None
+    assert responses is not None
+    assert chat["file"]["filename"] == responses["filename"] == file.filename
+    assert chat["file"]["file_data"].startswith(f"data:{expected_mime};base64,")
+    assert responses["file_data"] == chat["file"]["file_data"]
 
 
-def test_a_file_of_a_type_the_api_does_not_read_is_never_read(tmp_path: Path) -> None:
-    """The note replaces a file before its bytes are read, so a missing file of such a type fails nothing."""
-    file = File(filepath=str(tmp_path / "missing.zip"), filename="bundle.zip")
-
-    assert chat_file_part(file, provider="OpenAI Chat") == {
-        "type": "text",
-        "text": unreadable_type_note("bundle.zip", "application/zip"),
-    }
-    assert responses_file_part(file, provider="OpenAI Responses") == {
-        "type": "input_text",
-        "text": unreadable_type_note("bundle.zip", "application/zip"),
-    }
-
-
-def test_an_attachment_without_a_filename_is_named_and_typed_by_its_stored_file(tmp_path: Path) -> None:
+def test_an_attachment_without_a_filename_is_named_by_its_stored_file(tmp_path: Path) -> None:
     """An attachment recorded without a filename or type still reaches Responses, named and typed by its file."""
-    stored_path = tmp_path / "att_document.pdf"
-    stored_path.write_bytes(b"%PDF synthetic attachment")
-    _, _, files, _ = attachment_records_to_media(
-        [AttachmentRecord(attachment_id="att_document", local_path=stored_path, kind="file")],
-    )
-
-    replay = _input([Message(role="user", content="Read the attachment.", files=files)])
-
-    assert replay[0]["content"][1] == {
-        "type": "input_file",
-        "filename": "att_document.pdf",
-        "file_data": f"data:application/pdf;base64,{base64.b64encode(b'%PDF synthetic attachment').decode()}",
-    }
-
-
-def test_an_untyped_attachment_is_noted_by_its_stored_file_name(tmp_path: Path) -> None:
-    """Nothing types an attachment stored as ``.bin`` without a filename or type, so its note names the stored file."""
     stored_path = tmp_path / "att_document.bin"
     stored_path.write_bytes(b"synthetic attachment")
     _, _, files, _ = attachment_records_to_media(
@@ -1565,8 +1463,9 @@ def test_an_untyped_attachment_is_noted_by_its_stored_file_name(tmp_path: Path) 
     replay = _input([Message(role="user", content="Read the attachment.", files=files)])
 
     assert replay[0]["content"][1] == {
-        "type": "input_text",
-        "text": unreadable_type_note("att_document.bin", "application/octet-stream"),
+        "type": "input_file",
+        "filename": "att_document.bin",
+        "file_data": f"data:application/octet-stream;base64,{base64.b64encode(b'synthetic attachment').decode()}",
     }
 
 

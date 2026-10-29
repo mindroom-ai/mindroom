@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
+import mimetypes
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -24,15 +25,7 @@ from mindroom.model_defaults import CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES, CLAUDE
 from mindroom.providers.anthropic.repairs import replay_safe_blocks
 from mindroom.providers.anthropic.stored_turns import replayed_blocks
 from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY, as_dict
-from mindroom.providers.media_files import (
-    file_bytes,
-    file_mime_type,
-    file_text,
-    has_file_bytes,
-    is_text_mime_type,
-    read_media_bytes,
-    unreadable_file_note,
-)
+from mindroom.providers.media_files import read_media_bytes
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -89,9 +82,23 @@ _IMAGE_MEDIA_TYPES = {
     "gif": "image/gif",
     "webp": "image/webp",
 }
-# Claude reads a document as a base64 PDF or as plain text; "Binary formats such as .xlsx or .docx are not supported in
-# document blocks" (https://platform.claude.com/docs/en/build-with-claude/pdf-support).
-_PDF = "application/pdf"
+# Documents Claude reads as plain text; every other type is a base64 document, which the API accepts for PDF only.
+_TEXT_DOCUMENT_MEDIA_TYPES = frozenset(
+    {
+        "text/plain",
+        "text/csv",
+        "text/html",
+        "text/css",
+        "text/markdown",
+        "text/xml",
+        "text/rtf",
+        "text/javascript",
+        "text/x-python",
+        "application/json",
+        "application/x-javascript",
+        "application/x-python",
+    },
+)
 _STOP_REASONS: dict[str, StopReason] = {
     "end_turn": "end",
     "stop_sequence": "end",
@@ -272,23 +279,22 @@ def _image_block(image: Image, provider: str) -> dict[str, Any] | None:
 
 
 def _document_block(file: File, provider: str) -> dict[str, Any] | None:
-    """Return a PDF or text file as a document, a file of another type as a text block noting it, or None.
-
-    None is for a file without bytes or an empty local file; a file noted is never read.
-    """
-    if not has_file_bytes(file):
-        return None
-    media_type = file_mime_type(file)
-    text = is_text_mime_type(media_type)
-    if not text and media_type != _PDF:
-        return {"type": "text", "text": unreadable_file_note(file, media_type)}
-    if (data := file_bytes(file, provider=provider)) is None:
-        return None
-    if text:
-        # The text document source accepts only text/plain; every text type is sent as plain text.
-        source = {"type": "text", "media_type": "text/plain", "data": file_text(data)}
+    if file.filepath is not None:
+        data = read_media_bytes(file.filepath, kind="file", provider=provider)
+        if data is None:
+            # The file is empty, which its reader already logged.
+            return None
+        media_type = file.mime_type or mimetypes.guess_type(file.filepath)[0] or "application/pdf"
+    elif file.content is not None:
+        data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content
+        media_type = file.mime_type or "application/pdf"
     else:
-        source = {"type": "base64", "media_type": _PDF, "data": base64.b64encode(data).decode("utf-8")}
+        return None
+    if media_type in _TEXT_DOCUMENT_MEDIA_TYPES:
+        # The text document source accepts only text/plain; other text types are sent as plain text.
+        source = {"type": "text", "media_type": "text/plain", "data": data.decode("utf-8", errors="replace")}
+    else:
+        source = {"type": "base64", "media_type": media_type, "data": base64.b64encode(data).decode("utf-8")}
     return {"type": "document", "source": source}
 
 

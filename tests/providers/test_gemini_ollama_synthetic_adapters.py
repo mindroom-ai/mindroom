@@ -46,7 +46,6 @@ from mindroom.providers.gemini import files as gemini_files
 from mindroom.providers.gemini import wire as gemini_wire
 from mindroom.providers.ollama.adapter import build_provider as build_ollama_provider
 from mindroom.providers.synthetic_adapter import build_provider as build_synthetic_provider
-from tests.providers.family_support import unreadable_type_note
 from tests.providers.gemini_ollama_support import (
     build_adapter,
     gemini_sse,
@@ -1603,13 +1602,9 @@ async def test_gemini_sends_text_files_as_plain_text_and_names_files_it_cannot_r
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A text file goes as plain text; a file of a type Gemini rejects goes as a note naming it, never read or fetched.
-
-    A declared ``application/octet-stream`` names no type, so the filename types the file, and a file nothing types
-    is noted instead of sent as PDF.
-    """
-    # The local files do not exist, so reading one would fail the request.
-    deck = tmp_path / "att_deck.bin"
+    """A text file goes as plain text; a file of a type Gemini rejects goes as a note naming it, never read or fetched."""
+    # The local file does not exist, so reading it would fail the request.
+    deck = tmp_path / "deck.pptx"
     message = Message(
         role="user",
         content="Summarize",
@@ -1617,9 +1612,7 @@ async def test_gemini_sends_text_files_as_plain_text_and_names_files_it_cannot_r
             File(filepath=str(deck), mime_type="application/octet-stream", filename="deck.pptx"),
             File(url="https://media.test/archive.zip", mime_type="application/zip", filename="archive.zip"),
             File(url="http://media.test/backup.zip", mime_type="application/zip", filename="backup.zip"),
-            File(filepath=str(tmp_path / "att_blob"), filename="blob"),
             File(content=b"key: value", mime_type="application/yaml", filename="settings.yaml"),
-            File(content=b"notes", mime_type="application/octet-stream", filename="notes.txt"),
             File(content=b"%PDF", filename="a.pdf"),
         ],
     )
@@ -1628,20 +1621,12 @@ async def test_gemini_sends_text_files_as_plain_text_and_names_files_it_cannot_r
     await _stream_media(GEMINI_VERTEX, _request(message), tmp_path, server, monkeypatch)
 
     assert server.requests == server.model_requests()
-    pptx = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     assert _user_parts(server) == [
         {"text": "Summarize"},
-        *(
-            {"text": unreadable_type_note(name, mime_type)}
-            for name, mime_type in (
-                ("deck.pptx", pptx),
-                ("archive.zip", "application/zip"),
-                ("backup.zip", "application/zip"),
-                ("blob", "application/octet-stream"),
-            )
-        ),
+        {"text": "[Attachment omitted: deck.pptx (application/octet-stream) is a file type Gemini cannot read]"},
+        {"text": "[Attachment omitted: archive.zip (application/zip) is a file type Gemini cannot read]"},
+        {"text": "[Attachment omitted: backup.zip (application/zip) is a file type Gemini cannot read]"},
         {"inlineData": {"data": base64.urlsafe_b64encode(b"key: value").decode(), "mime_type": "text/plain"}},
-        {"inlineData": {"data": base64.urlsafe_b64encode(b"notes").decode(), "mime_type": "text/plain"}},
         {"inlineData": {"data": base64.urlsafe_b64encode(b"%PDF").decode(), "mime_type": "application/pdf"}},
     ]
 

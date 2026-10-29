@@ -4,7 +4,7 @@ A response's blocks carry fields and pairings the request schema rejects, and th
 HTTP 400, so every later turn of that thread would fail. ``replay_safe_blocks`` gives a response's blocks the shape a
 later request may send, once, when the turn is stored. The body transforms repair what depends on the request itself:
 tool-search references to tools it no longer offers, tool results that must open their user turn, and inline media
-past the provider's size limits, which becomes a short text note. Each body transform reads the
+Claude cannot read, or past the provider's size limits, which becomes a short text note. Each body transform reads the
 body ``format_claude_messages`` built, whose ``messages`` are role dicts with a block list as ``content``: an assistant
 turn's blocks are dicts, and a user turn can also carry the content list a message stored. None of the transforms
 mutate their input.
@@ -25,6 +25,7 @@ from mindroom.providers.claude_wire_blocks import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+_BASE64_DOCUMENT_MEDIA_TYPE = "application/pdf"
 # Vertex rejects Claude requests over 30 MB, the direct API over 32 MB, and Bedrock over 20 MB. Leave room
 # for the text, tools, and history around the inline media.
 MAX_INLINE_MEDIA_BYTES = 24_000_000
@@ -75,10 +76,11 @@ def with_leading_tool_results(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def with_supported_inline_media(body: dict[str, Any], *, max_inline_bytes: int, max_image_bytes: int) -> dict[str, Any]:
-    """Replace inline media past the provider's size limits with a short text note.
+    """Replace inline media Claude would reject with a short text note.
 
-    Base64 images over ``max_image_bytes`` are always replaced. Images and documents that would push the request's
-    inline media past ``max_inline_bytes`` are replaced too, keeping earlier blocks.
+    Base64 documents other than PDF and base64 images over ``max_image_bytes`` are always replaced. Images
+    and documents that would push the request's inline media past ``max_inline_bytes`` are replaced too,
+    keeping earlier blocks.
     """
     inline_bytes = 0
 
@@ -113,10 +115,13 @@ def _inline_media_note(
     if block_dict is None or source is None or source_type not in {"base64", "text"}:
         return None, inline_bytes
     kind = block_dict.get("type")
+    media_type = source.get("media_type")
     data = source.get("data") or ""
     # The SDK sends text as escaped JSON, where a newline or quote takes two bytes.
     data_bytes = len(json.dumps(data, ensure_ascii=False).encode()) if source_type == "text" else len(data)
-    if kind == "image" and data_bytes > max_image_bytes:
+    if kind == "document" and source_type == "base64" and media_type != _BASE64_DOCUMENT_MEDIA_TYPE:
+        reason = f"Claude reads only PDF and plain-text documents inline, not {media_type}"
+    elif kind == "image" and data_bytes > max_image_bytes:
         reason = f"its {data_bytes / 1_000_000:.1f} MB inline payload exceeds the provider's per-image limit"
     elif inline_bytes + data_bytes > max_inline_bytes:
         reason = (

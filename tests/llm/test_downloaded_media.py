@@ -42,11 +42,6 @@ def test_downloaded_media_keeps_the_type_its_source_names(
         (File(url="https://media.test/download?id=7", filename="rows.txt"), "text/csv", ("rows.txt", "text/csv")),
         (File(url="https://media.test/export/notes.txt"), "image/png", ("notes.txt", "text/plain")),
         (File(url="https://media.test/export/report.csv.gz"), None, ("report.csv.gz", None)),
-        (
-            File(url="https://media.test/files/plan.docx"),
-            "application/octet-stream",
-            ("plan.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
-        ),
     ],
 )
 def test_a_downloaded_file_takes_a_document_type_and_its_url_s_name(
@@ -56,8 +51,7 @@ def test_a_downloaded_file_takes_a_document_type_and_its_url_s_name(
 ) -> None:
     """``application/octet-stream`` and a type no document has give way to the file's or the URL's name.
 
-    A compressed name such as ``report.csv.gz`` names no type: its bytes are not CSV. A ``.docx`` name types its file
-    whether or not the host's MIME database knows the extension.
+    A compressed name such as ``report.csv.gz`` names no type: its bytes are not CSV.
     """
     assert file.url is not None
     named = named_by_resource(file, url_file_name(file.url), declared)

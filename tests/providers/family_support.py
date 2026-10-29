@@ -55,14 +55,6 @@ CLAUDE_DEPRECATION_FILTER = f"ignore:The model '{_ANTHROPIC['id']}' is deprecate
 # --- Per-family wire shapes -------------------------------------------------------------------------------------
 
 
-def unreadable_type_note(name: str, mime_type: str) -> str:
-    """Return the note every wire sends instead of the file ``name`` of ``mime_type``, a type its API does not read."""
-    return (
-        f"[Attachment omitted: {name} ({mime_type}) is a file type this model cannot read. Its content was not "
-        "inspected. Use get_attachment without view to inspect or save it, then use other available tools.]"
-    )
-
-
 def claude_events(
     blocks: list[dict[str, Any]],
     *,

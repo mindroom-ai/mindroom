@@ -3,29 +3,19 @@
 
 Attachments are filepath-backed, so parts are read and base64 encoded here; a file that cannot be read raises
 ``InvalidRequest``, and an empty one adds no part (``read_media_file``); ``provider`` names the adapter in that error.
-A file of a type the API does not read goes unread as a text part noting it (``unreadable_file_note``). Image URLs,
-and file URLs on Responses, go for the provider to fetch; the pipeline downloaded every other URL
+Image URLs, and file URLs on Responses, go for the provider to fetch; the pipeline downloaded every other URL
 (``Capabilities.url_media``).
 """
 
 from __future__ import annotations
 
 import base64
+import mimetypes
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.media import image_mime_type
-from mindroom.providers.media_files import (
-    OPENAI_TEXT_TYPES,
-    file_bytes,
-    file_mime_type,
-    file_name,
-    file_text,
-    has_file_bytes,
-    is_text_mime_type,
-    read_media_bytes,
-    unreadable_file_note,
-)
+from mindroom.providers.media_files import read_media_bytes
 
 if TYPE_CHECKING:
     from mindroom.llm.media import Audio, File, Image
@@ -38,34 +28,13 @@ __all__ = [
     "responses_image_part",
 ]
 
-# OpenAI's file inputs guide (https://developers.openai.com/api/docs/guides/pdf-files): "Chat Completions accepts only
-# PDF files as ``file`` content parts", and the guide sends another file's text as a ``text`` part. Responses reads the
-# types of the guide's "Full list of accepted file types": PDF, the Office and other document formats below, and text,
-# which is any ``text/*`` type, covering the ones the list names, and the list's text types outside ``text/``.
-_PDF = "application/pdf"
-_RESPONSES_FILE_TYPES = OPENAI_TEXT_TYPES | {
-    _PDF,
-    # Spreadsheets.
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    "application/vnd.ms-excel",
-    "application/vnd.google-apps.spreadsheet",
-    # Word and rich documents.
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "application/msword",
-    "application/vnd.oasis.opendocument.text",
-    "application/vnd.apple.pages",
-    "application/vnd.google-apps.document",
-    "application/vnd.apple.iwork",
-    # Presentations.
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    "application/vnd.ms-powerpoint",
-    "application/vnd.apple.keynote",
-    "application/vnd.google-apps.presentation",
+# Python's MIME database lacks or misnames these supported formats; host /etc/mime.types must not decide.
+_FILE_MIME_TYPES = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".sh": "text/x-sh",
 }
-
-
-def _data_url(mime_type: str, data: bytes) -> str:
-    return f"data:{mime_type};base64,{base64.b64encode(data).decode('utf-8')}"
 
 
 def _image_url(image: Image, provider: str) -> str | None:
@@ -74,7 +43,9 @@ def _image_url(image: Image, provider: str) -> str | None:
     data = (
         image.content if image.filepath is None else read_media_bytes(image.filepath, kind="image", provider=provider)
     )
-    return None if data is None else _data_url(image_mime_type(image, data), data)
+    if data is None:
+        return None
+    return f"data:{image_mime_type(image, data)};base64,{base64.b64encode(data).decode('utf-8')}"
 
 
 def chat_image_part(image: Image, *, provider: str) -> dict[str, Any] | None:
@@ -116,45 +87,56 @@ def chat_audio_part(audio: Audio, *, provider: str) -> dict[str, Any] | None:
     }
 
 
-def chat_file_part(file: File, *, provider: str) -> dict[str, Any] | None:
-    """Return a Chat Completions ``file`` part for a PDF, a text part for a text file, or None.
+def _content_bytes(file: File, provider: str) -> bytes | None:
+    if file.filepath is not None:
+        return read_media_bytes(file.filepath, kind="file", provider=provider)
+    if isinstance(file.content, str):
+        return file.content.encode("utf-8")
+    return file.content
 
-    A text file goes as its text (``file_text``), and a file of another type as a text part noting it. None is for a
-    file without bytes or an empty local file. A file part is named and typed as a Responses file part is.
+
+def _file_part_name(file: File, fallback: str) -> str:
+    """Return the name a file part carries: the attachment's original filename, else its stored file's name."""
+    return file.filename or file.name or (Path(file.filepath).name if file.filepath else None) or fallback
+
+
+def _file_part_data_url(file: File, name: str, data: bytes) -> str:
+    """Return a file part's data URL, typed by the declared type, else by the original filename, then the stored path.
+
+    The original filename comes first because a storage path is opaque and may end in ``.bin``. A declared
+    ``application/octet-stream`` names no type, and Responses rejects it, so the filename decides then too; a
+    compressed name such as ``report.csv.gz`` names no type either.
     """
-    if not has_file_bytes(file):
+    mime_type = file.mime_type if file.mime_type and file.mime_type != "application/octet-stream" else None
+    display_name = file.filename or file.name
+    if mime_type is None and display_name:
+        guessed, encoding = mimetypes.guess_type(display_name)
+        guessed = _FILE_MIME_TYPES.get(Path(display_name).suffix.lower(), guessed)
+        mime_type = guessed if encoding is None else None
+    if mime_type is None:
+        guessed, encoding = mimetypes.guess_type(file.filepath or name)
+        mime_type = guessed if guessed and encoding is None else "application/octet-stream"
+    return f"data:{mime_type};base64,{base64.b64encode(data).decode('utf-8')}"
+
+
+def chat_file_part(file: File, *, provider: str) -> dict[str, Any] | None:
+    """Return a Chat Completions ``file`` part with an inline data URL, or None for a file without bytes or an empty one.
+
+    It is named and typed as a Responses file part is (``_file_part_name``, ``_file_part_data_url``).
+    """
+    name = _file_part_name(file, "file")
+    data = _content_bytes(file, provider)
+    if data is None:
         return None
-    mime_type = file_mime_type(file)
-    text_file = is_text_mime_type(mime_type)
-    if mime_type != _PDF and not text_file:
-        return {"type": "text", "text": unreadable_file_note(file, mime_type)}
-    if (data := file_bytes(file, provider=provider)) is None:
-        return None
-    if text_file:
-        return {"type": "text", "text": file_text(data)}
-    return {
-        "type": "file",
-        "file": {"filename": file_name(file, "file"), "file_data": _data_url(mime_type, data)},
-    }
+    return {"type": "file", "file": {"filename": name, "file_data": _file_part_data_url(file, name, data)}}
 
 
 def responses_file_part(file: File, *, provider: str) -> dict[str, Any] | None:
-    """Return a Responses ``input_file`` part, a URL reference or inline data, or None when neither is available.
-
-    Responses fetches and types a file URL itself; inline data of a type it does not read goes as a text part noting it,
-    and an empty local file has no data.
-    """
+    """Return a Responses ``input_file`` part, a URL reference or inline data, or None when neither is available."""
+    name = _file_part_name(file, "document")
     if file.url:
         return {"type": "input_file", "file_url": file.url}
-    if not has_file_bytes(file):
+    data = _content_bytes(file, provider)
+    if data is None:
         return None
-    mime_type = file_mime_type(file)
-    if mime_type not in _RESPONSES_FILE_TYPES and not mime_type.startswith("text/"):
-        return {"type": "input_text", "text": unreadable_file_note(file, mime_type)}
-    if (data := file_bytes(file, provider=provider)) is None:
-        return None
-    return {
-        "type": "input_file",
-        "filename": file_name(file, "document"),
-        "file_data": _data_url(mime_type, data),
-    }
+    return {"type": "input_file", "filename": name, "file_data": _file_part_data_url(file, name, data)}

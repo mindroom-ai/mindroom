@@ -340,52 +340,9 @@ class File:
 MEDIA_MIME_FAMILIES: dict[type[Image | Audio | Video], str] = {Image: "image/", Audio: "audio/", Video: "video/"}
 
 
-# Python's MIME database lacks or misnames these document, text, and code formats, most of them extensions OpenAI's
-# file inputs guide lists; host /etc/mime.types must not decide.
-_NAMED_FILE_TYPES = {
-    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ".xla": "application/vnd.ms-excel",
-    ".xlc": "application/vnd.ms-excel",
-    ".xlm": "application/vnd.ms-excel",
-    ".xlt": "application/vnd.ms-excel",
-    ".xlw": "application/vnd.ms-excel",
-    ".odt": "application/vnd.oasis.opendocument.text",
-    ".iif": "text/x-iif",
-    ".sh": "text/x-sh",
-    ".yaml": "application/yaml",
-    ".yml": "application/yaml",
-    ".toml": "application/toml",
-    ".ini": "text/x-ini",
-    ".sql": "application/x-sql",
-    ".proto": "text/x-protobuf",
-    ".ts": "text/x-typescript",
-    ".go": "text/x-go",
-    ".rs": "text/x-rust",
-    ".cc": "text/x-c++",
-    ".cpp": "text/x-c++",
-    ".cxx": "text/x-c++",
-    ".hh": "text/x-c++",
-    ".asm": "text/x-asm",
-    ".s": "text/x-asm",
-    ".ics": "text/calendar",
-    ".ifb": "text/calendar",
-    ".mime": "message/rfc822",
-    ".conf": "text/plain",
-    ".def": "text/plain",
-    ".dic": "text/plain",
-    ".in": "text/plain",
-    ".list": "text/plain",
-    ".log": "text/plain",
-    ".text": "text/plain",
-}
-
-
-def named_mime_type(name: str) -> str | None:
+def _named_type(name: str) -> str | None:
     """Return the type a file name names; a compressed name, such as ``report.csv.gz``, names none."""
     named, encoding = mimetypes.guess_type(name)
-    named = _NAMED_FILE_TYPES.get(PurePosixPath(name).suffix.lower(), named)
     return named if encoding is None else None
 
 
@@ -405,11 +362,11 @@ def named_by_resource[T: Image | Audio | Video | File](
     """
     if isinstance(media, File):
         filename = media.filename or media.name or resource_name or None
-        candidates = (declared_mime, named_mime_type(filename or ""), named_mime_type(resource_name))
+        candidates = (declared_mime, _named_type(filename or ""), _named_type(resource_name))
         mime_type = media.mime_type or next((value for value in candidates if value in DOCUMENT_MIME_TYPES), None)
         return replace(media, filename=filename, mime_type=mime_type)
     mime_type, media_format = media.mime_type, media.format
-    named_type = named_mime_type(resource_name)
+    named_type = _named_type(resource_name)
     if mime_type is None and media_format is None:
         family = MEDIA_MIME_FAMILIES[type(media)]
         candidates = (declared_mime, named_type if isinstance(media, Image) else None)
@@ -438,6 +395,5 @@ __all__ = [
     "image_format",
     "image_mime_type",
     "named_by_resource",
-    "named_mime_type",
     "url_file_name",
 ]

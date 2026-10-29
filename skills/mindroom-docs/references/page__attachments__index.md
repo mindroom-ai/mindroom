@@ -22,7 +22,7 @@ Models without that support can still work with the file through the [`attachmen
 When a provider rejects inline media, MindRoom retries without it and tells the agent the content was not inspected; see [Media Fallback](https://docs.mindroom.chat/images/#media-fallback).
 Some provider integrations never send certain media kinds, so MindRoom leaves those out from the start with the same note.
 Only models using the `google` provider receive video, Claude and OpenAI Responses models (including Codex) also receive no audio, Ollama and Groq models receive only images, and Cerebras models receive no media.
-Claude, `google`, and Chat Completions models read documents as PDF or text, and OpenAI Responses models (including Codex) also read Office documents; any other file type, such as an archive, reaches the model as a note naming the file, and the message's other attachments still reach it.
+Models using the `google` provider read documents only as PDF or text; other file types, such as Office files and archives, reach them as a note naming the file.
 
 ## Attachment IDs
 

@@ -30,7 +30,6 @@ from tests.providers.anthropic_family_support import (
     route_provider,
     sse_reply,
 )
-from tests.providers.family_support import unreadable_type_note
 from tests.providers.golden_support import Wire
 from tests.providers.openai_family_support import responses_adapter
 
@@ -99,60 +98,22 @@ def _attachment_turn(tmp_path: Path) -> Message:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route", _CLAUDE_ROUTES)
 async def test_unsupported_documents_become_text_notes_while_pdf_stays_inline(tmp_path: Path, route: str) -> None:
-    """Office and archive uploads never reach Claude as base64 documents; each goes as a note naming it."""
+    """Office and archive uploads never reach Claude as base64 documents."""
     wire = Wire(sse_reply([{"type": "text", "text": "Read."}]))
 
     body = await _sent(route_provider(route, tmp_path, wire), wire, [_attachment_turn(tmp_path)])
 
-    assert _user_blocks(body) == [
-        {"type": "text", "text": "Summarize the attachments."},
-        {
-            "type": "document",
-            "source": {"type": "base64", "media_type": "application/pdf", "data": base64.b64encode(_PDF).decode()},
-        },
-        {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "Plain notes."}},
-        *({"type": "text", "text": unreadable_type_note(name, mime)} for name, mime in _UNSUPPORTED_FILES.items()),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_claude_reads_every_text_type_and_notes_an_untyped_file_unread(tmp_path: Path) -> None:
-    """Any text type goes as a plain-text document; a file nothing types is noted, never read, instead of sent as PDF.
-
-    A byte that is not UTF-8 reads as a replacement character, so a Latin-1 file still reads.
-    """
-    wire = Wire(sse_reply([{"type": "text", "text": "Read."}]))
-    turn = Message(
-        role="user",
-        content="Read these.",
-        files=[
-            File(content=b"echo hi", filename="run.sh"),
-            File(content=b"key: value", mime_type="application/yaml", filename="settings.yaml"),
-            File(filepath=str(tmp_path / "att_missing"), filename="blob"),
-            File(content=b"caf\xe9,ok", filename="latin.csv"),
-            File(content=b"a: 1", filename="config.yaml"),
-            File(content=b"From: a@example.org", filename="mail.eml"),
-            File(content=b"SELECT 1;", filename="q.sql", mime_type="application/sql"),
-            File(content=b"print 1;", filename="a.pl", mime_type="application/x-perl"),
-            File(content=b"puts 1", filename="a.rb", mime_type="application/x-ruby"),
-            File(content=b'{"cells": []}', filename="nb.ipynb", mime_type="application/x-ipynb+json"),
-        ],
-    )
-
-    body = await _sent(route_provider("anthropic", tmp_path, wire), wire, [turn])
-
-    assert _user_blocks(body)[1:] == [
-        {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "echo hi"}},
-        {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "key: value"}},
-        {"type": "text", "text": unreadable_type_note("blob", "application/octet-stream")},
-        {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "caf\ufffd,ok"}},
-        {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "a: 1"}},
-        {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "From: a@example.org"}},
-        *(
-            {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": data}}
-            for data in ("SELECT 1;", "print 1;", "puts 1", '{"cells": []}')
-        ),
-    ]
+    blocks = _user_blocks(body)
+    documents = [block for block in blocks if block["type"] == "document"]
+    assert [document["source"]["type"] for document in documents] == ["base64", "text"]
+    assert documents[0]["source"]["media_type"] == "application/pdf"
+    assert base64.b64decode(documents[0]["source"]["data"]) == _PDF
+    assert documents[1]["source"]["data"] == "Plain notes."
+    notes = _notes(blocks)
+    assert len(notes) == len(_UNSUPPORTED_FILES)
+    for note, mime_type in zip(notes, _UNSUPPORTED_FILES.values(), strict=True):
+        assert mime_type in note
+        assert "get_attachment without view" in note
 
 
 @pytest.mark.asyncio

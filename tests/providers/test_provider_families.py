@@ -40,7 +40,6 @@ from tests.providers.family_support import (
     claude_events,
     gemini_chunk,
     ollama_chunk,
-    unreadable_type_note,
 )
 from tests.providers.gemini_ollama_support import runtime_paths_for
 from tests.providers.golden_support import (
@@ -420,43 +419,8 @@ async def test_composed_pipeline_recovers_logs_and_projects_for_every_family(fam
 
 def _unreadable_media(kind: str, root: Path) -> dict[str, Any]:
     path = str(root / f"gone-{kind}")
-    media = {
-        "image": Image(filepath=path),
-        "file": File(filepath=path, mime_type="application/pdf"),
-        "audio": Audio(filepath=path, format="wav"),
-    }
+    media = {"image": Image(filepath=path), "file": File(filepath=path), "audio": Audio(filepath=path, format="wav")}
     return {{"image": "images", "file": "files", "audio": "audio"}[kind]: [media[kind]]}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("family", sorted(FAMILIES))
-async def test_every_family_notes_a_file_of_a_type_it_cannot_read(family: str, tmp_path: Path) -> None:
-    """A file of a type no route reads, or that nothing types, goes unread as a note naming it and its type.
-
-    So the image beside it still reaches the model, in the one request the provider gets; a route that omits files
-    replaces them up front with the media fallback's note instead.
-    """
-    spec = FAMILIES[family]
-    wire = Wire(spec.reply())
-    adapter = spec.adapter(tmp_path, wire)
-    # Neither file exists, so a route that read one would replace all of the message's media with the fallback note.
-    files = [
-        File(filepath=str(tmp_path / "att_bundle.zip"), mime_type="application/zip", filename="bundle.zip"),
-        File(filepath=str(tmp_path / "att_blob"), filename="blob"),
-    ]
-    image = Image(content=b"\x89PNG\r\n\x1a\n" + bytes(8), mime_type="image/png")
-    message = Message(role="user", content="Look", images=[image], files=files)
-
-    turn = await complete(pipeline_provider(adapter), ModelRequest(messages=[message]))
-
-    assert (turn.content, len(wire.requests)) == ("ok", 1)
-    sent = json.dumps(wire.body())
-    if "file" in adapter.capabilities.omitted_media:
-        assert FALLBACK_MARKER in sent
-        return
-    assert FALLBACK_MARKER not in sent
-    for name, mime_type in (("bundle.zip", "application/zip"), ("blob", "application/octet-stream")):
-        assert json.dumps(unreadable_type_note(name, mime_type))[1:-1] in sent
 
 
 @pytest.mark.asyncio
@@ -491,25 +455,6 @@ _MEDIA_PART_MARKERS = (
     '"fileData"',
     '"images"',
 )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("family", sorted(FAMILIES))
-async def test_every_family_sends_nothing_for_a_file_without_bytes(family: str, tmp_path: Path) -> None:
-    """A stored file known only by its id adds no part, readable type or not, on a route that takes files."""
-    spec = FAMILIES[family]
-    wire = Wire(spec.reply())
-    adapter = spec.adapter(tmp_path, wire)
-    files = [File(id="stored-report", filename="report.pdf"), File(id="stored-bundle", filename="bundle.zip")]
-    message = Message(role="user", content="Look", files=files)
-
-    turn = await complete(pipeline_provider(adapter), ModelRequest(messages=[message]))
-
-    assert (turn.content, len(wire.requests)) == ("ok", 1)
-    sent = json.dumps(wire.body())
-    assert not [marker for marker in _MEDIA_PART_MARKERS if marker in sent]
-    assert "Attachment omitted" not in sent
-    assert (FALLBACK_MARKER in sent) is ("file" in adapter.capabilities.omitted_media)
 
 
 def _empty_media(kind: str, root: Path) -> dict[str, Any]:
