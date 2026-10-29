@@ -624,8 +624,9 @@ class Relay:
     ) -> h11.Response | h11.InformationalResponse:
         """Stream the request body upstream, counting it against the body limit, and return the response head.
 
-        When a body write fails, a final response the upstream sent within `_CLOSE_TIMEOUT` is returned, and the client
+        When a body write fails, a final response the broker read before the failure is returned, and the client
         connection, whose remaining body goes unread, closes after it; otherwise the write's failure is raised.
+        A response still unread when the write fails is lost, because asyncio closes the socket on the failed write.
         """
         # The response's first read runs during the upload: once a write fails, asyncio raises that error on every
         # read, even of bytes it already received.
@@ -668,7 +669,8 @@ class Relay:
 
         Redirects are never followed. After a protocol switch (101) the connection becomes a byte splice until either
         side closes. An upstream may answer from the request head and close before taking the whole body, as with an
-        early 413: when a body write fails, a final response it sent is relayed, and the client connection closes.
+        early 413: when a body write fails, a final response the broker read before the failure is relayed, and the
+        client connection closes. One still unread is lost, the risk RFC 9112 section 9.6 describes for such a close.
         """
         try:
             await _from_upstream(upstream.send(request))
