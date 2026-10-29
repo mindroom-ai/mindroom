@@ -243,11 +243,10 @@ Cancelling a run cannot roll back a side effect a tool already started; such a c
 
 Kubernetes runs keep running through primary restarts, compatible upgrades, and config reloads that do not affect their owner.
 An upgraded image applies only to new runs; existing runs stay on the image they started with.
-While MindRoom starts up or replaces its worker backend, new launches return an error and must be retried once MindRoom is ready, while SDK calls from running scripts are retried automatically.
+While MindRoom starts up, or applies a config reload that changes a script agent's access, new launches return an error and must be retried once MindRoom is ready, while SDK calls from running scripts are retried automatically.
 Keep the isolated gateway address stable across upgrades.
 
 Docker and local runs are interrupted by every primary restart.
-Worker-backend replacement also interrupts Docker runs.
 
 A run is also interrupted when:
 

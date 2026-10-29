@@ -29,6 +29,7 @@ _._validate_matrix_username  # Pydantic field validator (src/mindroom/config/per
 _._validate_users  # Pydantic field validator (src/mindroom/config/personal_agents.py)
 _._validate_agent  # Pydantic model validator (src/mindroom/config/personal_agents.py)
 _.validate_identity_mapping  # Pydantic model validator (src/mindroom/config/slack.py)
+_._refuse_unknown_identity_fields  # Pydantic field validator (src/mindroom/workers/protocol.py)
 _.fetch_response  # Trafilatura spider download binding replaced by the server-fetch guard (src/mindroom/tools/agno_compat_trafilatura.py)
 _.fetch_images  # Newspaper4k Article.parse step overridden to skip image downloads (src/mindroom/tools/agno_compat_newspaper4k.py)
 _._save_file_to_disk  # FileGenerationTools save step overridden to write inside the workspace (src/mindroom/tools/agno_compat_file_generation.py)

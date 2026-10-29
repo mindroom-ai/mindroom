@@ -136,7 +136,7 @@ def _resolve_target(
     )
     if target.worker_key is None:
         raise ComputerError(503, "Could not resolve an isolated computer worker.")
-    manager_identity = configured_primary_worker_manager_identity(runtime_paths, runtime_config=config)
+    manager_identity = configured_primary_worker_manager_identity(runtime_paths)
     fingerprint = hashlib.sha256((config.model_dump_json() + repr(manager_identity)).encode()).hexdigest()
     return ComputerTarget(
         requester_id,

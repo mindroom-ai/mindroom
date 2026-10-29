@@ -589,10 +589,8 @@ def test_worker_maintenance_touches_computer_stream_before_cleanup(
         headers={"Origin": "https://chat.example.org"},
     ) as websocket:
         assert websocket.receive_bytes() == b"screen"
-        config, paths = config_lifecycle.read_app_committed_runtime_config(app)
         api_main._cleanup_workers_once(
-            paths,
-            runtime_config=config,
+            config_lifecycle.require_api_state(app).snapshot.runtime_paths,
             computer_worker_keys=computers.active_computer_worker_keys(app),
         )
         assert actions == ["touch:worker", "maintain"]

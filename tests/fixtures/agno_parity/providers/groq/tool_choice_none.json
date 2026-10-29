@@ -73,22 +73,18 @@
     "message": {
       "content": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
       "provider_data": {
+        "id": "chatcmpl-parity",
         "mindroom_model": {
           "id": "openai/gpt-oss-120b",
           "provider": "Groq"
-        }
+        },
+        "system_fingerprint": "fp_parity"
       },
       "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,
       "output_tokens": 12,
-      "provider_metrics": {
-        "completion_time": 0.021,
-        "prompt_time": 0.004,
-        "queue_time": 0.011,
-        "total_time": 0.025
-      },
       "total_tokens": 54
     },
     "stop_reason": "end"

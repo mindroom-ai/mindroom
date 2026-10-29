@@ -2411,6 +2411,7 @@ Changing `seed` changes the response length, split point, and tool-call choice, 
 Each provider accepts only the keys in the table below.
 A model with any other key, including a misspelled key or a retired Agno model setting such as `retries`, fails config validation with an `Unsupported extra_kwargs` error that names the model and the unknown keys and lists the accepted ones; remove or correct those keys.
 `max_retries` is not accepted, since MindRoom retries failed requests itself (see [Retries](#retries)); a model that sets it fails config validation with an error that says to remove it.
+`role_map` is not accepted either: Chat Completions requests send the system prompt as `developer` with `provider: openai` and as `system` with every other provider, so remove it, or for an OpenAI-compatible server that rejects the `developer` role use `provider: llama_cpp` with that server's `base_url`.
 
 - `base_url`, a string, sends requests to a custom endpoint, such as an OpenAI-compatible server.
 - `api_key` is the same as the model's `api_key` field.
@@ -2420,7 +2421,7 @@ A model with any other key, including a misspelled key or a retired Agno model s
 
 | Provider | Accepted keys |
 |----------|---------------|
-| `openai` with Chat Completions, `zai`, `llama_cpp` | `api_key`, `base_url`, `client_params`, `default_headers`, `default_query`, `extra_body`, `extra_headers`, `extra_query`, `frequency_penalty`, `logit_bias`, `logprobs`, `max_completion_tokens`, `max_tokens`, `metadata`, `organization`, `presence_penalty`, `reasoning_effort`, `request_params`, `role_map`, `seed`, `service_tier`, `stop`, `store`, `strict_output`, `temperature`, `timeout`, `top_logprobs`, `top_p`, `user`, `verbosity` |
+| `openai` with Chat Completions, `zai`, `llama_cpp` | `api_key`, `base_url`, `client_params`, `default_headers`, `default_query`, `extra_body`, `extra_headers`, `extra_query`, `frequency_penalty`, `logit_bias`, `logprobs`, `max_completion_tokens`, `max_tokens`, `metadata`, `organization`, `presence_penalty`, `reasoning_effort`, `request_params`, `seed`, `service_tier`, `stop`, `store`, `strict_output`, `temperature`, `timeout`, `top_logprobs`, `top_p`, `user`, `verbosity` |
 | `azure` | The Chat Completions keys, plus `api_version`, `azure_endpoint`, `azure_deployment`, and `azure_ad_token` |
 | `openrouter` | The Chat Completions keys, plus `models`, `cache_system_prompt`, and `extended_cache_time` |
 | `deepseek` | The Chat Completions keys, plus `use_thinking` |
@@ -2521,6 +2522,8 @@ MindRoom retries a model request that fails with a rate limit, an overload, a se
 Before each retry it waits as long as the provider's `Retry-After` or Azure's `retry-after-ms` header asks, when that is at most a minute, and otherwise a delay that doubles with each retry.
 SDK retry settings in `client_params`, such as `max_retries` or Gemini's `http_options.retry_options`, have no effect; the Gemini SDK still resends on its own after a dropped connection and during a file upload's transfer.
 A request that still fails ends the turn with "⏱️ Rate limited. Please wait a moment and try again." for a rate limit, or "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly." otherwise.
+A request larger than the account's tokens-per-minute limit, which OpenAI rejects as "Request too large", is not retried, since only a smaller request can pass; it ends the turn with "⚠️ This request is larger than the account's tokens-per-minute limit. Start a new thread or compact the conversation, then try again."
+A request that OpenAI or Gemini refuses because the account has no credit left or reached its monthly spend or usage limit is not retried either, and the turn ends with the provider's own message, such as "⚠️ Error: You exceeded your current quota, please check your plan and billing details."
 
 ## Stalled Streams
 
@@ -3668,7 +3671,7 @@ knowledge_bases:
 | `git` | object | `null` | Sync the folder from a Git repository; see [Git-Backed Knowledge Bases](#git-backed-knowledge-bases) |
 
 Set `skip_hidden: false` if the folder intentionally contains dot-prefixed files that should be indexed.
-Use a smaller `chunk_size` when your embedding server has lower token or batch limits; chunks that are too large make indexing fail with embedder 500 errors.
+Use a smaller `chunk_size` when your embedding server has lower token or batch limits; a chunk too long for the embedding model fails the file that holds it, and with it the refresh, for example with `embedder request failed (HTTP 400)` from OpenAI, or `(HTTP 500)` from a llama.cpp server whose physical batch size is smaller than the chunk.
 
 ### Keeping Indexes Fresh
 
@@ -3682,7 +3685,8 @@ Rewriting leaves free space inside an index file, which later writes reuse; once
 Changing `chunk_size`, `chunk_overlap`, `chunk_context_model`, the embedder, or any file filter re-embeds the whole base on the next refresh.
 An explicit reindex from the dashboard or API rebuilds every vector, which is how you replace an index you no longer trust.
 An interrupted or failed semantic build continues where it stopped on the next refresh instead of starting over.
-Temporary embedding failures (timeouts, connection errors, and HTTP 408, 409, 429, and any 5xx status) are retried, while permanent failures such as authentication errors stop the refresh until you fix the cause.
+Temporary embedding failures (timeouts, connection errors, and HTTP 408, 409, 429, and any 5xx status) are retried, while permanent failures such as authentication errors, or a 429 that says the OpenAI account has no credit left or reached its monthly spend or usage limit, stop the refresh until you fix the cause.
+A batch of chunks larger than the account's tokens-per-minute limit is embedded again one chunk per request.
 
 Knowledge base configuration hot-reloads.
 After a `chunk_size`, `chunk_overlap`, or `chunk_context_model` change, agents keep searching the previous index until the rebuild succeeds.
@@ -8507,11 +8511,10 @@ Cancelling a run cannot roll back a side effect a tool already started; such a c
 
 Kubernetes runs keep running through primary restarts, compatible upgrades, and config reloads that do not affect their owner.
 An upgraded image applies only to new runs; existing runs stay on the image they started with.
-While MindRoom starts up or replaces its worker backend, new launches return an error and must be retried once MindRoom is ready, while SDK calls from running scripts are retried automatically.
+While MindRoom starts up, or applies a config reload that changes a script agent's access, new launches return an error and must be retried once MindRoom is ready, while SDK calls from running scripts are retried automatically.
 Keep the isolated gateway address stable across upgrades.
 
 Docker and local runs are interrupted by every primary restart.
-Worker-backend replacement also interrupts Docker runs.
 
 A run is also interrupted when:
 
@@ -16275,6 +16278,8 @@ Do not report or "fix" these; they are deliberate.
 - Inviting an agent to a shared directory makes it readable to every requester of that agent, and the invitation needs only the inviting user's access to that agent, because that user could already relay the files in chat.
 - A user who may use both agents can restart the invited agent's dedicated workers by inviting and removing it repeatedly, which ends their background shells.
 - Removing a member or deleting a shared directory takes effect for a member's dedicated worker on that worker's next tool call, so until then its running processes can still read the directory, including files written after the removal.
+- Removing a service from `defaults.worker_grantable_credentials` deletes its copy from a running dedicated worker at that worker's next tool call, not at the config reload, so until then, or until the worker stops for being idle, its running processes can still read the credential.
+  Worker code may already have copied a credential it was granted, so rotate the credential at its provider to revoke it.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
 - A response's CLI grant, in minimal mode or for a standard-mode agent whose shell can reach MindRoom, is in the environment of its shell commands, so other code in the same worker can use that requester's tools through it until the response and its background jobs end; code that shares a worker already shares its trust.
 - A plugin's `tool:environment` hook decides which variables a tool call's `shell` commands receive, in the primary or a worker, including values it passes through from the primary's process environment; plugins already run with the primary's full trust, the variables travel only with that call's request, and other code in the same worker can read them, as with the CLI grant.
@@ -18750,6 +18755,7 @@ Tool errors arrive as an `error` object with a `code` inside a successful MCP re
 | `unauthorized` | Agent access or selection changed, or the agent runs tools with shared credentials and is not [opted in](#agent-eligibility); check Connections |
 | `tool_unavailable` | The tool could not be loaded or failed; its outcome may be unknown |
 | `tool_declined` | A MindRoom plugin declined the call, so it did not run; `message` gives the plugin's reason |
+| `tool_failed` | The tool ran and reported that the call failed; `message` gives the tool's own explanation |
 | `schema_too_large`, `result_too_large` | The schema or result exceeds the size limit |
 | `busy` | A concurrency limit is full |
 | `duplicate_request` | A call with the same request ID is already running |
@@ -19558,6 +19564,8 @@ Install proxied plugin tools in the runner image, or mount only the plugin direc
 
 Use this to run the primary runtime on the host, including with `uvx mindroom run`, and give each worker key its own persistent Docker container, without Kubernetes.
 A container is reused until its launch configuration changes.
+That covers only the config fields and files the worker sees, so edits to models, prompts, or other agents do not restart it, and an edit reaches workers once MindRoom has applied it.
+A change to the registered tools, such as adding a plugin or an MCP server, restarts every Docker worker on its next use, which ends background commands running in it.
 Idle containers keep running unless `MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS` is set to a positive interval, which then stops containers idle longer than `MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS`.
 When MindRoom shuts down, it removes its worker containers but keeps each worker's files, and the worker's next call starts a new container.
 
@@ -19604,7 +19612,7 @@ To verify, ask two agents to run `hostname`, then list the worker containers:
 docker ps --format '{{.Names}}\t{{.ID}}' | grep '^mindroom-worker'
 ```
 
-Each worker gets a read-only copy of the [live config snapshot](#live-config-snapshots) built from `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH`, together with the config-relative plugins and knowledge it needs.
+Each worker gets a read-only copy of the [live config snapshot](#live-config-snapshots) of the config MindRoom has applied, together with the config-relative plugins and knowledge it needs, resolved against the directory of `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH`.
 Agent-scoped workers get only their agent and its assigned knowledge bases, while `worker_scope: user` workers get every agent that shares them.
 Workers never see `~/.mindroom` or the config-adjacent `.env`.
 The called tool's own inline overrides still reach the worker, but if it needs a secret from `.env` or from elsewhere in `config.yaml`, provide it through a [credential lease](#credential-leases), [environment passthrough](#shell-environment-and-path), or `MINDROOM_DOCKER_WORKER_ENV_JSON` instead.
@@ -19644,7 +19652,7 @@ Worker pods can reach the primary API over the pod network, so the runtime chart
 
 Run the same MindRoom release in the primary runtime and in every runner and worker image.
 MindRoom refuses dedicated Docker and Kubernetes worker images whose protocol does not match the primary runtime, and replaces the worker once before failing, so a worker left running under a mutable tag such as `:latest` from a release with another worker protocol is replaced on its next use.
-A Docker worker is recreated from a fresh pull of the configured image, while a Kubernetes worker gets a new pod, which pulls the tag again only under the [worker image pull policy](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings) `Always`.
+A Docker worker from an older release is recreated from a fresh pull of the configured image, and one from a newer release without a pull, while a Kubernetes worker gets a new pod, which pulls the tag again only under the [worker image pull policy](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings) `Always`.
 If the pull fails, as it does for a locally built tag such as `mindroom:dev`, or the image is still incompatible, rebuild the image from the checkout the primary runs from or select the published tag that matches your MindRoom version.
 A worker from a newer release is refused too, and its error reports a higher protocol than the expected one, for example a `:latest` worker that started after a release the primary does not run yet; upgrade the primary to that release, or pin one release tag for both.
 A `static_runner` sandbox runner on another protocol is refused too, and every call routed to it fails until it runs the primary's release; MindRoom checks the runner when the primary first routes a call to it, so restart the primary after replacing a running runner with another release.
@@ -19975,7 +19983,7 @@ To deploy that backend without Helm, see [Worker settings](https://docs.mindroom
 | `MINDROOM_DOCKER_WORKER_PORT` | Sandbox-runner port inside the container | `8766` |
 | `MINDROOM_DOCKER_WORKER_STORAGE_MOUNT_PATH` | Worker root mount path inside the container | `/app/worker` |
 | `MINDROOM_DOCKER_WORKER_CONFIG_PATH` | Config path inside the container | `/app/config-host/config.yaml` |
-| `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` | Host `config.yaml` from which each worker's projected config is built | Resolved `MINDROOM_CONFIG_PATH` when it exists |
+| `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` | Path of `config.yaml` on the Docker host, whose directory the relative paths in each worker's projected config resolve against | Resolved `MINDROOM_CONFIG_PATH` when it exists |
 | `MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS` | Idle time before a worker container may be cleaned up | `1800` |
 | `MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS` | Maximum wait for a new worker to become ready | `60` |
 | `MINDROOM_DOCKER_WORKER_NAME_PREFIX` | Prefix for worker container names, which use it lowercased, with each run of characters other than letters, digits, and `-` replaced by one `-`, and cut to 38 characters; a longer prefix logs a warning | `mindroom-worker` |
@@ -21302,7 +21310,8 @@ A refused database is left untouched.
 | `Another MindRoom runtime is already using this event journal` | Another storage root's runtime is bound to the same journal database. | Run one runtime per journal; two would both answer every message. |
 
 A PostgreSQL journal is claimed with a session advisory lock, so its connection must be direct or session-pooled; a transaction-pooling proxy cannot hold it.
-If that session is lost, MindRoom shuts down rather than keep running unclaimed; a process supervisor such as Kubernetes or systemd restarts it.
+If that session or any other connection to the journal is lost, such as when the database restarts or closes an idle connection, MindRoom shuts down rather than keep running unclaimed or unable to use the journal; a process supervisor such as Kubernetes or systemd restarts it.
+Leave `idle_session_timeout`, and a session pooler's client idle timeout such as PgBouncer's `client_idle_timeout`, off for MindRoom's database role, because each idle journal connection they close makes MindRoom restart.
 After a runtime's host is lost without closing that session, a replacement is refused with `Another MindRoom runtime is already using this event journal` for about a minute on a direct connection, or for the pooler's client timeout behind a session pooler, until the old session is dropped; a supervisor's retries get through after that.
 
 Do not adopt just because startup refused: a connection URL that drifted to a fresh database is the common cause, and adopting would abandon the real journal's history instead of finding it.
@@ -21798,11 +21807,11 @@ These `error_type` values are stable; any other value is the class name of an un
 - `RateLimited`: the provider throttled the request, after any retries that were safe.
 - `ProviderUnavailable`: the provider or the network failed, or the stream stalled, after any retries that were safe.
 - `AuthenticationFailed`: the provider rejected the credentials, or none are set up.
-- `ContextWindowExceeded`: the conversation no longer fits the model's context window.
+- `ContextWindowExceeded`: the conversation no longer fits the model's context window, or one request is larger than the account's tokens-per-minute limit.
 - `InvalidRequest`: the provider rejected the request, such as a malformed or oversized body or an unknown model.
 - `ModelSafeguardRefusal`: the model's safeguards refused the request.
 - `ModelOutputLimitError`: the model's responses kept stopping at the output limit before their tool calls were complete.
-- `ProviderError`: any other provider rejection, such as an HTTP `403`.
+- `ProviderError`: any other provider rejection, such as an HTTP `403`, or an OpenAI or Gemini account with no credit left or past its monthly spend or usage limit.
 
 Count it grouped by `error_type` and alert when one value is far more frequent than usual.
 `RateLimited` and `ProviderUnavailable` from many agents mean a provider is failing, while `InvalidRequest` or `ContextWindowExceeded` from one agent is more likely one conversation the provider cannot accept.
@@ -22038,6 +22047,9 @@ Smaller changes that need operator action:
 - **MCP gateway and shared agents**: the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#agent-eligibility) no longer offers agents whose worker scope is `shared` or unset, so their users lose gateway access to them and saved selections of them stop working.
   To restore an agent, set `mcp_gateway_shared_credentials: true` on it or give it `worker_scope: user` or `user_agent`.
 - **Retired prompt overrides**: a [`prompts`](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides) entry for `DEFAULT_UNSEEN_MESSAGES_HEADER`, `INTERRUPTED_PARTIAL_REPLY_HEADER`, `MIXED_PARTIAL_REPLY_HEADER`, or `PREVIOUS_CONVERSATION_THREAD_HEADER` fails validation as an unknown prompt, so delete it from `config.yaml`; no prompt rendered these headers, so removing them changes no text a model reads.
+- **Dedicated workers**: the upgrade replaces every Docker and Kubernetes worker once on its next use, which ends background shell commands running in it.
+  Kubernetes background scripts still running during the upgrade are interrupted when MindRoom starts again instead of resuming; start them again.
+- **Docker worker config**: Docker workers get the config MindRoom has applied, and `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` only says where that config's directory is on the Docker host; a separate file at that path is no longer read, so move any worker-only settings into `config.yaml`.
 
 ### Compaction History
 

@@ -730,7 +730,7 @@ async def test_matrix_message_team_member_send_follows_the_teams_thread_mode(tmp
             middleware=(_as_member("general", "default"),),
         )
 
-    payload = json.loads(str(result))
+    payload = json.loads(str(result.value))
 
     assert payload["status"] == "ok"
     assert payload["thread_id"] == "$evt"

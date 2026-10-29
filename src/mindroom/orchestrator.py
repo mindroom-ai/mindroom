@@ -6,7 +6,7 @@ import asyncio
 import signal
 import time
 from collections.abc import Awaitable, Callable
-from contextlib import nullcontext, suppress
+from contextlib import ExitStack, nullcontext, suppress
 from contextvars import Context
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -114,7 +114,7 @@ from mindroom.runtime_state import (
 from mindroom.scheduling.executor import set_scheduling_hook_registry
 from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
 from mindroom.skill_learning.runner import SkillReviewRunner
-from mindroom.startup_errors import EventJournalHoldLostError, PermanentStartupError
+from mindroom.startup_errors import EventJournalLostError, PermanentStartupError
 from mindroom.startup_maintenance import StartupMaintenanceController
 from mindroom.tool_system.plugins import (
     PluginReloadResult,
@@ -125,9 +125,9 @@ from mindroom.tool_system.plugins import (
     reload_plugins,
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
-from mindroom.workers.backends.docker_projection import publish_generated_agents
 from mindroom.workers.backends.legacy_state_root_mounts import retire_state_root_worker_mounts
 from mindroom.workers.runtime import (
+    bind_worker_launch_config_source,
     clear_worker_validation_snapshot_cache,
     lease_configured_primary_worker_manager,
     reset_primary_worker_manager,
@@ -214,7 +214,7 @@ _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0
 _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
 _EMBEDDED_API_SHUTDOWN_GRACE_SECONDS = 5.0
 _DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS = 5.0
-_EVENT_JOURNAL_HOLD_CHECK_SECONDS = 30.0
+_EVENT_JOURNAL_CHECK_SECONDS = 30.0
 
 
 async def _gather_periodic_shutdown_phase(
@@ -526,7 +526,6 @@ class _MultiAgentOrchestrator:
             bot_provider=lambda agent_name: self.agent_bots.get(agent_name),
             worker_lease_provider=lambda required_backend_locator: lease_configured_primary_worker_manager(
                 self.runtime_paths,
-                runtime_config=self.config,
                 required_backend_locator=required_backend_locator,
             ),
             api_enabled=self.api_enabled,
@@ -540,6 +539,7 @@ class _MultiAgentOrchestrator:
             apply_update_plan=self._apply_config_update_plan,
             response_admission_gate=self._response_admission_gate,
             before_runtime_replacement=self._thread_export_runner.prepare_runtime_replacement,
+            finish_reload=self._script_runtime.finish_reload,
             config_update_lock=self._config_update_lock,
         )
         self._approval_transport = ApprovalMatrixTransport(
@@ -1204,11 +1204,6 @@ class _MultiAgentOrchestrator:
         except (DuplicateManagedEntityIdentityError, MissingManagedEntityAccountError) as exc:
             raise PermanentStartupError(str(exc)) from exc
 
-    def _commit_config(self, config: Config) -> None:
-        """Run on `config` from now on, and give Docker worker configs the generated agents it built."""
-        self.config = config
-        publish_generated_agents(self.runtime_paths, config.generated_agent_data())
-
     def _preflight_account_provisioning(
         self,
         config: Config,
@@ -1355,7 +1350,7 @@ class _MultiAgentOrchestrator:
                 )
                 return result
             finally:
-                await self._script_runtime.complete_worker_replacement()
+                await self._script_runtime.finish_reload()
 
     async def _apply_plugin_changes_for_config_update(
         self,
@@ -1377,7 +1372,7 @@ class _MultiAgentOrchestrator:
             new_config,
             changed_server_ids,
         )
-        self._commit_config(new_config)
+        self.config = new_config
         if reply_membership_policy_changed:
             self.invalidate_agent_reply_memberships(reason="config_reload")
         new_hook_registry = apply_prepared_plugin_reload(
@@ -1469,7 +1464,7 @@ class _MultiAgentOrchestrator:
         self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=True)
         await self._prepare_user_account(config, update_runtime_state=True)
         entity_users = await self._prepare_entity_accounts(config, entity_names)
-        self._commit_config(config)
+        self.config = config
         warn_about_config_risks(config, self.runtime_paths)
         self.agent_reply_memberships.invalidate(config, reason="initial_config")
         await self._bind_event_journal()
@@ -1810,7 +1805,7 @@ class _MultiAgentOrchestrator:
         )
         await self._prepare_user_account(new_config, update_runtime_state=not self.running)
         await self._prepare_entity_accounts(new_config, entity_names)
-        self._commit_config(new_config)
+        self.config = new_config
         warn_about_config_risks(new_config, self.runtime_paths)
         self.agent_reply_memberships.invalidate(new_config, reason="initial_config_reload")
         self._activate_hook_registry(hook_registry)
@@ -2171,13 +2166,13 @@ class _MultiAgentOrchestrator:
                     plan.changed_mcp_servers,
                 )
                 # Only apply the new config after validation and account checks succeed.
-                self._commit_config(new_config)
+                self.config = new_config
                 if reply_membership_policy_changed:
                     self.invalidate_agent_reply_memberships(reason="config_reload")
                 self.plugin_watch.sync_roots(new_config)
                 self._activate_hook_registry(self.hook_registry)
                 clear_worker_validation_snapshot_cache()
-            await self._script_runtime.complete_worker_replacement()
+            await self._script_runtime.reopen_script_calls()
             changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
             logger.info(
                 "updating_config_authorization",
@@ -2234,7 +2229,7 @@ class _MultiAgentOrchestrator:
             )
             return True
         finally:
-            await self._script_runtime.complete_worker_replacement()
+            await self._script_runtime.reopen_script_calls()
             if replay_startup_maintenance and self.running and self.config is not None:
                 self._startup_maintenance.restart_after_runtime_replacement(
                     config=self.config,
@@ -2488,10 +2483,10 @@ class _MultiAgentOrchestrator:
         # Every bot follows the paused replies of its principal from these on.
         await store.load_approval_signals()
 
-    async def event_journal_still_held(self) -> bool:
-        """Return whether this runtime still holds the journal it claimed; true before it claims one."""
+    async def event_journal_still_usable(self) -> bool:
+        """Return whether this runtime still holds the journal it claimed and can still use it; true before it claims one."""
         journal = self._open_journal
-        return journal is None or not self._journal_held or await journal.store.still_held()
+        return journal is None or not self._journal_held or await journal.store.still_usable()
 
     def _shared_journal_store(self) -> EventJournalStore:
         """Return the one journal store every bot in this process borrows.
@@ -3137,17 +3132,20 @@ def _sync_credentials_and_prepare_storage(runtime_paths: RuntimePaths, storage_p
     storage_path.mkdir(parents=True, exist_ok=True)
 
 
-async def _watch_event_journal_hold(
+async def _watch_event_journal(
     orchestrator: _MultiAgentOrchestrator,
     shutdown_requested: asyncio.Event,
-    hold_lost: asyncio.Event,
+    journal_lost: asyncio.Event,
 ) -> None:
-    """Stop the runtime once it no longer holds its event journal, before another runtime can take it over."""
+    """Stop the runtime once it lost its event journal's lock session or one of the journal's connections.
+
+    Another runtime could take over a journal whose lock lapsed, and a lost connection never reconnects.
+    """
     while not shutdown_requested.is_set():
-        await asyncio.sleep(_EVENT_JOURNAL_HOLD_CHECK_SECONDS)
-        if not await orchestrator.event_journal_still_held():
-            logger.error("event_journal_hold_lost")
-            hold_lost.set()
+        await asyncio.sleep(_EVENT_JOURNAL_CHECK_SECONDS)
+        if not await orchestrator.event_journal_still_usable():
+            logger.error("event_journal_lost")
+            journal_lost.set()
             shutdown_requested.set()
             return
 
@@ -3156,7 +3154,7 @@ def _start_auxiliary_tasks(
     orchestrator: _MultiAgentOrchestrator,
     runtime_paths: RuntimePaths,
     shutdown_requested: asyncio.Event,
-    journal_hold_lost: asyncio.Event,
+    journal_lost: asyncio.Event,
 ) -> list[asyncio.Task]:
     """Start the non-critical background tasks that run beside the orchestrator."""
     # First, so an invalid heap task interval fails before any task exists that shutdown could not cancel.
@@ -3183,8 +3181,8 @@ def _start_auxiliary_tasks(
     ]
     tasks.append(
         create_background_task(
-            _watch_event_journal_hold(orchestrator, shutdown_requested, journal_hold_lost),
-            name="event_journal_hold_watch",
+            _watch_event_journal(orchestrator, shutdown_requested, journal_lost),
+            name="event_journal_watch",
         ),
     )
     # The heartbeat ends by itself for unpaired or rejected installs, so it must not be restarted;
@@ -3233,12 +3231,14 @@ async def _run_runtime(  # noqa: PLR0915
     orchestrator: _MultiAgentOrchestrator | None = None
     auxiliary_tasks: list[asyncio.Task] = []
     shutdown_requested = asyncio.Event()
-    journal_hold_lost = asyncio.Event()
+    journal_lost = asyncio.Event()
     api_server = _EmbeddedApiServerContext(host=api_host, port=api_port)
     orchestrator_task: asyncio.Task[None] | None = None
     shutdown_wait_task: asyncio.Task[bool] | None = None
     api_task: asyncio.Task[None] | None = None
     stall_detector: EventLoopStallDetector | None = None
+    # Holds the binding of the applied config as the one source dedicated workers launch from.
+    worker_launch_binding = ExitStack()
 
     try:
         # Drop any stale worker manager before startup work builds the active runtime.
@@ -3263,9 +3263,16 @@ async def _run_runtime(  # noqa: PLR0915
 
         logger.info("Starting orchestrator...")
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=api)
+        config_reload = orchestrator.config_reload
+        # Bound before the API and the bots start, and kept until the worker manager has shut down; a reload that
+        # is still applying, or failed partway, never reaches a worker launch. Until startup records its config as
+        # applied, workers launch from the config it loaded, which no older config precedes.
+        worker_launch_binding.enter_context(
+            bind_worker_launch_config_source(lambda: config_reload.fully_applied_config or orchestrator.config),
+        )
         set_runtime_starting()
         auxiliary_tasks.extend(
-            _start_auxiliary_tasks(orchestrator, runtime_paths, shutdown_requested, journal_hold_lost),
+            _start_auxiliary_tasks(orchestrator, runtime_paths, shutdown_requested, journal_lost),
         )
 
         if api:
@@ -3336,11 +3343,14 @@ async def _run_runtime(  # noqa: PLR0915
             ),
             name="runtime_shutdown",
         )
-        await _wait_for_runtime_shutdown_cleanup(
-            cleanup_task,
-            shutdown_was_requested=shutdown_was_requested,
-        )
-    if journal_hold_lost.is_set():
+        try:
+            await _wait_for_runtime_shutdown_cleanup(
+                cleanup_task,
+                shutdown_was_requested=shutdown_was_requested,
+            )
+        finally:
+            worker_launch_binding.close()
+    if journal_lost.is_set():
         # Exiting with a failure lets a supervisor that restarts only on failure bring the runtime back.
-        msg = "MindRoom stopped because it no longer holds its event journal"
-        raise EventJournalHoldLostError(msg)
+        msg = "MindRoom stopped because it lost its event journal's lock session or one of its database connections"
+        raise EventJournalLostError(msg)

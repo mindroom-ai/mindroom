@@ -177,7 +177,7 @@ def test_a_current_database_costs_one_read(tmp_path: Path, monkeypatch: pytest.M
         return connection
 
     monkeypatch.setattr(store_module, "connect_conversation_database", traced)
-    prepare_conversation_database(database, names)
+    prepare_conversation_database(database, names, agent_name=None)
 
     # SQLite traces the pragma a table-valued function runs as a comment of its own.
     run = [statement for statement in statements if not statement.startswith("--")]
@@ -200,7 +200,7 @@ def test_a_link_at_the_database_or_its_directory_is_refused(tmp_path: Path, link
         database.symlink_to(target if link == "database" else tmp_path / "created.db")
 
     with pytest.raises(ValueError, match="link"):
-        prepare_conversation_database(database, names)
+        prepare_conversation_database(database, names, agent_name=None)
 
     assert target.read_bytes() == before
     assert not (tmp_path / "created.db").exists()
@@ -221,7 +221,7 @@ def test_a_link_planted_after_the_check_is_refused(tmp_path: Path, monkeypatch: 
 
     monkeypatch.setattr(store_module, "connect_conversation_database", swapped)
     with pytest.raises(ValueError, match="instead"):
-        prepare_conversation_database(database, names)
+        prepare_conversation_database(database, names, agent_name=None)
 
     assert target.read_bytes() == before
 
@@ -244,7 +244,7 @@ def test_a_sessions_directory_swapped_for_a_link_after_the_check_is_refused(
 
     monkeypatch.setattr(store_module, "connect_conversation_database", swapped)
     with pytest.raises(ValueError, match="instead"):
-        prepare_conversation_database(database, _NAMES)
+        prepare_conversation_database(database, _NAMES, agent_name=None)
 
     # SQLite's open may have left an empty file at the link's target, never a database with tables.
     planted = outside / database.name
@@ -267,7 +267,7 @@ def test_a_sessions_directory_swapped_for_a_link_before_the_resolve_is_refused(t
 
     database = SwappedOnFirstResolve(_NAMES.database_path(tmp_path / "store"))
     with pytest.raises(ValueError, match="instead"):
-        prepare_conversation_database(database, _NAMES)
+        prepare_conversation_database(database, _NAMES, agent_name=None)
 
     assert sessions.is_symlink()
     planted = outside / database.name

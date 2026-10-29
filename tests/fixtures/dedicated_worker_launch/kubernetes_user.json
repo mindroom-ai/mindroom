@@ -1,0 +1,379 @@
+{
+  "created": [
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "mindroom-worker-944d6bf185360e41083d012c",
+        "namespace": "chat",
+        "labels": {
+          "mindroom.ai/component": "worker",
+          "app.kubernetes.io/managed-by": "mindroom",
+          "app.kubernetes.io/name": "mindroom-worker",
+          "mindroom.ai/tenant": "test",
+          "mindroom.ai/worker-id": "mindroom-worker-944d6bf185360e41083d012c"
+        },
+        "annotations": {
+          "mindroom.ai/worker-key": "v1:tenant-123:user:~@alice:example.org",
+          "mindroom.ai/state-subpath": "workers/v1_tenant-123_user_@alice_example.org-944d6bf185360e41",
+          "mindroom.ai/created-at": "10.0",
+          "mindroom.ai/last-used-at": "10.0",
+          "mindroom.ai/startup-count": "1",
+          "mindroom.ai/failure-count": "0",
+          "mindroom.ai/worker-status": "starting",
+          "mindroom.ai/last-started-at": "10.0",
+          "mindroom.ai/template-hash": "361fe9dc735517f45cbcd57c0210878bdae29f3fd47c858b539d0fc4b7e30e87",
+          "mindroom.ai/workspace-template-hash": "361fe9dc735517f45cbcd57c0210878bdae29f3fd47c858b539d0fc4b7e30e87",
+          "mindroom.ai/private-agent-names": "[\"mind\"]"
+        }
+      },
+      "spec": {
+        "replicas": 1,
+        "selector": {
+          "matchLabels": {
+            "mindroom.ai/component": "worker",
+            "app.kubernetes.io/managed-by": "mindroom",
+            "app.kubernetes.io/name": "mindroom-worker",
+            "mindroom.ai/tenant": "test",
+            "mindroom.ai/worker-id": "mindroom-worker-944d6bf185360e41083d012c"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "mindroom.ai/component": "worker",
+              "app.kubernetes.io/managed-by": "mindroom",
+              "app.kubernetes.io/name": "mindroom-worker",
+              "mindroom.ai/tenant": "test",
+              "mindroom.ai/worker-id": "mindroom-worker-944d6bf185360e41083d012c"
+            },
+            "annotations": {
+              "mindroom.ai/worker-key": "v1:tenant-123:user:~@alice:example.org",
+              "mindroom.ai/startup-manifest-hash": "7056831817d7b9b4bfa373eb717eaa45dfea92eb4c7825130023d114f8aa4a0d",
+              "mindroom.ai/runner-token-hash": "262b6b9414f27399d440f93b9359e4843f6e88eb134e1ae1ea808e6ac590032b"
+            }
+          },
+          "spec": {
+            "serviceAccountName": "mindroom-worker",
+            "automountServiceAccountToken": false,
+            "enableServiceLinks": false,
+            "securityContext": {
+              "runAsUser": 1000,
+              "runAsGroup": 1000,
+              "fsGroup": 1000,
+              "runAsNonRoot": true,
+              "fsGroupChangePolicy": "OnRootMismatch",
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "sandbox-runner",
+                "image": "ghcr.io/mindroom-ai/mindroom:latest",
+                "imagePullPolicy": "IfNotPresent",
+                "command": [
+                  "tini",
+                  "--",
+                  "/app/run-sandbox-runner.sh"
+                ],
+                "ports": [
+                  {
+                    "containerPort": 8766,
+                    "name": "api"
+                  }
+                ],
+                "env": [
+                  {
+                    "name": "MINDROOM_SANDBOX_RUNNER_MODE",
+                    "value": "true"
+                  },
+                  {
+                    "name": "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE",
+                    "value": "forkserver"
+                  },
+                  {
+                    "name": "MINDROOM_SANDBOX_RUNNER_PORT",
+                    "value": "8766"
+                  },
+                  {
+                    "name": "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH",
+                    "value": "/app/worker/workers/v1_tenant-123_user_@alice_example.org-944d6bf185360e41/.runtime/startup_manifest.json"
+                  },
+                  {
+                    "name": "MINDROOM_CONFIG_PATH",
+                    "value": "/srv/mindroom-golden/config.yaml"
+                  },
+                  {
+                    "name": "MINDROOM_STORAGE_PATH",
+                    "value": "/app/worker/workers/v1_tenant-123_user_@alice_example.org-944d6bf185360e41"
+                  },
+                  {
+                    "name": "MINDROOM_SHARED_CREDENTIALS_PATH",
+                    "value": "/app/worker/workers/v1_tenant-123_user_@alice_example.org-944d6bf185360e41/.shared_credentials"
+                  },
+                  {
+                    "name": "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY",
+                    "value": "v1:tenant-123:user:~@alice:example.org"
+                  },
+                  {
+                    "name": "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT",
+                    "value": "/app/worker/workers/v1_tenant-123_user_@alice_example.org-944d6bf185360e41"
+                  },
+                  {
+                    "name": "HOME",
+                    "value": "/app/worker/workers/v1_tenant-123_user_@alice_example.org-944d6bf185360e41"
+                  },
+                  {
+                    "name": "MINDROOM_SANDBOX_PROXY_TOKEN",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "mindroom-worker-944d6bf185360e41083d012c",
+                        "key": "MINDROOM_SANDBOX_PROXY_TOKEN"
+                      }
+                    }
+                  },
+                  {
+                    "name": "EXTRA_ENV",
+                    "value": "present"
+                  },
+                  {
+                    "name": "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS",
+                    "value": "45"
+                  },
+                  {
+                    "name": "OPENAI_BASE_URL",
+                    "value": "https://extra-llm.example.test/v1"
+                  },
+                  {
+                    "name": "ANONYMIZED_TELEMETRY",
+                    "value": "false"
+                  },
+                  {
+                    "name": "CHROMA_OTEL_COLLECTION_ENDPOINT",
+                    "value": ""
+                  },
+                  {
+                    "name": "CHROMA_OTEL_GRANULARITY",
+                    "value": "none"
+                  },
+                  {
+                    "name": "COMPOSIO_DISABLE_SENTRY",
+                    "value": "true"
+                  },
+                  {
+                    "name": "COMPOSIO_DISABLE_VERSION_CHECK",
+                    "value": "true"
+                  },
+                  {
+                    "name": "DISABLE_TELEMETRY",
+                    "value": "1"
+                  },
+                  {
+                    "name": "DO_NOT_TRACK",
+                    "value": "1"
+                  },
+                  {
+                    "name": "GRAPHITI_TELEMETRY_ENABLED",
+                    "value": "false"
+                  },
+                  {
+                    "name": "HF_HUB_DISABLE_TELEMETRY",
+                    "value": "1"
+                  },
+                  {
+                    "name": "LITELLM_LOCAL_ANTHROPIC_BETA_HEADERS",
+                    "value": "true"
+                  },
+                  {
+                    "name": "LITELLM_LOCAL_MODEL_COST_MAP",
+                    "value": "true"
+                  },
+                  {
+                    "name": "MEM0_TELEMETRY",
+                    "value": "false"
+                  },
+                  {
+                    "name": "MEM0_TELEMETRY_SAMPLE_RATE",
+                    "value": "0"
+                  },
+                  {
+                    "name": "NEXT_TELEMETRY_DISABLED",
+                    "value": "1"
+                  },
+                  {
+                    "name": "OTEL_SDK_DISABLED",
+                    "value": "true"
+                  },
+                  {
+                    "name": "TURBO_TELEMETRY_DISABLED",
+                    "value": "1"
+                  },
+                  {
+                    "name": "WANDB_MODE",
+                    "value": "disabled"
+                  }
+                ],
+                "volumeMounts": [
+                  {
+                    "name": "worker-storage",
+                    "mountPath": "/app/worker/agents/helper/workspace",
+                    "subPath": "agents/helper/workspace"
+                  },
+                  {
+                    "name": "worker-storage",
+                    "mountPath": "/app/worker/workers/v1_tenant-123_user_@alice_example.org-944d6bf185360e41",
+                    "subPath": "workers/v1_tenant-123_user_@alice_example.org-944d6bf185360e41"
+                  },
+                  {
+                    "name": "worker-storage",
+                    "mountPath": "/app/worker/workers/v1_tenant-123_user_@alice_example.org-944d6bf185360e41/.shared_credentials",
+                    "subPath": "workers/v1_tenant-123_user_@alice_example.org-944d6bf185360e41/.shared_credentials",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "worker-storage",
+                    "mountPath": "/app/worker/workers/v1_tenant-123_user_@alice_example.org-944d6bf185360e41/.runtime",
+                    "subPath": "workers/v1_tenant-123_user_@alice_example.org-944d6bf185360e41/.runtime",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "worker-tmp",
+                    "mountPath": "/tmp"
+                  }
+                ],
+                "readinessProbe": {
+                  "httpGet": {
+                    "path": "/healthz",
+                    "port": "api"
+                  },
+                  "periodSeconds": 5,
+                  "failureThreshold": 6
+                },
+                "startupProbe": {
+                  "httpGet": {
+                    "path": "/healthz",
+                    "port": "api"
+                  },
+                  "periodSeconds": 5,
+                  "failureThreshold": 60
+                },
+                "livenessProbe": {
+                  "httpGet": {
+                    "path": "/healthz",
+                    "port": "api"
+                  },
+                  "periodSeconds": 10,
+                  "failureThreshold": 6
+                },
+                "resources": {
+                  "requests": {
+                    "memory": "256Mi",
+                    "cpu": "100m"
+                  },
+                  "limits": {
+                    "memory": "1Gi",
+                    "cpu": "500m"
+                  }
+                },
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "readOnlyRootFilesystem": true,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  }
+                }
+              }
+            ],
+            "volumes": [
+              {
+                "name": "worker-storage",
+                "persistentVolumeClaim": {
+                  "claimName": "mindroom-storage"
+                }
+              },
+              {
+                "name": "worker-tmp",
+                "emptyDir": {
+                  "sizeLimit": "1Gi"
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "patched": [
+    [
+      "mindroom-worker-944d6bf185360e41083d012c",
+      {
+        "metadata": {
+          "annotations": {
+            "mindroom.ai/worker-key": "v1:tenant-123:user:~@alice:example.org",
+            "mindroom.ai/state-subpath": "workers/v1_tenant-123_user_@alice_example.org-944d6bf185360e41",
+            "mindroom.ai/created-at": "10.0",
+            "mindroom.ai/last-used-at": "10.0",
+            "mindroom.ai/startup-count": "1",
+            "mindroom.ai/failure-count": "0",
+            "mindroom.ai/worker-status": "ready",
+            "mindroom.ai/last-started-at": "10.0",
+            "mindroom.ai/template-hash": "361fe9dc735517f45cbcd57c0210878bdae29f3fd47c858b539d0fc4b7e30e87",
+            "mindroom.ai/workspace-template-hash": "361fe9dc735517f45cbcd57c0210878bdae29f3fd47c858b539d0fc4b7e30e87",
+            "mindroom.ai/private-agent-names": "[\"mind\"]"
+          }
+        }
+      }
+    ]
+  ],
+  "manifest": {
+    "runtime_paths": {
+      "config_path": "/srv/mindroom-golden/config.yaml",
+      "env_file_values": {},
+      "process_env": {
+        "ANONYMIZED_TELEMETRY": "false",
+        "BROWSER_EXECUTABLE_PATH": "/usr/bin/chromium",
+        "CHROMA_OTEL_COLLECTION_ENDPOINT": "",
+        "CHROMA_OTEL_GRANULARITY": "none",
+        "COMPOSIO_DISABLE_SENTRY": "true",
+        "COMPOSIO_DISABLE_VERSION_CHECK": "true",
+        "CUSTOMER_ID": "customer-1",
+        "DISABLE_TELEMETRY": "1",
+        "DO_NOT_TRACK": "1",
+        "GRAPHITI_TELEMETRY_ENABLED": "false",
+        "HF_HUB_DISABLE_TELEMETRY": "1",
+        "LITELLM_LOCAL_ANTHROPIC_BETA_HEADERS": "true",
+        "LITELLM_LOCAL_MODEL_COST_MAP": "true",
+        "MATRIX_HOMESERVER": "https://matrix.example.test",
+        "MEM0_TELEMETRY": "false",
+        "MEM0_TELEMETRY_SAMPLE_RATE": "0",
+        "MINDROOM_CONFIG_PATH": "/srv/mindroom-golden/config.yaml",
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX": "workers",
+        "MINDROOM_LOG_LEVEL": "INFO",
+        "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "v1:tenant-123:user:~@alice:example.org",
+        "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": "/app/worker/workers/v1_tenant-123_user_@alice_example.org-944d6bf185360e41",
+        "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "forkserver",
+        "MINDROOM_SANDBOX_RUNNER_MODE": "true",
+        "MINDROOM_SANDBOX_RUNNER_PORT": "8766",
+        "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "45",
+        "MINDROOM_SHARED_CREDENTIALS_PATH": "/app/worker/workers/v1_tenant-123_user_@alice_example.org-944d6bf185360e41/.shared_credentials",
+        "MINDROOM_STORAGE_PATH": "/app/worker/workers/v1_tenant-123_user_@alice_example.org-944d6bf185360e41",
+        "NEXT_TELEMETRY_DISABLED": "1",
+        "OTEL_SDK_DISABLED": "true",
+        "TURBO_TELEMETRY_DISABLED": "1",
+        "WANDB_MODE": "disabled"
+      },
+      "storage_root": "/app/worker/workers/v1_tenant-123_user_@alice_example.org-944d6bf185360e41"
+    },
+    "tool_validation_snapshot": {
+      "calculator": {
+        "agent_override_fields": [],
+        "authored_override_validator": "default",
+        "config_fields": [],
+        "runtime_loadable": true
+      }
+    }
+  }
+}

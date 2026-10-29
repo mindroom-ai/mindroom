@@ -34,6 +34,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.codec import decode_json, run_kind
+from mindroom.session_storage.legacy_agent_session_owners import adopt_agent_session_owners, upgrade_storage_v2
 from mindroom.session_storage.legacy_agno2_runs import stored_timestamp
 from mindroom.session_storage.legacy_agno3_backup import write_conversion_backup
 from mindroom.session_storage.legacy_agno3_schema import (
@@ -84,14 +85,17 @@ def convert_conversation_database(
     path: Path,
     names: TableNames,
     descriptors: ExitStack,
+    *,
+    agent_name: str | None,
 ) -> None:
     """Convert the database ``connection`` holds open at ``path``, in an older layout, to storage v2.
 
     In one ``BEGIN IMMEDIATE``: the backup, the Agno-era steps (usage ledger seeding, summary-row adoption with Agno 2
     blob runs and positions), the conversion, the drop of the Agno tables and dead columns, and the v2 tables and meta
-    row. A file in write-ahead-log mode returns to the rollback journal first, which checkpoints its log. The file is
-    then compacted when that pays off (``_compact``), and its conversion is logged. ``descriptors`` takes the backup's
-    descriptor of the file, which the caller closes after ``connection``.
+    row, which records the current version, so in agent ``agent_name``'s database its session rows then name it
+    (``adopt_agent_session_owners``). A file in write-ahead-log mode returns to the rollback journal first, which
+    checkpoints its log. The file is then compacted when that pays off (``_compact``), and its conversion is logged.
+    ``descriptors`` takes the backup's descriptor of the file, which the caller closes after ``connection``.
     """
     _leave_wal_mode(connection, path)
     started = time.monotonic()
@@ -103,6 +107,8 @@ def convert_conversation_database(
         # SQLite keeps whatever bytes worker code stores as text; the conversion's own connection reads them.
         connection.text_factory = _TEXT_WITH_REPLACEMENT_CHARACTERS
         _convert(connection, AgnoTableNames(names.storage_name), path, descriptors)
+        if agent_name is not None:
+            adopt_agent_session_owners(connection, names, agent_name)
         runs, messages = connection.execute(
             f"SELECT (SELECT count(*) FROM {quote_identifier(names.log_runs)}), "  # noqa: S608
             f"(SELECT count(*) FROM {quote_identifier(names.log_messages)})",
@@ -150,33 +156,38 @@ async def migrate_conversation_storage(runtime_paths: RuntimePaths) -> None:
 
 def _migrate_databases(runtime_paths: RuntimePaths) -> None:
     root = resolve_session_state_root(runtime_paths.storage_root, runtime_paths)
-    directories = [*_directories(root / "agents"), *_directories(root / "teams")]
+    # Each agent's directory, shared or in a private instance, is named after its agent.
+    agents = _directories(root / "agents")
     for scope in _directories(root / "private_instances"):
-        directories.extend(_directories(scope))
+        agents.extend(_directories(scope))
+    others = _directories(root / "teams")
     # The system usage store, which records internal provider calls, is a conversation database of its own.
     system = root / SYSTEM_USAGE_STORAGE_NAME
     if not system.is_symlink() and system.is_dir():
-        directories.append(system)
-    for directory in directories:
+        others.append(system)
+    stores = [(directory, directory.name) for directory in agents] + [(directory, None) for directory in others]
+    for directory, agent_name in stores:
         names = TableNames(directory.name)
         path = names.database_path(directory)
         try:
             # A store that never wrote has no database to convert; its first open creates one.
             if path.is_symlink() or path.exists():
-                _convert_at_startup(path, names)
+                _convert_at_startup(path, names, agent_name)
         except Exception as error:
             # Worker code can write session databases, so one that is linked, unreadable, locked, or malformed must not
             # stop startup. Its owner converts it with the full lock timeout when it next opens it, or fails alone.
             logger.warning("conversation_conversion_skipped_store", path=str(path), error=str(error))
 
 
-def _convert_at_startup(path: Path, names: TableNames) -> None:
+def _convert_at_startup(path: Path, names: TableNames, agent_name: str | None) -> None:
     with (
         ExitStack() as descriptors,
         closing(connect_by_name(path, timeout=_STARTUP_LOCK_TIMEOUT_SECONDS)) as connection,
     ):
-        if table_names(connection) and not is_current_layout(connection, names):
-            convert_conversation_database(connection, path, names, descriptors)
+        if is_current_layout(connection, names):
+            upgrade_storage_v2(connection, names, agent_name)
+        elif table_names(connection):
+            convert_conversation_database(connection, path, names, descriptors, agent_name=agent_name)
 
 
 def _directories(root: Path) -> list[Path]:
@@ -407,8 +418,9 @@ def _has_row(connection: sqlite3.Connection, names: AgnoTableNames, run_id: str)
 # logged by id; the backup keeps both. Worker code can write the run data, so a row whose run id is not text is left out
 # too, with what a paused team row embeds, as is an embedded or folded member whose run id is not text; a position that
 # is not a number goes last, as SQLite sorted it; a member's creation time that is not whole seconds a datetime holds
-# becomes its team run row's or its fold's; and each message and tool keeps its call ids only as text or none
-# (`_use_text_call_ids`).
+# becomes its team run row's or its fold's; and each message keeps only its tool calls that are objects, their ids and
+# its result id read as non-empty text or none (`Message.from_dict`), and each tool keeps its call id only as text or
+# none (`_use_object_calls_and_text_tool_ids`).
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_runs_convert_in_load_order_with_their_row_ids,
 # ::test_members_of_members_join_their_team_run, ::test_a_paused_team_runs_embedded_members_become_its_member_rows,
 # ::test_a_fold_whose_run_has_no_row_gets_a_cancelled_row_after_its_summary,
@@ -581,8 +593,8 @@ def _write_run(
     run: _Run,
     seq: int,
 ) -> None:
-    # The repair reads call ids, so it runs on messages whose ids are text or None.
-    _use_text_call_ids(run.record.messages, run.record.tools or ())
+    # The repair reads the calls and their ids, so it runs on messages whose calls are objects with text or None ids.
+    _use_object_calls_and_text_tool_ids(run.record.messages, run.record.tools or ())
     run.record.messages = repair_legacy_tool_calls(run.record.messages)
     data = run.record.to_dict()
     kind = run_kind(run.record)
@@ -694,7 +706,7 @@ def _convert_segment(
         return
     decoded = (_decoded(Message.from_dict, message) for message in row.segment_list("messages"))
     folded = [message for message in decoded if message is not None]
-    _use_text_call_ids(folded)
+    _use_object_calls_and_text_tool_ids(folded)
     named = {call.get("id") for message in folded for call in message.tool_calls or ()}
     named |= {message.tool_call_id for message in folded}
     messages = [message.to_dict() for message in folded]
@@ -714,22 +726,17 @@ def _convert_segment(
     flag_folded(connection, names, session_id, run_id, messages, member_ids, row.id)
 
 
-def _use_text_call_ids(messages: Iterable[Message], tools: Iterable[ToolExecution] = ()) -> None:
-    """Keep the decoded messages' and tools' call ids only as text or None, as MindRoom wrote them.
+def _use_object_calls_and_text_tool_ids(messages: Iterable[Message], tools: Iterable[ToolExecution] = ()) -> None:
+    """Keep the decoded messages' tool calls only as objects and the tools' call ids only as text or None.
 
-    Worker code can write run data, so a message's tool calls keep only their objects, and a call id of another type
-    becomes None; every reader can then hash and compare the ids.
+    Worker code can write run data, so this is what lets every reader iterate the calls and hash and compare the ids;
+    decoding a message already reads its own call ids as non-empty text or None (``Message.from_dict``).
     """
     for message in messages:
         calls = message.tool_calls if isinstance(message.tool_calls, list) else []
-        message.tool_calls = [_with_text_id(call) for call in calls if isinstance(call, dict)]
-        message.tool_call_id = message.tool_call_id if isinstance(message.tool_call_id, str) else None
+        message.tool_calls = [call for call in calls if isinstance(call, dict)]
     for tool in tools:
         tool.tool_call_id = tool.tool_call_id if isinstance(tool.tool_call_id, str) else None
-
-
-def _with_text_id(call: dict[str, Any]) -> dict[str, Any]:
-    return call if isinstance(call.get("id"), str | None) else {**call, "id": None}
 
 
 def _decoded[Value, Record](decode: Callable[[Value], Record], data: Value) -> Record | None:

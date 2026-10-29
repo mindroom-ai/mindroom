@@ -229,9 +229,10 @@ def _call_ids(messages: Sequence[Message]) -> dict[str, str]:
     call_ids: dict[str, str] = {}
     for message in messages:
         for call in message.tool_calls or ():
-            call_id = call.get("call_id") or call.get("id")
-            if isinstance(call.get("id"), str) and isinstance(call_id, str):
-                call_ids[call["id"]] = call_id
+            item_id = call.get("id")
+            call_id = call.get("call_id") or item_id
+            if item_id and isinstance(call_id, str):
+                call_ids[item_id] = call_id
     return call_ids
 
 

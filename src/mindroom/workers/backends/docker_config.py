@@ -85,7 +85,6 @@ _EXTRA_ENV_JSON_ENV = "MINDROOM_DOCKER_WORKER_ENV_JSON"
 _EXTRA_LABELS_JSON_ENV = "MINDROOM_DOCKER_WORKER_LABELS_JSON"
 DOCKER_RESERVED_EXTRA_ENV_NAMES = frozenset(
     {
-        "MINDROOM_RUNTIME_PATHS_JSON",
         SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
     },
 )
@@ -309,7 +308,6 @@ def docker_backend_config_signature(
     *,
     auth_token: str | None,
     storage_path: Path | None = None,
-    worker_grantable_credentials: frozenset[str] | None = None,
 ) -> tuple[str, ...]:
     """Return a cache signature for one concrete Docker backend config."""
     config = _DockerWorkerBackendConfig.from_runtime(runtime_paths)
@@ -348,7 +346,6 @@ def docker_backend_config_signature(
             runtime_env.get("DOCKER_HOST", ""),
             runtime_env.get("DOCKER_TLS_VERIFY", ""),
             runtime_env.get("DOCKER_CERT_PATH", ""),
-            *sorted(worker_grantable_credentials or frozenset()),
         ),
         runtime_paths=effective_runtime_paths,
         json_values=(

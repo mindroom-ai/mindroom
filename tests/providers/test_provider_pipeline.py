@@ -21,6 +21,7 @@ from mindroom.config.models import DebugConfig
 from mindroom.llm.errors import (
     MALFORMED_TOOL_CALL,
     MODEL_SAFEGUARD_REFUSAL_MESSAGE,
+    QUOTA_EXHAUSTED,
     SAFEGUARD_REFUSAL,
     InvalidRequest,
     ModelSafeguardRefusal,
@@ -752,6 +753,27 @@ async def test_a_refusal_is_neither_retried_nor_resent_without_media() -> None:
 
     assert len(inner.requests) == 2
     assert all(request.messages[0].images for request in inner.requests)
+
+
+# --- An account out of credit ---------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_account_out_of_credit_is_neither_retried_nor_resent_without_media() -> None:
+    """Only a change to the account's billing lets the request through, and its media did not cause the failure."""
+    quota = classify_provider_error(
+        "You exceeded your current quota, please check your plan and billing details.",
+        provider="Scripted Chat",
+        status_code=429,
+        code="insufficient_quota",
+    )
+    inner = _ScriptedProvider([[quota], [_turn()]])
+
+    with pytest.raises(ProviderError) as raised:
+        await complete(pipeline_provider(inner), ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
+
+    assert raised.value.code == QUOTA_EXHAUSTED
+    assert len(inner.requests) == 1
 
 
 # --- Malformed tool-call guidance -----------------------------------------------------------------------------

@@ -191,7 +191,7 @@
     "message": {
       "content": "Order A-1001 has shipped.",
       "provider_data": {
-        "content_blocks": [
+        "claude_blocks": [
           {
             "text": "Order A-1001 has shipped.",
             "type": "text"

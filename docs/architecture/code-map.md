@@ -256,8 +256,10 @@ Matrix sync callback
 | `providers/names.py` | `provider_route`, the route a configured provider value selects with aliases such as `gemini` resolved, which model dispatch, pricing, and the wire adapters compare, and `PROVIDER_ROUTES`, the routes the provider registry builds, which config validation accepts as a model's `provider`, in a module that imports nothing |
 | `providers/anthropic/messages.py` | The Claude adapter (`ModelProvider`) for the direct API, Vertex AI, and Bedrock Mantle routes, with their client factories, error mapping, and `build_provider` |
 | `providers/anthropic/settings.py` | Claude route settings parsed from `extra_kwargs` under Agno's field names, and the keys each route accepts |
-| `providers/anthropic/wire.py` | Claude Messages API formatting of messages and tools, and parsing of the finished response into an assistant message |
-| `providers/anthropic/repairs.py` | Replay-safe transforms of a Claude request body: citations, tool-result order, tool-search blocks, inline media budgets |
+| `providers/anthropic/wire.py` | Claude Messages API formatting of messages and tools, and parsing of the finished response into an assistant message that stores its blocks once, in request shape |
+| `providers/anthropic/stored_turns.py` | The blocks a stored Claude assistant turn replays: its stored `claude_blocks`, or blocks rebuilt from its message fields, which never take a cache breakpoint |
+| `providers/anthropic/legacy_stored_turns.py` | Claude turns stored before `claude_blocks`: response-shape blocks read in request shape, and older turns rebuilt from their fields |
+| `providers/anthropic/repairs.py` | Replay-safe shapes of Claude blocks (citations, tool-search blocks) and request-scoped body repairs: unavailable tool references, tool-result order, inline media budgets |
 | `providers/anthropic/prompt_cache.py` | The wire preparation of one Claude request body: history repairs, deferred tool search, tool choice, and the prompt-cache ladder |
 | `providers/cache_ladder.py` | The Claude prompt-cache ladder primitives (breakpoint markers, message rungs, the tools marker) shared by the Claude adapter and the OpenRouter Claude ladder |
 | `providers/anthropic/native_compaction.py` | Claude native compaction: the compaction edit, the checkpoint replay projection, and the checkpoint recorded on each response |
@@ -285,7 +287,7 @@ Matrix sync callback
 | `budgets/caps.py` | Per-user monthly caps kept as runtime state under the storage root, written atomically and read lock-free |
 | `budgets/monitor.py` | Background spend refresh, the per-user cap store, and the per-reply decision to use the fallback model |
 | `config/budgets.py` | Opt-in budgets: default monthly cap and fallback model |
-| `session_storage/agent_storage.py` | Opens an agent's, a team scope's, or the system usage ledger's conversation store: the preflight archive check, the link-refusing connect, the tables of a new database, and the conversion of one in an older layout |
+| `session_storage/agent_storage.py` | Opens an agent's, a team scope's, or the system usage ledger's conversation store: the preflight archive check, the link-refusing connect, the tables of a new database, the conversion of one in an older layout, and an agent's layout version upgrade |
 | `session_storage/store.py` | The conversation store: one SQLite database of sessions, runs with a row per stored message and per tool execution, summary rows, and the usage ledger, with full run saves refused once a run is final and single facts patched onto stored rows, each operation in one transaction on its own connection |
 | `session_storage/schema.py` | File and table names, table listing, and the layout of a conversation database: the sessions table, the six `*_log_*` tables, and the usage ledger |
 | `session_storage/codec.py` | A run record to its run row, message rows, and tool-execution rows and back, with the JSON keys stored runs carry, and the JSON decode that reads worker-written text without failing |
@@ -294,6 +296,7 @@ Matrix sync callback
 | `session_storage/legacy_agno2_runs.py` | Data older Agno releases stored: Agno 2 run blobs, rows without a position, and odd timestamps, which the conversion reads, and session JSON columns encoded twice, which the conversion stores once and usage reports over unconverted files read |
 | `session_storage/legacy_tool_results.py` | Tool results an earlier release stored combined in one message, split into one message per result when a database converts |
 | `session_storage/legacy_agno3_conversion.py` | The one-way conversion of an Agno-layout conversation database to storage v2, run by a store open that finds an older layout and by the startup sweep over the session state root |
+| `session_storage/legacy_agent_session_owners.py` | Agent session rows and runs that name an id other than their agent, set to the agent once, as layout version 3, by the agent's store open and the startup sweep |
 | `session_storage/legacy_agno3_backup.py` | The `<name>.db.pre-storage-v2` copy a database gets before its conversion, after a free-space check, through no-follow descriptors |
 | `session_storage/legacy_agno3_schema.py` | The Agno layout's table names, DDL, run-row decoder, and member-subtree delete, read only by the conversion and its Agno-era steps |
 | `history/summary_rows.py` | The conversation log's summary rows: compare-and-append of compaction chunks and mid-turn folds, the event ids each row covers, the tool calls folds took, and edit and redaction cuts |
@@ -366,6 +369,8 @@ Matrix sync callback
 | `tool_system/progress.py` | Live progress a running tool call reports to whatever owns it |
 | `tool_system/dedicated_threads.py` | One thread per blocking call of a background job or worker proxy call, outside the bounded shared pools |
 | `workers/in_flight.py` | Workers with a call in flight, which idle cleanup refreshes before it runs |
+| `workers/protocol.py` | The typed requests and responses the primary and its sandbox runners exchange, and the worker protocol version both check |
+| `workers/backends/dedicated_launch.py` | The runner environment and startup manifest every dedicated Docker or Kubernetes worker starts with, from its backend's container layout |
 | `shell/output_capture.py` | Bounded shell output spools, completion validation, and atomic output-file publication |
 | `shell/execution.py` | Shell command execution core: spawning, output buffering, stopping at a timeout, and the handle registry of Desktop shell and script runs |
 | `shell/supervisor.py` | Worker-local shell supervisor process that runs shell commands and script handles for sandbox request subprocesses, stopping a command whose relay dies |
@@ -432,6 +437,7 @@ Matrix sync callback
 | `tool_system/tool_hooks.py` | MindRoom's tool-call policy as middleware around every call: plugin before-call, environment, and after-call hooks, the background-script approval gate, job and authority checkpoints, durable call recording, and failure records |
 | `tool_system/tool_environment.py` | The environment one tool call gives its shell commands, local or worker-routed: the plugin hooks' changes with the response's CLI grant over them |
 | `llm/` | Provider-neutral values the runtime shares: messages, media, usage, run records and their pause requirements, run events, the `ModelProvider` protocol, and normalized provider errors, with the dict keys stored runs carry |
+| `llm/legacy_run_content.py` | Run contents earlier releases stored: a paused notice in place of the model's text, read as none, and a failed run's failure text, handed over redacted |
 | `llm/tool_search.py` | Portable deferred tool search for routes the build marks portable: the pipeline stage that leaves deferred schemas off the request and shows stored deferred calls as `call_tool` calls, the loop's rewrite of a model's `call_tool` calls to the functions they name, and the argument parsing both share, which every wire that sends tool-call arguments as an object uses to replay a call another provider stored |
 | `agent_loop/model_loop.py` | `run_model_loop`, the request and tool loop agents, team leaders, and skill reviews share: send the messages, append the answer, run its tool calls, and stop on a final answer, a stopping tool, a pause, a hook, or the request cap |
 | `agent_loop/run.py` | `run_agent` and `resume_agent`: agent runs and approval resumes over the model loop, each ending in one terminal record handed to the persist callback before the run ends |

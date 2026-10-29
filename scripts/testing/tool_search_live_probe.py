@@ -247,12 +247,12 @@ def run_live(args: argparse.Namespace) -> int:
         block.get("type")
         for message in messages
         if message.role == "assistant"
-        for block in (message.provider_data or {}).get("server_tool_blocks", [])
+        for block in (message.provider_data or {}).get("claude_blocks", [])
     ]
     discovered = "tool_search_tool_result" in block_types
     called_deferred = DEFERRED_TOOL_NAME in called
     usage_first = first.usage.tokens
-    print(f"turn 1: server blocks={block_types} tool calls={called}")
+    print(f"turn 1: blocks={block_types} tool calls={called}")
     print(f"turn 1 usage: cache_write={usage_first.cache_write_tokens} cache_read={usage_first.cache_read_tokens}")
 
     if not called_deferred:

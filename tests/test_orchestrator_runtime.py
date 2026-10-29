@@ -86,7 +86,7 @@ from mindroom.orchestrator import (
     _SignalAwareUvicornServer,
     _wait_for_runtime_completion,
     _wait_for_runtime_shutdown_cleanup,
-    _watch_event_journal_hold,
+    _watch_event_journal,
     main,
 )
 from mindroom.runtime_state import (
@@ -96,10 +96,11 @@ from mindroom.runtime_state import (
     set_api_server_address,
     set_runtime_ready,
 )
-from mindroom.startup_errors import EventJournalHoldLostError, PermanentStartupError
+from mindroom.startup_errors import EventJournalLostError, PermanentStartupError
 from mindroom.tool_jobs.runtime import ToolJobRuntime, get_background_runtime
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
+from mindroom.workers.backend import WorkerBackendError
 from tests.bot_helpers import (
     AgentBotTestBase,
     _configured_team_test_config,
@@ -562,16 +563,16 @@ async def test_binding_the_journal_loads_its_paused_replies_before_any_bot_follo
 async def test_a_runtime_that_loses_its_journal_stops() -> None:
     """Once the journal's claim lapses, another runtime could take it over, so this one shuts down."""
     orchestrator = MagicMock()
-    orchestrator.event_journal_still_held = AsyncMock(side_effect=[True, False])
+    orchestrator.event_journal_still_usable = AsyncMock(side_effect=[True, False])
     shutdown_requested = asyncio.Event()
-    hold_lost = asyncio.Event()
+    journal_lost = asyncio.Event()
 
-    with patch("mindroom.orchestrator._EVENT_JOURNAL_HOLD_CHECK_SECONDS", 0):
-        await asyncio.wait_for(_watch_event_journal_hold(orchestrator, shutdown_requested, hold_lost), timeout=5)
+    with patch("mindroom.orchestrator._EVENT_JOURNAL_CHECK_SECONDS", 0):
+        await asyncio.wait_for(_watch_event_journal(orchestrator, shutdown_requested, journal_lost), timeout=5)
 
     assert shutdown_requested.is_set()
-    assert hold_lost.is_set()
-    assert orchestrator.event_journal_still_held.await_count == 2
+    assert journal_lost.is_set()
+    assert orchestrator.event_journal_still_usable.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -686,7 +687,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_orchestrator.start = AsyncMock(side_effect=lambda: asyncio.Event().wait())
         mock_orchestrator.stop = AsyncMock()
         mock_orchestrator.running = False
-        mock_orchestrator.event_journal_still_held = AsyncMock(return_value=False)
+        mock_orchestrator.event_journal_still_usable = AsyncMock(return_value=False)
 
         async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
             await asyncio.Event().wait()
@@ -697,8 +698,8 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.reset_primary_worker_manager"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
-            patch("mindroom.orchestrator._EVENT_JOURNAL_HOLD_CHECK_SECONDS", 0),
-            pytest.raises(EventJournalHoldLostError),
+            patch("mindroom.orchestrator._EVENT_JOURNAL_CHECK_SECONDS", 0),
+            pytest.raises(EventJournalLostError),
         ):
             await asyncio.wait_for(
                 main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=False),
@@ -1857,6 +1858,55 @@ class TestAgentBot(AgentBotTestBase):
             await main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=False)
 
         assert watched_paths == [resolved_config_path]
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_main_launches_workers_from_the_fully_applied_config_until_they_shut_down(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Dedicated workers launch from the fully applied config, or startup's loaded one before it, through shutdown."""
+        reset_runtime_state()
+        runtime_paths = self._runtime_paths(tmp_path)
+        loaded = Config()
+        applied = Config()
+        mock_orchestrator = _mock_runtime_orchestrator()
+        mock_orchestrator.stop = AsyncMock()
+        mock_orchestrator.config = None
+        mock_orchestrator.config_reload = SimpleNamespace(fully_applied_config=None)
+        seen: dict[str, object] = {}
+
+        async def _start() -> None:
+            # Before startup loads a config, there is nothing to launch from.
+            with pytest.raises(WorkerBackendError, match="applied config"):
+                workers_runtime_module.current_worker_launch_config(runtime_paths)
+            mock_orchestrator.config = loaded
+            seen["loaded"] = workers_runtime_module.current_worker_launch_config(runtime_paths).config
+            # Once a config is fully applied, a later published config that has not finished applying is not used.
+            mock_orchestrator.config_reload.fully_applied_config = applied
+            mock_orchestrator.config = Config()
+            seen["start"] = workers_runtime_module.current_worker_launch_config(runtime_paths).config
+            msg = "stop after the launch check"
+            raise RuntimeError(msg)
+
+        def _shutdown_workers() -> None:
+            seen["shutdown"] = workers_runtime_module.current_worker_launch_config(runtime_paths).config
+
+        mock_orchestrator.start = AsyncMock(side_effect=_start)
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=AsyncMock()),
+            patch("mindroom.orchestrator.shutdown_primary_worker_manager", side_effect=_shutdown_workers),
+            pytest.raises(RuntimeError, match="stop after the launch check"),
+        ):
+            await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
+
+        assert seen["loaded"] is loaded
+        assert seen["start"] is applied
+        assert seen["shutdown"] is applied
+        with pytest.raises(WorkerBackendError, match="applied config"):
+            workers_runtime_module.current_worker_launch_config(runtime_paths)
 
     @pytest.mark.asyncio
     async def test_orchestrator_main_starts_provisioning_heartbeat(self, tmp_path: Path) -> None:
@@ -4697,7 +4747,8 @@ class TestMultiAgentOrchestrator:
         tmp_path: Path,
     ) -> None:
         """A failed prepare keeps the old backend authoritative and reopens admission."""
-        current_config = _runtime_bound_config(Config(), tmp_path)
+        script_agent = {"watcher": {"display_name": "Watcher", "tools": ["script"]}}
+        current_config = _runtime_bound_config(Config(agents=script_agent), tmp_path)
         new_config = _runtime_bound_config(Config(), tmp_path)
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(current_config))
         orchestrator.config = current_config
@@ -4707,7 +4758,8 @@ class TestMultiAgentOrchestrator:
             configured_entities=set(),
             entities_to_restart=set(),
             new_entities=set(),
-            removed_entities=set(),
+            # Removing a script agent revokes its runs, so the reload crosses the script runtime's boundary.
+            removed_entities={"watcher"},
             mindroom_user_changed=False,
             room_access_changed=False,
             matrix_space_changed=False,
@@ -4730,10 +4782,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
-            patch(
-                "mindroom.orchestration.script_runtime.configured_primary_worker_manager_identity",
-                side_effect=lambda _paths, config: "new" if config is new_config else "old",
-            ),
             patch.object(
                 type(runtime),
                 "_apply_update_pass",
@@ -4744,16 +4792,15 @@ class TestMultiAgentOrchestrator:
             await orchestrator._apply_config_update_plan(current_config, plan, ())
 
         assert orchestrator.config is current_config
-        assert runtime._worker_replacement_phase == "idle"
         assert runtime.manager.worker_backend is old_backend
         assert runtime._current_worker_lease is lease
 
     @pytest.mark.asyncio
-    async def test_config_update_aborts_the_worker_handoff_when_startup_maintenance_cancellation_fails(
+    async def test_config_update_reopens_script_calls_when_startup_maintenance_cancellation_fails(
         self,
         tmp_path: Path,
     ) -> None:
-        """A post-boundary reload failure must reopen worker admission before it escapes."""
+        """A post-boundary reload failure reopens running scripts' calls before it escapes."""
         current_config = _runtime_bound_config(Config(), tmp_path)
         new_config = _runtime_bound_config(Config(), tmp_path)
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(current_config))
@@ -4773,26 +4820,17 @@ class TestMultiAgentOrchestrator:
         runtime = orchestrator.script_runtime
         completed_configs: list[Config] = []
 
-        async def complete_worker_replacement(_runtime: object) -> None:
+        async def reopen_script_calls(_runtime: object) -> None:
             completed_configs.append(orchestrator.config)
 
         with (
             patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
-            patch(
-                "mindroom.orchestration.script_runtime.configured_primary_worker_manager_identity",
-                side_effect=lambda _paths, config: "new" if config is new_config else "current",
-            ),
             patch.object(
                 orchestrator._startup_maintenance,
                 "cancel",
                 new=AsyncMock(side_effect=RuntimeError("maintenance cancellation failed")),
             ),
-            patch.object(
-                type(runtime),
-                "complete_worker_replacement",
-                new=complete_worker_replacement,
-                create=True,
-            ),
+            patch.object(type(runtime), "reopen_script_calls", new=reopen_script_calls),
             pytest.raises(RuntimeError, match="maintenance cancellation failed"),
         ):
             await orchestrator._apply_config_update_plan(current_config, plan, ())
@@ -4800,11 +4838,11 @@ class TestMultiAgentOrchestrator:
         assert completed_configs == [current_config]
 
     @pytest.mark.asyncio
-    async def test_config_update_completes_the_worker_handoff_with_new_config_after_commit_failure(
+    async def test_config_update_reopens_script_calls_with_new_config_after_commit_failure(
         self,
         tmp_path: Path,
     ) -> None:
-        """A failure after commit must never reopen worker admission against the old config."""
+        """A failure after commit reopens running scripts' calls only once the new config is published to bots."""
         current_config = _runtime_bound_config(Config(), tmp_path)
         new_config = _runtime_bound_config(Config(), tmp_path)
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(current_config))
@@ -4824,7 +4862,7 @@ class TestMultiAgentOrchestrator:
         runtime = orchestrator.script_runtime
         completed_configs: list[Config] = []
 
-        async def complete_worker_replacement(_runtime: object) -> None:
+        async def reopen_script_calls(_runtime: object) -> None:
             completed_configs.append(orchestrator.config)
 
         with (
@@ -4832,12 +4870,7 @@ class TestMultiAgentOrchestrator:
             patch.object(type(runtime), "apply_update_plan", new=AsyncMock()),
             patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
             patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
-            patch.object(
-                type(runtime),
-                "complete_worker_replacement",
-                new=complete_worker_replacement,
-                create=True,
-            ),
+            patch.object(type(runtime), "reopen_script_calls", new=reopen_script_calls),
             patch.object(
                 orchestrator,
                 "_sync_mcp_manager",
@@ -5211,11 +5244,16 @@ class TestMultiAgentOrchestrator:
             only_support_service_changes=True,
             requires_response_drain=True,
         )
-        generation_refreshes: list[Config] = []
+        reload_steps: list[str] = []
 
-        async def complete_worker_replacement(_runtime: object) -> None:
+        async def reopen_script_calls(_runtime: object) -> None:
             assert orchestrator.config is new_config
-            generation_refreshes.append(new_config)
+            reload_steps.append("reopen calls")
+
+        async def finish_reload() -> None:
+            # New script launches read the applied config, so the fence ends only once the reload is published.
+            assert orchestrator.config_reload.fully_applied_config is new_config
+            reload_steps.append("end launch fence")
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config) as mock_load_config,
@@ -5226,12 +5264,8 @@ class TestMultiAgentOrchestrator:
             ) as mock_build_plan,
             patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()) as mock_sync_support,
-            patch.object(
-                type(orchestrator.script_runtime),
-                "complete_worker_replacement",
-                new=complete_worker_replacement,
-                create=True,
-            ),
+            patch.object(type(orchestrator.script_runtime), "reopen_script_calls", new=reopen_script_calls),
+            patch.object(orchestrator.config_reload, "finish_reload", new=finish_reload),
         ):
             updated = await orchestrator.config_reload._update_config()
 
@@ -5243,7 +5277,7 @@ class TestMultiAgentOrchestrator:
         # without the planner or the support sync ever being reached.
         mock_build_plan.assert_called_once()
         mock_sync_support.assert_awaited_once()
-        assert generation_refreshes == [new_config, new_config]
+        assert reload_steps == ["reopen calls", "reopen calls", "end launch fence"]
 
     @pytest.mark.asyncio
     async def test_update_config_adopts_a_journal_edit_and_warns_that_it_waits_for_a_restart(

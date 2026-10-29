@@ -2,7 +2,8 @@
 
 Anthropic prompt caching reuses the request prefix (tools, system, messages) up to explicit ``cache_control``
 breakpoints, and only probes the last twenty or so blocks before each one. The ladder marks the newest
-cacheable content block, one earlier fallback boundary, and the last tool definition; each route also marks its
+cacheable content block, one earlier fallback boundary, and the last tool definition; a Claude assistant block
+rebuilt from a message's fields is never cacheable (``RebuiltBlock``). Each route also marks its
 stable system prompt, the request's first system message (``agent_loop.prompt``), all under one TTL, within the API
 limit of four markers.
 
@@ -15,7 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from mindroom.hooks.enrichment import is_transient_context
-from mindroom.providers.claude_wire_blocks import TOOL_SEARCH_TOOL_TYPE, as_dict
+from mindroom.providers.claude_wire_blocks import TOOL_SEARCH_TOOL_TYPE, RebuiltBlock, as_dict
 
 __all__ = [
     "MAX_CACHE_MARKERS",
@@ -48,11 +49,13 @@ def has_cache_marker(block: object) -> bool:
 
 
 def _is_markable_block(block: object) -> bool:
-    """Return whether a wire-format content block may carry cache_control."""
+    """Return whether a wire-format content block may carry cache_control.
+
+    A Claude block rebuilt from a message's fields (``RebuiltBlock``) never does, and neither does content that is
+    not a block dict, such as a stored tool result's non-block list item on the Chat wire.
+    """
     block_dict = as_dict(block)
-    if block_dict is None:
-        # SDK block objects (assistant text/tool_use/thinking) are rebuilt on every request; ladder on dict
-        # blocks only.
+    if block_dict is None or isinstance(block_dict, RebuiltBlock):
         return False
     block_type = block_dict.get("type")
     if block_type not in _MARKABLE_BLOCK_TYPES:

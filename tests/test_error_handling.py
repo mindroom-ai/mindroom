@@ -11,7 +11,9 @@ from mindroom.error_handling import (
 )
 from mindroom.llm.errors import (
     MODEL_SAFEGUARD_REFUSAL_MESSAGE,
+    TOKENS_PER_MINUTE,
     AuthenticationFailed,
+    ContextWindowExceeded,
     InvalidRequest,
     ModelSafeguardRefusal,
     ProviderError,
@@ -141,6 +143,23 @@ _OAUTH_HOST_UNREACHABLE = (
             ProviderError("Request timeout while the provider read the body", provider="Ollama"),
             "⚠️ Error: Request timeout while the provider read the body",
             id="final-timeout-wording",
+        ),
+        pytest.param(
+            ContextWindowExceeded("prompt is too long", provider="Anthropic", status_code=400),
+            "⚠️ The conversation no longer fits the model's context window. "
+            "Start a new thread or compact the conversation, then try again.",
+            id="context-window",
+        ),
+        pytest.param(
+            ContextWindowExceeded(
+                "Request too large for gpt-6-astra on tokens per min (TPM)",
+                provider="OpenAI",
+                status_code=429,
+                code=TOKENS_PER_MINUTE,
+            ),
+            "⚠️ This request is larger than the account's tokens-per-minute limit. "
+            "Start a new thread or compact the conversation, then try again.",
+            id="over-tokens-per-minute",
         ),
     ],
 )

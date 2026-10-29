@@ -278,11 +278,11 @@ These `error_type` values are stable; any other value is the class name of an un
 - `RateLimited`: the provider throttled the request, after any retries that were safe.
 - `ProviderUnavailable`: the provider or the network failed, or the stream stalled, after any retries that were safe.
 - `AuthenticationFailed`: the provider rejected the credentials, or none are set up.
-- `ContextWindowExceeded`: the conversation no longer fits the model's context window.
+- `ContextWindowExceeded`: the conversation no longer fits the model's context window, or one request is larger than the account's tokens-per-minute limit.
 - `InvalidRequest`: the provider rejected the request, such as a malformed or oversized body or an unknown model.
 - `ModelSafeguardRefusal`: the model's safeguards refused the request.
 - `ModelOutputLimitError`: the model's responses kept stopping at the output limit before their tool calls were complete.
-- `ProviderError`: any other provider rejection, such as an HTTP `403`.
+- `ProviderError`: any other provider rejection, such as an HTTP `403`, or an OpenAI or Gemini account with no credit left or past its monthly spend or usage limit.
 
 Count it grouped by `error_type` and alert when one value is far more frequent than usual.
 `RateLimited` and `ProviderUnavailable` from many agents mean a provider is failing, while `InvalidRequest` or `ContextWindowExceeded` from one agent is more likely one conversation the provider cannot accept.

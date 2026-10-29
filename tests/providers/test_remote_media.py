@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import httpx2
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.messages import Message
@@ -287,6 +288,53 @@ async def test_media_a_url_cannot_supply_reaches_every_family_as_the_media_note(
 
     assert (turn.content, len(wire.requests)) == ("ok", 1)
     assert spec.user_text(wire.body()) == f"Look\n\n{_NOTE}"
+
+
+# Each URL a tool may return and the form the log keeps: scheme, masked userinfo, host and port, and path.
+_LOGGED_URLS = {
+    "signed": (
+        "https://reader:hunter2@media.test/signed/cat.png?X-Amz-Signature=sig-0f3a&expires=99#frag-7",
+        "https://***@media.test/signed/cat.png",
+    ),
+    "port": ("http://127.0.0.1:8188/view?filename=cat.png&expires=99#frag-7", "http://127.0.0.1:8188/view"),
+    "ipv6": ("http://[::1]:9000/bucket/cat.png?expires=99#frag-7", "http://[::1]:9000/bucket/cat.png"),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("url", "logged"), list(_LOGGED_URLS.values()), ids=list(_LOGGED_URLS))
+@pytest.mark.parametrize(
+    ("status", "body", "reason"),
+    [(403, b"", {"status_code": 403}), (200, b"0" * 256, {"error": "Byte stream exceeds 128 bytes"})],
+    ids=["refused", "oversized"],
+)
+async def test_a_url_that_cannot_be_downloaded_logs_only_its_scheme_host_and_path(
+    url: str,
+    logged: str,
+    status: int,
+    body: bytes,
+    reason: dict[str, object],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The log names the server by scheme, host and port, and path, and leaves out the query string and fragment.
+
+    It still says why: the status a refused download got, whose error text repeats the URL, or any other failure's text.
+    """
+    monkeypatch.setattr(remote_media, "_DOWNLOAD_LIMIT_BYTES", 128)
+    pool = httpx2.AsyncClient(transport=httpx2_transport(lambda _request: httpx.Response(status, content=body)))
+    monkeypatch.setattr(model_http_client, "_loop_client", lambda: pool)
+    wire = Wire(FAMILIES["ollama"].reply())
+    message = Message(role="user", content="Look", images=[Image(url=url)])
+
+    with capture_logs() as logs:
+        await complete(_provider("ollama", tmp_path, wire), ModelRequest(messages=[message]))
+
+    [unavailable] = [log for log in logs if log["event"] == "remote_media_unavailable"]
+    assert unavailable["url"] == logged
+    assert {key: unavailable[key] for key in reason} == reason
+    recorded = json.dumps(logs, default=str)
+    assert not any(secret in recorded for secret in ("hunter2", "sig-0f3a", "expires", "frag-7"))
 
 
 @pytest.mark.asyncio
