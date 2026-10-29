@@ -124,8 +124,8 @@ async def _collect_agent_continuation(
     # presentation too, but only the parent run's calls can continue its turn.
     completed = tuple(tool for tool in response.tools or () if tool.tool_call_id in completed_ids)
     _reconcile_agent_tools(presentation, response)
-    # A run that completed without streaming its text hands the text over for the lifecycle to append, apart from
-    # what it carried over from the pause, which the reply it continues already accounts for.
+    # A run that completed without streaming its text hands the text it wrote since the resume over for the lifecycle
+    # to append; the reply it continues already shows what it wrote before the pause.
     hands_over_text = response.status is RunStatus.completed and not saw_content_delta
     return _CollectedAgentContinuation(
         response=response,

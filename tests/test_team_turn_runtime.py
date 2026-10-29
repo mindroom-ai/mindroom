@@ -51,6 +51,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams import envelope
 from mindroom.teams import leader as leader_module
 from mindroom.teams.members import _as_member
+from mindroom.teams.presentation import NO_TEAM_RESPONSE
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
@@ -794,12 +795,8 @@ async def test_a_member_approval_pauses_the_team_with_the_member_s_identity_and_
     record, [member] = team.stored_runs()
     assert (record.status, member.status) == (RunStatus.paused, RunStatus.paused)
     assert record.member_responses[0].run_id == member.run_id
-    assert record.content == "Team run paused. The following require input:\n- Checker: touch requires confirmation"
+    assert record.content is None
     assert team.recorder.outcome == "suspended"
-
-
-_MEMBER_PAUSED = "I have tools to execute, but I need confirmation."
-_TEAM_PAUSED = "Team run paused. The following require input:\n- Checker: touch requires confirmation"
 
 
 @pytest.mark.asyncio
@@ -830,8 +827,8 @@ async def test_a_team_pause_shows_the_document_its_events_built_without_paused_n
 ) -> None:
     """A blocking pause shows the document its run's events built, as a streamed pause does.
 
-    The member and the leader paused without text of their own, so their runs hold the paused notices, which the
-    pause does not show. The snapshot the resume continues holds the same slots.
+    The member and the leader paused without text of their own, so their runs hold no content and the pause shows no
+    notice. The snapshot the resume continues holds the same slots.
     """
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch, stream=stream, show_tool_calls=show_tool_calls)
 
@@ -845,7 +842,7 @@ async def test_a_team_pause_shows_the_document_its_events_built_without_paused_n
     assert [member["content"] for member in state["members"]] == ["", checker_slot]
     assert state["consensus"] == consensus_slot
     record, [member] = team.stored_runs()
-    assert (record.content, member.content) == (_TEAM_PAUSED, _MEMBER_PAUSED)
+    assert (record.content, member.content) == (None, None)
     assert team.recorder.outcome == "suspended"
 
 
@@ -1268,7 +1265,7 @@ async def _writer_unavailable() -> None:
             "**Writer**: Writer unavailable\n\n\n*No team consensus - showing individual responses only*",
             id="member-failed-before-text",
         ),
-        pytest.param([answer("\n")], [], "\n", id="blank-leader-text"),
+        pytest.param([answer("\n")], [], NO_TEAM_RESPONSE, id="blank-leader-text"),
     ],
 )
 async def test_an_approved_resume_that_shows_no_text_renders_its_finished_runs(
@@ -1278,10 +1275,10 @@ async def test_an_approved_resume_that_shows_no_text_renders_its_finished_runs(
     writer: list[list[ScriptStep]],
     body: str,
 ) -> None:
-    """A resume whose runs write no text shows what they hand over, as the Agno-backed resume did.
+    """A resume whose runs write no text shows what they hand over, else the no-reply note, as a new team turn does.
 
-    A member the resumed leader hands a task and that fails before any text shows its error; without member text the
-    leader's own text stands. The approved checker says nothing, so the paused notice it carried over shows nowhere.
+    A member the resumed leader hands a task and that fails before any text shows its error; a leader that writes only
+    blank text leaves the no-reply note. The approved checker says nothing after its call.
     """
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel(leader)
@@ -1904,7 +1901,7 @@ async def test_a_failed_resume_stores_the_error_over_the_paused_row_and_ran_the_
     assert ProbeToolkit.calls == ["dangerous"]
     record, [member] = team.stored_runs()
     assert (record.status, member.status) == (RunStatus.error, RunStatus.completed)
-    assert "provider connection lost" in str(record.content)
+    assert "provider connection lost" in str(record.error)
     assert member.tools is not None
     assert (member.tools[0].confirmed, member.tools[0].result) == (True, "touched dangerous")
 
@@ -1981,7 +1978,7 @@ async def test_a_failed_team_turn_records_why_its_runs_failed(
     await team.reply(stream=stream, show_tool_calls=False)
 
     record, _ = team.stored_runs()
-    assert (record.status, record.content) == (RunStatus.error, "provider connection lost")
+    assert (record.status, record.content, record.error) == (RunStatus.error, None, "provider connection lost")
     assert team.recorder.outcome == "interrupted"
     assert team.recorder.assistant_text == recorded
 
@@ -2341,14 +2338,14 @@ async def test_a_blocking_team_reply_shows_a_member_paused_on_its_delegation_onc
 
 
 @pytest.mark.asyncio
-async def test_a_blocking_team_reply_without_content_shows_what_the_leader_wrote_before_its_member_paused(
+async def test_a_blocking_team_reply_whose_leader_says_nothing_more_shows_what_it_wrote_before_its_member_paused(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A leader silent after its member's delegation has no content, so the reply shows what it wrote before the pause.
+    """A leader silent after its member's delegation keeps what it wrote before the pause, which the reply shows.
 
-    The leader's continuation starts its content afresh and nobody wrote anything after the delegation, so the reply's
-    consensus is the text the leader streamed before it delegated.
+    Nobody wrote anything after the delegation, so the reply's consensus is the text the leader streamed before it
+    delegated, and the leader's content is that text.
     """
     team = squad_turn(
         tmp_path,
@@ -2370,7 +2367,7 @@ async def test_a_blocking_team_reply_without_content_shows_what_the_leader_wrote
     assert text == f"{HEADER}\n**Team Consensus**:\n\nAsking the writer."
     assert team.recorder.assistant_text == text
     record, _, _ = _delegation_state(team)
-    assert record.content is None
+    assert record.content == "Asking the writer."
 
 
 @pytest.mark.asyncio
@@ -2411,6 +2408,48 @@ async def test_a_team_paused_on_its_child_s_approval_resumes_through_the_delegat
     assert (record.status, member.status) == (RunStatus.completed, RunStatus.completed)
     assert [child.status for child in state.children] == ["completed"]
     assert "Dug deep." in str(team.models["writer-model"].requests[-1].messages[-1].content)
+
+
+@pytest.mark.asyncio
+async def test_a_child_that_pauses_again_after_its_approval_shows_the_leader_s_earlier_text_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A team paused on its member's child shows what the leader wrote before the pause once when the child asks again.
+
+    The delegation driver hands back the stored team run unresumed, whose content is that text, which the restored
+    document already shows.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[
+            calls(
+                tool_call("delegate_task_to_member", "call-team", member_id="writer", task="Research it"),
+                content="Asking the writer.",
+                metrics=usage(40, 4),
+            ),
+            answer("Consensus.", usage(50, 5)),
+        ],
+        writer=[_delegate_to_helper("Dig"), answer("Writer: dug.")],
+        helper=[
+            calls(tool_call("touch", "call-helper", label="deep"), metrics=usage(5, 1)),
+            calls(tool_call("touch", "call-helper-again", label="deeper"), metrics=usage(5, 1)),
+            answer("Dug deeper."),
+        ],
+        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+    )
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.stream(show_tool_calls=False)
+    first = raised.value.paused
+    assert first.response_text.count("Asking the writer.") == 1
+    _, _, state = _delegation_state(team)
+
+    again = await team.resume(first, approved=True, approvals=_saved_approval_calls(state))
+
+    assert isinstance(again, PausedAttempt)
+    assert ProbeToolkit.calls == ["deep"]
+    assert again.response_text.count("Asking the writer.") == 1
 
 
 @pytest.mark.asyncio
@@ -2639,10 +2678,10 @@ async def test_a_stopped_blocking_team_turn_records_what_its_leader_wrote_before
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A leader stopped after its member's delegation has no content, yet the turn records the text it had written.
+    """A leader stopped after its member's delegation keeps the text it had written, which the turn records.
 
-    The leader's continuation starts its content afresh and its member said nothing after the delegation; the turn
-    records the document the run's events built, which holds the text the leader wrote before the delegation.
+    Its member said nothing after the delegation; the turn records the document the run's events built, which holds
+    the text the leader wrote before the delegation, as the leader's stored content does.
     """
     working = asyncio.Event()
 
@@ -2671,7 +2710,7 @@ async def test_a_stopped_blocking_team_turn_records_what_its_leader_wrote_before
         await task
 
     record, _, _ = _delegation_state(team)
-    assert (record.status, record.content) == (RunStatus.cancelled, None)
+    assert (record.status, record.content) == (RunStatus.cancelled, "Asking the writer.")
     assert team.recorder.outcome == "interrupted"
     assert team.recorder.assistant_text == "\n**Team Consensus**:\n\nAsking the writer."
 

@@ -816,10 +816,10 @@ async def test_a_run_that_paused_without_text_shows_no_paused_notice_in_its_paus
     pause: str,
     reply: str,
 ) -> None:
-    """A blocking reply shows its pause and its approved reply without the paused notice its run's record holds.
+    """A blocking reply shows its pause and its approved reply without a paused notice.
 
-    The run paused without text of its own, so its record holds the paused notice as its content, which neither
-    reply shows: the approval card says what the pause waits for.
+    The run paused without text of its own, so its record holds no content: the approval card says what the pause
+    waits for.
     """
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
     config = bind_runtime_paths(
@@ -846,7 +846,7 @@ async def test_a_run_that_paused_without_text_shows_no_paused_notice_in_its_paus
     )
     assert paused.response_text.strip() == pause
     [stored] = stored_runs(config, paths, identity.session_id)
-    assert stored.content == "I have tools to execute, but I need confirmation."
+    assert stored.content is None
     continuation = approval_continuation(
         approval_id="approval-notice-free",
         run_id=paused.run_id,

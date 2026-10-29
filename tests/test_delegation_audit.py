@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import asdict, replace
-from typing import TYPE_CHECKING, Literal
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 import pytest
@@ -25,14 +26,16 @@ from mindroom.delegation.audit import (
 )
 from mindroom.delegation.lifecycle import settle_child_response, start_child_turn
 from mindroom.delegation.records import DelegationRecordLimitError, DelegationRecordLocator, DelegationRecordOwner
-from mindroom.delegation.recovery import interrupt_child
+from mindroom.delegation.recovery import interrupt_child, read_child_run
 from mindroom.delegation.sessions import reserve_subagent_turn
 from mindroom.delegation.state import DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
+from mindroom.history.storage import new_scope_session
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     serialize_tool_execution_identity,
@@ -40,8 +43,6 @@ from mindroom.tool_system.worker_routing import (
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.constants import RuntimePaths
 
 
@@ -243,6 +244,126 @@ async def test_interruption_recovery_keeps_a_settlement_saved_before_a_crash(tmp
     assert (snapshot.status, snapshot.result) == ("cancelled", "Delegation cancelled.")
     run = json.loads((await _record_dir(child, config, paths) / "run.json").read_text())
     assert (run["status"], run["error"]) == ("cancelled", "Delegation cancelled.")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["failed", "cancelled"])
+async def test_a_child_recovery_stops_keeps_its_text_and_stores_why_it_stopped_as_its_error(
+    tmp_path: Path,
+    status: Literal["cancelled", "failed"],
+) -> None:
+    """Recovery that fails or cancels a child's paused run stores the reason as the run's error, beside its text."""
+    config = _config()
+    paths = test_runtime_paths(tmp_path)
+    child = _child()
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+    storage = create_session_storage("child", config, paths, _identity("child", "child-session"))
+    session = new_scope_session(session_id=child.session_id, scope_id="child", is_team=False)
+    paused = RunRecord(
+        run_id=child.run_id,
+        session_id=child.session_id,
+        user_id="@alice:localhost",
+        agent_id="child",
+        status=RunStatus.paused,
+        content="Half of the report is inspected.",
+    )
+    assert storage.save_run(session, paused, record_usage=False) == "written"
+
+    await interrupt_child(child, config=config, runtime_paths=paths, reason="Restarted", status=status)
+
+    stored = await read_child_run(child, config, paths)
+    assert stored is not None
+    assert (stored.status, stored.content, stored.error) == (
+        RunStatus.error if status == "failed" else RunStatus.cancelled,
+        "Half of the report is inspected.",
+        "Restarted",
+    )
+    assert (child.status, child.result) == (status, "Restarted")
+    # A settlement that reads the stored row reports why the child stopped, as the recovery did.
+    assert stored.handover_content == "Restarted"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "result"),
+    [
+        (RunStatus.completed, ("completed", "Agent completed the task but returned no content.")),
+        (RunStatus.cancelled, ("cancelled", "Delegation cancelled.")),
+        (RunStatus.error, ("failed", "Delegation failed.")),
+    ],
+)
+async def test_a_child_run_that_ends_without_text_settles_with_a_note_for_how_it_ended(
+    tmp_path: Path,
+    status: RunStatus,
+    result: tuple[str, str],
+) -> None:
+    """A child run that ends with nothing to hand over settles with a note naming how it ended, never a bare status."""
+    config = _config()
+    paths = test_runtime_paths(tmp_path)
+    child = _child()
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+
+    await settle_child_response(
+        child,
+        RunRecord(run_id=child.run_id, session_id=child.session_id, status=status),
+        config=config,
+        runtime_paths=paths,
+    )
+
+    assert (child.status, child.result) == result
+
+
+# The rows v2026.10.633's recovery stored when it cancelled or failed a paused child that had written text, generated
+# by running that release's ``interrupt_child``: each holds the reason as its content and no ``error``.
+_RECOVERED_CHILD_ROWS: dict[str, dict[str, Any]] = json.loads(
+    (Path(__file__).parent / "fixtures" / "legacy_run_content" / "v2026.10.633_recovered_child_rows.json").read_text(),
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "status"),
+    [("child_cancelled_by_recovery", "cancelled"), ("child_failed_by_recovery", "failed")],
+)
+async def test_a_child_row_an_earlier_recovery_stopped_still_settles_with_its_reason(
+    tmp_path: Path,
+    name: str,
+    status: Literal["cancelled", "failed"],
+) -> None:
+    """A child row an earlier release's recovery cancelled or failed, its reason stored as its content, settles with it."""
+    stored = _RECOVERED_CHILD_ROWS[name]
+    assert "error" not in stored
+    config = _config()
+    paths = test_runtime_paths(tmp_path)
+    child = _child()
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+    storage = create_session_storage("child", config, paths, _identity("child", "child-session"))
+    session = new_scope_session(session_id=child.session_id, scope_id="child", is_team=False)
+    assert storage.save_run(session, RunRecord.from_dict(stored), record_usage=False) == "written"
+    response = await read_child_run(child, config, paths)
+    assert response is not None
+
+    await settle_child_response(child, response, config=config, runtime_paths=paths)
+
+    assert (child.status, child.result) == (status, stored["content"])
 
 
 @pytest.mark.asyncio

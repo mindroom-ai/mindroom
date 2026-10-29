@@ -362,7 +362,7 @@ def test_an_agno_2_database_migrates_before_the_owned_store_opens_it(tmp_path: P
     """The conversion needs no Agno storage, and the store then loads the runs after the adopted summary."""
     db_file = _agno_2_database_with_summary(tmp_path)
 
-    prepare_conversation_database(db_file, _NAMES)
+    prepare_conversation_database(db_file, _NAMES, agent_name=None)
 
     assert _migrated_log(db_file) == _MIGRATED_LOG
     session = ConversationStore(db_file).load_session("session-1", "agent")
@@ -387,10 +387,10 @@ def test_an_interrupted_migration_changes_nothing_and_runs_again(
     with monkeypatch.context() as patch:
         patch.setattr(legacy_compaction_state, "delete_run_subtrees_in_transaction", interrupt)
         with pytest.raises(RuntimeError, match="interrupted adoption"):
-            prepare_conversation_database(db_file, _NAMES)
+            prepare_conversation_database(db_file, _NAMES, agent_name=None)
 
     assert _dump(db_file) == before
-    prepare_conversation_database(db_file, _NAMES)
+    prepare_conversation_database(db_file, _NAMES, agent_name=None)
     assert _migrated_log(db_file) == _MIGRATED_LOG
 
 
@@ -401,7 +401,7 @@ def test_owners_migrating_at_once_adopt_the_summary_once(tmp_path: Path) -> None
 
     def migrate(_index: int) -> None:
         start.wait()
-        prepare_conversation_database(db_file, _NAMES)
+        prepare_conversation_database(db_file, _NAMES, agent_name=None)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(migrate, range(4)))

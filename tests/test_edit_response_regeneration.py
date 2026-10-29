@@ -38,6 +38,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.session_ids import create_session_id
+from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from mindroom.teams.formation import TeamIntent, TeamOutcome, TeamResolution
 from mindroom.teams.spec import TeamMode
@@ -130,6 +131,11 @@ def _open_storage(storage: object) -> object:
 def _turn_store(bot: AgentBot) -> object:
     """Return the unwrapped turn store for one bot."""
     return unwrap_extracted_collaborator(bot._turn_store)
+
+
+def _store_without_sessions() -> MagicMock:
+    """Return a conversation store stand-in that holds no session, so an edit's cleanup removes only its runs."""
+    return MagicMock(spec=ConversationStore, **{"load_session.return_value": None})
 
 
 async def _response_event_id(bot: AgentBot, source_event_id: str) -> str | None:
@@ -900,7 +906,7 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
         "sender": "@user:example.com",
     }
 
-    storage = MagicMock()
+    storage = _store_without_sessions()
 
     @asynccontextmanager
     async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
@@ -1482,6 +1488,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
         patch.object(
             bot._conversation_state_writer,
             "create_storage",
+            return_value=_store_without_sessions(),
         ) as mock_create_storage,
         patch("mindroom.turn_store.remove_runs_answering", return_value=True) as mock_remove_run,
     ):
@@ -1629,6 +1636,7 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
         patch.object(
             bot._conversation_state_writer,
             "create_storage",
+            return_value=_store_without_sessions(),
         ),
         patch("mindroom.turn_store.remove_runs_answering", return_value=False) as mock_remove_run,
     ):
@@ -1745,6 +1753,7 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
         patch.object(
             bot._conversation_state_writer,
             "create_storage",
+            return_value=_store_without_sessions(),
         ),
         patch("mindroom.turn_store.remove_runs_answering", return_value=False) as mock_remove_run,
     ):
@@ -1914,6 +1923,7 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
         patch.object(
             bot._conversation_state_writer,
             "create_storage",
+            return_value=_store_without_sessions(),
         ),
         patch("mindroom.turn_store.remove_runs_answering", return_value=False) as mock_remove_run,
         patch(

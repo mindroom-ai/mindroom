@@ -767,12 +767,7 @@ class TurnStore:
         )
         session = await run_blocking_until_complete(storage.load_session, target.session_id, scope.kind)
         if session is not None:
-            await remove_history_of_redacted_events(
-                storage,
-                session,
-                scope,
-                partial(self.redacted_history_events, target),
-            )
+            await remove_history_of_redacted_events(storage, session, partial(self.redacted_history_events, target))
         removed_any = await run_blocking_until_complete(
             _remove_runs_for_sources,
             storage,

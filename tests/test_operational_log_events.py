@@ -154,7 +154,7 @@ def test_conversation_converted_keeps_its_name_and_fields(tmp_path: Path) -> Non
         connection.execute("CREATE TABLE other (x)")
 
     with capture_logs() as logs:
-        prepare_conversation_database(database, names)
+        prepare_conversation_database(database, names, agent_name=None)
 
     _assert_logged(logs, "conversation_converted")
 

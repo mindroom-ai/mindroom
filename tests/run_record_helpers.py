@@ -110,7 +110,8 @@ def resumed[RecordT: AnyRunRecord](
     """Return ``paused`` resumed into a completed run.
 
     Its one waiting call ends as ``decided``, its requirement records that call and ``requirement_fields``, ``added``
-    follows its messages, and ``answered`` is the final reply's text and usage, from the model that ran it.
+    follows its messages, and ``answered`` is the final reply's text and usage, from the model that ran it; its content
+    is the paused content and that text, a blank line apart.
     """
     [requirement] = paused.requirements or ()
     text, metrics = answered
@@ -118,7 +119,7 @@ def resumed[RecordT: AnyRunRecord](
     return replace(
         paused,
         status=RunStatus.completed,
-        content=text,
+        content="\n\n".join(part for part in (paused.content, text) if part),
         messages=[*paused.messages, *added, reply(text, model=paused.model, metrics=metrics)],
         tools=[decided],
         requirements=[replace(requirement, tool_execution=decided, **requirement_fields)],
