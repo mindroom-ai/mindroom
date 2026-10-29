@@ -126,7 +126,7 @@ class VisibleResponseReconciler:
                 raise RuntimeError(msg)
             recovered_response_event_id = next(iter(response_event_ids), None)
         if recovered_response_event_id is not None:
-            await self.record_pending_visible_response(handled_turn, recovered_response_event_id)
+            await self.deps.turn_store.record_placeholder(handled_turn, recovered_response_event_id)
         return recovered_response_event_id
 
     async def settle_source_events_ignored(self, handled_turn: TurnRecord) -> None:
@@ -166,10 +166,6 @@ class VisibleResponseReconciler:
         await self.deps.settle_ignored_sources(preparation.invalid)
         self.deps.turn_store.retry_when_claim_releases(room_id, preparation.surviving)
 
-    async def record_pending_visible_response(self, handled_turn: TurnRecord, response_event_id: str) -> None:
-        """Durably bind one visible response to its incomplete turn before generation."""
-        await self.deps.turn_store.record_placeholder(handled_turn, response_event_id)
-
     async def deliver_recoverable_text(
         self,
         handled_turn: TurnRecord,
@@ -188,9 +184,9 @@ class VisibleResponseReconciler:
         The journal sources this turn answers settle inside the enqueue, so the
         answer becoming durably owed and the turn stopping being the journal's
         work are one commit. On the direct path the terminal record would land
-        in the turn rows first and the journal would settle afterwards, leaving a window where a pending row describes finished
-        work -- the window the degraded replay guard has to consult two records
-        to survive.
+        in the turn rows first and the journal would settle afterwards, leaving
+        a window where a pending row describes finished work -- the window the
+        degraded replay guard has to consult two records to survive.
 
         And a crashed send is recovered by resending the frozen row rather than
         by scanning the room for what might already be there. The scan still
@@ -220,7 +216,9 @@ class VisibleResponseReconciler:
             ),
         )
         if response_event_id is not None:
-            await self.record_pending_visible_response(handled_turn, response_event_id)
+            # A FINAL the outbox bound to this turn already completed it. One it could not bind, because the turn
+            # moved room meanwhile, is found here by a replay that runs before the caller records the turn.
+            await self.deps.turn_store.record_placeholder(handled_turn, response_event_id)
         return response_event_id
 
     async def deliver_selection_acknowledgement(

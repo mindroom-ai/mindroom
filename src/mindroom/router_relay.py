@@ -380,7 +380,8 @@ async def execute_router_relay(
     with bound_log_context(**resolved_target.log_context):
         if event_id:
             deps.logger.info("Routed to entity", suggested_entity=suggested_entity)
-            await deps.visible_responses.record_pending_visible_response(tracked_handled_turn, event_id)
+            # The relay is not an outbox delivery, so a replay before the turn is recorded answered adopts it from here.
+            await deps.turn_store.record_placeholder(tracked_handled_turn, event_id)
             await deps.turn_store.record_responded_turn(
                 canonicalize_turn_record(tracked_handled_turn, response_event_id=event_id),
             )

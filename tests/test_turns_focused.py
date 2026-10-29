@@ -5114,9 +5114,9 @@ async def test_command_replay_adopts_durable_response(config: Config, tmp_path: 
     handled_turn = TurnRecord.create([event.event_id])
 
     with patch.object(
-        harness.dispatcher.deps.visible_responses,
-        "record_pending_visible_response",
-        wraps=harness.dispatcher.deps.visible_responses.record_pending_visible_response,
+        harness.turn_store,
+        "record_placeholder",
+        wraps=harness.turn_store.record_placeholder,
     ) as record_visible_response:
         with patch.object(harness.turn_store, "record_responded_turn"):
             await harness.dispatcher.deps.command_executor.execute(
