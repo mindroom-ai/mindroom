@@ -257,7 +257,7 @@ def _dump(database: Path) -> str:
 
 
 def _loaded_ids(store: ConversationStore, session_id: str = _SESSION) -> list[str]:
-    session = store.load_session(session_id, "agent")
+    session = store.load_session(session_id)
     assert session is not None
     return [run.run_id for run in session.runs]
 
@@ -359,7 +359,7 @@ def test_members_of_members_join_their_team_run(tmp_path: Path) -> None:
         "m0": "t0",
         "mm0": "t0",
     }
-    session = store.load_session("session", "team")
+    session = store.load_session("session")
     assert session is not None
     assert {run.run_id for run in session.runs} == {"t0", "m0", "mm0"}
 
@@ -783,7 +783,7 @@ def test_a_fold_whose_run_id_is_not_text_names_no_run(tmp_path: Path, fold_run_i
         (2, 2, None),
     ]
     assert [run.run_id for run in store.list_runs(_SESSION)] == ["r0", "r1"]
-    session = store.load_session(_SESSION, "agent")
+    session = store.load_session(_SESSION)
     assert session is not None
     retire(store, session=session, scope_key="agent:code")
     assert [run.run_id for run in store.list_runs(_SESSION)] == ["r0", "r1"]
@@ -972,11 +972,11 @@ def test_session_columns_encoded_twice_are_stored_once(tmp_path: Path) -> None:
 
     state, session_data, metadata, _ = _session_columns(database, _SESSION)
     assert (json.loads(state), session_data, json.loads(metadata)) == ({"a": 1}, None, {"k": "v"})
-    session = store.load_session(_SESSION, "agent")
+    session = store.load_session(_SESSION)
     assert session is not None
     assert (session.session_state, session.metadata) == ({"a": 1}, {"k": "v"})
     assert _session_columns(database, "odd")[2] == json.dumps("not json")
-    odd = store.load_session("odd", "agent")
+    odd = store.load_session("odd")
     assert odd is not None
     assert odd.metadata is None
 
@@ -1173,7 +1173,7 @@ def test_session_text_that_is_not_utf8_is_stored_as_the_conversion_reads_it(
 
     store = _converted(database)
 
-    session = store.load_session(_SESSION, "agent")
+    session = store.load_session(_SESSION)
     assert session is not None
     assert read(session)
     assert [run.run_id for run in session.runs] == ["r0"]
@@ -1205,7 +1205,7 @@ def test_a_session_whose_text_holds_a_replacement_character_converts_unchanged(t
 
     store = _converted(database)
 
-    session = store.load_session("s\ufffd", "agent")
+    session = store.load_session("s\ufffd")
     assert session is not None
     assert (session.metadata, [run.run_id for run in session.runs]) == ({"note": "\ufffd"}, ["r0"])
 
@@ -1218,7 +1218,7 @@ def test_removed_runs_stay_removed(tmp_path: Path) -> None:
 
     store = _converted(database)
 
-    session = store.load_session(_SESSION, "agent")
+    session = store.load_session(_SESSION)
     assert session is not None
     assert store.save_run(session, _run("cut"), record_usage=False) == "removed"
     assert store.get_run("cut") is None
@@ -1296,7 +1296,7 @@ def test_a_queued_compaction_request_becomes_the_metadata_flag(tmp_path: Path) -
     assert has_queued_force_compaction(store, _SESSION, HistoryScope(kind="agent", scope_id="code"))
     assert has_queued_force_compaction(store, _SESSION, HistoryScope(kind="team", scope_id="squad"))
     # The database's agent owns the session the team row named too.
-    team = store.load_session("team", "agent")
+    team = store.load_session("team")
     assert team is not None
     assert team.session_state == {}
     assert has_queued_force_compaction(store, "team", HistoryScope(kind="team", scope_id="squad"))
@@ -1324,7 +1324,7 @@ def test_a_request_queued_before_the_summary_rows_existed_leaves_the_scopes_tomb
     store = _converted(database)
 
     assert _loaded_ids(store) == ["kept"]
-    session = store.load_session(_SESSION, "agent")
+    session = store.load_session(_SESSION)
     assert session is not None
     assert session.session_state == {}
     assert session.metadata == {
@@ -1385,7 +1385,7 @@ def test_session_data_that_holds_no_state_object_converts_as_stored(
     store = _converted(database)
 
     assert _session_columns(database, _SESSION) == (*converted, metadata, updated_at)
-    session = store.load_session(_SESSION, "agent")
+    session = store.load_session(_SESSION)
     assert session is not None
     assert session.session_state == {}
 

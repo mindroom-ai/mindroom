@@ -219,7 +219,7 @@ async def _run(
 ) -> RunRecord:
     turn = _turn(prompt)
     store = agent.store
-    session = (store.load_session(session_id, "agent") if store is not None else None) or new_scope_session(
+    session = (store.load_session(session_id) if store is not None else None) or new_scope_session(
         session_id=session_id,
         scope_id="test_agent",
         is_team=False,
@@ -1125,7 +1125,7 @@ async def test_long_single_turn_compacts_mid_turn_and_continues(
         f"run:{output.run_id}",
     ]
     assert [fold.run_id for fold in folds_of(storage, TEST_AGENT_SCOPE.key)] == [output.run_id] * len(rows)
-    stored = storage.load_session("session-1", "agent")
+    stored = storage.load_session("session-1")
     assert stored is not None
     assert stored.summary is not None
     assert stored.summary.text == rows[-1].summary
@@ -1338,7 +1338,7 @@ async def test_failure_in_a_later_chunk_of_the_turn_commits_nothing(
     # The second chunk failed, so nothing was written and the request kept every exchange unchanged.
     assert not any(is_compaction_summary(message) for request in model.requests for message in request.messages)
     assert summary_rows_of(storage, TEST_AGENT_SCOPE.key) == []
-    stored = storage.load_session("session-1", "agent")
+    stored = storage.load_session("session-1")
     assert stored is not None
     assert stored.summary is None
 
@@ -1392,7 +1392,7 @@ async def test_rolling_back_a_partial_compaction_keeps_an_earlier_one(
 async def test_force_flag_survives_mid_turn_compaction(tmp_path: Path, summary_calls: SummaryCalls) -> None:
     config, paths = _config(tmp_path)
     storage = seeded_storage(config, paths)
-    stored = storage.load_session("session-1", "agent")
+    stored = storage.load_session("session-1")
     assert stored is not None
     storage.update_metadata(
         stored,
@@ -1407,7 +1407,7 @@ async def test_force_flag_survives_mid_turn_compaction(tmp_path: Path, summary_c
     await _run(_scoped_agent(model, config, paths, storage), "Do the task")
 
     assert summary_calls.inputs
-    after = storage.load_session("session-1", "agent")
+    after = storage.load_session("session-1")
     assert after is not None
     assert read_scope_state(after, TEST_AGENT_SCOPE).force_compact_before_next_run is True
 
@@ -1864,7 +1864,7 @@ async def test_oversized_native_request_in_a_stored_conversation_covers_the_turn
         *(f"row:{row.summary}" for row in rows),
         f"run:{output.run_id}",
     ]
-    stored = storage.load_session("session-1", "agent")
+    stored = storage.load_session("session-1")
     assert stored is not None
     assert stored.summary is not None
     assert stored.summary.text == rows[-1].summary

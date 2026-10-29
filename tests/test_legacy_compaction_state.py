@@ -95,7 +95,7 @@ def test_opening_storage_adopts_legacy_summary_tombstones_and_seen_ids_once(tmp_
         ),
     )
     storage = _open(tmp_path)
-    stored = storage.load_session("session", "agent")
+    stored = storage.load_session("session")
     assert stored is not None
     assert stored.metadata == _compaction_metadata(_SCOPE.key, {"force_compact_before_next_run": True})
     assert stored.summary is not None
@@ -148,7 +148,7 @@ def test_opening_storage_adopts_a_summary_without_compaction_state_under_the_row
     assert summary_rows_of(storage, team_scope.key, "session") == [
         StoredSummaryRow(summary="team summary", legacy=True),
     ]
-    stored = storage.load_session("session", "team")
+    stored = storage.load_session("session")
     assert stored is not None
     assert stored.summary is not None
     assert stored.summary.text == "team summary"
@@ -168,7 +168,7 @@ def test_opening_storage_leaves_uncompacted_scopes_and_their_seen_ids_alone(tmp_
         ),
     )
     assert summary_rows_of(storage, _SCOPE.key, "session") == []
-    stored = storage.load_session("session", "agent")
+    stored = storage.load_session("session")
     assert stored is not None
     assert stored.metadata == metadata
 
@@ -202,7 +202,7 @@ def test_opening_storage_keeps_seen_ids_of_a_scope_without_a_summary(tmp_path: P
     )
     assert summary_rows_of(storage, _SCOPE.key, "session") == []
     assert summary_rows.legacy_event_ids(storage, session_id="session", scope_key=_SCOPE.key) is None
-    stored = storage.load_session("session", "agent")
+    stored = storage.load_session("session")
     assert stored is not None
     assert stored.metadata == seen
 
@@ -237,7 +237,7 @@ def test_opening_storage_reads_double_encoded_legacy_metadata(tmp_path: Path) ->
         StoredSummaryRow(summary="legacy summary", legacy=True),
     ]
     assert summary_rows.legacy_event_ids(storage, session_id="session", scope_key=_SCOPE.key) == {"$legacy"}
-    stored = storage.load_session("session", "agent")
+    stored = storage.load_session("session")
     assert stored is not None
     assert stored.metadata == {}
 
@@ -258,7 +258,7 @@ def test_opening_storage_adopts_a_team_row_with_tombstones(tmp_path: Path) -> No
     assert summary_rows_of(storage, team_scope.key, "session") == [
         StoredSummaryRow(summary="team summary", legacy=True),
     ]
-    stored = storage.load_session("session", "team")
+    stored = storage.load_session("session")
     assert stored is not None
     assert stored.metadata == {}
 
@@ -281,7 +281,7 @@ def test_opening_storage_turns_pre_archive_blob_runs_into_rows_without_tombstone
         connection.execute("UPDATE code_sessions SET runs = ?", (json.dumps(json.dumps(blob)),))
 
     storage = _open(tmp_path)
-    stored = storage.load_session("session", "agent")
+    stored = storage.load_session("session")
     assert stored is not None
     assert stored_run_ids(storage, "session") == ["kept"]
     assert [run.run_id for run in stored.runs or []] == ["kept"]
@@ -369,7 +369,7 @@ def test_an_agno_2_database_migrates_before_the_owned_store_opens_it(tmp_path: P
     prepare_conversation_database(db_file, _NAMES, recorded_owner(db_file))
 
     assert _migrated_log(db_file) == _MIGRATED_LOG
-    session = ConversationStore(db_file).load_session("session-1", "agent")
+    session = ConversationStore(db_file).load_session("session-1")
     assert session is not None
     assert [run.run_id for run in session.runs] == ["run-1", "run-2", "run-3"]
     assert session.summary is not None

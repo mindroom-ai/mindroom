@@ -361,7 +361,7 @@ async def test_resuming_a_pre_release_team_pause_keeps_its_single_summary(
     """A team paused while Agno rendered the summary into the leader's system message resumes with only that copy."""
     team = _with_seeded_history(_checker_pauses(tmp_path, monkeypatch))
     paused = await _paused_on_the_checker(team)
-    session = team.storage.load_session(SESSION_ID, "team")
+    session = team.storage.load_session(SESSION_ID)
     assert session is not None
     stored = team.storage.get_run(paused.run_id)
     assert isinstance(stored, TeamRunRecord)

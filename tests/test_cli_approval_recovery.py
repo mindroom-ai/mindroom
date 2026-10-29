@@ -130,7 +130,7 @@ def _saved(store: ConversationStore, session_id: str, record: RunRecord) -> tupl
         record,
         record_usage=False,
     )
-    session = store.load_session(session_id, "agent")
+    session = store.load_session(session_id)
     persisted = store.get_run(record.run_id)
     assert session is not None
     assert isinstance(persisted, RunRecord)
@@ -794,7 +794,7 @@ async def test_a_recovered_approval_saves_no_tool_call_its_fold_already_summariz
             progress=None,
         )
 
-    stored = store.load_session("session", "agent")
+    stored = store.load_session("session")
     assert stored is not None
     saved = "\n".join(
         message.get_content_string() for run in stored.runs if run.run_id == "run" for message in run.messages
@@ -861,7 +861,7 @@ async def _checkpointed_batch(
     checkpoint.complete("call_completed", ToolOutcome(content="completed sibling result", images=(sibling_image,)))
     await checkpoint.persist_approval("old-bash")
     persisted = store.get_run("saved-run")
-    saved_session = store.load_session(runtime.session_id, "agent")
+    saved_session = store.load_session(runtime.session_id)
     assert isinstance(persisted, RunRecord)
     assert saved_session is not None
     return persisted, saved_session
@@ -1007,7 +1007,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
 
     async def approve(paused):
         # The batch of the Bash call waiting for approval is saved before the wait.
-        stored = store.load_session(runtime.session_id, "agent")
+        stored = store.load_session(runtime.session_id)
         assert stored is not None
         assert any(
             item.get("id") == paused.cli_call["parent_bash_call_id"]
@@ -1104,7 +1104,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
         )
 
     def stored_runs() -> list[dict]:
-        stored = store.load_session(runtime.session_id, "agent")
+        stored = store.load_session(runtime.session_id)
         assert stored is not None
         return [run.to_dict() for run in stored.runs]
 

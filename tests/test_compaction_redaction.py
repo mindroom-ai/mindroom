@@ -98,7 +98,7 @@ def _compact(storage: ConversationStore, session: ConversationSession, run_ids: 
 
 
 def _stored(storage: ConversationStore) -> ConversationSession:
-    session = storage.load_session("session", "agent")
+    session = storage.load_session("session")
     assert session is not None
     return session
 

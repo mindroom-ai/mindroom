@@ -107,7 +107,7 @@ async def test_persist_response_event_id_keeps_assistant_history_plain(tmp_path:
         response_event_id="$answer",
     )
 
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.runs is not None
     persisted_run = persisted.runs[0]

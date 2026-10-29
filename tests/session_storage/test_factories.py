@@ -124,13 +124,13 @@ def test_an_agno_2_database_is_migrated_once_and_then_keeps_its_log_order(tmp_pa
         assert "runs" not in {row[1] for row in connection.execute("PRAGMA table_info(code_sessions)")}
         # Opening a pre-existing file must keep its rollback journal.
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("delete",)
-    loaded = store.load_session("session-1", "agent")
+    loaded = store.load_session("session-1")
     assert loaded is not None
     assert [run.run_id for run in loaded.runs] == ["run-1", "run-2", "run-3"]
 
     store.delete_runs(["run-2"], session_id="session-1")
     store.save_run(loaded, _run("run-4"), record_usage=False)
-    reopened = _open(tmp_path).load_session("session-1", "agent")
+    reopened = _open(tmp_path).load_session("session-1")
 
     assert reopened is not None
     assert [run.run_id for run in reopened.runs] == ["run-1", "run-3", "run-4"]
@@ -162,9 +162,9 @@ def test_a_private_agents_store_is_the_requesters_own(tmp_path: Path) -> None:
     for_alice = create_session_storage("mind", config, runtime_paths, execution_identity=alice)
     for_bob = create_session_storage("mind", config, runtime_paths, execution_identity=bob)
 
-    assert for_alice.load_session("session-alice", "agent") is not None
+    assert for_alice.load_session("session-alice") is not None
     assert for_bob.path != for_alice.path
-    assert for_bob.load_session("session-alice", "agent") is None
+    assert for_bob.load_session("session-alice") is None
 
 
 def test_a_current_database_costs_reading_its_version(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

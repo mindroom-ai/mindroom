@@ -61,7 +61,7 @@ def test_session_runs_read_compacted_and_later_runs_in_order(storage: Conversati
     """Runs a summary folded are still read, in time order with the later ones, each once."""
     session = _seed(storage, [_run("r1", 100), _run("r2", 200), _run("r3", 300)])
     compact_runs(storage, session, HistoryScope(kind="agent", scope_id="mind"), ["r1", "r2"], "summary")
-    loaded = storage.load_session(SESSION, "agent")
+    loaded = storage.load_session(SESSION)
     assert loaded is not None
     assert [run.run_id for run in loaded.runs or []] == ["r3"]
 

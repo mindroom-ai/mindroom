@@ -265,7 +265,7 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
     )
     assert preparation.invalid == ()
     storage = storage_factory()
-    persisted = storage.load_session(target.session_id, "agent")
+    persisted = storage.load_session(target.session_id)
     assert persisted is not None
     assert "deleted prompt" not in str([run.messages for run in persisted.runs or []])
 

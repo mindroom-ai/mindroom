@@ -543,7 +543,7 @@ async def test_workflow_first_turn_uses_actual_caller_store(
             _WorkflowRun("sample-workflow"),
         )
         assert result.content == "Sample output."
-        loaded = storage.load_session(context.session_id, "team" if caller.endswith("team") else "agent")
+        loaded = storage.load_session(context.session_id)
         assert loaded is not None, "First-turn helper usage needs its actual caller session row"
         assert not loaded.runs
         rows = _usage_rows(storage)
@@ -677,7 +677,7 @@ async def test_scope_reset_and_first_turn_write_preserve_concurrent_session(tmp_
             kind="dynamic_workflow",
             requester_id=None,
         )
-        loaded = context.storage.load_session("session", "agent")
+        loaded = context.storage.load_session("session")
         assert loaded is not None
         assert loaded.metadata == {"marker": "concurrent session"}
         raise asyncio.CancelledError

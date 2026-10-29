@@ -150,15 +150,15 @@ class ConversationStore:
             ).fetchone()
         return None if row is None else decoded_mapping(row[0])
 
-    def load_session(self, session_id: str, kind: SessionKind) -> ConversationSession | None:
-        """Load one session with the runs a reply reasons over, or None when it is missing or ``kind`` is not its kind.
+    def load_session(self, session_id: str) -> ConversationSession | None:
+        """Load one session with the runs a reply reasons over, or None when it is missing.
 
         The session's kind and owner are the database's owner. The runs are every top-level run its scope's latest
         summary row does not cover, every paused, cancelled, or errored one wherever it sits, and the member runs of
         those, in ``seq`` order, each in its replay view.
         """
         with self.transaction(write=False) as connection:
-            loaded = self._read_load(connection, session_id, kind)
+            loaded = self._read_load(connection, session_id)
         if loaded is None:
             return None
         session_state, metadata, created_at = loaded.row
@@ -175,17 +175,17 @@ class ConversationStore:
             created_at=created_at,
         )
 
-    def _read_load(self, connection: sqlite3.Connection, session_id: str, kind: SessionKind) -> _Load | None:
+    def _read_load(self, connection: sqlite3.Connection, session_id: str) -> _Load | None:
         """Read what a load of session ``session_id`` returns, in the caller's transaction."""
         names = self.names
-        owner = database_owner(connection, names)
         row = connection.execute(
             f"SELECT session_state, metadata, created_at FROM {quote_identifier(names.sessions)} "  # noqa: S608
             "WHERE session_id = ?",
             (session_id,),
         ).fetchone()
-        if row is None or owner.kind != kind:
+        if row is None:
             return None
+        owner = _database_owner(connection, names)
         runs, summaries = quote_identifier(names.log_runs), quote_identifier(names.log_summaries)
         loaded = (
             f"run.session_id = ? AND ({_loads_sql('run', summaries)} OR run.parent_run_id IN "  # noqa: S608
@@ -212,14 +212,14 @@ class ConversationStore:
         """
         with self.transaction(write=True) as connection:
             yield connection
-            loaded = self._read_load(connection, session_id, session.kind) if session is not None else None
+            loaded = self._read_load(connection, session_id) if session is not None else None
         if session is not None:
             _adopt_log(session, loaded)
 
     def reload_log(self, session: ConversationSession) -> None:
         """Make ``session``'s runs and summary what a load returns now, after another writer changed its log."""
         with self.transaction(write=False) as connection:
-            loaded = self._read_load(connection, session.session_id, session.kind)
+            loaded = self._read_load(connection, session.session_id)
         _adopt_log(session, loaded)
 
     def save_run(
@@ -322,7 +322,6 @@ class ConversationStore:
     def rewrite_run_messages(
         self,
         session_id: str,
-        kind: SessionKind,
         edit: Callable[[list[AnyRunRecord]], list[AnyRunRecord]],
         *,
         session: ConversationSession | None = None,
@@ -335,7 +334,7 @@ class ConversationStore:
         when it stored nothing, which spares a second read.
         """
         with self.transaction(write=True) as connection:
-            loaded = self._read_load(connection, session_id, kind)
+            loaded = self._read_load(connection, session_id)
             runs = loaded.runs if loaded is not None else []
             statuses = {run.run_id: run.status.value for run in runs}
             stored = [(run, status) for run in edit(runs) if (status := statuses.get(run.run_id)) is not None]
@@ -343,7 +342,7 @@ class ConversationStore:
                 messages = [message.to_dict() for message in run.messages]
                 set_visible_messages(connection, self.names, run.run_id, messages, status)
             if stored and session is not None:
-                loaded = self._read_load(connection, session_id, kind)
+                loaded = self._read_load(connection, session_id)
         if session is not None:
             _adopt_log(session, loaded)
 
@@ -435,7 +434,7 @@ class ConversationStore:
         records its usage, as a run's terminal save through ``persist_to`` does.
         """
         with self.transaction(write=False) as connection:
-            if database_owner(connection, self.names) != HistoryScope(kind="agent", scope_id=agent_id):
+            if _database_owner(connection, self.names) != HistoryScope(kind="agent", scope_id=agent_id):
                 return []
             return connection.execute(
                 "SELECT session_id, COALESCE(updated_at, created_at) AS updated "  # noqa: S608
@@ -593,7 +592,7 @@ def _session_state(raw_session_state: object) -> dict[str, Any]:
     return decoded_mapping(raw_session_state) or {}
 
 
-def database_owner(connection: sqlite3.Connection, names: TableNames) -> HistoryScope:
+def _database_owner(connection: sqlite3.Connection, names: TableNames) -> HistoryScope:
     """Return the agent, team scope, or system usage ledger that owns the database, as its meta row records it."""
     kind, scope_id = connection.execute(
         f"SELECT owner_kind, owner_id FROM {quote_identifier(names.log_meta)} WHERE id = 1",  # noqa: S608
@@ -1166,7 +1165,6 @@ __all__ = [
     "begun",
     "connect_by_name",
     "connect_conversation_database",
-    "database_owner",
     "decoded_mapping",
     "delete_runs_in_transaction",
     "ensure_session_row",

@@ -191,7 +191,7 @@ async def test_a_stale_save_of_a_folded_run_never_replays(tmp_path: Path) -> Non
         storage=storage,
     )
 
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert [run.run_id for run in persisted.runs] == ["run-2"]
     assert folded_run_ids(storage) == ["run-1"]
@@ -210,7 +210,7 @@ def test_a_stale_save_of_a_folded_run_and_its_member_runs_changes_neither(tmp_pa
     compact_runs(storage, session, _SCOPE, ["compacted"], "summary")
     seed_session(storage, _session(runs))
 
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert [run.run_id for run in persisted.runs] == ["kept"]
 
@@ -222,7 +222,7 @@ def test_update_scope_state_on_latest_applies_update_to_freshest_row(tmp_path: P
     stale_session = _session([_completed_run("run-1")])
     seed_session(storage, stale_session)
 
-    concurrent_session = storage.load_session("session-1", "agent")
+    concurrent_session = storage.load_session("session-1")
     assert concurrent_session is not None
     concurrent_state = HistoryScopeState(force_compact_before_next_run=True)
     storage.update_metadata(concurrent_session, lambda metadata: _with_scope_state(metadata, _SCOPE, concurrent_state))
@@ -238,7 +238,7 @@ def test_update_scope_state_on_latest_applies_update_to_freshest_row(tmp_path: P
 
     assert seen_states == [concurrent_state]
     assert returned_state.force_compact_before_next_run is False
-    persisted_session = storage.load_session("session-1", "agent")
+    persisted_session = storage.load_session("session-1")
     assert persisted_session is not None
     assert read_scope_state(persisted_session, _SCOPE) == returned_state
     assert stale_session.metadata == persisted_session.metadata
@@ -254,7 +254,7 @@ def test_update_scope_state_on_latest_skips_write_when_update_is_a_no_op(
     stale_session = _session([_completed_run("run-1")])
     seed_session(storage, stale_session)
 
-    concurrent_session = storage.load_session("session-1", "agent")
+    concurrent_session = storage.load_session("session-1")
     assert concurrent_session is not None
     persisted_state = HistoryScopeState(force_compact_before_next_run=True)
     storage.update_metadata(concurrent_session, lambda metadata: _with_scope_state(metadata, _SCOPE, persisted_state))
@@ -364,7 +364,7 @@ async def test_chunk_progress_survives_interruption_and_restart(
             replay_estimator=None,
         )
 
-    interrupted = storage.load_session("session-1", "agent")
+    interrupted = storage.load_session("session-1")
     assert interrupted is not None
     assert interrupted.summary is not None
     assert interrupted.summary.text == "summary chunk 1"
@@ -399,7 +399,7 @@ async def test_chunk_progress_survives_interruption_and_restart(
             storage=storage,
         )
 
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.text == "summary chunk 2"
@@ -1185,7 +1185,7 @@ async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_pa
     assert len(attempts) == 3
     assert estimate_compaction_input_tokens(attempts[1]) < estimate_compaction_input_tokens(attempts[0])
     assert attempts[2] != attempts[1]
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.text == "recovered summary"
@@ -1406,7 +1406,7 @@ async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_pat
     assert "RUN2-MARKER" not in attempts[1][1]
     assert "RUN2-MARKER" in attempts[2][1]
     assert outcome.summary_model == "fallback-model"
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.text == "recovered summary"
@@ -1461,7 +1461,7 @@ async def test_small_refused_summary_request_fails_without_identical_retry_or_pe
 
     assert len(attempts) == 1
     assert estimate_compaction_input_tokens(attempts[0]) < 1_000
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1"]
@@ -1526,7 +1526,7 @@ async def test_minimum_available_budget_can_issue_smaller_degradation_retry(tmp_
     assert build_budgets[0] == summary_input_budget
     assert build_budgets[1] < build_budgets[0]
     assert estimate_compaction_input_tokens(attempts[1]) < estimate_compaction_input_tokens(attempts[0])
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.text == "recovered summary"
@@ -1554,7 +1554,7 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
     )
     seed_session(storage, session)
     seed_summary(storage, session, _SCOPE, previous_summary)
-    session = storage.load_session("session-1", "agent")
+    session = storage.load_session("session-1")
     assert session is not None
     generate_summary = AsyncMock()
 
@@ -1585,7 +1585,7 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
 
     assert outcome is None
     generate_summary.assert_not_awaited()
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.text == previous_summary
@@ -1614,7 +1614,7 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
     runtime_generate_summary.assert_not_awaited()
     assert prepared.compaction_decision.reason == "compaction_unavailable"
     assert prepared.compaction_reply_outcome == "none"
-    repeated = storage.load_session("session-1", "agent")
+    repeated = storage.load_session("session-1")
     assert repeated is not None
     assert repeated.summary is not None
     assert repeated.summary.text == previous_summary
@@ -1662,7 +1662,7 @@ async def test_two_timeouts_exhaust_current_attempt_without_persisting_suppressi
     assert len(attempts) == 2
     assert estimate_compaction_input_tokens(attempts[1]) < estimate_compaction_input_tokens(attempts[0])
     assert prepared.compaction_reply_outcome == "timeout"
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1"]
@@ -1739,7 +1739,7 @@ async def test_compaction_retries_transient_provider_error_at_same_budget(
     assert len(attempts) == 2
     assert attempts[1] == attempts[0]
     retry_sleep.assert_awaited_once_with(DEFAULT_SUMMARY_RETRY_POLICY.same_input_retry_delay_seconds)
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.text == "recovered summary"

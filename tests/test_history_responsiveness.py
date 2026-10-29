@@ -360,7 +360,7 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
         with pytest.raises(asyncio.CancelledError, match="original cancellation"):
             await task
         if after_persist:
-            persisted = storage.load_session("session", "agent")
+            persisted = storage.load_session("session")
             assert persisted is not None
             assert persisted.summary is not None
             assert persisted.summary.text == "Greeting received."

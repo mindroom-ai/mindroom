@@ -123,7 +123,7 @@ def test_an_agents_open_converts_rows_naming_another_owner_to_the_agent(tmp_path
 
     assert _owner(store.path) == (LOG_VERSION, _SCOPE)
     for session_id in ("old", "unowned"):
-        session = store.load_session(session_id, "agent")
+        session = store.load_session(session_id)
         assert session is not None
         assert session.owner_id == "code"
         assert [run.agent_id for run in session.runs] == ["code"]
@@ -174,7 +174,7 @@ def test_a_compaction_after_the_adoption_replays_its_summary(tmp_path: Path) -> 
     """A conversation started under the display-name id keeps its summary and compacted run after a compaction."""
     _agno_database(tmp_path / "code", _session("session", _DISPLAY_NAME_ID))
     store: ConversationStore = create_agent_state_storage("code", tmp_path / "code")
-    session = store.load_session("session", "agent")
+    session = store.load_session("session")
     assert session is not None
     new_run = RunRecord(
         run_id="new",
@@ -187,7 +187,7 @@ def test_a_compaction_after_the_adoption_replays_its_summary(tmp_path: Path) -> 
 
     compact_runs(store, session, _SCOPE, ["new"], "summary of new")
 
-    reloaded = store.load_session("session", "agent")
+    reloaded = store.load_session("session")
     assert reloaded is not None
     assert reloaded.summary is not None
     assert reloaded.summary.text == "summary of new"
@@ -207,7 +207,7 @@ def test_a_conversation_continued_after_v2026_2_55_replays_its_earlier_runs(tmp_
 
     store = create_agent_state_storage("code", tmp_path / "code")
 
-    loaded = store.load_session("session", "agent")
+    loaded = store.load_session("session")
     assert loaded is not None
     assert [run.run_id for run in loaded.runs if replays_in_scope(run, _SCOPE)] == ["session-run", "new"]
     assert [run.agent_id for run in loaded.runs if run.parent_run_id is not None] == ["helper"]
@@ -220,7 +220,7 @@ async def test_redacting_an_event_an_adopted_run_answered_cuts_from_that_run(tmp
     session.runs.append(replace(_run("new"), agent_id="code"))
     _v2_database(tmp_path / "code", session)
     store = create_agent_state_storage("code", tmp_path / "code")
-    loaded = store.load_session("session", "agent")
+    loaded = store.load_session("session")
     assert loaded is not None
 
     async def redacted_history_events(event_ids: Collection[str]) -> dict[str, str | None]:
@@ -238,7 +238,7 @@ def test_a_summary_converted_under_the_display_name_id_still_replays(tmp_path: P
 
     store = create_agent_state_storage("code", tmp_path / "code")
 
-    loaded = store.load_session("session", "agent")
+    loaded = store.load_session("session")
     assert loaded is not None
     assert loaded.summary is not None
     assert loaded.summary.text == "summary kept by Agno"
@@ -252,7 +252,7 @@ def test_a_summary_stored_under_the_display_name_id_still_replays_after_the_upgr
     session.runs.append(_run("later"))
     stored = create_agent_state_storage("code", tmp_path / "code")
     seed_session(stored, session)
-    loaded = stored.load_session("session", "agent")
+    loaded = stored.load_session("session")
     assert loaded is not None
     compact_runs(stored, loaded, old_scope, ["session-run"], "first summary")
     compact_runs(stored, loaded, old_scope, ["later"], "second summary")
@@ -260,7 +260,7 @@ def test_a_summary_stored_under_the_display_name_id_still_replays_after_the_upgr
 
     store = create_agent_state_storage("code", tmp_path / "code")
 
-    reloaded = store.load_session("session", "agent")
+    reloaded = store.load_session("session")
     assert reloaded is not None
     assert reloaded.summary is not None
     assert reloaded.summary.text == "second summary"

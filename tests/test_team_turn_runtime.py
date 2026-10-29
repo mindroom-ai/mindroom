@@ -176,7 +176,7 @@ async def test_a_streamed_team_reply_renders_the_members_and_the_consensus_and_s
     member_request = team.models["writer-model"].requests[0].messages
     assert [message.content for message in member_request if message.role != "system"] == ["Report"]
     assert team.models["checker-model"].requests == []
-    session = team.storage.load_session(SESSION_ID, "team")
+    session = team.storage.load_session(SESSION_ID)
     assert session is not None
     assert EVENT_ID in read_scope_seen_event_ids(team.storage, session, TEAM_SCOPE)
 
@@ -214,7 +214,7 @@ async def test_a_team_turn_whose_attempts_all_came_back_empty_leaves_its_trigger
     chunks = await team.stream()
 
     assert chunks == [ai_runtime.EMPTY_RESPONSE_NOTICE]
-    session = team.storage.load_session(SESSION_ID, "team")
+    session = team.storage.load_session(SESSION_ID)
     assert session is not None
     assert session.runs == []
     assert read_scope_seen_event_ids(team.storage, session, TEAM_SCOPE) == set()
@@ -241,7 +241,7 @@ async def test_a_team_turn_that_only_ran_tools_marks_its_trigger_seen(
     await team.reply(stream=stream, show_tool_calls=False)
 
     assert ProbeToolkit.calls == ["a"]
-    session = team.storage.load_session(SESSION_ID, "team")
+    session = team.storage.load_session(SESSION_ID)
     assert session is not None
     assert read_scope_seen_event_ids(team.storage, session, TEAM_SCOPE) == {EVENT_ID}
     assert history_storage._read_preserved_scope_seen_event_ids(session.metadata, TEAM_SCOPE) == {EVENT_ID}
@@ -2998,7 +2998,7 @@ async def test_the_driver_writes_the_interrupted_record_after_the_loop_stored_th
         await asyncio.wait_for(task, timeout=5)
 
     assert statuses_when_interrupted_record_written == [RunStatus.cancelled]
-    session = team.storage.load_session(SESSION_ID, "team")
+    session = team.storage.load_session(SESSION_ID)
     assert session is not None
     [record] = [run for run in session.runs if isinstance(run, TeamRunRecord)]
     assert record.metadata is not None

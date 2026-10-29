@@ -8761,7 +8761,7 @@ async def test_a_finished_approval_continuation_links_its_reply_event_onto_the_r
     assert deps.persist_response_event_id is not None
     await deps.persist_response_event_id("run-1", "$reply")
 
-    stored = storage.load_session("session-1", entity_kind)
+    stored = storage.load_session("session-1")
     assert stored is not None
     assert [run.metadata for run in stored.runs] == [{MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$reply"}]
 

@@ -92,7 +92,7 @@ def test_incompatible_session_schema_is_archived_before_real_session_use(tmp_pat
     storage.save_run(session, run, record_usage=False)
 
     storage = _storage(state_root, kind)
-    loaded = storage.load_session(session.session_id, kind)
+    loaded = storage.load_session(session.session_id)
     assert loaded is not None
     expected_runs = [("new-run", "saved answer")]
     if kind == "team":
@@ -150,7 +150,7 @@ def test_compatible_session_reopen_preserves_history_and_extra_columns(tmp_path:
         connection.commit()
 
     storage = _storage(tmp_path)
-    loaded = storage.load_session("old-session", "agent")
+    loaded = storage.load_session("old-session")
     assert isinstance(loaded, ConversationSession)
     assert [(run.run_id, run.content) for run in loaded.runs or []] == [("saved-run", "saved answer")]
 
@@ -189,9 +189,9 @@ def test_concurrent_constructors_recover_once_and_share_current_store(tmp_path: 
         futures = [executor.submit(construct) for _ in range(2)]
         first, second = [future.result(timeout=10) for future in futures]
     seed_session_row(first, _row("first"))
-    assert second.load_session("first", "agent") is not None
+    assert second.load_session("first") is not None
     seed_session_row(second, _row("second"))
-    assert first.load_session("second", "agent") is not None
+    assert first.load_session("second") is not None
     _assert_old_row(_archived_database(tmp_path))
 
 
@@ -290,13 +290,13 @@ def test_hot_rollback_recovers_committed_state_before_schema_decision(tmp_path: 
         assert raised.value.sqlite_errorcode == sqlite3.SQLITE_READONLY_ROLLBACK
 
     storage = _storage(tmp_path)
-    loaded = storage.load_session("old-session", "agent")
+    loaded = storage.load_session("old-session")
     assert (loaded is not None) is compatible
     if compatible:
         assert isinstance(loaded, ConversationSession)
         assert [(run.run_id, run.content) for run in loaded.runs or []] == [("committed-run", "committed answer")]
     seed_session_row(storage, _row("new-session"))
-    assert storage.load_session("new-session", "agent") is not None
+    assert storage.load_session("new-session") is not None
 
     retained_database = database if compatible else _archived_database(tmp_path)
     with closing(sqlite3.connect(retained_database.as_uri() + "?mode=ro", uri=True)) as connection:
@@ -319,7 +319,7 @@ def test_wal_only_committed_rows_survive_archive(tmp_path: Path) -> None:
 
     storage = _storage(tmp_path)
     seed_session_row(storage, _row("new-session"))
-    assert storage.load_session("new-session", "agent") is not None
+    assert storage.load_session("new-session") is not None
 
     archived = _archived_database(tmp_path)
     assert {suffix: archived.with_suffix(suffix).read_bytes() for suffix in before} == before
@@ -428,12 +428,12 @@ def test_compatible_old_fixture_and_current_run_rows_survive_reopen(tmp_path: Pa
     )
 
     storage = open_storage()
-    loaded = storage.load_session("session-1", "agent")
+    loaded = storage.load_session("session-1")
     assert isinstance(loaded, ConversationSession)
     expected_ids = {"row-only"} if null_blob else {"run-1", "run-2", "run-3", "row-only"}
     assert {run.run_id for run in loaded.runs or []} == expected_ids
     assert next(run.content for run in loaded.runs or [] if run.run_id == "row-only") == "new answer"
-    current = storage.load_session("current-session", "agent")
+    current = storage.load_session("current-session")
     assert isinstance(current, ConversationSession)
     assert [(run.run_id, run.content) for run in current.runs or []] == [("current-run", "current answer")]
     with closing(sqlite3.connect(database)) as connection:
@@ -467,7 +467,7 @@ def test_a_missing_runs_table_converts_without_an_archive(tmp_path: Path) -> Non
         RunRecord(run_id="first-run", content="first answer", agent_id="general", session_id="waiting"),
         record_usage=False,
     )
-    loaded = storage.load_session("waiting", "agent")
+    loaded = storage.load_session("waiting")
     assert loaded is not None
     assert [(run.run_id, run.content) for run in loaded.runs] == [("first-run", "first answer")]
     assert not list(tmp_path.glob("sessions.incompatible-*"))

@@ -53,7 +53,7 @@ async def test_seen_event_ids_are_written_onto_the_stored_row_not_the_pre_run_sn
         ),
         event_ids=["$reply", "$unseen"],
     )
-    reloaded = storage.load_session("t1", "team")
+    reloaded = storage.load_session("t1")
     assert reloaded is not None
     seen_event_ids = read_scope_seen_event_ids(storage, reloaded, scope)
 

@@ -668,7 +668,7 @@ class MaskedBackend(StoreBackend):
 
     @override
     def redaction_cleanup(self, redacted: set[str]) -> object:
-        removed = self._cut(partial(redaction_cut, scope=self.scope, redacted=redacted))
+        removed = self._cut(partial(redaction_cut, redacted=redacted))
         assert isinstance(removed, list)
         if any(f"$reply-{run_id}" in removed for run_id in self.link_only):
             self._diverge("link_reaches_any_stored_run", "a redaction of a reply only the v2 store linked cut history")

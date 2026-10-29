@@ -485,7 +485,7 @@ def test_every_row_converts_to_what_its_readers_read_before(rows: list[str | Non
                 f'FROM "{names.sessions}"',
             )
         }
-        loaded = {f"s{index}": store.load_session(f"s{index}", "agent") for index in range(len(rows))}
+        loaded = {f"s{index}": store.load_session(f"s{index}") for index in range(len(rows))}
         again = _dump(database)
         _open("agent_code", root)
         assert _dump(database) == again

@@ -22,7 +22,6 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import HelperUsage, MessageMetrics, RequestUsage, RunMetrics, TokenCounts
 from mindroom.session_storage import store as store_module
-from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.schema import LOG_VERSION
 from mindroom.session_storage.store import (
     ConversationStore,
@@ -51,13 +50,7 @@ def _session(session_id: str = "s1", *, kind: SessionKind = "agent", owner: str 
 
 
 def _team() -> ConversationSession:
-    return _session(kind="team", owner="eng")
-
-
-@pytest.fixture
-def team_store(tmp_path: Path) -> ConversationStore:
-    """Open team ``eng``'s conversation database, named ``code`` so the tables these tests query are its tables too."""
-    return create_state_storage("code", tmp_path / "team", HistoryScope(kind="team", scope_id="eng"))
+    return _session(kind="team", owner="crew")
 
 
 def _usage(input_tokens: int, *, model: str = "code-model") -> RunMetrics:
@@ -109,7 +102,7 @@ def _member(run_id: str, team_run_id: str, status: RunStatus = RunStatus.complet
 def _team_run(run_id: str, status: RunStatus = RunStatus.completed, **fields: Any) -> TeamRunRecord:  # noqa: ANN401
     return TeamRunRecord(
         run_id=run_id,
-        team_id="eng",
+        team_id="crew",
         session_id="s1",
         status=status,
         created_at=1_700_000_000,
@@ -217,14 +210,14 @@ def _totals(store: ConversationStore, session_id: str = "s1") -> dict[str, Any]:
     return json.loads(session_data or "{}").get("session_metrics", {})
 
 
-def _loaded(store: ConversationStore, kind: SessionKind = "agent") -> ConversationSession:
-    session = store.load_session("s1", kind)
+def _loaded(store: ConversationStore) -> ConversationSession:
+    session = store.load_session("s1")
     assert session is not None
     return session
 
 
-def _loaded_ids(store: ConversationStore, kind: SessionKind = "agent") -> list[str]:
-    return [run.run_id for run in _loaded(store, kind).runs]
+def _loaded_ids(store: ConversationStore) -> list[str]:
+    return [run.run_id for run in _loaded(store).runs]
 
 
 def _as_stored(runs: list[AnyRunRecord]) -> list[dict[str, Any]]:
@@ -456,7 +449,7 @@ def test_a_paused_team_run_behind_the_summary_keeps_writable_members_and_moves_o
         _team_run("t1"),
         session=team,
     )
-    _summary(team_store, 3, scope_key="team:eng")
+    _summary(team_store, 3, scope_key="team:crew")
 
     outcomes = _save(team_store, _member("m0", "t0", content="after"), _team_run("t0"), session=team)
 
@@ -465,7 +458,7 @@ def test_a_paused_team_run_behind_the_summary_keeps_writable_members_and_moves_o
     assert row is not None
     assert json.loads(row[2])["content"] == "after"
     assert _seqs(team_store)["t0"] == 4
-    assert _loaded_ids(team_store, "team") == ["m0", "t0"]
+    assert _loaded_ids(team_store) == ["m0", "t0"]
 
 
 def test_a_member_of_a_member_raises_and_writes_nothing(store: ConversationStore) -> None:
@@ -709,7 +702,7 @@ def test_a_metadata_patch_of_a_run_that_is_not_visible_joins_nothing(store: Conv
     """Only a visible top-level run is covered; a paused run and a member are not, even by their own scope's row."""
     team = _team()
     _save(store, _member("m1", "t2"), _team_run("t2", RunStatus.paused), _team_run("t3"), session=team)
-    row_id = _summary(store, 3, scope_key="team:eng")
+    row_id = _summary(store, 3, scope_key="team:crew")
     member_scope = _summary(store, 3, scope_key="agent:helper")
 
     store.patch_run_metadata("s1", "m1", {"matrix_response_event_id": "$member"})
@@ -755,7 +748,7 @@ def test_a_message_rewrite_edits_only_the_runs_a_load_returns_and_stores_only_th
         run.status, run.metadata, run.content = RunStatus.error, {"k": "lost"}, "lost"
         return [*runs, _run("covered", messages=[Message(role="user", content="no", id="covered-user")])]
 
-    store.rewrite_run_messages("s1", "agent", edit, session=session)
+    store.rewrite_run_messages("s1", edit, session=session)
 
     assert handed == ["r1"]
     stored = store.get_run("r1")
@@ -776,7 +769,7 @@ def test_a_message_rewrite_never_unfolds_a_message(store: ConversationStore) -> 
         runs[0].messages = [*copy.deepcopy(messages)]
         return runs
 
-    store.rewrite_run_messages("s1", "agent", edit)
+    store.rewrite_run_messages("s1", edit)
 
     assert [(row[0], row[2]) for row in _message_rows(store, "r1")] == [("m0", summary_id), ("m1", None)]
 
@@ -789,7 +782,7 @@ def test_a_message_rewrite_keeps_a_paused_runs_system_message(store: Conversatio
         runs[0].status = RunStatus.completed
         return runs
 
-    store.rewrite_run_messages("s1", "agent", edit)
+    store.rewrite_run_messages("s1", edit)
 
     assert [row[0] for row in _message_rows(store, "r1")] == ["r1-system", "r1-user"]
 
@@ -803,7 +796,7 @@ def test_a_message_rewrite_holds_the_write_lock_while_it_edits(store: Conversati
         _write_now(store, "UPDATE code_sessions_log_runs SET status = 'ERROR'", errors)
         return runs
 
-    store.rewrite_run_messages("s1", "agent", edit)
+    store.rewrite_run_messages("s1", edit)
 
     assert errors == ["database is locked"]
 
@@ -820,7 +813,7 @@ def test_a_message_rewrite_that_stores_no_run_leaves_the_session_the_load_its_ed
         handed.extend(runs)
         return [_run("unknown")]
 
-    store.rewrite_run_messages("s1", "agent", edit, session=session)
+    store.rewrite_run_messages("s1", edit, session=session)
 
     assert [id(run) for run in session.runs] == [id(run) for run in handed]
     assert _as_stored(session.runs) == _as_stored(_loaded(store).runs)
@@ -834,10 +827,10 @@ def test_deleting_runs_takes_their_members_and_messages_and_fences_nothing(team_
     """A discard deletes the team run's member rows too; it records no removed run and keeps the summaries."""
     team = _team()
     _save(team_store, _member("m0", "t0"), _member("m1", "t0"), _team_run("t0"), _team_run("t1"), session=team)
-    seed_session_row(team_store, _session("s2", kind="team", owner="eng"))
-    team_store.save_run(_session("s2", kind="team", owner="eng"), _member("elsewhere", "t0"), record_usage=False)
-    _summary(team_store, 4, scope_key="team:eng")
-    session = _loaded(team_store, "team")
+    seed_session_row(team_store, _session("s2", kind="team", owner="crew"))
+    team_store.save_run(_session("s2", kind="team", owner="crew"), _member("elsewhere", "t0"), record_usage=False)
+    _summary(team_store, 4, scope_key="team:crew")
+    session = _loaded(team_store)
     session.runs = [*session.runs, _member("m0", "t0"), _member("m1", "t0"), _team_run("t0")]
 
     deleted = team_store.delete_runs(["t0", "missing"], session_id="s1", session=session)
@@ -882,9 +875,9 @@ def test_load_returns_uncovered_and_non_visible_runs_with_their_members_in_seq_o
         _team_run("t-new"),
         session=team,
     )
-    _summary(team_store, 6, scope_key="team:eng")
+    _summary(team_store, 6, scope_key="team:crew")
 
-    assert _loaded_ids(team_store, "team") == ["m-paused", "t-paused", "t-cancelled", "t-new"]
+    assert _loaded_ids(team_store) == ["m-paused", "t-paused", "t-cancelled", "t-new"]
 
 
 def test_cancelled_and_errored_runs_behind_the_summary_still_load(store: ConversationStore) -> None:
@@ -914,19 +907,18 @@ def test_load_covers_runs_by_their_own_scopes_latest_summary_and_replays_the_own
     assert [run.run_id for run in session.runs] == ["r3", "unowned"]
 
 
-def test_load_returns_none_for_a_missing_session_or_one_of_another_kind(team_store: ConversationStore) -> None:
-    """An agent load never returns a team's session; a team load returns it with the team as its owner."""
+def test_a_load_names_the_databases_owner_and_returns_none_for_a_missing_session(team_store: ConversationStore) -> None:
+    """A loaded session's kind and owner are the database's; a session it does not hold loads as None."""
     _save(team_store, _team_run("t1"), session=_team())
 
-    assert team_store.load_session("s1", "agent") is None
-    assert team_store.load_session("missing", "team") is None
-    loaded = _loaded(team_store, "team")
-    assert (loaded.kind, loaded.owner_id, [run.run_id for run in loaded.runs]) == ("team", "eng", ["t1"])
+    assert team_store.load_session("missing") is None
+    loaded = _loaded(team_store)
+    assert (loaded.kind, loaded.owner_id, [run.run_id for run in loaded.runs]) == ("team", "crew", ["t1"])
 
 
 def test_a_new_database_reads_as_empty(store: ConversationStore) -> None:
     """A database opened before anything was written to it reads as empty instead of failing."""
-    assert store.load_session("s1", "agent") is None
+    assert store.load_session("s1") is None
     assert store.read_session_metadata("s1") is None
     assert store.list_runs("s1") == []
     assert store.get_run("r1") is None
@@ -956,7 +948,7 @@ def test_get_run_returns_a_paused_team_run_with_the_members_its_requirements_nam
     assert isinstance(paused, TeamRunRecord)
     assert [member.run_id for member in paused.member_responses] == ["m2", "m1"]
     assert [message.id for message in paused.member_responses[0].messages] == ["m2-system", "m2-user"]
-    loaded = {run.run_id: run for run in _loaded(team_store, "team").runs}
+    loaded = {run.run_id: run for run in _loaded(team_store).runs}
     loaded_team = loaded["t0"]
     assert isinstance(loaded_team, TeamRunRecord)
     assert loaded_team.member_responses[1] is not loaded["m1"]
@@ -981,7 +973,7 @@ def test_list_runs_returns_every_run_with_members_in_seq_order_in_its_replay_vie
     """Covered runs and members are listed too, and a crash-left copy hides what its fold took."""
     team = _team()
     _save(store, _team_run("t0"), _member("m1", "t2"), _team_run("t2", RunStatus.cancelled), session=team)
-    _summary(store, 1, scope_key="team:eng")
+    _summary(store, 1, scope_key="team:crew")
     _fold(store, _team_run("t2", RunStatus.running), [Message(role="user", content="m", id="folded", created_at=1)])
 
     listed = store.list_runs("s1")
@@ -1117,14 +1109,14 @@ async def test_a_removed_save_takes_the_run_and_its_members_out_of_the_session(t
         _team_run("t1"),
         session=team,
     )
-    session = _loaded(team_store, "team")
+    session = _loaded(team_store)
     team_store.delete_runs(["t0"], session_id="s1")
     _remove(team_store, "t0")
 
     await persist_to(team_store, session)(_team_run("t0", RunStatus.cancelled))
 
     assert [run.run_id for run in session.runs] == ["t1"]
-    assert _as_stored(session.runs) == _as_stored(_loaded(team_store, "team").runs)
+    assert _as_stored(session.runs) == _as_stored(_loaded(team_store).runs)
 
 
 @pytest.mark.asyncio
@@ -1138,14 +1130,14 @@ async def test_a_resumed_team_run_keeps_its_member_runs_in_the_session(team_stor
         _team_run("t1"),
         session=team,
     )
-    session = _loaded(team_store, "team")
+    session = _loaded(team_store)
     persist = persist_to(team_store, session)
 
     await persist(_member("m0", "t0", content="checked"))
     await persist(_team_run("t0", content="answered"))
 
     assert [run.run_id for run in session.runs] == ["m0", "t1", "t0"]
-    assert _as_stored(session.runs) == _as_stored(_loaded(team_store, "team").runs)
+    assert _as_stored(session.runs) == _as_stored(_loaded(team_store).runs)
 
 
 @pytest.mark.asyncio
@@ -1760,7 +1752,7 @@ def test_usage_saves_move_the_sessions_update_time_and_rewrites_do_not(store: Co
 
     _save(store, _run("r1"), _run("r2"))
     store.patch_run_metadata("s1", "r1", {"matrix_response_event_id": "$reply"})
-    store.rewrite_run_messages("s1", "agent", lambda runs: runs)
+    store.rewrite_run_messages("s1", lambda runs: runs)
     store.delete_runs(["r2"], session_id="s1")
     assert _query(store, "SELECT updated_at FROM code_sessions") == [(5,)]
 
@@ -1831,4 +1823,4 @@ def test_list_updated_sessions_returns_an_agents_sessions_updated_after_the_curs
 
     assert store.list_updated_sessions("code", since=10) == [("c", 20), ("b", 30)]
     assert store.list_updated_sessions("other", since=0) == []
-    assert team_store.list_updated_sessions("eng", since=0) == []
+    assert team_store.list_updated_sessions("crew", since=0) == []

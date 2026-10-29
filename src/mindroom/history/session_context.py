@@ -100,7 +100,7 @@ def load_scope_session(
         execution_identity=execution_identity,
     )
     storage = storage_factory()
-    session = storage.load_session(session_id, scope.kind)
+    session = storage.load_session(session_id)
     return ScopeSessionContext(
         scope=scope,
         storage=storage,

@@ -163,7 +163,7 @@ class _Replay:
 
 def _replay(tmp_path: Path) -> _Replay:
     storage = _open(tmp_path)
-    session = storage.load_session("s1", "agent")
+    session = storage.load_session("s1")
     assert session is not None
     return _Replay(
         loaded=[run.run_id or "" for run in session.runs or []],
@@ -359,7 +359,7 @@ def test_archived_member_runs_return_with_their_team_run(tmp_path: Path) -> None
     )
 
     storage = _open(tmp_path)
-    session = storage.load_session("s1", "team")
+    session = storage.load_session("s1")
     stored = stored_run_ids(storage, "s1")
     folded = folded_run_ids(storage, "s1")
 
@@ -405,7 +405,7 @@ def test_a_generation_of_several_runs_sorts_after_its_last_top_level_run_with_th
                 (json.dumps(event_ids), json.dumps(seen_event_ids), run_id),
             )
 
-    session = _open(tmp_path).load_session("s1", "team")
+    session = _open(tmp_path).load_session("s1")
     with closing(sqlite3.connect(_db(tmp_path))) as connection:
         rows = connection.execute(
             "SELECT run.run_id, summary.event_ids, summary.seen_event_ids FROM code_sessions_log_summaries AS summary "

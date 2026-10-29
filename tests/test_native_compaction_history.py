@@ -131,7 +131,7 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
         ),
     )
     db = create_agent_state_storage("test_agent", tmp_path)
-    session = db.load_session("session", "agent")
+    session = db.load_session("session")
     assert session is not None
     original = [run.to_dict() for run in session.runs]
     model = responses_adapter(tmp_path, store=True)
@@ -181,7 +181,7 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
         {"type": "function_call_output", "call_id": "call_status", "output": "ready"},
         {"role": "user", "content": "Continue"},
     ]
-    persisted = db.load_session("session", "agent")
+    persisted = db.load_session("session")
     assert persisted is not None
     assert [run.to_dict() for run in persisted.runs] == original
     assert [run.to_dict() for run in session.runs] == original
@@ -568,7 +568,7 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
     db = create_agent_state_storage("test_agent", tmp_path)
     seed_session(db, seeded)
     compact_runs(db, seeded, _SCOPE, ["folded"], "Archived summary.")
-    session = db.load_session("session", "agent")
+    session = db.load_session("session")
     assert session is not None
     resolved = _inputs(config)
     prepared = await prepare_scope_history(

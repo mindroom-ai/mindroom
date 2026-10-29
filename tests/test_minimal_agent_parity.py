@@ -375,9 +375,7 @@ async def test_durable_memory_standard_minimal_standard(response_harness) -> Non
         h.runtime.runtime_paths,
         build_execution_identity_from_runtime_context(h.runtime),
     )
-    old_messages = [
-        message.to_dict() for message in storage.load_session(h.runtime.session_id, "agent").runs[0].messages
-    ]
+    old_messages = [message.to_dict() for message in storage.load_session(h.runtime.session_id).runs[0].messages]
     await h.respond([_bash_call("memory", "add_memory", {"content": "Release parity durable lesson"}), "minimal saved"])
     assert h.shell.receipts[-1]["outcome"] == "Memorized: Release parity durable lesson"
     found = await search_agent_memories(
@@ -390,7 +388,7 @@ async def test_durable_memory_standard_minimal_standard(response_harness) -> Non
     )
     assert any(item["memory"] == "Release parity durable lesson" for item in found.results)
     await h.respond(["standard sees same history"], mode="standard", prompt="after switch")
-    session = storage.load_session(h.runtime.session_id, "agent")
+    session = storage.load_session(h.runtime.session_id)
     assert len(session.runs) == 3
     assert [message.to_dict() for message in session.runs[0].messages] == old_messages
     final = h.provider.requests[-1]

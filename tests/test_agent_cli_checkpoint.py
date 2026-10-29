@@ -153,7 +153,7 @@ async def test_the_turns_session_holds_the_checkpoint_as_stored(tmp_path: Path) 
     await checkpoint.persist("bash-1")
 
     assert catalog.store is not None
-    stored = catalog.store.load_session("session", "agent")
+    stored = catalog.store.load_session("session")
     assert stored is not None
     assert [(run.run_id, run.status) for run in catalog.session.runs] == [("run", RunStatus.cancelled)]
     assert [run.to_dict() for run in catalog.session.runs] == [run.to_dict() for run in stored.runs]

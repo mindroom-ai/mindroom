@@ -712,7 +712,7 @@ async def test_a_private_ad_hoc_team_stores_under_its_requester_scope_and_replay
     await team.respond(message="Second question", ctx=team.ctx(run_id="run-2"))
 
     assert team.scope.scope_id.startswith("team_general+research_requester_")
-    session = team.storage.load_session(SESSION_ID, "team")
+    session = team.storage.load_session(SESSION_ID)
     assert session is not None
     assert [(run.run_id, run.team_id) for run in session.runs] == [
         ("run-1", team.scope.scope_id),
@@ -833,7 +833,7 @@ async def test_a_matrix_reply_marks_its_trigger_and_the_unread_thread_events_see
         response_sender_id="@mindroom_team:localhost",
     )
 
-    session = team.storage.load_session(SESSION_ID, "team")
+    session = team.storage.load_session(SESSION_ID)
     assert session is not None
     assert read_scope_seen_event_ids(team.storage, session, team.scope) == {"$event-1", EVENT_ID}
 
@@ -856,7 +856,7 @@ async def test_a_team_reply_writes_session_metadata_in_the_database_s_lane(
 
     await team.respond(response_sender_id="@mindroom_team:localhost")
 
-    session = team.storage.load_session(SESSION_ID, "team")
+    session = team.storage.load_session(SESSION_ID)
     assert session is not None
     assert read_scope_seen_event_ids(team.storage, session, team.scope) == {EVENT_ID}
     assert writing_threads
@@ -891,7 +891,7 @@ def _notice(response_turn_id: str, *, marker: bool | str = True, text: str = QUE
 
 def _notices(team: TeamTurn, response_turn_id: str) -> list[tuple[str, bool | str, str]]:
     """Return the stored notices of one reply: the run each sits in, its marker, and its text."""
-    session = team.storage.load_session(SESSION_ID, "team")
+    session = team.storage.load_session(SESSION_ID)
     assert session is not None
     return [
         (run.run_id, message.provider_data["mindroom_queued_message_notice"], str(message.content))
@@ -1047,7 +1047,7 @@ async def test_a_notice_delivered_before_the_team_run_failed_is_not_left_live(
     assert _leader(team).requests[-1].messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
     assert notice_context.notice_fired
     assert _notices(team, notice_context.response_turn_id) == []
-    session = team.storage.load_session(SESSION_ID, "team")
+    session = team.storage.load_session(SESSION_ID)
     assert session is not None
     assert [
         (run.run_id, run.status, (run.metadata or {}).get("mindroom_original_status"))

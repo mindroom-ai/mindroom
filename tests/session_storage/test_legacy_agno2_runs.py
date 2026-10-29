@@ -112,7 +112,7 @@ def test_blob_runs_become_rows_when_the_summary_rows_migrate(tmp_path: Path) -> 
 
     assert [_comparable(run) for run in store.list_runs("session-1")] == [_comparable(run) for run in expected]
     assert not _has_blob_column(db_file)
-    session = store.load_session("session-1", "agent")
+    session = store.load_session("session-1")
     assert session is not None
     assert session.session_state == {}
     assert [(run.run_id, run.status.value) for run in session.runs] == [
@@ -218,7 +218,7 @@ def test_a_blob_entry_with_an_unusable_value_converts_alone(tmp_path: Path, fiel
     if field == "created_at":
         # The conversion's time stands in for one Agno never wrote.
         assert created["odd"] >= started
-    assert store.load_session("session-1", "agent") is not None
+    assert store.load_session("session-1") is not None
 
 
 @pytest.mark.parametrize(

@@ -25,7 +25,7 @@ async def remove_redacted_history_like_next_response(
     scope: HistoryScope = _AGENT_SCOPE,
 ) -> None:
     """Open one history scope the way the next response's turn driver does."""
-    session = storage.load_session(target.session_id, scope.kind)
+    session = storage.load_session(target.session_id)
     await _remove_history_of_redacted_events(
         ResponseTurnContext(
             entity_label="agent",

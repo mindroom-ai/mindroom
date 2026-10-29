@@ -760,7 +760,7 @@ async def prepare_history_for_run_for_test(
     if storage is not None and session_id is not None:
         persisted_session = session
         if persisted_session is None:
-            persisted_session = storage.load_session(session_id, resolved_scope.kind)
+            persisted_session = storage.load_session(session_id)
         scope_context = ScopeSessionContext(
             scope=resolved_scope,
             storage=storage,
@@ -3884,6 +3884,12 @@ def unstored_team_scope_context(
 def store(tmp_path: Path) -> "ConversationStore":
     """Open the conversation database ``code`` under ``tmp_path`` as production opens one, with every table."""
     return create_state_storage("code", tmp_path, HistoryScope(kind="agent", scope_id="code"))
+
+
+@pytest.fixture
+def team_store(tmp_path: Path) -> "ConversationStore":
+    """Open team ``crew``'s conversation database, named ``code`` as ``store``'s is, so tests query the same tables."""
+    return create_state_storage("code", tmp_path / "team", HistoryScope(kind="team", scope_id="crew"))
 
 
 def seed_session_row(storage: "ConversationStore", session: "ConversationSession") -> None:

@@ -116,7 +116,7 @@ def test_discard_empty_completed_run_removes_run_from_loaded_session_and_storage
     )
 
     assert [run.run_id for run in session.runs] == ["run-good"]
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert [run.run_id for run in persisted.runs] == ["run-good"]
 
@@ -153,7 +153,7 @@ def test_discard_empty_completed_run_deletes_a_run_the_live_session_never_saw(tm
     )
 
     assert [run.run_id for run in live_session.runs] == ["run-good"]
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert [run.run_id for run in persisted.runs] == ["run-good"]
 
@@ -190,7 +190,7 @@ def test_discard_empty_completed_team_run_removes_run_from_session_and_storage(t
     )
 
     assert [run.run_id for run in session.runs] == ["run-good"]
-    persisted = storage.load_session("session-1", "team")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert [run.run_id for run in persisted.runs] == ["run-good"]
 

@@ -586,7 +586,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
             )
             assert catalog.store is not None
             persisted = catalog.store.get_run("run")
-            session = catalog.store.load_session("session", "agent")
+            session = catalog.store.load_session("session")
             assert isinstance(persisted, RunRecord)
             assert session is not None
             build = agents.create_agent(

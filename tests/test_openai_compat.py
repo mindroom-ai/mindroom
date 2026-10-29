@@ -4759,7 +4759,7 @@ class TestTeamCompletion:
             runtime_paths=runtime_paths,
             execution_identity=None,
         )
-        session = storage.load_session(first.ctx.session_id, "team")
+        session = storage.load_session(first.ctx.session_id)
         assert session is not None
         assert [(run.run_id, run.status, run.content) for run in session.runs] == [
             (first.ctx.run_id, RunStatus.completed, "First answer"),
@@ -4818,7 +4818,7 @@ class TestTeamCompletion:
             runtime_paths=runtime_paths,
             execution_identity=None,
         )
-        session = storage.load_session(run.ctx.session_id, "team")
+        session = storage.load_session(run.ctx.session_id)
         assert session is not None
         assert session.session_state == {"remembered": "blue"}
         report = collect_admin_usage(config=team_config, runtime_paths=runtime_paths)

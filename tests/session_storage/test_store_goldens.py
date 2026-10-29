@@ -74,8 +74,8 @@ def _summary_dict(summary: ScopeSummary | None) -> dict[str, str] | None:
     return None if summary is None else {"summary": summary.text, "updated_at": summary.updated_at.isoformat()}
 
 
-def _load(conversation: ConversationStore, store: GoldenStore, session_id: str) -> ConversationSession:
-    session = conversation.load_session(session_id, store.sessions[session_id])
+def _load(conversation: ConversationStore, session_id: str) -> ConversationSession:
+    session = conversation.load_session(session_id)
     assert session is not None
     return session
 
@@ -108,7 +108,7 @@ def _replay_view(run_data: dict[str, Any], kept: Callable[[str], bool]) -> AnyRu
 @pytest.mark.parametrize(("store", "session_id"), _SESSIONS, ids=_SESSION_IDS)
 def test_golden_sessions_load_as_agno_loaded_them(store: GoldenStore, session_id: str, tmp_path: Path) -> None:
     """Fields, run selection, order, summary, and every run match Agno's load, but for Agno's own reader losses."""
-    session = _load(store.open(tmp_path), store, session_id)
+    session = _load(store.open(tmp_path), session_id)
     agno = agno_loaded_session(store, session_id)
 
     assert (
@@ -136,7 +136,7 @@ def test_golden_runs_load_every_field_their_rows_hold(store: GoldenStore, sessio
         row["run_id"]: row["run_data"]
         for row in stored_rows(store.restore(tmp_path / "agno"), store.names.runs, session_id)
     }
-    session = _load(store.open(tmp_path / "converted"), store, session_id)
+    session = _load(store.open(tmp_path / "converted"), session_id)
     loaded_message_ids = {
         run["run_id"]: {message["id"] for message in run["messages"]}
         for run in agno_loaded_session(store, session_id)["runs"]
@@ -199,18 +199,17 @@ def test_saving_and_rewriting_every_loaded_golden_run_changes_nothing(
 ) -> None:
     """Saving each loaded run's copy and rewriting their messages unchanged keeps every row but its update time."""
     conversation = store.open(tmp_path)
-    kind = store.sessions[session_id]
-    session = _load(conversation, store, session_id)
+    session = _load(conversation, session_id)
     loaded = [run.to_dict() for run in session.runs]
     before = _log_rows(conversation.path, store.names, session_id)
 
     for run in list(session.runs):
         conversation.save_run(session, copy.deepcopy(run), record_usage=False)
-    conversation.rewrite_run_messages(session_id, kind, lambda runs: runs, session=session)
+    conversation.rewrite_run_messages(session_id, lambda runs: runs, session=session)
 
     assert _log_rows(conversation.path, store.names, session_id) == before
     assert [run.to_dict() for run in session.runs] == loaded
-    assert [run.to_dict() for run in _load(conversation, store, session_id).runs] == loaded
+    assert [run.to_dict() for run in _load(conversation, session_id).runs] == loaded
 
 
 def _sorted_details(totals: dict[str, Any]) -> dict[str, Any]:
@@ -319,7 +318,7 @@ def test_linking_a_delivered_reply_rewrites_only_that_run(tmp_path: Path) -> Non
     [store] = [store for store in golden_stores() if store.label == "agent_code"]
     conversation = store.open(tmp_path)
     session_id = "!room:example.org:$approved"
-    session = _load(conversation, store, session_id)
+    session = _load(conversation, session_id)
     [run] = session.runs
     before = _log_rows(conversation.path, store.names, session_id)
 

@@ -223,7 +223,7 @@ _EPOCH = datetime.fromtimestamp(0, UTC)
 
 def _stored(storage: ConversationStore, session: ConversationSession) -> ConversationSession:
     """Reload ``session`` from storage."""
-    stored = storage.load_session(session.session_id, session.kind)
+    stored = storage.load_session(session.session_id)
     assert stored is not None
     return stored
 
@@ -976,7 +976,7 @@ async def test_editing_a_folded_turn_beside_a_redacted_one_leaves_no_runs_or_sum
         tmp_path,
         ConversationSession(kind="agent", session_id=target.session_id, owner_id="agent", runs=[run("$a"), run("$b")]),
     )
-    stored = storage.load_session(target.session_id, "agent")
+    stored = storage.load_session(target.session_id)
     assert stored is not None
     compact_runs(storage, stored, scope, [run.run_id for run in stored.runs or [] if run.run_id], "summary of a and b")
     store = await _store_with_storage(journal_store, storage)
@@ -998,7 +998,7 @@ async def test_editing_a_folded_turn_beside_a_redacted_one_leaves_no_runs_or_sum
     await store.remove_stale_runs_for_edit(turn_record=records["$a"], requester_user_id="@user:example.org")
     await remove_redacted_history_like_next_response(store, target, storage, scope=scope)
 
-    persisted = storage.load_session(target.session_id, "agent")
+    persisted = storage.load_session(target.session_id)
     assert persisted is not None
     assert [stored_run.run_id for stored_run in persisted.runs or []] == []
     assert persisted.summary is None
@@ -2137,7 +2137,7 @@ def test_no_test_references_removed_bot_handled_turn_ledger_shim() -> None:
 
 def _next_request(storage: ConversationStore, session_id: str, scope: HistoryScope, prompt: str) -> str:
     """Return the message contents the scope's next reply sends: its summary, the replayed history, then ``prompt``."""
-    session = storage.load_session(session_id, "agent")
+    session = storage.load_session(session_id)
     assert session is not None
     history = scope_history_messages(
         session.runs,
@@ -2286,7 +2286,7 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
         session.runs = session.runs[1:]
     write_agno_database(AgnoTableNames("agent").database_path(tmp_path), session, usage=False)
     storage = storage_factory()
-    initial_persisted = storage.load_session(target.session_id, "agent")
+    initial_persisted = storage.load_session(target.session_id)
     assert initial_persisted is not None
     if compacted:
         assert initial_persisted.summary is not None
@@ -2300,7 +2300,7 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
     assert not await _suppressed(reopened, target, ("$next",))
     storage = storage_factory()
     await remove_redacted_history_like_next_response(reopened, target, storage, scope=scope)
-    persisted = storage.load_session(target.session_id, "agent")
+    persisted = storage.load_session(target.session_id)
     assert persisted is not None
     next_request = _next_request(storage, target.session_id, scope, "NEXT_SURVIVING_INPUT")
     assert "NEXT_SURVIVING_INPUT" in next_request
@@ -2638,7 +2638,7 @@ async def test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen(
     if later_run_names_revision:
         # A modern compaction folds the later run on top of the legacy summary.
         storage = storage_factory()
-        reopened_session = storage.load_session(target.session_id, "agent")
+        reopened_session = storage.load_session(target.session_id)
         assert reopened_session is not None
         compact_runs(
             storage,
@@ -2654,7 +2654,7 @@ async def test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen(
     await _suppressed(store, target, ("$next",))
     storage = storage_factory()
     await remove_redacted_history_like_next_response(store, target, storage, scope=scope)
-    persisted = storage.load_session(target.session_id, "agent")
+    persisted = storage.load_session(target.session_id)
     assert persisted is not None
     if historical_summary_owner:
         assert persisted.summary is None

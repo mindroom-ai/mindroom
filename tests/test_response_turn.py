@@ -601,7 +601,7 @@ async def test_turn_removes_history_derived_from_a_redacted_event_no_turn_owns(
     )
 
     def _stored_session() -> ConversationSession | None:
-        return storage.load_session("session-1", "team") if team else storage.load_session("session-1", "agent")
+        return storage.load_session("session-1")
 
     lookups: list[tuple[str, ...]] = []
 

@@ -170,7 +170,7 @@ class _Runner:
             )
 
     def _load(self) -> ConversationSession:
-        session = self._storage.load_session(_SESSION, "agent")
+        session = self._storage.load_session(_SESSION)
         assert session is not None
         return session
 

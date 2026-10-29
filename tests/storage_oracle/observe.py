@@ -151,7 +151,7 @@ def observe(
 
     ``run_ids`` are the runs whose folded tool calls are read; by default every run ``list_runs`` returns.
     """
-    session, load_error = _attempt(lambda: store.load_session(session_id, scope.kind))
+    session, load_error = _attempt(lambda: store.load_session(session_id))
     listed, list_error = _attempt(lambda: store.list_runs(session_id))
     folded_of = list(run_ids) if run_ids is not None else [run.run_id for run in listed or []]
     return {

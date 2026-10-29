@@ -413,7 +413,6 @@ class _RecordingStore(ConversationStore):
     def rewrite_run_messages(
         self,
         session_id: str,
-        kind: SessionKind,
         edit: Callable[[list[AnyRunRecord]], list[AnyRunRecord]],
         *,
         session: ConversationSession | None = None,
@@ -428,7 +427,7 @@ class _RecordingStore(ConversationStore):
                 self.saves.append([run.run_id for run in edited])
             return edited
 
-        ConversationStore.rewrite_run_messages(self, session_id, kind, recorded, session=session)
+        ConversationStore.rewrite_run_messages(self, session_id, recorded, session=session)
 
 
 def _recording_store(
@@ -477,13 +476,8 @@ def _seed(
     return seeded
 
 
-def _stored_runs(
-    store: ConversationStore,
-    kind: SessionKind = "agent",
-    *,
-    session_id: str = "session-1",
-) -> list[AnyRunRecord]:
-    session = ConversationStore.load_session(store, session_id, kind)
+def _stored_runs(store: ConversationStore, *, session_id: str = "session-1") -> list[AnyRunRecord]:
+    session = ConversationStore.load_session(store, session_id)
     assert session is not None
     return session.runs
 
@@ -3277,7 +3271,7 @@ async def test_response_finalization_collapses_a_team_runs_current_notice_state(
         assert _notice_count(messages, marker=True) == 1
         await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
 
-    stored = {run.run_id: run for run in _stored_runs(store, "team")}
+    stored = {run.run_id: run for run in _stored_runs(store)}
     assert set(stored) == {"run-1", "member-run-1"}
     stored_team_run = stored["run-1"]
     assert isinstance(stored_team_run, TeamRunRecord)
@@ -3639,7 +3633,7 @@ def test_notice_provider_data_survives_mindroom_sqlite_round_trip(tmp_path: Path
     response_turn_id = "response-1"
     _seed(_queued_notice_storage(tmp_path), _completed("run-1", [_owned_notice(response_turn_id)]))
 
-    session = _queued_notice_storage(tmp_path).load_session("session-1", "agent")
+    session = _queued_notice_storage(tmp_path).load_session("session-1")
 
     assert session is not None
     stored_notice = session.runs[0].messages[0]
@@ -3694,7 +3688,7 @@ async def test_prior_notice_survives_actual_next_provider_request_and_tool_round
     response_1_id = await _persist_notice_bearing_response(tmp_path)
 
     store = _queued_notice_storage(tmp_path)
-    session = store.load_session("session-1", "agent")
+    session = store.load_session("session-1")
     assert session is not None
     model = ScriptedModel([answer("ok")])
     history = scope_history_messages(
@@ -3743,7 +3737,7 @@ async def test_prior_notice_survives_actual_next_provider_request_and_tool_round
         assert _notice_count(seen, marker="persisted", response_turn_id=response_1_id) == 1
         assert _notice_count(seen, response_turn_id=response_2_context.response_turn_id) == 0
 
-    persisted = _queued_notice_storage(tmp_path).load_session("session-1", "agent")
+    persisted = _queued_notice_storage(tmp_path).load_session("session-1")
     assert persisted is not None
     response_1_run, response_2_run = persisted.runs
     assert response_2_run.content == "ok"
