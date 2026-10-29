@@ -180,9 +180,10 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
     name the failure as the provider does, such as ``rate_limit_error`` or ``server_error``; the error keeps ``code``
     as its ``provider_code``. ``retry_after_seconds`` is the response's ``Retry-After`` hint.
 
-    1. A 429 status or a rate-limit name is ``RateLimited``, unless its wording says the request alone is larger than
-       the account's tokens-per-minute limit, which makes it ``ContextWindowExceeded`` marked ``TOKENS_PER_MINUTE``:
-       only a smaller request passes.
+    1. A 429 status, or a rate-limit name on an event without a status, is ``RateLimited``, unless its wording says the
+       request alone is larger than the account's tokens-per-minute limit, which makes it ``ContextWindowExceeded``
+       marked ``TOKENS_PER_MINUTE``: only a smaller request passes. A rate-limit name with that wording decides on any
+       status, as Groq sends it with a 413; otherwise a status other than 429 outranks a rate-limit name.
     2. A transient status, 408, 409, or any 5xx, is ``ProviderUnavailable``, unless its wording is llama.cpp's for an
        input larger than the server's physical batch, which makes it ``ContextWindowExceeded``: only a smaller input
        passes.
@@ -218,9 +219,9 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
 
     if names & _QUOTA_EXHAUSTED_NAMES or any(wording in lowered for wording in _QUOTA_EXHAUSTED_WORDING):
         return typed(ProviderError, marker=QUOTA_EXHAUSTED)
-    if status == _RATE_LIMIT_STATUS or names & _RATE_LIMIT_NAMES:
-        too_large = _REQUEST_TOO_LARGE in lowered
-        return typed(ContextWindowExceeded, marker=TOKENS_PER_MINUTE) if too_large else typed(RateLimited)
+    over_tokens_per_minute = _REQUEST_TOO_LARGE in lowered
+    if status == _RATE_LIMIT_STATUS or (names & _RATE_LIMIT_NAMES and (status is None or over_tokens_per_minute)):
+        return typed(ContextWindowExceeded, marker=TOKENS_PER_MINUTE) if over_tokens_per_minute else typed(RateLimited)
     if status in _TRANSIENT_CLIENT_STATUSES or status in _SERVER_ERROR_RANGE:
         too_large = _PHYSICAL_BATCH_TOO_SMALL in lowered
         return typed(ContextWindowExceeded) if too_large else typed(ProviderUnavailable)

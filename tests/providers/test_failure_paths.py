@@ -832,6 +832,17 @@ _OPENAI_HTTP_CASES = [
         ERROR,
         1,
     ),
+    # A client error stays final whatever type a server gives it, a rate-limit type included; the texts are invented.
+    *(
+        _Case(
+            f"http_{status}_rate_limit_type",
+            _openai_status(status, "Rejected under a rate-limit type.", "rate_limit_error"),
+            InvalidRequest,
+            ERROR,
+            1,
+        )
+        for status in (400, 413)
+    ),
     _Case(
         "http_422",
         _openai_status(422, "Unprocessable Entity: the request body failed validation.", "invalid_request_error"),

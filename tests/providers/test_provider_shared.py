@@ -125,9 +125,12 @@ def test_a_retry_after_header_is_read_as_the_sdks_read_it(headers: dict[str, str
     assert retry_after_seconds(headers, now=now) == seconds
 
 
-@pytest.mark.parametrize("status", [429, None])
+@pytest.mark.parametrize("status", [429, 413, None])
 def test_a_request_above_the_tokens_per_minute_limit_is_too_large_not_rate_limited(status: int | None) -> None:
-    """Only a smaller request passes, and the marker keeps its reply from blaming the context window."""
+    """Only a smaller request passes, and the marker keeps its reply from blaming the context window.
+
+    Groq sends it with a 413 and the same ``rate_limit_exceeded`` code.
+    """
     error = classify_provider_error(_REQUEST_TOO_LARGE, provider="Test", status_code=status, code="rate_limit_exceeded")
 
     assert (type(error), error.retryable, error.code, error.provider_code, error.status_code) == (
