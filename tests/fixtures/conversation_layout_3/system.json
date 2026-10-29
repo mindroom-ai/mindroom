@@ -1,0 +1,528 @@
+{
+ "sessions": {
+  "routing": {
+   "metadata": null,
+   "observed": {
+    "folded_tool_call_ids": {},
+    "force_queued": false,
+    "ledger": [
+     [
+      "routing:s2",
+      {
+       "created_at": 1750000020.0,
+       "kind": "routing",
+       "metrics": {
+        "input_tokens": 30,
+        "output_tokens": 3,
+        "total_tokens": 33
+       },
+       "model": "synthetic-model",
+       "model_provider": "Synthetic",
+       "parent_run_id": null,
+       "requests": [
+        {
+         "created_at": 1750000020.0,
+         "metrics": {
+          "input_tokens": 30,
+          "output_tokens": 3,
+          "total_tokens": 33
+         },
+         "model": "synthetic-model",
+         "model_provider": "Synthetic"
+        }
+       ],
+       "run_id": "routing:s2",
+       "team_id": null,
+       "user_id": null
+      }
+     ]
+    ],
+    "list_runs": [],
+    "loaded_runs": [],
+    "redaction_candidates": [],
+    "request": [
+     {
+      "content": "probe",
+      "created_at": 0,
+      "from_history": false,
+      "id": "probe",
+      "role": "user",
+      "stop_after_tool_call": false
+     }
+    ],
+    "resume_requests": {},
+    "row": {
+     "created_at": 1750000020,
+     "session_data": {
+      "session_state": {}
+     },
+     "updated_at": 1750000020,
+     "user_id": null
+    },
+    "seen_event_ids": [],
+    "session": {
+     "created_at": 1750000020,
+     "kind": "agent",
+     "metadata": null,
+     "owner_id": "system:internal",
+     "session_state": {},
+     "summary": null
+    },
+    "session_runs": []
+   },
+   "runs_by_id": {}
+  },
+  "thread_summary": {
+   "metadata": null,
+   "observed": {
+    "folded_tool_call_ids": {},
+    "force_queued": false,
+    "ledger": [
+     [
+      "thread_summary:s1",
+      {
+       "created_at": 1750000010.0,
+       "kind": "thread_summary",
+       "metrics": {
+        "input_tokens": 30,
+        "output_tokens": 3,
+        "total_tokens": 33
+       },
+       "model": "synthetic-model",
+       "model_provider": "Synthetic",
+       "parent_run_id": null,
+       "requests": [
+        {
+         "created_at": 1750000010.0,
+         "metrics": {
+          "input_tokens": 30,
+          "output_tokens": 3,
+          "total_tokens": 33
+         },
+         "model": "synthetic-model",
+         "model_provider": "Synthetic"
+        }
+       ],
+       "run_id": "thread_summary:s1",
+       "team_id": null,
+       "user_id": null
+      }
+     ]
+    ],
+    "list_runs": [],
+    "loaded_runs": [],
+    "redaction_candidates": [],
+    "request": [
+     {
+      "content": "probe",
+      "created_at": 0,
+      "from_history": false,
+      "id": "probe",
+      "role": "user",
+      "stop_after_tool_call": false
+     }
+    ],
+    "resume_requests": {},
+    "row": {
+     "created_at": 1750000010,
+     "session_data": {
+      "session_state": {}
+     },
+     "updated_at": 1750000010,
+     "user_id": null
+    },
+    "seen_event_ids": [],
+    "session": {
+     "created_at": 1750000010,
+     "kind": "agent",
+     "metadata": null,
+     "owner_id": "system:internal",
+     "session_state": {},
+     "summary": null
+    },
+    "session_runs": []
+   },
+   "runs_by_id": {}
+  }
+ },
+ "updated_sessions": [
+  [
+   "thread_summary",
+   1750000010
+  ],
+  [
+   "routing",
+   1750000020
+  ]
+ ],
+ "usage_rows": [
+  {
+   "mode": "runs",
+   "row": {
+    "entity_id": "system:internal",
+    "entity_kind": "agent",
+    "requester_id": null,
+    "row_key": "thread_summary",
+    "runs": [
+     {
+      "created_at": 1750000010.0,
+      "kind": "thread_summary",
+      "metrics": {
+       "input_tokens": 30,
+       "output_tokens": 3,
+       "total_tokens": 33
+      },
+      "model": "synthetic-model",
+      "model_metrics": [],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": null,
+      "requests": [
+       {
+        "created_at": 1750000010.0,
+        "metrics": {
+         "input_tokens": 30,
+         "output_tokens": 3,
+         "total_tokens": 33
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "thread_summary:s1",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {},
+    "session_metrics_available": false,
+    "session_model_metrics": []
+   },
+   "since": null
+  },
+  {
+   "mode": "runs",
+   "row": {
+    "entity_id": "system:internal",
+    "entity_kind": "agent",
+    "requester_id": null,
+    "row_key": "routing",
+    "runs": [
+     {
+      "created_at": 1750000020.0,
+      "kind": "routing",
+      "metrics": {
+       "input_tokens": 30,
+       "output_tokens": 3,
+       "total_tokens": 33
+      },
+      "model": "synthetic-model",
+      "model_metrics": [],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": null,
+      "requests": [
+       {
+        "created_at": 1750000020.0,
+        "metrics": {
+         "input_tokens": 30,
+         "output_tokens": 3,
+         "total_tokens": 33
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "routing:s2",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {},
+    "session_metrics_available": false,
+    "session_model_metrics": []
+   },
+   "since": null
+  },
+  {
+   "mode": "runs",
+   "row": {
+    "entity_id": "system:internal",
+    "entity_kind": "agent",
+    "requester_id": null,
+    "row_key": "routing",
+    "runs": [
+     {
+      "created_at": 1750000020.0,
+      "kind": "routing",
+      "metrics": {
+       "input_tokens": 30,
+       "output_tokens": 3,
+       "total_tokens": 33
+      },
+      "model": "synthetic-model",
+      "model_metrics": [],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": null,
+      "requests": [
+       {
+        "created_at": 1750000020.0,
+        "metrics": {
+         "input_tokens": 30,
+         "output_tokens": 3,
+         "total_tokens": 33
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "routing:s2",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {},
+    "session_metrics_available": false,
+    "session_model_metrics": []
+   },
+   "since": 0
+  },
+  {
+   "mode": "runs",
+   "row": {
+    "entity_id": "system:internal",
+    "entity_kind": "agent",
+    "requester_id": null,
+    "row_key": "thread_summary",
+    "runs": [
+     {
+      "created_at": 1750000010.0,
+      "kind": "thread_summary",
+      "metrics": {
+       "input_tokens": 30,
+       "output_tokens": 3,
+       "total_tokens": 33
+      },
+      "model": "synthetic-model",
+      "model_metrics": [],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": null,
+      "requests": [
+       {
+        "created_at": 1750000010.0,
+        "metrics": {
+         "input_tokens": 30,
+         "output_tokens": 3,
+         "total_tokens": 33
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "thread_summary:s1",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {},
+    "session_metrics_available": false,
+    "session_model_metrics": []
+   },
+   "since": 0
+  },
+  {
+   "mode": "both",
+   "row": {
+    "entity_id": "system:internal",
+    "entity_kind": "agent",
+    "requester_id": null,
+    "row_key": "thread_summary",
+    "runs": [
+     {
+      "created_at": 1750000010.0,
+      "kind": "thread_summary",
+      "metrics": {
+       "input_tokens": 30,
+       "output_tokens": 3,
+       "total_tokens": 33
+      },
+      "model": "synthetic-model",
+      "model_metrics": [],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": null,
+      "requests": [
+       {
+        "created_at": 1750000010.0,
+        "metrics": {
+         "input_tokens": 30,
+         "output_tokens": 3,
+         "total_tokens": 33
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "thread_summary:s1",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {},
+    "session_metrics_available": true,
+    "session_model_metrics": []
+   },
+   "since": null
+  },
+  {
+   "mode": "both",
+   "row": {
+    "entity_id": "system:internal",
+    "entity_kind": "agent",
+    "requester_id": null,
+    "row_key": "routing",
+    "runs": [
+     {
+      "created_at": 1750000020.0,
+      "kind": "routing",
+      "metrics": {
+       "input_tokens": 30,
+       "output_tokens": 3,
+       "total_tokens": 33
+      },
+      "model": "synthetic-model",
+      "model_metrics": [],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": null,
+      "requests": [
+       {
+        "created_at": 1750000020.0,
+        "metrics": {
+         "input_tokens": 30,
+         "output_tokens": 3,
+         "total_tokens": 33
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "routing:s2",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {},
+    "session_metrics_available": true,
+    "session_model_metrics": []
+   },
+   "since": null
+  },
+  {
+   "mode": "both",
+   "row": {
+    "entity_id": "system:internal",
+    "entity_kind": "agent",
+    "requester_id": null,
+    "row_key": "routing",
+    "runs": [
+     {
+      "created_at": 1750000020.0,
+      "kind": "routing",
+      "metrics": {
+       "input_tokens": 30,
+       "output_tokens": 3,
+       "total_tokens": 33
+      },
+      "model": "synthetic-model",
+      "model_metrics": [],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": null,
+      "requests": [
+       {
+        "created_at": 1750000020.0,
+        "metrics": {
+         "input_tokens": 30,
+         "output_tokens": 3,
+         "total_tokens": 33
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "routing:s2",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {},
+    "session_metrics_available": false,
+    "session_model_metrics": []
+   },
+   "since": 0
+  },
+  {
+   "mode": "both",
+   "row": {
+    "entity_id": "system:internal",
+    "entity_kind": "agent",
+    "requester_id": null,
+    "row_key": "thread_summary",
+    "runs": [
+     {
+      "created_at": 1750000010.0,
+      "kind": "thread_summary",
+      "metrics": {
+       "input_tokens": 30,
+       "output_tokens": 3,
+       "total_tokens": 33
+      },
+      "model": "synthetic-model",
+      "model_metrics": [],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": null,
+      "requests": [
+       {
+        "created_at": 1750000010.0,
+        "metrics": {
+         "input_tokens": 30,
+         "output_tokens": 3,
+         "total_tokens": 33
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "thread_summary:s1",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {},
+    "session_metrics_available": false,
+    "session_model_metrics": []
+   },
+   "since": 0
+  }
+ ]
+}
