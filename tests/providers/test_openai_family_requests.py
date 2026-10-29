@@ -1462,6 +1462,14 @@ def _sent_type(part: dict[str, Any] | None) -> str:
         (File(content=b"started", filename="server.log"), "text", "text/plain"),
         (File(content=b"let x = 1", filename="app.ts"), "text", "text/x-typescript"),
         (File(content=b'syntax = "proto3";', filename="api.proto"), "text", "text/x-protobuf"),
+        (File(content=b"SELECT 1;", filename="q.sql", mime_type="application/sql"), "text", "note application/sql"),
+        (File(content=b"print 1;", filename="a.pl", mime_type="application/x-perl"), "text", "note application/x-perl"),
+        (File(content=b"puts 1", filename="a.rb", mime_type="application/x-ruby"), "text", "note application/x-ruby"),
+        (
+            File(content=b'{"cells": []}', filename="nb.ipynb", mime_type="application/x-ipynb+json"),
+            "text",
+            "note application/x-ipynb+json",
+        ),
         (
             File(content=b"\x08\x96\x01", filename="payload.bin", mime_type="application/x-protobuf"),
             "note application/x-protobuf",

@@ -132,6 +132,10 @@ async def test_claude_reads_every_text_type_and_notes_an_untyped_file_unread(tmp
             File(content=b"caf\xe9,ok", filename="latin.csv"),
             File(content=b"a: 1", filename="config.yaml"),
             File(content=b"From: a@example.org", filename="mail.eml"),
+            File(content=b"SELECT 1;", filename="q.sql", mime_type="application/sql"),
+            File(content=b"print 1;", filename="a.pl", mime_type="application/x-perl"),
+            File(content=b"puts 1", filename="a.rb", mime_type="application/x-ruby"),
+            File(content=b'{"cells": []}', filename="nb.ipynb", mime_type="application/x-ipynb+json"),
         ],
     )
 
@@ -144,6 +148,10 @@ async def test_claude_reads_every_text_type_and_notes_an_untyped_file_unread(tmp
         {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "caf\ufffd,ok"}},
         {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "a: 1"}},
         {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "From: a@example.org"}},
+        *(
+            {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": data}}
+            for data in ("SELECT 1;", "print 1;", "puts 1", '{"cells": []}')
+        ),
     ]
 
 

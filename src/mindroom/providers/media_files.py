@@ -72,14 +72,17 @@ OPENAI_TEXT_TYPES = frozenset(
     },
 )
 # Text types outside ``text/``: OpenAI's, without ``application/x-protobuf``, which usually names a binary payload (a
-# ``.proto`` source file is typed as text by its name), and common declared types for XML, JavaScript, Python, and
-# shell scripts.
+# ``.proto`` source file is typed as text by its name), and common declared types for XML, JavaScript, Python, shell
+# scripts, SQL, Perl, and Ruby, as Linux clients declare them from shared-mime-info.
 _TEXT_MIME_TYPES = (OPENAI_TEXT_TYPES - {"application/x-protobuf"}) | {
     "application/xml",
     "application/x-javascript",
     "application/x-python",
     "application/x-sh",
     "application/x-shellscript",
+    "application/sql",
+    "application/x-perl",
+    "application/x-ruby",
 }
 
 
@@ -153,8 +156,11 @@ def file_mime_type(file: File) -> str:
 
 
 def is_text_mime_type(mime_type: str) -> bool:
-    """Return whether ``mime_type``, as ``file_mime_type`` gives it, is a text type."""
-    return mime_type.startswith("text/") or mime_type in _TEXT_MIME_TYPES
+    """Return whether ``mime_type``, as ``file_mime_type`` gives it, is a text type.
+
+    A ``+json`` structured-syntax type (RFC 6839), such as ``application/x-ipynb+json``, is JSON, which is UTF-8 text.
+    """
+    return mime_type.startswith("text/") or mime_type.endswith("+json") or mime_type in _TEXT_MIME_TYPES
 
 
 def file_text(data: bytes) -> str:
