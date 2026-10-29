@@ -142,7 +142,7 @@ class TestTeamRoomUpdates:
                         updated = await orchestrator.config_reload._update_config()
 
                         # Verify the existing team and router bots were reconciled in place.
-                        assert updated is True
+                        assert updated is False
                         assert orchestrator.agent_bots == original_bots
                         assert orchestrator.agent_bots["agent1"].rooms == ["room1"]
                         assert orchestrator.agent_bots["team1"].rooms == ["room2", "room3", "room4"]

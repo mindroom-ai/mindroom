@@ -316,4 +316,4 @@ async def test_agent_and_team_edits_reach_the_next_response_without_restarting_b
     assert "Answer in one sentence." in agent.prompt.instructions
     assert "calculator" in {toolkit.name for toolkit in agent.spec.toolkits}
     assert runtime.agent_bots["team"].config.teams["team"].mode == "collaborate"
-    assert emit_config_reloaded.await_args.kwargs["changed_entities"] == {"general", "team"}
+    assert emit_config_reloaded.await_args.args[1] == {"general", "team"}
