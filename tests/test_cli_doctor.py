@@ -469,12 +469,12 @@ def test_doctor_checks_the_ollama_servers_memory_reaches_as_the_runtime_resolves
     ]
 
 
-def test_doctor_leaves_an_ollama_memory_llm_without_a_host_to_the_ollama_sdk(
+def test_doctor_checks_the_saved_ollama_host_for_a_memory_llm_without_one(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Mem0 gives the Ollama SDK no host when ``memory.llm.config`` sets none, so the SDK's default server is checked."""
+    """An Ollama memory LLM whose ``config`` sets no host reaches the saved Ollama host, as a model does."""
     runtime_paths = _runtime_with_env(tmp_path, {"OLLAMA_HOST": "http://saved.example:11434"})
     probed = _ollama_servers(monkeypatch)
     config = Config(
@@ -483,8 +483,8 @@ def test_doctor_leaves_an_ollama_memory_llm_without_a_host_to_the_ollama_sdk(
     )
 
     assert _check_memory_llm(config, runtime_paths) == (1, 0, 0)
-    assert _servers_and_keys(probed) == [("http://127.0.0.1:11434/api/tags", None)]
-    assert "Memory LLM: ollama reachable (OLLAMA_HOST or the Ollama SDK default)" in capsys.readouterr().out
+    assert _servers_and_keys(probed) == [("http://saved.example:11434/api/tags", None)]
+    assert "Memory LLM: ollama reachable (http://saved.example:11434)" in capsys.readouterr().out
 
 
 def test_doctor_reports_ollama_settings_it_cannot_read_and_goes_on(
