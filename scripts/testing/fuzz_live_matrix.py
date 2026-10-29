@@ -52,7 +52,7 @@ import yaml
 import mindroom
 from mindroom.constants import AI_RUN_METADATA_KEY, STREAM_STATUS_KEY
 from mindroom.event_journal import turn_rows
-from mindroom.event_journal.identity import journal_principal_id
+from mindroom.event_journal.identity import agent_of_principal, journal_principal_id, matrix_user_of_principal
 from mindroom.event_journal.schema import SQLITE_DIALECT, render
 from mindroom.prompts import AGENT_IDENTITY_CONTEXT_TEMPLATE
 from mindroom.streaming import INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE
@@ -3527,7 +3527,7 @@ class ManagedTuwunelStack:
                 FROM journal_events
                 WHERE principal_id = ? AND event_id = ? AND kind = 'message'
                 """,
-                (f"{AGENT_NAME}@{self.agent_id}", event_id),
+                (journal_principal_id(AGENT_NAME, self.agent_id), event_id),
             ).fetchone()
         if row is None:
             return None
@@ -5783,7 +5783,8 @@ def _parse_runtime_redaction_entry(line: str) -> RuntimeRedactionEntry:
         or type(raw["monotonic_ns"]) is not int
         or raw["monotonic_ns"] <= 0
         or type(raw["already_redacted"]) is not bool
-        or not raw["principal_id"].startswith(raw["agent_name"] + "@@")
+        or agent_of_principal(raw["principal_id"]) != raw["agent_name"]
+        or not matrix_user_of_principal(raw["principal_id"]).startswith("@")
     ):
         msg = "invalid runtime redaction evidence: invalid entry fields"
         raise AssertionError(msg)
@@ -5897,7 +5898,7 @@ class FinalStateAuditor:
     ) -> Mapping[str, TurnRecord]:
         """Join current ownership and positive decisions without rewriting generation outcomes."""
         assert self.ledger_path is not None
-        snapshot = _read_supersession_snapshot(self.ledger_path, f"{AGENT_NAME}@{self.agent_id}")
+        snapshot = _read_supersession_snapshot(self.ledger_path, journal_principal_id(AGENT_NAME, self.agent_id))
         decisions = _supersession_decisions(self.oracle.log_path)
         self.oracle._ledger_redactions = snapshot.redacted
         self.oracle.journal_event_states = {event_id: row.state for event_id, row in snapshot.sources.items()}
@@ -6000,7 +6001,7 @@ class FinalStateAuditor:
             newer,
             *anchor,
             old_response,
-            f"{AGENT_NAME}@{self.agent_id}",
+            journal_principal_id(AGENT_NAME, self.agent_id),
             row.room_id,
             root,
             row.sender,
@@ -6796,7 +6797,7 @@ class FinalStateAuditor:
         """Return the edits MindRoom settled without regenerating a reply, as it does for an older message's edit."""
         if self.ledger_path is None or not self.ledger_path.exists():
             return frozenset()
-        snapshot = _read_supersession_snapshot(self.ledger_path, f"{AGENT_NAME}@{self.agent_id}")
+        snapshot = _read_supersession_snapshot(self.ledger_path, journal_principal_id(AGENT_NAME, self.agent_id))
         return frozenset(
             edit_id
             for revisions in self.source_revision_markers.values()
@@ -9732,7 +9733,7 @@ def _sanitized_oracle_snapshot(oracle: ExactReplyOracle) -> dict[str, object]:
     references, and settlement counters are retained for diagnosis.
     """
     return {
-        "principal_id": f"{AGENT_NAME}@{oracle.agent_id}",
+        "principal_id": journal_principal_id(AGENT_NAME, oracle.agent_id),
         "expected_sources": dict(oracle.expected_sources),
         "optional_sources": sorted(oracle.optional_sources),
         "observed_sources": sorted(oracle.observed_sources),

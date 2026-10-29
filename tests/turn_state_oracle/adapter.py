@@ -24,6 +24,7 @@ from mindroom.event_journal import (
     journal,
     turn_rows,
 )
+from mindroom.event_journal.identity import journal_principal_id
 from mindroom.event_journal.legacy_turn_rows import legacy_summary_sources
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -40,7 +41,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal.backend import Transaction
 
 AGENT = "agent"
-PRINCIPAL = f"{AGENT}@@mindroom_agent:example.org"
+PRINCIPAL = journal_principal_id(AGENT, "@mindroom_agent:example.org")
 REQUESTER = "@alice:example.org"
 ROOMS = {"a": "!a:example.org", "b": "!b:example.org"}
 TARGETS = {key: MessageTarget.resolve(room_id, f"$thread-{key}", None) for key, room_id in ROOMS.items()}

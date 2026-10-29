@@ -21,6 +21,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
 from mindroom.event_journal import journal, turn_rows
+from mindroom.event_journal.identity import journal_principal_id
 from mindroom.event_journal.models import ResponseRecoveryState
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.storage import (
@@ -116,7 +117,7 @@ async def _redact(
 
 async def _store(journal_store: EventJournalStore, *, agent_name: str = "agent") -> TurnStore:
     """Return a store over this journal's turn rows, started as a runtime starts it."""
-    principal = journal_store.principal(f"{agent_name}@alice")
+    principal = journal_store.principal(journal_principal_id(agent_name, "alice"))
     store = TurnStore(
         TurnStoreDeps(
             turn_records=journal_store.turn_records(agent_name),

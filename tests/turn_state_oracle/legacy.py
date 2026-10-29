@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from mindroom.event_journal.identity import journal_principal_id
 from tests.turn_state_oracle.actions import Action, op
 from tests.turn_state_oracle.adapter import AGENT, EPOCH, PRINCIPAL, REQUESTER, ROOMS, SCOPE, TARGETS
 
@@ -170,7 +171,7 @@ FIXTURES: dict[str, LegacyFixture] = {
         tombstones=(
             (PRINCIPAL, ROOMS["b"], "$m6"),
             (PRINCIPAL, ROOMS["a"], "$x1"),
-            (f"{AGENT}@@old_login:example.org", ROOMS["a"], "$x2"),
+            (journal_principal_id(AGENT, "@old_login:example.org"), ROOMS["a"], "$x2"),
         ),
         actions=(
             op("admit", events=["$m6", "$m7"], room="a"),

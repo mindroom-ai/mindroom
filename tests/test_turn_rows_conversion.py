@@ -26,6 +26,7 @@ from mindroom.event_journal import (
     turn_rows,
     upgrades,
 )
+from mindroom.event_journal.identity import journal_principal_id
 from mindroom.event_journal.legacy_turn_rows import (
     import_legacy_ledger_file,
     legacy_summary_sources,
@@ -51,7 +52,7 @@ pytestmark = pytest.mark.asyncio
 
 ROOM = ROOMS["a"]
 TARGET = TARGETS["a"]
-EARLIER_LOGIN = f"{AGENT}@@old_login:example.org"
+EARLIER_LOGIN = journal_principal_id(AGENT, "@old_login:example.org")
 CONTROL = "other@@other:example.org"
 VOICE = PreparedVoiceSource.from_content("transcript", {"msgtype": "m.text", "body": "transcript"})
 

@@ -67,6 +67,7 @@ from mindroom.event_journal import (
     turn_rows,
 )
 from mindroom.event_journal.approval_signals import ApprovalSignals, PausedReply
+from mindroom.event_journal.identity import agent_of_principal
 from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
 from mindroom.event_journal.offloading import ThreadOffload, settled
 from mindroom.event_journal.reads import _CONVERSATION_CURSOR_CLAUSE
@@ -665,9 +666,10 @@ async def _activate_interactive_question(
 
 
 async def _interactive_question_rows(store: EventJournalStore) -> list[dict[str, object]]:
-    """Return currently visible, unconsumed questions as plain test evidence."""
-    rows = await store.backend.read(
-        lambda transaction: transaction.fetchall(
+    """Return currently visible, unconsumed, unredacted questions as plain test evidence."""
+
+    def read(transaction: Transaction) -> list[dict[str, object]]:
+        rows = transaction.fetchall(
             """
             SELECT iq.principal_id, iq.question_event_id, iq.room_id, vm.thread_id,
                    iq.revision_event_id, iq.question_json, vm.membership_epoch
@@ -678,17 +680,21 @@ async def _interactive_question_rows(store: EventJournalStore) -> list[dict[str,
              AND vm.logical_event_id = iq.question_event_id
              AND vm.revision_event_id = iq.revision_event_id
             WHERE iq.consumed_by_source_event_id IS NULL
-              AND NOT EXISTS (
-                  SELECT 1 FROM event_redactions AS redaction
-                  WHERE substr(iq.principal_id, 1, length(redaction.agent_name) + 1) = redaction.agent_name || '@'
-                    AND redaction.room_id = iq.room_id
-                    AND redaction.event_id = iq.revision_event_id
-              )
             ORDER BY iq.question_event_id
             """,
-        ),
-    )
-    return [dict(row) for row in rows]
+        )
+        return [
+            dict(row)
+            for row in rows
+            if not turn_rows.redacted_events(
+                transaction,
+                agent_of_principal(str(row["principal_id"])),
+                str(row["room_id"]),
+                (str(row["revision_event_id"]),),
+            )
+        ]
+
+    return await store.backend.read(read)
 
 
 async def _interactive_selection_rows(store: EventJournalStore) -> list[dict[str, object]]:

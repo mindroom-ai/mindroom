@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom.event_journal import EventJournalStore, journal, turn_rows
+from mindroom.event_journal.identity import journal_principal_id
 from mindroom.event_journal.turn_rows import Accepted, Answered, Refused
 from mindroom.history.types import HistoryScope
 from mindroom.message_target import MessageTarget
@@ -882,9 +883,9 @@ class TestAgentRedaction:
     ) -> None:
         """Every principal of the agent loses the message and another agent keeps it."""
         store = journal_database()
-        current = f"{AGENT}@@bot:example.org"
-        earlier = f"{AGENT}@@old-login:example.org"
-        control = f"{OTHER_AGENT}@@other:example.org"
+        current = journal_principal_id(AGENT, "@bot:example.org")
+        earlier = journal_principal_id(AGENT, "@old-login:example.org")
+        control = journal_principal_id(OTHER_AGENT, "@other:example.org")
         for principal_id in (current, earlier, control):
             await admit(store.principal(principal_id), "$m", room_id=ROOM)
         await accepted(store, turn(["$m"]))
@@ -924,11 +925,15 @@ class TestAgentRedaction:
         store: EventJournalStore,
     ) -> None:
         """The principals of an agent are matched by their exact prefix."""
-        for principal_id in (f"{AGENT}@@a:example.org", f"{AGENT.upper()}@@b:example.org", f"{AGENT}x@@c:example.org"):
+        for principal_id in (
+            journal_principal_id(AGENT, "@a:example.org"),
+            journal_principal_id(AGENT.upper(), "@b:example.org"),
+            journal_principal_id(f"{AGENT}x", "@c:example.org"),
+        ):
             await admit(store.principal(principal_id), "$m", room_id=ROOM)
 
         principals = await store.backend.read(
             lambda transaction: journal._principals_of_agent(transaction, AGENT, room_id=ROOM),
         )
 
-        assert principals == (f"{AGENT}@@a:example.org",)
+        assert principals == (journal_principal_id(AGENT, "@a:example.org"),)
