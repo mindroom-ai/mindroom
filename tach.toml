@@ -59,7 +59,6 @@ depends_on = [
     "mindroom.embeddings.ollama_embedder",
     "mindroom.embeddings.openai_embedder",
     "mindroom.embeddings.sentence_transformers_embedder",
-    "mindroom.model_defaults",
 ]
 
 [[modules]]
@@ -1397,6 +1396,7 @@ depends_on = [
     "mindroom.ai_runtime",
     "mindroom.approval.receipt",
     "mindroom.history.mid_turn_compaction",
+    "mindroom.history.types",
     "mindroom.llm",
     "mindroom.participation_hook",
     "mindroom.skill_learning.capture",
@@ -8169,7 +8169,6 @@ depends_on = [
     "mindroom.workspaces",
     "mindroom.delegation.hooks",
     "mindroom.turn_continuation",
-    "mindroom.history.types",
     "mindroom.redaction",
     "mindroom.delegation.storage",
     "mindroom.session_storage.agent_storage",
@@ -8212,7 +8211,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.delegation.state"
-depends_on = ["mindroom.tool_system.worker_routing"]
+depends_on = ["mindroom.history.types", "mindroom.tool_system.worker_routing"]
 
 [[modules]]
 path = "mindroom.delegation.hooks"
@@ -8469,7 +8468,6 @@ path = "mindroom.providers.ollama.adapter"
 depends_on = [
     "mindroom.credentials.sync",
     "mindroom.llm",
-    "mindroom.model_defaults",
     "mindroom.providers.assistant_turn",
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.media_files",
@@ -9769,7 +9767,12 @@ visibility = ["mindroom.skill_learning.runner", "mindroom.skill_learning.tools"]
 
 [[modules]]
 path = "mindroom.skill_learning.transcript"
-depends_on = ["mindroom.agent_loop", "mindroom.history.conversation_text", "mindroom.history.run_visibility"]
+depends_on = [
+    "mindroom.agent_loop",
+    "mindroom.history.conversation_text",
+    "mindroom.history.run_visibility",
+    "mindroom.history.types",
+]
 visibility = ["mindroom.skill_learning.reviewer", "mindroom.skill_learning.runner"]
 
 [[modules]]
@@ -9796,7 +9799,6 @@ depends_on = [
     "mindroom.approval.tool_approval",
     "mindroom.session_storage.agent_storage",
     "mindroom.helper_usage",
-    "mindroom.history.types",
     "mindroom.llm",
     "mindroom.model_usage",
     "mindroom.providers.registry",
@@ -10010,7 +10012,6 @@ depends_on = [
     "mindroom.history.runtime",
     "mindroom.history.storage",
     "mindroom.history.summary_message",
-    "mindroom.history.types",
     "mindroom.llm",
     "mindroom.native_compaction",
     "mindroom.providers.anthropic.prompt_cache",

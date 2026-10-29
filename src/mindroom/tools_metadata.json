@@ -3671,7 +3671,7 @@
         },
         {
           "authored_override": true,
-          "default": "gemini-3.1-flash-image",
+          "default": "gemini-nano-banana-2.1",
           "description": null,
           "label": "Image Generation Model",
           "name": "image_generation_model",

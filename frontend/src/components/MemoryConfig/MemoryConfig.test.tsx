@@ -216,6 +216,42 @@ describe("MemoryConfig", () => {
     expect(hostInput).toHaveValue("http://localhost:11434");
   });
 
+  it("leaves an unset Ollama host empty, so a save keeps OLLAMA_HOST in charge", async () => {
+    (useConfigStore as any).mockReturnValue({
+      config: {
+        memory: {
+          embedder: {
+            provider: "ollama",
+            config: { model: "nomic-embed-text" },
+          },
+        },
+      },
+      updateMemoryConfig: mockUpdateMemoryConfig,
+      saveConfig: mockSaveConfig,
+      isDirty: false,
+    });
+
+    render(<MemoryConfig />);
+
+    const hostInput = document.getElementById("host") as HTMLInputElement;
+    expect(hostInput).toHaveValue("");
+    expect(hostInput).toHaveAttribute("placeholder", "http://localhost:11434");
+    expect(screen.getByText("Ollama Host URL")).not.toHaveTextContent("*");
+    expect(screen.getByText(/Empty uses OLLAMA_HOST/)).toBeInTheDocument();
+
+    fireEvent.change(document.getElementById("model") as HTMLInputElement, {
+      target: { value: "mxbai-embed-large" },
+    });
+
+    await waitFor(() => {
+      const calls = mockUpdateMemoryConfig.mock.calls;
+      expect(calls[calls.length - 1]?.[0]?.embedder).toEqual({
+        provider: "ollama",
+        config: { model: "mxbai-embed-large", host: "" },
+      });
+    });
+  });
+
   it("hides host input for sentence-transformers provider", () => {
     const localConfig: Partial<Config> = {
       memory: {
@@ -262,7 +298,7 @@ describe("MemoryConfig", () => {
             provider: "ollama",
             config: expect.objectContaining({
               model: "nomic-embed-text",
-              host: "http://localhost:11434",
+              host: "",
             }),
           }),
         }),

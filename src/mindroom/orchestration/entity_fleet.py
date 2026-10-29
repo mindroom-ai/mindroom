@@ -356,7 +356,7 @@ class EntityFleet:
         )
         if cancellation is not None:
             cancellations.append(cancellation)
-        deferred_bots = [bot for bot in bots if bot.deferred_stop_required is True]
+        deferred_bots = [bot for bot in bots if bot.deferred_stop_required]
         pending_owner_count = sum(bot.pending_response_owner_count for bot in bots)
         if pending_owner_count > 0:
             logger.warning(
@@ -386,7 +386,7 @@ class EntityFleet:
         finished_deferred = {
             id(bot)
             for bot, result in zip(deferred_bots, deferred_results, strict=True)
-            if not isinstance(result, BaseException) and bot.deferred_stop_required is False
+            if not isinstance(result, BaseException) and not bot.deferred_stop_required
         }
         cleanup_failures = [
             result
@@ -395,7 +395,7 @@ class EntityFleet:
             and not (id(bot) in finished_deferred and isinstance(result, ResponseShutdownTimeoutError))
         ]
         pending_owner_count = sum(bot.pending_response_owner_count for bot in bots)
-        callback_cleanup_pending = any(bot.deferred_stop_required is True for bot in bots)
+        callback_cleanup_pending = any(bot.deferred_stop_required for bot in bots)
         if pending_owner_count > 0 or callback_cleanup_pending:
             logger.warning(
                 "orchestrator_shared_journal_close_deferred",

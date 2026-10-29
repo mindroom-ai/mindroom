@@ -67,7 +67,11 @@ def _stream(**options: object) -> AsyncIterator[RunEvent]:
         _paused_run(),
         record_type=RunRecord,
         continue_parent=_UnusedContinuation(
-            RunStorage(None, new_scope_session(session_id="session-1", scope_id="leader", is_team=False), None),
+            RunStorage(
+                None,
+                new_scope_session(session_id="session-1", scope=HistoryScope(kind="agent", scope_id="leader")),
+                None,
+            ),
         ),
         agent_name="leader",
         run_child=cast("Callable", None),
@@ -86,7 +90,11 @@ async def test_the_driver_refuses_a_paused_run_whose_owner_is_not_a_matrix_conve
         _paused_run(),
         record_type=RunRecord,
         continue_parent=_UnusedContinuation(
-            RunStorage(None, new_scope_session(session_id="session-1", scope_id="leader", is_team=False), None),
+            RunStorage(
+                None,
+                new_scope_session(session_id="session-1", scope=HistoryScope(kind="agent", scope_id="leader")),
+                None,
+            ),
         ),
         agent_name="leader",
         run_child=cast("Callable", None),
@@ -276,7 +284,10 @@ async def test_a_consumer_failure_during_the_continuation_stores_the_cancelled_p
         knowledge=None,
         model=turn_model(config, paths, "leader"),
     )
-    session = new_scope_session(session_id=identity.session_id or "", scope_id="leader", is_team=False)
+    session = new_scope_session(
+        session_id=identity.session_id or "",
+        scope=HistoryScope(kind="agent", scope_id="leader"),
+    )
     ctx = RunContext(run_id="parent-run", session=UnstoredSession(session.session_id), user_id=identity.requester_id)
     request = [*prompt_for_turn(build), Message(role="user", content="Delegate")]
 

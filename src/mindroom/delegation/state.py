@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, get_args
 
+from mindroom.history.types import HistoryScope
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
@@ -138,6 +139,11 @@ def child_execution_identity(child: DelegationChild) -> ToolExecutionIdentity:
         msg = "Delegation child execution identity does not match its retained wait"
         raise RuntimeError(msg)
     return identity
+
+
+def child_scope(child: DelegationChild) -> HistoryScope:
+    """Return the history scope the child's runs are stored in: its agent's."""
+    return HistoryScope(kind="agent", scope_id=child.child_agent_name)
 
 
 @dataclass

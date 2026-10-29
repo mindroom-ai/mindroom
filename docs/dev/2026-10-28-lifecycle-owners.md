@@ -13,14 +13,12 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 - Removal settles approval continuations before the config that removes the entity is published, through an explicit "removed" entry, so recovery never depends on which config is live.
   An entity whose frozen FINAL recovery is still unresolved does not leave its rooms, so the recovery retry can still deliver there.
 - Three authorization predicates stay separate because they gate different things: any reply-authorization input (publication waits for replies), a continuing agent's responder access (background scripts are re-authorized; a broader trigger would end scripts whose bot is merely restarting, because an unavailable bot cannot confirm authority), and room-membership grant inputs (grants are revoked until the router refreshes, which blocks replies, so it must not fire on extra inputs).
-- One entity fleet holds each entity's bot, sync task, start retry, and disabled flag in one slot, with one stop sequence per reason.
-  A restart tolerates only a reply that outlived the drain, because the replacement replays it; removal and process shutdown keep a bot that still owns cleanup registered until its deferred stop finishes.
+- A restart tolerates only a reply that outlived the drain, because the replacement replays it.
 - A bot start is one attempt and the fleet owns every retry, because a retry inside the fleet's own retry loop multiplies attempts and delays the degraded report.
-- An edit made while MindRoom starts is applied once startup publishes its config: a reload request made before the runtime runs is kept, and startup reloads once if the config files changed since it loaded them.
 - Each scheduled task has one owner bot, decided once when the task is saved and stored in its state: the router when the room's full state lets it send the task's trigger and write schedule state, else the bot that saved the task.
   Recomputing the owner at each restore from the latest writer would disagree with creation twice over: a synced room view lazy-loads members, so it can lack a joined router that the full state shows, and an edit by another agent makes that agent the latest writer while the runner stays with the creator.
   Edits, status writes, and cancellations keep the stored owner whichever bot writes them, so a restarting owner keeps its tasks and its recurring checkpoint key, and every bot that restores the room reads the same owner.
-  Runners outlive their owner's restarts instead of being cancelled and restored, because a restore races the replacement's own restore on join and a cancelled send has no safe replay; a stopping owner admits no new operation and its operations in flight drain, bounded, before its client closes.
+  Runners outlive their owner's restarts instead of being cancelled and restored, because a restore races the replacement's own restore on join and a cancelled send has no safe replay.
 - A removed entity's scheduled tasks fail; they are never handed to another bot.
   The maintainer decided this: removal is deliberate, and a reminder that silently starts posting as a different agent, with that agent's room access, is worse than one that stops and says why.
   The removed bot fails each task it runs while it still has its client and before it leaves its rooms, so it can explain in each task's thread; restarts never fail a task.
@@ -51,11 +49,10 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 - An edit made while MindRoom starts is loaded once for the dashboard after the reload debounce and again when startup applies it, because keeping the first load for later would need its own check that nothing superseded it.
 - A homeserver that does not answer within the stop budget while an agent is removed leaves that agent's unsettled schedules pending, or failed without their notice; withdrawing a scheduled tool call's approval card that is already sending still finishes first, because a started journal delivery always completes.
   A pending one fails only when a bot that may write schedule state restores its room later, which never happens in the removed agent's own DMs.
-- A schedule edit saved while its agent restarts, in the seconds before the schedule fires, can be overwritten: the runner fires the version it read before the restart and then writes its status over the edit, as on main within the milliseconds between its read and its send.
+- A schedule edit saved while its agent restarts, in the seconds before the schedule fires, can be overwritten: the runner fires the version it read before the restart and then writes its status over the edit, the same race that any edit has in the milliseconds between a runner's read and its send.
 - A removed entity that leaves no room, because its frozen FINAL recovery is still unresolved or it never started, is removed from its rooms by the next router start's orphan cleanup.
 - A file edit made while another reload applies, or a second file edit made while an MCP catalog restart drains responses, reaches the dashboard only after that step; a dashboard save in that window overwrites it.
   The drain lasts at most 600 seconds, but an apply that creates Matrix accounts waits for an unreachable homeserver for as long as it is down.
   Closing it would need a loader beside the reload loop, a second owner of each load, and loading plugin modules concurrently with plugin staging.
 - A removal that cannot stop a reply still running after the drain and its cancellation fails the whole reload before publication.
   The next config change first restores the last fully applied config, which rebuilds every entity the failed reload removed or left half-stopped, and then removes each entity the new config still omits.
-  Removal runs before publication so the departing entity settles its approvals while the current router still delivers notices.

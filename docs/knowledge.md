@@ -285,7 +285,7 @@ With `chunk_context_model`, a model reads each chunk of a multi-chunk file toget
 models:
   fast:
     provider: openai
-    id: gpt-5.4-mini
+    id: gpt-6-luna
 
 knowledge_bases:
   docs:

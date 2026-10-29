@@ -15,7 +15,6 @@ from mindroom.history.replay import (
 from mindroom.history.summary_message import compaction_summary_message
 from mindroom.history.types import (
     HistoryPolicy,
-    HistoryScope,
     ScopeSummary,
 )
 from mindroom.llm.messages import Message
@@ -135,7 +134,6 @@ def test_estimate_prompt_visible_history_tokens_never_mutates_session_messages()
 
     estimated_tokens = estimate_prompt_visible_history_tokens(
         session=session,
-        scope=HistoryScope(kind="agent", scope_id="test_agent"),
         history_settings=history_settings,
         replay_estimator=None,
     )
@@ -166,12 +164,10 @@ def test_estimate_prompt_visible_history_tokens_excludes_legacy_persisted_prompt
 
     assert estimate_prompt_visible_history_tokens(
         session=contaminated_session,
-        scope=HistoryScope(kind="agent", scope_id="test_agent"),
         history_settings=history_settings,
         replay_estimator=None,
     ) == estimate_prompt_visible_history_tokens(
         session=clean_session,
-        scope=HistoryScope(kind="agent", scope_id="test_agent"),
         history_settings=history_settings,
         replay_estimator=None,
     )
@@ -208,7 +204,6 @@ def test_estimate_prompt_visible_history_tokens_drops_a_tool_result_whose_call_t
 
     estimated_tokens = estimate_prompt_visible_history_tokens(
         session=session,
-        scope=HistoryScope(kind="agent", scope_id="test_agent"),
         history_settings=history_settings,
         replay_estimator=None,
     )
@@ -229,7 +224,6 @@ def test_estimate_prompt_visible_history_tokens_counts_summary_after_compaction_
 
     estimated_tokens = estimate_prompt_visible_history_tokens(
         session=session,
-        scope=HistoryScope(kind="agent", scope_id="test_agent"),
         history_settings=history_settings,
         replay_estimator=None,
     )

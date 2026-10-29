@@ -288,7 +288,6 @@ async def _supersession_case(
     )
     client.paginate_room = AsyncMock(side_effect=lambda _: list(events.values()))
     oracle.observed_markers_for = auditor.observed_markers_for
-    oracle.source_current_markers = {"$old": "MRK[src=op:1;rev=orig]", "$new": "MRK[src=op:2;rev=orig]"}
     return _SupersessionCase(journal, oracle, auditor, events)
 
 
@@ -943,7 +942,6 @@ async def test_supersession_terminal_edit_must_belong_to_response_room(tmp_path:
     }
     original["content"][live_fuzz.STREAM_STATUS_KEY] = "streaming"
     original["content"]["body"] = "LIVE-FUZZ call=1 END call=1"
-    case.auditor.source_current_markers = dict(case.oracle.source_current_markers)
     try:
         case.auditor._observe_supersession(case.events)
         assert ("$old" in case.auditor.supersession_proofs) is not foreign_room
@@ -1173,7 +1171,6 @@ async def test_supersession_live_runner_retains_records_added_after_construction
     runner.oracle.ledger_path = case.oracle.ledger_path
     runner.oracle.expected_body_for = case.oracle.expected_body_for
     runner.oracle.observed_markers_for = case.oracle.observed_markers_for
-    runner.source_current_markers.update(case.oracle.source_current_markers)
     for source, logical in case.oracle.expected_sources.items():
         runner.oracle.expect(logical, source, thread=case.oracle.source_threads[source])
     for event in case.events.values():

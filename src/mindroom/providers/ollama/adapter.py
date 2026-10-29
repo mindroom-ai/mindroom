@@ -22,7 +22,6 @@ from mindroom.llm.messages import tool_result_view, with_joined_system
 from mindroom.llm.provider import Capabilities, ModelIdentity, ReasoningDelta, TextDelta, ToolCallReady, UsageReported
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.providers.assistant_turn import ThinkTagSplitter, TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
 from mindroom.providers.media_files import read_media_bytes
@@ -295,11 +294,10 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Ol
     extra_kwargs = {**(model_config.extra_kwargs or {}), "api_key": api_key}
     settings = settings_from_extra_kwargs(OllamaSettings, extra_kwargs, provider=model_config.provider)
     # ``client_params`` wins over every client option, so its ``host`` is the server requests reach.
-    host = str(
-        (settings.client_params or {}).get("host")
-        or model_config.host
-        or get_ollama_host(runtime_paths=runtime_paths)
-        or OLLAMA_HOST_DEFAULT,
+    host = get_ollama_host(
+        runtime_paths=runtime_paths,
+        configured_host=(settings.client_params or {}).get("host") or model_config.host,
+        saved_first=False,
     )
     return OllamaProvider(
         identity=ModelIdentity(

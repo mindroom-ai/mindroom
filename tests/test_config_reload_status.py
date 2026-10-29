@@ -4,16 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-from functools import partial
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
-from mindroom.config.main import Config, load_config
+from mindroom.config.main import load_config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle, load_published_config
-from mindroom.response_admission import ResponseAdmissionGate
+from tests.conftest import make_config_reload_lifecycle
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -47,27 +45,11 @@ def test_loaded_fingerprint_covers_includes_and_survives_disk_changes(tmp_path: 
     assert copied.source_fingerprint == original.source_fingerprint
 
 
-def _lifecycle(tmp_path: Path) -> ConfigReloadLifecycle:
-    runtime_paths = _paths(tmp_path)
-    return ConfigReloadLifecycle(
-        runtime_paths=runtime_paths,
-        is_running=lambda: True,
-        current_config=Config,
-        agent_bots=dict,
-        load_config=partial(load_published_config, runtime_paths, api_enabled=False),
-        apply_update_plan=AsyncMock(return_value=True),
-        response_admission_gate=ResponseAdmissionGate(),
-        before_runtime_replacement=AsyncMock(),
-        rebind_published_config_consumers=MagicMock(),
-        finish_reload=AsyncMock(),
-    )
-
-
 @pytest.mark.asyncio
 async def test_confirmation_waits_for_apply_completion(tmp_path: Path) -> None:
     """Loading and publishing a config cannot acknowledge a blocked runtime apply."""
     (tmp_path / "config.yaml").write_text("defaults: {enable_streaming: false}\n")
-    lifecycle = _lifecycle(tmp_path)
+    lifecycle = make_config_reload_lifecycle(_paths(tmp_path))
     entered = asyncio.Event()
     release = asyncio.Event()
 
@@ -96,7 +78,7 @@ async def test_comment_only_edit_is_acknowledged(tmp_path: Path) -> None:
     """Equivalent authored config still acknowledges the newly loaded source bytes."""
     path = tmp_path / "config.yaml"
     path.write_text("{}\n")
-    lifecycle = _lifecycle(tmp_path)
+    lifecycle = make_config_reload_lifecycle(_paths(tmp_path))
     current = load_config(lifecycle.runtime_paths)
     lifecycle.current_config = lambda: current
     lifecycle._record_applied(current)
@@ -114,7 +96,7 @@ async def test_failure_reports_the_attempted_source(tmp_path: Path, failure: str
     """Rejected config and failed runtime application cannot produce a success receipt."""
     path = tmp_path / "config.yaml"
     path.write_text("{}\n")
-    lifecycle = _lifecycle(tmp_path)
+    lifecycle = make_config_reload_lifecycle(_paths(tmp_path))
     current = load_config(lifecycle.runtime_paths)
     lifecycle.current_config = lambda: current
     lifecycle._record_applied(current)
@@ -135,7 +117,7 @@ async def test_failure_reports_the_attempted_source(tmp_path: Path, failure: str
 async def test_malformed_include_failure_has_no_unproven_fingerprint(tmp_path: Path) -> None:
     """An incomplete parse cannot attribute its failure to a complete source tree."""
     (tmp_path / "config.yaml").write_text("defaults: !include missing.yaml\n")
-    lifecycle = _lifecycle(tmp_path)
+    lifecycle = make_config_reload_lifecycle(_paths(tmp_path))
     await lifecycle._apply_queued_config_reload()
     assert lifecycle.status.status == "failed"
     assert lifecycle.status.fingerprint is None
@@ -145,7 +127,7 @@ async def test_malformed_include_failure_has_no_unproven_fingerprint(tmp_path: P
 async def test_queued_change_preserves_active_failure_fingerprint(tmp_path: Path) -> None:
     """A newer file event cannot erase attribution for an apply already in progress."""
     (tmp_path / "config.yaml").write_text("defaults: {enable_streaming: false}\n")
-    lifecycle = _lifecycle(tmp_path)
+    lifecycle = make_config_reload_lifecycle(_paths(tmp_path))
     expected = load_config(lifecycle.runtime_paths).source_fingerprint
 
     async def fail_after_new_change(_config: object, _plan: object) -> bool:

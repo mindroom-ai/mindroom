@@ -168,7 +168,7 @@ def _replay(tmp_path: Path) -> _Replay:
     return _Replay(
         loaded=[run.run_id or "" for run in session.runs or []],
         summary=session.summary.text if session.summary is not None else None,
-        seen=read_scope_seen_event_ids(storage, session, _SCOPE),
+        seen=read_scope_seen_event_ids(storage, session),
         stored=stored_run_ids(storage, "s1"),
         folded=folded_run_ids(storage, "s1"),
     )

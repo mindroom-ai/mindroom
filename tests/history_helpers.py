@@ -28,7 +28,7 @@ from mindroom.history.compaction import Summarizer, SummaryModel
 from mindroom.history.storage import (
     _with_scope_state,
     append_compaction_chunk,
-    first_scope_session,
+    new_scope_session,
     read_chunk_basis,
 )
 from mindroom.history.summary_input import build_summary_input
@@ -41,6 +41,7 @@ from mindroom.history.types import (
     HistoryScope,
     HistoryScopeState,
     ResolvedHistorySettings,
+    owner_scope,
 )
 from mindroom.hooks import (
     HookRegistry,
@@ -554,30 +555,23 @@ def folds_of(storage: ConversationStore, scope_key: str, session_id: str = "sess
 def compact_runs(
     storage: ConversationStore,
     session: ConversationSession,
-    scope: HistoryScope,
     run_ids: list[str],
     summary: str,
 ) -> None:
-    """Append one compaction chunk folding ``run_ids`` behind ``summary``, as compaction commits a chunk."""
+    """Append one compaction chunk folding ``run_ids`` behind ``summary`` in ``session``'s scope, as compaction does."""
+    latest = summary_rows.latest_row(storage, session_id=session.session_id, scope_key=owner_scope(session).key)
     assert append_compaction_chunk(
         storage=storage,
         session=session,
-        scope=scope,
         basis=read_chunk_basis(
             storage,
             session,
-            scope,
             run_ids,
-            previous_summary=_stored_summary(storage, session, scope),
+            previous_summary=latest.summary if latest is not None else None,
         ),
         included_run_ids=run_ids,
         summary=summary,
     )
-
-
-def _stored_summary(storage: ConversationStore, session: ConversationSession, scope: HistoryScope) -> str | None:
-    latest = summary_rows.latest_row(storage, session_id=session.session_id, scope_key=scope.key)
-    return latest.summary if latest is not None else None
 
 
 def seed_summary(storage: ConversationStore, session: ConversationSession, scope: HistoryScope, summary: str) -> None:
@@ -625,7 +619,7 @@ def store_fold(
             messages=tuple(Message(role="tool", tool_call_id=call_id) for call_id in tool_call_ids),
             member_run_ids=frozenset(),
         ),
-        initial_session=first_scope_session(scope, session_id),
+        initial_session=new_scope_session(session_id=session_id, scope=scope),
     )
     assert row_id is not None
     return row_id

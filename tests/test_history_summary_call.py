@@ -384,7 +384,7 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
     assert persisted is not None
     assert persisted.summary is None
     assert len(persisted.runs) == 4
-    assert read_scope_state(persisted, scope).force_compact_before_next_run is False
+    assert read_scope_state(persisted).force_compact_before_next_run is False
     assert prepared.compaction_reply_outcome == "timeout"
     events = [entry["event"] for entry in logs]
     assert "Compaction failed; continuing without compaction" in events

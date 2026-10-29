@@ -32,7 +32,6 @@ if TYPE_CHECKING:
 
 _AGENT = "agent:code"
 _TEAM = "team:crew"
-_SCOPE = HistoryScope(kind="agent", scope_id="code")
 _NON_VISIBLE = {RunStatus.paused, RunStatus.cancelled, RunStatus.error}
 
 
@@ -365,7 +364,7 @@ def test_a_chunk_refuses_history_that_changed_after_the_session_loaded(store: Co
     else:
         assert store.save_interrupted_record(_session(), _run("r2", RunStatus.cancelled)) == "written"
 
-    assert read_chunk_basis(store, session, _SCOPE, ["r1", "r2", "r3"], previous_summary="S1") is None
+    assert read_chunk_basis(store, session, ["r1", "r2", "r3"], previous_summary="S1") is None
 
 
 def test_a_chunk_builds_on_the_summary_it_loaded(store: ConversationStore) -> None:
@@ -374,7 +373,7 @@ def test_a_chunk_builds_on_the_summary_it_loaded(store: ConversationStore) -> No
     assert _chunk(store, ["r0"], "S1") is not None
     session = _loaded(store)
 
-    basis = read_chunk_basis(store, session, _SCOPE, ["r1", "r2"], previous_summary="S1")
+    basis = read_chunk_basis(store, session, ["r1", "r2"], previous_summary="S1")
 
     assert basis is not None
     assert [run.run_id for run in basis.covered] == ["r1", "r2"]

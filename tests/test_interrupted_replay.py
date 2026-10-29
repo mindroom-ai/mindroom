@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
 
 def _session() -> ConversationSession:
-    return new_scope_session(session_id="session-1", scope_id="test_agent", is_team=False)
+    return new_scope_session(session_id="session-1", scope=HistoryScope(kind="agent", scope_id="test_agent"))
 
 
 def _assistant_text(run: object) -> str:
@@ -540,7 +540,7 @@ def test_a_team_sessions_interrupted_replay_is_a_team_run(tmp_path: Path) -> Non
 
     persist_interrupted_replay_snapshot(
         storage=storage,
-        session=new_scope_session(session_id="session-1", scope_id="squad", is_team=True),
+        session=new_scope_session(session_id="session-1", scope=HistoryScope(kind="team", scope_id="squad")),
         run_id="cancelled-run",
         snapshot=snapshot,
     )
@@ -814,7 +814,7 @@ def test_persist_interrupted_replay_snapshot_keeps_minimal_interrupted_turn(tmp_
 
     persist_interrupted_replay_snapshot(
         storage=storage,
-        session=new_scope_session(session_id="session-1", scope_id="test_agent", is_team=False),
+        session=new_scope_session(session_id="session-1", scope=HistoryScope(kind="agent", scope_id="test_agent")),
         run_id="cancelled-run",
         snapshot=snapshot,
     )
@@ -881,7 +881,7 @@ def test_an_interrupted_record_without_a_turn_recorder_leaves_out_what_its_folds
 
     persist_interrupted_replay_snapshot(
         storage=storage,
-        session=new_scope_session(session_id="session-1", scope_id="test_agent", is_team=False),
+        session=new_scope_session(session_id="session-1", scope=HistoryScope(kind="agent", scope_id="test_agent")),
         run_id="stopped-run",
         snapshot=snapshot,
     )

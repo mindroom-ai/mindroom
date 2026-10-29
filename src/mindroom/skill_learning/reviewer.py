@@ -25,7 +25,6 @@ from mindroom.agent_loop.tools import PreparedTools
 from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.custom_tools.skill_manage import SkillManageTools
 from mindroom.helper_usage import HelperUsageOwner, record_run_usage
-from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import RunMetrics
@@ -273,7 +272,7 @@ async def _replay(
     )
     if session is None:
         return None
-    messages = await asyncio.to_thread(conversation_messages, session, HistoryScope(kind="agent", scope_id=agent_name))
+    messages = await asyncio.to_thread(conversation_messages, session)
     transcript = await asyncio.to_thread(
         render_transcript,
         messages,

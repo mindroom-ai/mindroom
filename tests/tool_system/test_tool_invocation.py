@@ -7,6 +7,7 @@ import json
 import threading
 import time
 from collections.abc import AsyncIterator, Iterator  # noqa: TC003 - pydantic resolves the annotations at wrap time.
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -38,6 +39,7 @@ from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.tool_system.tool_hooks import (
     SyncToolCompletionTracker,
     owned_sync_tool_completion,
+    run_sync_tool_entrypoint,
     track_sync_tool_completion,
 )
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
@@ -343,8 +345,7 @@ async def test_synchronous_leaf_is_owned_by_the_completion_tracker() -> None:
         outcome = await _run(function, "{}")
 
     assert outcome.content == "done"
-    started = tracker.started_task()
-    assert started is not None
+    [started] = tracker.settle()
     assert started.done()
 
 
@@ -482,7 +483,7 @@ async def test_custom_iterator_closes_once(*, async_tool: bool, stream: Callable
 
     assert outcome == ToolOutcome(content="ab")
     assert closed == ["async" if stream is _AsyncStream else "sync"]
-    assert (tracker.started_task() is None) is (stream is _AsyncStream)
+    assert (tracker.settle() == []) is (stream is _AsyncStream)
 
 
 @pytest.mark.asyncio
@@ -811,3 +812,61 @@ def test_parse_tool_arguments_reads_empty_input_as_no_arguments(probe_functions:
     assert parse_tool_arguments("", function) == {}
     assert parse_tool_arguments("[]", function) is None
     assert parse_tool_arguments('{"nested": {"flag": "true"}}', function) == {"nested": {"flag": "true"}}
+
+
+@pytest.mark.asyncio
+async def test_a_leaf_still_queued_when_its_owner_settles_never_starts() -> None:
+    """Synchronous work a call submitted but its owner's threads had not begun by the call's end never runs."""
+    first_started, release_first, second_ran = threading.Event(), threading.Event(), threading.Event()
+    tasks: list[asyncio.Task[object]] = []
+
+    def first() -> str:
+        first_started.set()
+        assert release_first.wait(SETTLE_TIMEOUT_SECONDS)
+        return "first"
+
+    def second() -> str:
+        second_ran.set()
+        return "second"
+
+    async def tool() -> None:
+        tasks.append(asyncio.create_task(run_sync_tool_entrypoint(first)))
+        assert await asyncio.to_thread(first_started.wait, SETTLE_TIMEOUT_SECONDS)
+        # Queued behind the first on the owner's only thread.
+        tasks.append(asyncio.create_task(run_sync_tool_entrypoint(second)))
+        await asyncio.sleep(0)
+        msg = "the tool failed"
+        raise RuntimeError(msg)
+
+    async def owned_call() -> None:
+        async with owned_sync_tool_completion(ThreadPoolExecutor(max_workers=1)):
+            await tool()
+
+    owner = asyncio.create_task(owned_call())
+    assert await asyncio.to_thread(first_started.wait, SETTLE_TIMEOUT_SECONDS)
+    release_first.set()
+    with pytest.raises(RuntimeError, match="the tool failed"):
+        await owner
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert not second_ran.is_set()
+
+
+@pytest.mark.asyncio
+async def test_work_a_call_submits_after_its_owner_settled_never_runs() -> None:
+    """A task the call left behind that starts synchronous work after the call ended gets no thread for it."""
+    ran = threading.Event()
+    go = asyncio.Event()
+    left_behind: list[asyncio.Task[object]] = []
+
+    async def later() -> object:
+        await go.wait()
+        return await run_sync_tool_entrypoint(ran.set)
+
+    async with owned_sync_tool_completion():
+        left_behind.append(asyncio.create_task(later()))
+    go.set()
+    [outcome] = await asyncio.gather(*left_behind, return_exceptions=True)
+
+    assert isinstance(outcome, asyncio.CancelledError)
+    assert not ran.is_set()

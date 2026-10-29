@@ -415,7 +415,10 @@ async def pause_parent(
         knowledge=None,
         model=turn_model(config, runtime_paths, agent_name),
     )
-    session = new_scope_session(session_id=identity.session_id or "", scope_id=agent_name, is_team=False)
+    session = new_scope_session(
+        session_id=identity.session_id or "",
+        scope=HistoryScope(kind="agent", scope_id=agent_name),
+    )
     request = [*prompt_for_turn(build), OwnedMessage(role="user", content=prompt)]
     ctx = RunContext(run_id=run_id, session=UnstoredSession(session.session_id), user_id=identity.requester_id)
     record: RunRecord | None = None

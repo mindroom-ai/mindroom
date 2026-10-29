@@ -16,12 +16,12 @@ from typing import TYPE_CHECKING
 from mindroom.agent_loop.run import own_model_messages
 from mindroom.history.conversation_text import Utterance, one_line, utterances
 from mindroom.history.run_visibility import is_model_history_visible_run, replays_in_scope
+from mindroom.history.types import owner_scope
 from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from mindroom.history.types import HistoryScope
     from mindroom.llm.messages import Message
     from mindroom.llm.runs import RunRecord
     from mindroom.session_storage.types import ConversationSession
@@ -36,12 +36,13 @@ _MIN_MESSAGE_CHARS = 2_000
 _CLIP_NOTE_CHARS = 64
 
 
-def conversation_messages(session: ConversationSession, scope: HistoryScope) -> list[list[Utterance]]:
-    """Return each stored message of the turns a request of ``scope`` replays, in order, as what was said in it.
+def conversation_messages(session: ConversationSession) -> list[list[Utterance]]:
+    """Return each stored message of the turns ``session``'s scope replays, in order, as what was said in it.
 
     Tool calls and results are included. A prompt holding several people's messages stays one entry, so it is redacted
     as a whole like any stored message.
     """
+    scope = owner_scope(session)
     return [
         list(parts)
         for run in session.runs

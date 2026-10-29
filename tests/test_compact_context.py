@@ -210,7 +210,7 @@ async def test_compact_context_sets_force_flag_for_agent_scope(tmp_path: Path) -
 
     persisted = storage.load_session("session-1")
     assert persisted is not None
-    state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
+    state = read_scope_state(persisted)
     assert state.force_compact_before_next_run is True
     assert result == COMPACT_CONTEXT_SUCCESS
 
@@ -244,7 +244,7 @@ async def test_request_compaction_before_next_reply_is_public_manual_seam(
 
     persisted = storage.load_session("session-1")
     assert persisted is not None
-    state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
+    state = read_scope_state(persisted)
     assert state.force_compact_before_next_run is True
     assert result == COMPACT_CONTEXT_SUCCESS
 
@@ -268,7 +268,7 @@ async def test_compact_context_requires_compaction_window(tmp_path: Path) -> Non
 
     persisted = storage.load_session("session-1")
     assert persisted is not None
-    state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
+    state = read_scope_state(persisted)
     assert state.force_compact_before_next_run is False
     assert result == (
         "Error: Compaction is unavailable for this scope because no context_window is configured on the active model."
@@ -376,7 +376,7 @@ async def test_compact_context_requires_positive_summary_input_budget(tmp_path: 
 
     persisted = storage.load_session("session-1")
     assert persisted is not None
-    state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
+    state = read_scope_state(persisted)
     assert state.force_compact_before_next_run is False
     assert result == (
         "Error: Compaction is unavailable for this scope because the active compaction model leaves no "
@@ -406,7 +406,7 @@ async def test_compact_context_requires_summary_input_budget_with_retry_headroom
 
     persisted = storage.load_session("session-1")
     assert persisted is not None
-    state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
+    state = read_scope_state(persisted)
     assert state.force_compact_before_next_run is False
     assert result == (
         "Error: Compaction is unavailable for this scope because the summary input budget must exceed "
@@ -481,7 +481,7 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.text == "merged summary"
-    state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
+    state = read_scope_state(persisted)
     assert state.force_compact_before_next_run is False
     assert prepared.compaction_reply_outcome == "success"
     outcome = completed_outcome(lifecycle)
@@ -635,7 +635,7 @@ async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Pat
 
     persisted = storage.load_session("session-1")
     assert persisted is not None
-    direct_state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
+    direct_state = read_scope_state(persisted)
     reloaded_team_context = _load_scope_context(
         scope=team_scope,
         session_id="session-1",
@@ -644,7 +644,7 @@ async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Pat
         execution_identity=identity,
     )
     assert reloaded_team_context.session is not None
-    team_state = read_scope_state(reloaded_team_context.session, team_scope)
+    team_state = read_scope_state(reloaded_team_context.session)
     assert direct_state.force_compact_before_next_run is False
     assert team_state.force_compact_before_next_run is True
 
@@ -682,7 +682,7 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_visible_runs(
     persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is None
-    state = read_scope_state(persisted, scope)
+    state = read_scope_state(persisted)
     assert state.force_compact_before_next_run is False
     assert prepared.compaction_reply_outcome == "failed"
     summary_mock.assert_not_awaited()
@@ -729,7 +729,7 @@ async def test_prepare_history_for_run_forced_compaction_compacts_single_run(
     assert persisted.summary is not None
     assert persisted.summary.text == "single run summary"
     assert persisted.runs == []
-    state = read_scope_state(persisted, scope)
+    state = read_scope_state(persisted)
     assert state.force_compact_before_next_run is False
     assert len(folded_run_ids(storage)) == 1
     assert prepared.compaction_reply_outcome == "success"
@@ -745,11 +745,11 @@ async def test_a_request_survives_the_requesting_runs_terminal_save_and_a_concur
     identity = _execution_identity()
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
     seed_session(storage, _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
-    # The requesting run and a team turn both loaded the session before the run's tool call asked for compaction.
+    # The requesting run and another turn both loaded the session before the run's tool call asked for compaction.
     running = storage.load_session("session-1")
-    team_copy = storage.load_session("session-1")
+    other_copy = storage.load_session("session-1")
     assert running is not None
-    assert team_copy is not None
+    assert other_copy is not None
     tool = CompactContextTools(
         agent_name="test_agent",
         config=config,
@@ -758,8 +758,7 @@ async def test_a_request_survives_the_requesting_runs_terminal_save_and_a_concur
     )
 
     assert await tool.compact_context() == COMPACT_CONTEXT_SUCCESS
-    team_scope = HistoryScope(kind="team", scope_id="squad")
-    update_scope_seen_event_ids(storage, team_copy, team_scope, ["$consumed"])
+    update_scope_seen_event_ids(storage, other_copy, ["$consumed"])
     # The run's tools changed the state they share, which its terminal record saves with it.
     running.session_state["tool"] = "state"
     await persist_to(storage, running)(_completed_run("run-2", agent_id="test_agent"))
@@ -767,7 +766,7 @@ async def test_a_request_survives_the_requesting_runs_terminal_save_and_a_concur
     stored = storage.load_session("session-1")
     assert stored is not None
     assert stored.session_state == {"tool": "state"}
-    assert read_scope_seen_event_ids(storage, stored, team_scope) == {"$consumed"}
+    assert read_scope_seen_event_ids(storage, stored) == {"$consumed"}
     assert has_queued_force_compaction(storage, "session-1", _AGENT_SCOPE)
     install_model_providers(monkeypatch, {"default": summary_model()})
     with patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="summary")):
@@ -804,11 +803,10 @@ async def test_a_requested_compaction_keeps_metadata_another_writer_stored_meanw
     seed_session(storage, seeded)
     session = storage.load_session("session-1")
     assert session is not None
-    # A team turn records the events it consumed on the row after this reply loaded it.
+    # Another turn records the events it consumed on the row after this reply loaded it.
     other = storage.load_session("session-1")
     assert other is not None
-    team_scope = HistoryScope(kind="team", scope_id="squad")
-    update_scope_seen_event_ids(storage, other, team_scope, ["$consumed"])
+    update_scope_seen_event_ids(storage, other, ["$consumed"])
 
     install_model_providers(monkeypatch, {"default": summary_model()})
     with patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="summary")):
@@ -825,7 +823,7 @@ async def test_a_requested_compaction_keeps_metadata_another_writer_stored_meanw
 
     stored = storage.load_session("session-1")
     assert stored is not None
-    assert read_scope_seen_event_ids(storage, stored, team_scope) == {"$consumed"}
+    assert read_scope_seen_event_ids(storage, stored) == {"$consumed"}
     assert stored.summary is not None
     assert not has_queued_force_compaction(storage, "session-1", scope)
 
@@ -834,14 +832,14 @@ async def test_a_requested_compaction_keeps_metadata_another_writer_stored_meanw
 async def test_recording_consumed_event_ids_keeps_a_compaction_request_stored_after_the_copy_loaded(
     tmp_path: Path,
 ) -> None:
-    """A team turn's consumed ids merge into the row's metadata, not its loaded copy's, so a later request stays."""
+    """Consumed ids merge into the row's metadata, not a copy loaded earlier, so a later request stays."""
     config, runtime_paths = _make_config(tmp_path)
     identity = _execution_identity()
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
     seed_session(storage, _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
-    team_copy = storage.load_session("session-1")
-    assert team_copy is not None
-    # The user asks for compaction after the team turn loaded its copy of the session.
+    other_copy = storage.load_session("session-1")
+    assert other_copy is not None
+    # The user asks for compaction after another turn loaded its copy of the session.
     result = await request_compaction_before_next_reply(
         scope=_AGENT_SCOPE,
         agent_name="test_agent",
@@ -853,15 +851,14 @@ async def test_recording_consumed_event_ids_keeps_a_compaction_request_stored_af
         room_id=None,
     )
     assert result == COMPACT_CONTEXT_SUCCESS
-    team_scope = HistoryScope(kind="team", scope_id="squad")
 
-    update_scope_seen_event_ids(storage, team_copy, team_scope, ["$consumed"])
+    update_scope_seen_event_ids(storage, other_copy, ["$consumed"])
 
     stored = storage.load_session("session-1")
     assert stored is not None
-    assert read_scope_state(stored, _AGENT_SCOPE).force_compact_before_next_run is True
-    assert read_scope_seen_event_ids(storage, stored, team_scope) == {"$consumed"}
-    assert team_copy.metadata == stored.metadata
+    assert read_scope_state(stored).force_compact_before_next_run is True
+    assert read_scope_seen_event_ids(storage, stored) == {"$consumed"}
+    assert other_copy.metadata == stored.metadata
 
 
 @pytest.mark.asyncio
@@ -902,7 +899,7 @@ async def test_compact_context_uses_stable_team_scope_storage(tmp_path: Path) ->
         execution_identity=identity,
     )
     assert team_context.session is not None
-    team_state = read_scope_state(team_context.session, team_scope)
+    team_state = read_scope_state(team_context.session)
     assert team_state.force_compact_before_next_run is True
     assert result == COMPACT_CONTEXT_SUCCESS
 
@@ -977,7 +974,7 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
         execution_identity=identity,
     )
     assert reloaded_team_context.session is not None
-    team_state = read_scope_state(reloaded_team_context.session, team_scope)
+    team_state = read_scope_state(reloaded_team_context.session)
     assert team_state.force_compact_before_next_run is True
     assert result == COMPACT_CONTEXT_SUCCESS
 
@@ -1059,7 +1056,7 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
         execution_identity=identity,
     )
     assert reloaded_team_context.session is not None
-    team_state = read_scope_state(reloaded_team_context.session, team_scope)
+    team_state = read_scope_state(reloaded_team_context.session)
     assert team_state.force_compact_before_next_run is True
     assert result == COMPACT_CONTEXT_SUCCESS
 
@@ -1137,9 +1134,6 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
         execution_identity=identity,
     )
     assert reloaded_scope_context.session is not None
-    agent_state = read_scope_state(
-        reloaded_scope_context.session,
-        HistoryScope(kind="agent", scope_id="test_agent"),
-    )
+    agent_state = read_scope_state(reloaded_scope_context.session)
     assert agent_state.force_compact_before_next_run is True
     assert result == COMPACT_CONTEXT_SUCCESS

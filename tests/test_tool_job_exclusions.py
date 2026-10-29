@@ -25,10 +25,9 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
     tool_runtime_context,
 )
-from tests.conftest import test_runtime_paths
+from tests.conftest import make_config_reload_lifecycle, test_runtime_paths
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
-from tests.test_config_lifecycle import _make_lifecycle
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     job_actor,
@@ -270,7 +269,7 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
                     return
                 # Editing the authored list must not mutate the startup snapshot.
                 config.background_tool_jobs.exclude_toolkits.clear()
-                lifecycle = _make_lifecycle(tmp_path, current_config=config)
+                lifecycle = make_config_reload_lifecycle(paths, current_config=config)
                 lifecycle._record_applied(config)
                 assert lifecycle.status.status == "restart_required"
                 step, _ = await _invoke(actor, "native_step", background_after=3)

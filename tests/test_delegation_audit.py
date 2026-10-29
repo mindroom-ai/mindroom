@@ -31,6 +31,7 @@ from mindroom.delegation.sessions import reserve_subagent_turn
 from mindroom.delegation.state import DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.history.storage import new_scope_session
+from mindroom.history.types import HistoryScope
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
@@ -267,7 +268,7 @@ async def test_a_child_recovery_stops_keeps_its_text_and_stores_why_it_stopped_a
         caller_execution_identity=_identity("leader", "parent-session"),
     )
     storage = create_session_storage("child", config, paths, _identity("child", "child-session"))
-    session = new_scope_session(session_id=child.session_id, scope_id="child", is_team=False)
+    session = new_scope_session(session_id=child.session_id, scope=HistoryScope(kind="agent", scope_id="child"))
     paused = RunRecord(
         run_id=child.run_id,
         session_id=child.session_id,
@@ -359,7 +360,7 @@ async def test_a_child_row_an_earlier_recovery_stopped_still_settles_with_its_re
         caller_execution_identity=_identity("leader", "parent-session"),
     )
     storage = create_session_storage("child", config, paths, _identity("child", "child-session"))
-    session = new_scope_session(session_id=child.session_id, scope_id="child", is_team=False)
+    session = new_scope_session(session_id=child.session_id, scope=HistoryScope(kind="agent", scope_id="child"))
     assert storage.save_run(session, RunRecord.from_dict(stored), record_usage=False) == "written"
     response = await read_child_run(child, config, paths)
     assert response is not None

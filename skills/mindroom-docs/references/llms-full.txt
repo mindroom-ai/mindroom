@@ -2093,7 +2093,7 @@ Azure, Bedrock, Codex, and Kimi examples are in their own sections below.
 Claude Fable 5.1 uses `claude-fable-5-1` on Anthropic, `anthropic.claude-fable-5-1` on Bedrock, and `anthropic/claude-fable-5.1` on OpenRouter.
 Claude Opus 5.5 and Sonnet 5.5 use `claude-opus-5-5` and `claude-sonnet-5-5` on Anthropic and Vertex AI, `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5` on Bedrock, and `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5` on OpenRouter.
 For the direct DeepSeek API, use `deepseek-flash` for V4.1 Flash or `deepseek-v4-pro` for Pro; the older `deepseek-v4-flash` name is a [temporary compatibility route to V4.1 Flash](https://api-docs.deepseek.com/updates/#date-2026-09-10).
-OpenRouter uses the distinct ID `deepseek/deepseek-v4.1-flash`.
+OpenRouter serves the current V4.1 Flash release as `deepseek/deepseek-v4.1-flash-1017`.
 [GLM 5.3](https://docs.z.ai/guides/llm/glm-5.3) is available through the GLM Coding Plan endpoint shown above.
 The [Qwen3.8-27B model card](https://huggingface.co/Qwen/Qwen3.8-27B) and each hosting provider document their own context limits.
 
@@ -2205,8 +2205,8 @@ models:
       reasoning_effort: high
 ```
 
-[GPT-6 Astra requires Responses for function calling](https://developers.openai.com/api/docs/guides/latest-model), and GPT-6.1 Sol and GPT-6 Luna support function calling in Chat Completions only with `reasoning_effort: none`.
-Through a proxy or custom alias, set `api: responses` for GPT-6 models, or tool calls on Astra, Sol, and Luna fail at their default reasoning effort.
+[GPT-6 Astra, GPT-6.1 Sol, and GPT-6.1 Terra require Responses for function calling](https://developers.openai.com/api/docs/guides/latest-model), and GPT-6 Luna supports function calling in Chat Completions only with `reasoning_effort: none`.
+Through a proxy or custom alias, set `api: responses` for GPT-6 models, or tool calls on Astra, Sol, Terra, and Luna fail at their default reasoning effort.
 Set `extra_kwargs.reasoning_effort` or `extra_kwargs.reasoning` only when you want to customize reasoning.
 Selecting Responses keeps any `extra_kwargs.store: false` setting.
 How `api` affects tool search is described in [Native Server-Side Tool Search](https://docs.mindroom.chat/tools/dynamic-tools/#native-server-side-tool-search).
@@ -2242,6 +2242,7 @@ Model access and usage limits depend on the logged-in ChatGPT account, so check 
 |-------|----------|----------|
 | GPT-6.1 Sol | `gpt-6.1-sol` | Near-Astra reasoning for long-running work; the starter default |
 | GPT-6 Astra | `gpt-6-astra` | The hardest end-to-end reasoning and agentic work |
+| GPT-6.1 Terra | `gpt-6.1-terra` | Fast everyday coding, writing, screenshots, and computer use |
 | GPT-6 Luna | `gpt-6-luna` | Efficient, high-volume work such as summaries and routing |
 
 Older or preview slugs work when the account exposes them, the form `openai-codex/gpt-6.1-sol` is accepted, and the legacy `gpt-5.6` alias maps to `gpt-5.6-sol`.
@@ -2279,9 +2280,9 @@ defaults:
   thread_summary_model: luna
 ```
 
-Use `258000` as the context window: it is the effective budget of the Codex ChatGPT surface (just under 95% of its 272000-token window), not the larger window of the OpenAI API.
-Set reasoning effort with `extra_kwargs.reasoning_effort`; GPT-6.1 Sol, GPT-6 Astra, and GPT-6 Luna accept `low`, `medium`, `high`, `xhigh`, and `max`.
-Codex clients also offer Ultra for Sol and Astra, but Ultra's Codex-managed subagents are not available through MindRoom.
+Use `258000` as the context window: it fits the Codex window of every model above, which is smaller than the OpenAI API window.
+Set reasoning effort with `extra_kwargs.reasoning_effort`; GPT-6.1 Sol, GPT-6 Astra, GPT-6.1 Terra, and GPT-6 Luna accept `low`, `medium`, `high`, `xhigh`, and `max`.
+Codex clients also offer Ultra for Sol, Astra, and Terra, but Ultra's Codex-managed subagents are not available through MindRoom.
 The provider supports text and image input with text output; transcription, text-to-speech, and realtime speech are not supported.
 The adapter depends on the Codex CLI login format and backend, so a Codex CLI update can require a MindRoom update; use `provider: openai` for the public API contract and API billing.
 
@@ -2292,25 +2293,28 @@ Run `kimi` and `/login` first so `~/.kimi-code/credentials/kimi-code.json` conta
 
 | Model | Model ID | Best fit |
 |-------|----------|----------|
-| Kimi K3 | `k3` | Flagship reasoning, long-horizon coding, and agent work with up to a 1M-token context |
+| Kimi K3.1 Pro | `k3.1-pro` | Flagship reasoning, long-horizon coding, and agent work with up to a 1M-token context; the starter default |
+| Kimi K3.1 Pro Highspeed | `k3.1-pro-highspeed` | K3.1 Pro at about 2-3x the speed and twice the quota use, on Pro (legacy Allegretto) and higher |
+| Kimi K3 | `k3` | The previous flagship generation with up to a 1M-token context |
 | Kimi K3 256k | `k3-256k` | The same K3 generation with a 256k-token context |
 | Kimi for Coding | `kimi-for-coding` | Coding-tuned tier exposed by the Kimi Code CLI |
 | Kimi for Coding Highspeed | `kimi-for-coding-highspeed` | Faster coding tier exposed by the Kimi Code CLI |
 
-[Kimi Code context limits depend on the subscription plan](https://www.kimi.com/code/docs/en/kimi-code/models.html): `k3` supports 1,048,576 tokens on Pro (legacy Allegretto) and higher, while Plus (legacy Moderato) is limited to 262,144.
+[Kimi Code context limits depend on the subscription plan](https://www.kimi.com/code/docs/en/kimi-code/models.html): `k3.1-pro` and `k3` support 1,048,576 tokens on Pro (legacy Allegretto) and higher, while Plus (legacy Moderato) is limited to 262,144.
 The starter config and this example require Pro/Allegretto or higher; on Plus/Moderato, and for `k3-256k` on any plan, set `context_window: 262144`.
 
 ```yaml
 models:
   default:
     provider: kimi
-    id: k3
+    id: k3.1-pro
     context_window: 1048576
 ```
 
-The form `kimi-code/k3` is accepted.
+The form `kimi-code/k3.1-pro` is accepted.
 If Kimi Code state lives outside `~/.kimi-code`, set `KIMI_CODE_HOME` in the `.env` beside `config.yaml` or the process environment, or `extra_kwargs.kimi_home`; `~` prefixes are expanded.
-Kimi K3 always reasons before replying, so responses include reasoning tokens even for short answers.
+Kimi K3.1 Pro and K3 reason before replying by default, so responses include reasoning tokens even for short answers.
+Setting `extra_kwargs.reasoning_effort` to `none` makes K3.1 Pro requests fail with HTTP 400, while K3 then answers with K2.8 Preview without reasoning.
 The adapter depends on the Kimi Code CLI login format and backend, so a Kimi Code update can require a MindRoom update.
 
 ## OpenRouter Provider Routing
@@ -2322,7 +2326,7 @@ Control routing with OpenRouter [provider preferences](https://openrouter.ai/doc
 models:
   deepseek:
     provider: openrouter
-    id: deepseek/deepseek-v4.1-flash
+    id: deepseek/deepseek-v4.1-flash-1017
     context_window: 1048576
     extra_kwargs:
       extra_body:
@@ -2449,7 +2453,7 @@ Some models reject sampling controls:
 
 - Claude Opus 4.7, Opus 4.8, Mythos Preview, and every Claude 5 and 5.x model reject non-default `temperature`, `top_p`, and `top_k`, so MindRoom omits them on Anthropic, Bedrock, and Vertex requests.
 - MindRoom also omits those controls for direct Gemini 3.8 Flash, Gemini 3.6 Flash, and Gemini 3.5 Flash-Lite requests.
-- [GPT-6 Astra does not support `temperature`, `top_p`, or `top_logprobs`](https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters), and GPT-6.1 Sol and GPT-6 Luna reject them unless reasoning effort is `none`; leave them out of these models' `extra_kwargs`.
+- [GPT-6 Astra and GPT-6.1 Sol do not support `temperature`, `top_p`, or `top_logprobs`](https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters), and GPT-6.1 Terra and GPT-6 Luna reject them unless reasoning effort is `none`; leave them out of these models' `extra_kwargs`.
 
 ## Prompt Caching
 
@@ -3275,7 +3279,7 @@ Mem0 supports the `openai` (default), `ollama`, `huggingface`, and `sentence_tra
 |---|---|---|
 | `provider` | `openai` | Embedding provider |
 | `config.model` | `text-embedding-3-small` | Embedding model name |
-| `config.host` | `null` | Base URL for OpenAI-compatible endpoints, or the Ollama host; for `ollama`, a configured `OLLAMA_HOST` takes precedence, and the fallback is `http://localhost:11434` |
+| `config.host` | `null` | Base URL for OpenAI-compatible endpoints, or the Ollama host; for `ollama`, a configured `OLLAMA_HOST` takes precedence over `host`, and without either the host is `http://localhost:11434` |
 | `config.dimensions` | `null` | Embedding dimension override (>= 1) for OpenAI-compatible providers |
 | `config.api_key` | `null` | Explicit API key for the `openai` provider |
 | `config.credentials_service` | `null` | Credential service that supplies the `openai` provider's key |
@@ -3356,7 +3360,7 @@ When the embedder rejects its credential, semantic memory search reports the cau
 `memory.llm` sets the model Mem0 uses to extract memories.
 Supported providers are `ollama`, `openai`, `openrouter`, and `anthropic`.
 When `memory.llm` is omitted, MindRoom uses `gemma4` on the Ollama server set by `OLLAMA_HOST` (default `http://localhost:11434`).
-With `provider: ollama`, `config.host` points extraction at a different Ollama server, but a configured `OLLAMA_HOST` takes precedence; other providers ignore `host`.
+With `provider: ollama`, `config.host` names the Ollama server only when no `OLLAMA_HOST` is configured, unlike a model's `host`; without either, extraction uses `http://localhost:11434`, and other providers ignore `host`.
 With `provider: openai`, use `gpt-6-luna`; other GPT-5 and GPT-6 models that support Chat Completions also work.
 For GPT-5 and GPT-6 models, with `provider: openai` or as `openai/<model>` with `provider: openrouter`, Mem0 sends no `temperature`, `top_p`, or `max_tokens` from `config` unless `config.is_reasoning_model` is `false`; set `config.reasoning_effort`, for example `low`, to choose their reasoning effort.
 
@@ -3866,7 +3870,7 @@ With `chunk_context_model`, a model reads each chunk of a multi-chunk file toget
 models:
   fast:
     provider: openai
-    id: gpt-5.4-mini
+    id: gpt-6-luna
 
 knowledge_bases:
   docs:
@@ -11112,14 +11116,15 @@ Generated images are square (1:1).
 | `vertexai` | `boolean` | `false` | Use Vertex AI instead of the Gemini API. `GOOGLE_GENAI_USE_VERTEXAI=true` also enables it. Required for `generate_video()`. |
 | `project_id` | `text` | `null` | Vertex project, falling back to `GOOGLE_CLOUD_PROJECT`. |
 | `location` | `text` | `null` | Vertex location, falling back to `GOOGLE_CLOUD_LOCATION`. |
-| `image_generation_model` | `text` | `gemini-3.1-flash-image` | Model for `generate_image()` (Nano Banana 2). |
+| `image_generation_model` | `text` | `gemini-nano-banana-2.1` | Model for `generate_image()` (Nano Banana 2.1). |
 | `video_generation_model` | `text` | `veo-3.1-generate-001` | Model for `generate_video()` (Veo 3.1). |
 | `enable_generate_image` | `boolean` | `true` | Enable `generate_image()`. |
 | `enable_generate_video` | `boolean` | `true` | Enable `generate_video()`. |
 | `all` | `boolean` | `false` | Enable both functions. |
 
 One `gemini` toolkit uses a single Vertex location for both functions.
-Google lists `global`, `us`, and `eu` for [Gemini 3.1 Flash Image](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/3-1-flash-image) and `us-central1` for [Veo 3.1](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/veo/3-1-generate), with no shared location.
+Google lists only `global` for [Nano Banana 2.1](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/nano-banana-2-1), `global`, `us`, and `eu` for [Nano Banana 2](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/3-1-flash-image), and `us-central1` for [Veo 3.1](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/veo/3-1-generate), with no shared location.
+To generate images from a Vertex AI `us` or `eu` location, set `image_generation_model: gemini-3.1-flash-image`.
 To use both on Vertex AI, give each to a separate agent and disable the other function:
 
 ```yaml
@@ -18670,7 +18675,8 @@ Each value must be a positive integer; zero does not mean unlimited.
 The limits apply to all three operations, and a call over any limit fails immediately with `busy` instead of queueing.
 A cancelled or timed-out call keeps its allowance until its tool work and cleanup finish.
 The defaults are conservative starting values; tune them to available resources, tool latency, and upstream quotas.
-Gateway tool work runs on 32 dedicated threads, and calls beyond that wait within their deadline, so keep `MINDROOM_MCP_GATEWAY_MAX_USER_CALLS` below 32 so one user cannot occupy them all.
+Gateway tool work runs on 32 dedicated threads, and work beyond that waits within its call's deadline.
+A call holds one thread for each synchronous body or worker request it runs at once, including those of tools a plugin tool calls through `toolkit_functions`, so `MINDROOM_MCP_GATEWAY_MAX_USER_CALLS` limits a user's calls, not their threads: a plugin tool that runs several nested requests at once takes several threads.
 
 Size limits:
 
@@ -22386,7 +22392,7 @@ Some presets need a local login or server before MindRoom can answer:
 
 - `codex`: run `codex login` first; see [Codex Models](https://docs.mindroom.chat/configuration/models/#codex-models-with-chatgpt-login) for the generated models.
 - `kimi`: run `kimi` and `/login` first; see [Kimi Models](https://docs.mindroom.chat/configuration/models/#kimi-models-with-kimi-code-login).
-- `ollama`: generates `gemma4` as `default` and `qwen3.8:27b` as `qwen3_8_27b`, with `OLLAMA_HOST=http://localhost:11434`; pull both models first with `ollama pull gemma4` and `ollama pull qwen3.8:27b`.
+- `ollama`: generates `gemma4` as `default` and `qwen3.8:27b` as `qwen3_8_27b`, each loaded with a 32,768-token context (see [Ollama Context Size](https://docs.mindroom.chat/configuration/models/#ollama-context-size) to change it), with `OLLAMA_HOST=http://localhost:11434`; pull both models first with `ollama pull gemma4` and `ollama pull qwen3.8:27b`.
 - `llama.cpp`: generates Unsloth GGUF models for a llama.cpp server at `http://localhost:8080/v1`; start it with one of the configured model refs:
 
 ```bash

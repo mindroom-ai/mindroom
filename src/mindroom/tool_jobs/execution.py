@@ -3,7 +3,7 @@
 ``with_job_admission`` admits each call one actor makes: it runs in its reply, as a managed job the reply waits for
 within the call's ``background_after`` budget, or not at all when a job-gated call cannot become a job, which also
 asks for that call's approval as the job's first phase. Inside a managed job every call admitted here, a nested
-MindRoom agent's included, keeps its synchronous leaf owned by the job and has its grant checked again.
+MindRoom agent's included, keeps the synchronous leaves it starts owned by the job and has its grant checked again.
 ``job_definitions_hook`` offers the budget on the definitions of the functions whose calls can become jobs.
 """
 
@@ -303,7 +303,7 @@ def _wait_budget(call: ToolCall, *, mode: ToolWaitMode, depth: int) -> float | N
 
 
 async def _run_here(call_next: ToolNext, arguments: dict[str, Any], *, unassembled: bool) -> object:
-    """Run a call in this task; inside a managed job, the job owns its synchronous leaf.
+    """Run a call in this task; inside a managed job, the job owns the synchronous leaves it starts.
 
     ``unassembled`` says the function comes from no toolkit MindRoom assembles, as the knowledge search, skill, and
     team delegation functions MindRoom adds beside them do; inside a job, such a function runs under its enclosing
@@ -311,7 +311,7 @@ async def _run_here(call_next: ToolNext, arguments: dict[str, Any], *, unassembl
     """
     if not job_owns_execution():
         return await call_next(arguments)
-    # A managed job keeps its resources until a synchronous leaf the call started finishes.
+    # A managed job keeps its resources until every synchronous leaf the call started finishes.
     with enclosing_grant() if unassembled else nullcontext():
         async with owned_sync_tool_completion(JOB_CALL_EXECUTOR):
             return await call_next(arguments)

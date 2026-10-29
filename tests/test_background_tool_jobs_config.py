@@ -26,11 +26,10 @@ from mindroom.tool_jobs.runtime import (
 )
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, pending_background_tool_jobs_restart
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
-from tests.conftest import make_turn_context, test_runtime_paths
+from tests.conftest import make_config_reload_lifecycle, make_turn_context, test_runtime_paths
 from tests.delegation_helpers import ScriptedAgents
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
-from tests.test_config_lifecycle import _make_lifecycle
 from tests.tool_job_helpers import (
     completed_delegation_job,
     job_owner,
@@ -170,7 +169,7 @@ def test_reload_reports_restart_and_keeps_effective_mode(tmp_path: Path, initial
             background_tool_jobs=BackgroundToolJobsConfig(enabled=not initial),
             timezone="Europe/Amsterdam",
         )
-        lifecycle = _make_lifecycle(tmp_path, current_config=config)
+        lifecycle = make_config_reload_lifecycle(paths, current_config=config)
         lifecycle._record_applied(changed)
         assert background_tool_jobs_enabled(changed, paths) is initial
         assert lifecycle.status.status == "restart_required"

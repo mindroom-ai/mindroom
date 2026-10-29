@@ -461,10 +461,10 @@ models:
     provider: google
   # --- OpenRouter ---
   deepseek:
-    id: deepseek/deepseek-v4.1-flash
+    id: deepseek/deepseek-v4.1-flash-1017
     provider: openrouter
   nemotron:
-    id: nvidia/nemotron-3.5-lightning:free
+    id: nvidia/nemotron-3.5-super-vl:free
     provider: openrouter
   tencent_hy4:
     id: tencent/hy4-preview

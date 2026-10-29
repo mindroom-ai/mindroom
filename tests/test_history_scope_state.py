@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -35,6 +36,7 @@ from tests.history_helpers import (
     _completed_run,
     _make_config,
     _session,
+    _team_session,
 )
 
 if TYPE_CHECKING:
@@ -47,34 +49,16 @@ def storage(tmp_path: Path) -> ConversationStore:
     return create_agent_state_storage("test_agent", tmp_path / "seen")
 
 
-def _shared_session(*, is_team: bool) -> ConversationSession:
-    if is_team:
-        return ConversationSession(
-            kind="team",
-            session_id="session-1",
-            owner_id="test_agent",
-            runs=[],
-            created_at=1,
-        )
-    return ConversationSession(
-        kind="agent",
-        session_id="session-1",
-        owner_id="test_agent",
-        runs=[],
-        created_at=1,
-    )
-
-
 def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path) -> None:
     _config, _runtime_paths_value = _make_config(tmp_path)
     scope = HistoryScope(kind="team", scope_id="team-123")
     storage = create_state_storage("team_123", tmp_path / "seen", scope)
-    session = _session("session-1")
+    session = _team_session("session-1", team_id="team-123")
 
-    update_scope_seen_event_ids(storage, session, scope, ["event-1"])
+    update_scope_seen_event_ids(storage, session, ["event-1"])
     session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
 
-    assert read_scope_seen_event_ids(storage, session, scope) == {"event-1"}
+    assert read_scope_seen_event_ids(storage, session) == {"event-1"}
 
 
 def test_with_scope_state_updates_only_force_flag(tmp_path: Path) -> None:
@@ -84,16 +68,15 @@ def test_with_scope_state_updates_only_force_flag(tmp_path: Path) -> None:
 
     forced_metadata = _with_scope_state({}, scope, forced)
 
-    assert read_scope_state(_session("session-1", metadata=forced_metadata), scope) == forced
+    assert read_scope_state(_session("session-1", metadata=forced_metadata)) == forced
     cleared_metadata = _with_scope_state(forced_metadata, scope, HistoryScopeState())
-    assert read_scope_state(_session("session-1", metadata=cleared_metadata), scope) == HistoryScopeState()
+    assert read_scope_state(_session("session-1", metadata=cleared_metadata)) == HistoryScopeState()
     assert cleared_metadata == {}
-    assert read_scope_state(_session("session-1", metadata=forced_metadata), scope) == forced
+    assert read_scope_state(_session("session-1", metadata=forced_metadata)) == forced
 
 
 def test_scope_seen_event_ids_include_persisted_response_event_ids(tmp_path: Path, storage: ConversationStore) -> None:
     _config, _runtime_paths_value = _make_config(tmp_path)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
     run = _completed_run("run-1")
     run.metadata = {
         "matrix_seen_event_ids": ["question-1"],
@@ -101,7 +84,7 @@ def test_scope_seen_event_ids_include_persisted_response_event_ids(tmp_path: Pat
     }
     session = _session("session-1", runs=[run])
 
-    assert read_scope_seen_event_ids(storage, session, scope) == {"question-1", "answer-1"}
+    assert read_scope_seen_event_ids(storage, session) == {"question-1", "answer-1"}
 
 
 @pytest.mark.parametrize("is_team", [False, True], ids=["agent", "team"])
@@ -153,26 +136,20 @@ def test_seen_event_ids_match_model_history_visibility(tmp_path: Path, *, is_tea
             runs=runs,
             created_at=1,
         )
-    update_scope_seen_event_ids(storage, session, scope, ["preserved-event"])
+    update_scope_seen_event_ids(storage, session, ["preserved-event"])
 
-    assert read_scope_seen_event_ids(storage, session, scope) == {"completed-event", "preserved-event", "running-event"}
-    assert [run.run_id for run in scope_visible_runs(session, scope)] == ["completed", "running"]
+    assert read_scope_seen_event_ids(storage, session) == {"completed-event", "preserved-event", "running-event"}
+    assert [run.run_id for run in scope_visible_runs(session)] == ["completed", "running"]
 
 
 def test_scope_states_do_not_bleed_between_scopes(tmp_path: Path) -> None:
     _config, _runtime_paths_value = _make_config(tmp_path)
     agent_scope = HistoryScope(kind="agent", scope_id="test_agent")
-    team_scope = HistoryScope(kind="team", scope_id="team-123")
-    session = _session("session-1")
+    metadata = _with_scope_state(None, agent_scope, HistoryScopeState(force_compact_before_next_run=True))
 
-    session.metadata = _with_scope_state(
-        session.metadata,
-        agent_scope,
-        HistoryScopeState(force_compact_before_next_run=True),
-    )
-
-    assert read_scope_state(session, agent_scope).force_compact_before_next_run is True
-    assert read_scope_state(session, team_scope).force_compact_before_next_run is False
+    assert read_scope_state(_session("session-1", metadata=metadata)).force_compact_before_next_run is True
+    team_session = _team_session("session-1", team_id="team-123", metadata=metadata)
+    assert read_scope_state(team_session).force_compact_before_next_run is False
 
 
 def test_queued_force_compaction_reads_the_session_row_without_its_runs(
@@ -223,7 +200,7 @@ def test_legacy_scope_state_metadata_is_ignored(tmp_path: Path) -> None:
         },
     )
 
-    assert read_scope_state(session, agent_scope).force_compact_before_next_run is False
+    assert read_scope_state(session).force_compact_before_next_run is False
 
     session.metadata = _with_scope_state(
         session.metadata,
@@ -244,13 +221,13 @@ def test_legacy_scope_state_metadata_is_ignored(tmp_path: Path) -> None:
 
 
 def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path) -> None:
-    """A team's database holds the team's scope and its bot's agent path, whose seen ids stay apart."""
+    """A scope's seen ids leave out the runs and preserved ids of another scope with the same id."""
     _config, _runtime_paths_value = _make_config(tmp_path)
-    agent_scope = HistoryScope(kind="agent", scope_id="team-123")
     team_scope = HistoryScope(kind="team", scope_id="team-123")
     storage = create_state_storage("team_123", tmp_path / "seen", team_scope)
-    session = _session(
+    session = _team_session(
         "session-1",
+        team_id="team-123",
         runs=[
             RunRecord(
                 run_id="agent-run",
@@ -266,7 +243,7 @@ def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path) -> Non
             ),
         ],
     )
-    update_scope_seen_event_ids(storage, session, team_scope, ["preserved-team-event"])
+    update_scope_seen_event_ids(storage, session, ["preserved-team-event"])
 
-    assert read_scope_seen_event_ids(storage, session, agent_scope) == {"agent-event"}
-    assert read_scope_seen_event_ids(storage, session, team_scope) == {"team-event", "preserved-team-event"}
+    assert read_scope_seen_event_ids(storage, replace(session, kind="agent")) == {"agent-event"}
+    assert read_scope_seen_event_ids(storage, session) == {"team-event", "preserved-team-event"}

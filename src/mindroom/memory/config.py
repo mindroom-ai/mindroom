@@ -18,7 +18,6 @@ from mindroom.logging_config import get_logger
 from mindroom.memory._mem0_usage import install_mem0_usage_capture
 from mindroom.model_defaults import (
     MEMORY_OLLAMA_LLM,
-    OLLAMA_HOST_DEFAULT,
     OPENROUTER_BASE_URL_DEFAULT,
     claude_rejects_sampling_controls,
     openai_rejects_sampling_controls,
@@ -176,17 +175,15 @@ def _memory_collection_name(config: Config) -> str:
     return f"{_MEMORY_COLLECTION_PREFIX}_{digest}"
 
 
-def mem0_ollama_host(config: Config, runtime_paths: RuntimePaths) -> str | None:
-    """Return the server an Ollama memory LLM reaches, the default one included, as Mem0 is configured.
+def mem0_ollama_host(config: Config, runtime_paths: RuntimePaths) -> str:
+    """Return the server the Ollama memory LLM, configured or default, reaches.
 
-    The saved Ollama host wins over ``memory.llm.config.host``. An ``ollama`` memory LLM without ``host`` reaches its
-    ``ollama_base_url``, and without that the Ollama SDK's own default (None).
+    Mem0's own ``ollama_base_url`` goes as written; otherwise the saved Ollama host wins over ``memory.llm.config.host``.
     """
-    memory_llm = config.memory.llm
-    if memory_llm is not None and "host" not in memory_llm.config:
-        return memory_llm.config.get("ollama_base_url")
-    configured = None if memory_llm is None else memory_llm.config["host"]
-    return get_ollama_host(runtime_paths=runtime_paths) or configured or OLLAMA_HOST_DEFAULT
+    llm_config = {} if config.memory.llm is None else config.memory.llm.config
+    if base_url := llm_config.get("ollama_base_url"):
+        return base_url
+    return get_ollama_host(runtime_paths=runtime_paths, configured_host=llm_config.get("host"), saved_first=True)
 
 
 def _mem0_llm_config(config: Config, runtime_paths: RuntimePaths) -> dict[str, Any]:
@@ -205,13 +202,10 @@ def _mem0_llm_config(config: Config, runtime_paths: RuntimePaths) -> dict[str, A
         }
 
     llm_provider = memory_llm.provider
-    llm_provider_config: dict[str, Any] = {}
-    # Copy config but handle provider-specific field names
-    for key, value in memory_llm.config.items():
-        if key == "host" and llm_provider == "ollama":
-            llm_provider_config["ollama_base_url"] = mem0_ollama_host(config, runtime_paths)
-        elif key != "host":  # Skip host for other fields
-            llm_provider_config[key] = value
+    # Mem0 names the Ollama server ``ollama_base_url``, and its other LLMs read no ``host``.
+    llm_provider_config = {key: value for key, value in memory_llm.config.items() if key != "host"}
+    if llm_provider == "ollama":
+        llm_provider_config["ollama_base_url"] = mem0_ollama_host(config, runtime_paths)
 
     if llm_provider in {"openai", "anthropic", "openrouter"} and not llm_provider_config.get("api_key"):
         api_key = get_api_key_for_provider(llm_provider, runtime_paths=runtime_paths)

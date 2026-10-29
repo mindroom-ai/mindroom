@@ -5762,6 +5762,8 @@ def test_body_call_id_parses_only_canonical_prefixes() -> None:
         f"LIVE-FUZZ call=172\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\nLIVE-FUZZ call=175 segment-000 END call=175"
     )
     assert _body_call_id(continued) == 175
+    # An attempt cut short right after its ID still names its call.
+    assert _body_call_id(f"LIVE-FUZZ call=87\n\n{INTERRUPTED_RESPONSE_NOTE}") == 87
     assert _body_call_id("[Response interrupted by service restart]") is None
     assert _body_call_id("LIVE-FUZZ call=x END") is None
 
@@ -5935,6 +5937,41 @@ async def test_exact_reply_oracle_ignores_empty_defaultdict_entries() -> None:
         assert oracle.unsettled_required_sources() == ["$source"]
         oracle.response_ids["$untracked-redaction-target"]
         oracle._assert_no_wrong_replies()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_exact_reply_oracle_drops_a_reply_its_redaction_removed() -> None:
+    """A placeholder MindRoom removed, as for a replay a newer message superseded, stops being a streaming reply."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example", coalescing_threads=True)
+    auditor = FinalStateAuditor(client, oracle, agent_id="@agent:example", expected_body_for=_short_body_for)
+    try:
+        oracle.expect("op:1", "$source", thread=0)
+        oracle._ingest_event({"event_id": "$source", "sender": "@user:example", "type": "m.room.message"})
+        oracle._ingest_event(_agent_reply_event("$source", "$placeholder", "Thinking..."))
+        assert oracle.incomplete_streaming_sources() == ["$source"]
+        assert oracle.resolve_response_ref("response:op:1") == "$placeholder"
+
+        oracle._ingest_event(
+            {
+                "event_id": "$removal",
+                "sender": "@agent:example",
+                "type": "m.room.redaction",
+                "redacts": "$placeholder",
+                "content": {"redacts": "$placeholder", "reason": "Reply removed"},
+            },
+        )
+
+        assert oracle.incomplete_streaming_sources() == []
+        assert oracle.response_ids["$source"] == set()
+        assert "$placeholder" not in oracle.latest_reply_bodies
+        # A later operation that targets the response, such as a reaction, still reaches the removed event.
+        assert oracle.resolve_response_ref("response:op:1") == "$placeholder"
+        # Live supersession proofs read the same view the final audit reads from `/messages`.
+        assert auditor._canonical_agent_replies(oracle.canonical_events) == {}
+        assert oracle.canonical_events["$placeholder"]["unsigned"]["redacted_because"]["event_id"] == "$removal"
     finally:
         await client.close()
 
@@ -6769,6 +6806,60 @@ def test_ledger_read_attributes_ai_answers_from_reply_records(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_an_edit_whose_regeneration_a_restart_cut_short_counts_as_declined(tmp_path: Path) -> None:
+    """A regeneration a restart left lost answered nothing, so MindRoom settling its edit declines that edit."""
+    ledger_path = tmp_path / "event_journal.db"
+    principal_id = journal_principal_id("general", "@agent:example")
+    _write_ledger(ledger_path, {"$root": TurnRecord.create(source_event_ids=("$root",), completed=True)})
+    with closing(sqlite3.connect(ledger_path)) as database:
+        database.execute(
+            "INSERT INTO reply_messages (principal_id, reply_id, entity_name, room_id, membership_epoch, event_id, "
+            "state, last_span_id, presentation_json, revision, placeholder_only, reply_sequence, created_at_ns, "
+            "updated_at_ns) VALUES (?, 'answer', 'general', '!room:example', 0, '$reply', 'completed', 'cut', "
+            "'{}', 1, 0, 1, 1, 1)",
+            (principal_id,),
+        )
+        database.executemany(
+            "INSERT INTO reply_spans (principal_id, span_id, reply_id, kind, delivery_id, bot_generation, "
+            "base_sequence, outcome, claimed_at_ns) VALUES (?, ?, 'answer', ?, ?, 'g', 0, ?, ?)",
+            [
+                (principal_id, "turn", "turn", "$root", "completed", 1),
+                (principal_id, "answered", "regeneration", "$answered-edit", "completed", 2),
+                (principal_id, "cut", "regeneration", "$cut-edit", "lost", 3),
+            ],
+        )
+        database.executemany(
+            "INSERT INTO journal_events (principal_id, event_id, room_id, thread_id, kind, sender, origin_server_ts, "
+            "source_json, membership_epoch, state) VALUES (?, ?, '!room:example', '', 'message', '@user:example', ?, "
+            "'{}', 0, 'settled')",
+            [(principal_id, "$answered-edit", 20), (principal_id, "$cut-edit", 30)],
+        )
+        database.commit()
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example", coalescing_threads=True, ledger_path=ledger_path)
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=_short_body_for,
+        ledger_path=ledger_path,
+        pending_edit_markers={"$root": {"$cut-edit": _source_marker("root:0", "edit:3")}},
+    )
+    try:
+        snapshot = live_fuzz._read_supersession_snapshot(ledger_path, principal_id)
+        assert snapshot.regenerated_edits == frozenset({"$answered-edit"})
+        auditor._observe_supersession({})
+        assert oracle.declined_edit_sources == frozenset({"$root"})
+
+        # Debt that also names an edit a completed regeneration answered waits for that answer instead.
+        auditor.pending_edit_markers["$root"]["$answered-edit"] = _source_marker("root:0", "edit:2")
+        auditor._observe_supersession({})
+        assert oracle.declined_edit_sources == frozenset()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("note", [INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE])
 async def test_supersession_proof_reads_the_interrupted_reply_of_an_unanswered_turn(
     tmp_path: Path,
@@ -6818,6 +6909,200 @@ async def test_supersession_proof_reads_the_interrupted_reply_of_an_unanswered_t
 
     assert proof is not None
     assert proof.interrupted_response_event_id == "$reply"
+
+
+@pytest.mark.asyncio
+async def test_supersession_anchor_accepts_the_revision_mindroom_answered() -> None:
+    """A newer message answered before MindRoom declined its later edit still anchors an older message's supersession."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example", coalescing_threads=True)
+    oracle.expect("op:2", "$newer", thread=0)
+    oracle.expect("op:3", "$other", thread=0)
+    answered_edit = _source_marker("op:2", "edit:5")
+    declined_edit = _source_marker("op:2", "edit:7")
+    observed = {5: frozenset({_source_marker("op:2", ORIGINAL_REVISION)})}
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=_short_body_for,
+        source_current_markers={"$newer": declined_edit},
+        source_revision_markers={"$newer": {"$answered": answered_edit, "$edit": declined_edit}},
+        observed_markers_for=lambda call_id: observed.get(call_id, frozenset()),
+    )
+    anchor = _agent_reply_event("$newer", "$anchor", _short_body_for(5))
+    anchor["content"]["io.mindroom.stream_status"] = "completed"
+    records = {"$newer": TurnRecord.create(source_event_ids=("$newer",), response_event_id="$anchor", completed=True)}
+    try:
+        # Its original and an edit an answer used both anchor, as long as the call answered this message.
+        for revision in (_source_marker("op:2", ORIGINAL_REVISION), answered_edit):
+            observed[5] = frozenset({revision})
+            assert auditor._completed_supersession_anchor(
+                "$newer",
+                records,
+                {"$anchor": anchor},
+                {"$newer": {"$anchor"}},
+            ) == ("$newer", "$anchor")
+
+        # A call that answered another message anchors nothing.
+        observed[5] = frozenset({_source_marker("op:3", ORIGINAL_REVISION)})
+        assert (
+            auditor._completed_supersession_anchor("$newer", records, {"$anchor": anchor}, {"$newer": {"$anchor"}})
+            is None
+        )
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("later_ts", "seen", "noted", "status", "coalesced", "dropped"),
+    [
+        (30, "declined", True, "error", False, True),
+        (50, "declined", True, "error", False, False),
+        (None, "declined", True, "error", False, False),
+        (30, "original", True, "error", False, False),
+        (30, "answered", True, "error", False, False),
+        (30, "declined", False, "streaming", False, False),
+        (30, "declined", True, "streaming", False, False),
+        (None, "declined", True, "error", True, False),
+    ],
+    ids=[
+        "later_message_before_the_note",
+        "later_message_after_the_note",
+        "no_later_message",
+        "call_saw_the_original",
+        "call_saw_an_answered_edit",
+        "no_interrupted_note",
+        "note_in_a_write_that_is_not_final",
+        "coalesced_turn_without_a_later_message",
+    ],
+)
+async def test_regeneration_a_restart_cut_short_ends_interrupted_once_a_later_message_drops_it(
+    tmp_path: Path,
+    later_ts: int | None,
+    seen: str,
+    noted: bool,
+    status: str,
+    coalesced: bool,
+    dropped: bool,
+) -> None:
+    """After a restart MindRoom declines an edit another message followed, and the cut-short reply ends interrupted."""
+    ledger_path = tmp_path / "event_journal.db"
+    principal_id = journal_principal_id("general", "@agent:example")
+    # A coalesced turn's own later message follows its earlier source, but nothing followed the turn.
+    turn_sources = ("$root", "$sibling") if coalesced else ("$root",)
+    turn = TurnRecord.create(source_event_ids=turn_sources, completed=True)
+    _write_ledger(ledger_path, dict.fromkeys(turn_sources, turn))
+    with closing(sqlite3.connect(ledger_path)) as database:
+        database.execute(
+            "INSERT INTO reply_messages (principal_id, reply_id, entity_name, room_id, membership_epoch, event_id, "
+            "state, last_span_id, presentation_json, revision, placeholder_only, reply_sequence, created_at_ns, "
+            "updated_at_ns) VALUES (?, 'answer', 'general', '!room:example', 0, '$reply', 'failed', 'cut', "
+            "'{}', 1, 0, 1, 1, 1)",
+            (principal_id,),
+        )
+        database.executemany(
+            "INSERT INTO reply_spans (principal_id, span_id, reply_id, kind, delivery_id, bot_generation, "
+            "base_sequence, outcome, claimed_at_ns) VALUES (?, ?, 'answer', ?, ?, 'g', 0, ?, ?)",
+            [
+                (principal_id, "turn", "turn", turn.anchor_event_id, "completed", 1),
+                (principal_id, "answered", "regeneration", "$answered-edit", "completed", 2),
+                (principal_id, "cut", "regeneration", "$edit", "lost", 3),
+            ],
+        )
+        database.execute(
+            "INSERT INTO reply_span_sources (principal_id, span_id, event_id, role, ordinal) "
+            "VALUES (?, 'turn', '$root', 'logical', 0)",
+            (principal_id,),
+        )
+        database.executemany(
+            "INSERT INTO journal_events (principal_id, event_id, room_id, thread_id, kind, sender, origin_server_ts, "
+            "source_json, membership_epoch, state) VALUES (?, ?, '!room:example', '', 'message', '@user:example', ?, "
+            "'{}', 0, 'settled')",
+            [(principal_id, "$answered-edit", 15), (principal_id, "$edit", 20)],
+        )
+        database.commit()
+    answered = _source_marker("root:0", "edit:2")
+    edited = _source_marker("root:0", "edit:3")
+    call_markers = {"declined": edited, "original": _source_marker("root:0", ORIGINAL_REVISION), "answered": answered}
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example", coalescing_threads=True, ledger_path=ledger_path)
+    oracle.expect("root:0", "$root", thread=0)
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=_short_body_for,
+        ledger_path=ledger_path,
+        source_current_markers={"$root": edited},
+        source_revision_markers={"$root": {"$answered-edit": answered, "$edit": edited}},
+        observed_markers_for=lambda call_id: frozenset({call_markers[seen]}) if call_id == 87 else frozenset(),
+    )
+    body = f"LIVE-FUZZ call=87\n\n{INTERRUPTED_RESPONSE_NOTE}" if noted else "LIVE-FUZZ call=87 segment-000"
+    replace_root = {"m.relates_to": {"rel_type": "m.replace", "event_id": "$root"}}
+    events: dict[str, dict[str, Any]] = {
+        "$root": {
+            "event_id": "$root",
+            "sender": "@user:example",
+            "type": "m.room.message",
+            "origin_server_ts": 10,
+            "content": {"body": "root", "msgtype": "m.text"},
+        },
+        "$answered-edit": {
+            "event_id": "$answered-edit",
+            "sender": "@user:example",
+            "type": "m.room.message",
+            "origin_server_ts": 15,
+            "content": replace_root,
+        },
+        "$edit": {
+            "event_id": "$edit",
+            "sender": "@user:example",
+            "type": "m.room.message",
+            "origin_server_ts": 20,
+            "content": replace_root,
+        },
+        "$reply": _agent_reply_event("$root", "$reply", "Thinking..."),
+        "$note": _agent_edit_event("$reply", "$note", body, ts=40),
+    }
+    events["$note"]["content"]["m.new_content"]["io.mindroom.stream_status"] = status
+    later_messages = {"$later": later_ts} | ({"$sibling": 25} if coalesced else {})
+    for event_id, ts in later_messages.items():
+        if ts is None:
+            continue
+        events[event_id] = {
+            "event_id": event_id,
+            "sender": "@user:example",
+            "type": "m.room.message",
+            "origin_server_ts": ts,
+            "content": {
+                "body": "next",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$root", "m.in_reply_to": {"event_id": "$root"}},
+            },
+        }
+    for event in events.values():
+        event["_audit_room_id"] = "!room:example"
+    sent = [
+        _SentRecord(event_id, "!room:example", "m.room.message", sender="@user:example", content=event["content"])
+        for event_id, event in events.items()
+        if event["sender"] == "@user:example"
+    ]
+    try:
+        auditor._observe_supersession(events, sent_records=sent)
+
+        assert oracle.dropped_regenerations == (frozenset({"$reply"}) if dropped else frozenset())
+        assert oracle._reply_body_complete("$reply", body, source_event_id="$root") is dropped
+        if dropped:
+            assert auditor._assert_final_bodies_complete(events, {"$root": {"$reply"}}) == 0
+            # The cut-short attempt answered the edit, so the answer stays bound to its revision.
+            auditor._assert_model_saw_current_sources(events, sent_records=sent)
+        else:
+            with pytest.raises(AssertionError, match="non-canonical body"):
+                auditor._assert_final_bodies_complete(events, {"$root": {"$reply"}})
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio
@@ -7562,6 +7847,58 @@ async def test_model_source_audit_accepts_a_declined_edit_only_after_a_later_mes
                 _SentRecord("$b", "!room:example", "m.room.message", sender="@user:example", content=later["content"]),
             ],
         )
+    finally:
+        await auditor.client.close()
+
+
+@pytest.mark.asyncio
+async def test_model_source_audit_accepts_an_edit_applied_while_its_message_was_queued(tmp_path: Path) -> None:
+    """An edit that reached its message in the coalescing queue settles like a declined one, but the turn answers it."""
+    ledger_path = tmp_path / "event_journal.db"
+    queued = _source_marker("op:1", "edit:5")
+    late = _source_marker("op:1", "edit:9")
+    auditor = _model_source_auditor(
+        ledger_path=ledger_path,
+        expected_sources={"$a": "op:1"},
+        source_current_markers={"$a": late},
+        observed={4: frozenset({queued})},
+    )
+    auditor.source_revision_markers = {"$a": {"$queued": queued, "$late": late}}
+    # Neither edit drove a regeneration: the first changed the queued message, the second came after another message.
+    auditor.declined_edits = lambda: frozenset({"$queued", "$late"})  # type: ignore[method-assign]
+    try:
+        record = TurnRecord.create(source_event_ids=("$a",), response_event_id="$reply-a", completed=True)
+        _write_ledger(ledger_path, {"$a": record})
+        thread = {"rel_type": "m.thread", "event_id": "$a", "m.in_reply_to": {"event_id": "$a"}}
+
+        def message(event_id: str, ts: int, content: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "event_id": event_id,
+                "sender": "@user:example",
+                "type": "m.room.message",
+                "origin_server_ts": ts,
+                "content": content,
+            }
+
+        replace_a = {"m.relates_to": {"rel_type": "m.replace", "event_id": "$a"}}
+        events = {
+            "$a": message("$a", 10, {"body": "original", "msgtype": "m.text"}),
+            "$queued": message("$queued", 20, replace_a),
+            "$b": message("$b", 30, {"body": "next", "msgtype": "m.text", "m.relates_to": thread}),
+            "$late": message("$late", 40, replace_a),
+            "$reply-a": _agent_reply_event("$a", "$reply-a", _short_body_for(4)),
+        }
+        sent = [
+            _SentRecord(event_id, "!room:example", "m.room.message", sender="@user:example", content=event["content"])
+            for event_id, event in events.items()
+            if event_id != "$reply-a"
+        ]
+        auditor._assert_model_saw_current_sources(events, sent_records=sent)
+
+        # Once a regeneration answered the later edit, the queued revision is stale.
+        auditor.declined_edits = lambda: frozenset({"$queued"})  # type: ignore[method-assign]
+        with pytest.raises(AssertionError, match="without current source markers"):
+            auditor._assert_model_saw_current_sources(events, sent_records=sent)
     finally:
         await auditor.client.close()
 
