@@ -1159,7 +1159,7 @@ async def test_a_synchronous_tool_cannot_run_a_toolkit_function_on_its_own_event
         def sync_tool() -> str:
             return asyncio.run(ping())
 
-        with pytest.raises(RuntimeError, match="make the tool async to call other tools"):
+        with pytest.raises(RuntimeError, match="on an event loop of its own"):
             async with owned_sync_tool_completion(JOB_CALL_EXECUTOR):
                 await run_sync_tool_entrypoint(sync_tool)
     finally:

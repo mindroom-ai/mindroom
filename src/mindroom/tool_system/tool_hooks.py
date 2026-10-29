@@ -345,10 +345,10 @@ async def run_sync_tool_entrypoint(call: Callable[[], _ToolHookResult]) -> _Tool
     """Run one synchronous tool call off the event loop, retained by any completion owner."""
     tracker = _SYNC_TOOL_COMPLETION_TRACKER.get()
     if tracker is not None and tracker._loop is not asyncio.get_running_loop():
-        # A synchronous body that runs its own event loop, as with asyncio.run, would start work its owner cannot hold.
+        # Code that runs its own event loop, as with asyncio.run, would start work its owner cannot hold.
         msg = (
-            "A synchronous tool cannot run a nested tool call on its own event loop; "
-            "make the tool async to call other tools."
+            "A tool call cannot run a nested tool call on an event loop of its own; "
+            "await it from the tool's async body."
         )
         raise RuntimeError(msg)
     claim = _StartClaim()
