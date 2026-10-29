@@ -816,6 +816,29 @@ async def test_a_reply_persists_a_notice_an_earlier_crashed_reply_left_live(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("probe")
+async def test_only_a_reply_whose_attempt_started_hands_its_session_to_queued_notice_finalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply that fails while preparing its first attempt ran nothing in the agent session, so it registers none."""
+    reply = _reply(tmp_path, monkeypatch, [answer("Done.")])
+
+    with queued_message_signal_context(None) as notices:
+        assert await _respond(reply) == "Done."
+    assert list(notices.storage_targets) == [("assistant", SESSION_ID, "agent")]
+
+    async def history_unavailable(*_args: object, **_kwargs: object) -> None:
+        msg = "history unavailable"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(ai, "_prepare_agent_run_context", history_unavailable)
+    with queued_message_signal_context(None) as notices:
+        assert await _respond(reply, run_id="run-2") == "[assistant] ⚠️ Error: history unavailable"
+    assert notices.storage_targets == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
 async def test_a_silent_participation_decision_ends_the_reply_before_any_model_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
