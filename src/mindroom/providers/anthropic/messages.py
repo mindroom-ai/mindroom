@@ -551,17 +551,12 @@ _COMMITTED_STREAM_STATUS = 200
 _NO_CREDENTIALS_ERROR = '"Could not resolve authentication method.'
 # The blocks the model writes itself; every other block is a server tool's call or result.
 _MODEL_BLOCK_TYPES = frozenset({"text", "thinking", "redacted_thinking", "tool_use"})
-# The error type Anthropic sends, with a 402 status, for a problem with the organization's billing or payment details.
-_BILLING_ERROR_TYPE = "billing_error"
 # How Anthropic words the 400 ``invalid_request_error`` of a request the organization's billing stops, which carries no
 # code of its own: "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade
 # or purchase credits." for an organization without prepaid credit, and a message that begins "You have reached your
 # specified API usage limits" or "You have reached your specified workspace API usage limits" for a spend limit the
 # organization or a workspace set. No retry passes until the credit or the limit changes.
 _BILLING_STOP_WORDING = ("credit balance is too low", "you have reached your specified")
-# The ``error.details.error_code`` of the 429 ``rate_limit_error`` an organization gets once it reached its usage tier's
-# monthly spend cap, with no ``retry-after`` header: no retry passes before the next month or a higher tier.
-_SPEND_CAP_CODE = "enforced_spend_limit_reached"
 
 
 def _progress(event: Any) -> StreamProgress:  # noqa: ANN401 - SDK stream event
@@ -579,10 +574,11 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
     """Return the shared error for an SDK, transport, or Google token failure; any other exception propagates.
 
     The Vertex client mints its Google access token inside the request. An ``error`` event inside the stream arrives
-    with the stream's committed 200 status, so its error type classifies it. A failed response keeps the body's own
-    message as its text, rather than the SDK's status line and body, or the SDK's text when the body has none, so a
-    reply shows what Anthropic said; a request the organization's billing stops is a final error. The SDK finds a
-    client's credentials only when it sends, so a client without any fails then, as the missing key it is.
+    with the stream's committed 200 status, so it is classified without a status, by its type. An Anthropic-shaped
+    body gives the shared classifier its message, type, and ``details.error_code``, and the message becomes the
+    error's text, so a reply shows what Anthropic said rather than the SDK's status line and body; any other body keeps
+    the SDK's text. A billing stop Anthropic names by neither type nor code is matched by its wording here. The SDK
+    finds a client's credentials only when it sends, so a client without any fails then, as the missing key it is.
     """
     if isinstance(error, TypeError) and str(error).startswith(_NO_CREDENTIALS_ERROR):
         return missing_api_key_error(PROVIDER_ENV_KEYS["anthropic"], provider=provider)
@@ -591,16 +587,15 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
     if isinstance(error, anthropic.APIStatusError):
         body = _ErrorBody.of(error.body)
         message = body.message or error.message
-        committed = error.status_code == _COMMITTED_STREAM_STATUS
-        status_code = None if committed else error.status_code
-        if body.stops_on_billing():
+        status_code = None if error.status_code == _COMMITTED_STREAM_STATUS else error.status_code
+        if any(wording in message.casefold() for wording in _BILLING_STOP_WORDING):
             return ProviderError(message, provider=provider, status_code=status_code, code=QUOTA_EXHAUSTED)
-        if committed:
-            return classify_provider_error(message, provider=provider, error_type=body.type)
         return classify_provider_error(
             message,
             provider=provider,
             status_code=status_code,
+            code=body.code,
+            error_type=body.type,
             retry_after_seconds=retry_after_seconds(error.response.headers),
         )
     if isinstance(error, anthropic.APIError):
@@ -631,15 +626,6 @@ class _ErrorBody:
             type=error_type if isinstance(error_type, str) else None,
             message=message if isinstance(message, str) else None,
             code=code if isinstance(code, str) else None,
-        )
-
-    def stops_on_billing(self) -> bool:
-        """Return whether the organization's billing refused the request, which no retry passes until it changes."""
-        lowered = (self.message or "").casefold()
-        return (
-            self.type == _BILLING_ERROR_TYPE
-            or self.code == _SPEND_CAP_CODE
-            or any(wording in lowered for wording in _BILLING_STOP_WORDING)
         )
 
 

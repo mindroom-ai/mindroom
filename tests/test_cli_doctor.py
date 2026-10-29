@@ -93,8 +93,8 @@ def test_service_disabled_explains_api_enablement() -> None:
     assert detail == "HTTP 403: the Vertex AI API (aiplatform.googleapis.com) is not enabled in this project"
 
 
-# Google's answer to a request whose project has the Vertex AI API disabled, in its AIP-193 error shape, which the
-# Vertex AI route sends Claude's failures in; Google may also send it as a one-element list.
+# Google's answer to a Vertex AI request whose project has the Vertex AI API disabled, in Google's AIP-193 error shape
+# rather than Anthropic's; Google may also send it as a one-element list.
 _VERTEX_API_DISABLED = {
     "error": {
         "code": 403,

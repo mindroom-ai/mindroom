@@ -56,7 +56,9 @@ _RATE_LIMIT_NAMES = frozenset({"rate_limit_error", "rate_limit_exceeded"})
 # credit used up, a reached organization or project spend limit, and a reached OpenAI-assigned usage limit, besides
 # ``insufficient_quota``, the older code of an account without credit and still the error type of the others.
 # Moonshot's error type, which it sends without a code, for an account whose balance or token quota ran out or that was
-# disabled.
+# disabled. Anthropic's error type for a problem with the organization's billing or payment details, which it sends
+# with a 402, and the ``details.error_code`` of its 429 ``rate_limit_error`` once the organization reached its usage
+# tier's monthly spend cap, which carries no ``retry-after``.
 _QUOTA_EXHAUSTED_NAMES = frozenset(
     {
         "insufficient_quota",
@@ -65,6 +67,8 @@ _QUOTA_EXHAUSTED_NAMES = frozenset(
         "project_spend_limit_exceeded",
         "organization_usage_limit_exceeded",
         "exceeded_current_quota_error",
+        "billing_error",
+        "enforced_spend_limit_reached",
     },
 )
 # The name Anthropic gives rejected credentials, with or without its 401 status.
