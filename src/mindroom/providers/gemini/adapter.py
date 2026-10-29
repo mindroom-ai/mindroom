@@ -59,8 +59,8 @@ _PROVIDER = "Google"
 _SAMPLING_CONTROL_NAMES = frozenset({"temperature", "top_p", "top_k"})
 # How the SDK's ``ValueError`` begins when a Gemini API client has no API key at all.
 _NO_API_KEY_ERROR = "No API key was provided."
-# The generation a Gemini model id names, as in ``gemini-3.8-flash`` or ``models/gemini-4-pro``; an alias such as
-# ``gemini-flash-latest`` names none.
+# The generation a Gemini model id names, as in ``gemini-3.1-pro-preview`` or ``models/gemini-4-pro``; an alias
+# such as ``gemini-flash-latest`` names none.
 _GEMINI_GENERATION = re.compile(r"gemini-(\d+)(?:[.-]|$)")
 
 
