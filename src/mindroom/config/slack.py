@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from mindroom.config.resolution import authored_tool_entries
 from mindroom.matrix.identity import validate_email_to_matrix_mapping
 
 if TYPE_CHECKING:
@@ -104,7 +105,7 @@ def _check_channels(path: str, channels: object) -> None:
 
 def _effective_write(config: Config, name: str) -> object:
     """Return the `write` the agent's `slack` tool runs with: its own override over any from `defaults.tools`."""
-    entries = config.resolve_agent(name).tools.authored
+    entries = authored_tool_entries(config, name)
     overrides = next((entry.tool_config_overrides for entry in entries if entry.name == _SLACK_TOOL_NAME), {})
     return overrides.get("write", True)
 
