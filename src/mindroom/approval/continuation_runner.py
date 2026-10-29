@@ -913,7 +913,7 @@ class ApprovalContinuationRunner:
                 self.host.client(),
                 claimed.room_id,
                 requester_user_id=claimed.requester_id,
-                enable_streaming=self.deps.runtime.enable_streaming,
+                enable_streaming=self.deps.runtime.config.defaults.enable_streaming,
             )
             else nullcontext()
         )

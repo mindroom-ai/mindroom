@@ -33,9 +33,6 @@ class BotRuntimeView(Protocol):
     def agent_reply_memberships(self) -> AgentReplyMembershipIndex: ...  # noqa: D102
 
     @property
-    def enable_streaming(self) -> bool: ...  # noqa: D102
-
-    @property
     def orchestrator(self) -> OrchestratorRuntime | None: ...  # noqa: D102
 
     @property
@@ -58,11 +55,6 @@ class BotRuntimeState:
     # so it survives the runtime rebuild after a login identity change.
     response_admission_gate: ResponseAdmissionGate = field(default_factory=ResponseAdmissionGate)
     runtime_started_at: float = field(default_factory=time.time)
-
-    @property
-    def enable_streaming(self) -> bool:
-        """Return whether the live config enables streaming replies."""
-        return self.config.defaults.enable_streaming
 
     def mark_runtime_started(self) -> None:
         """Record the runtime start time for this bot start."""

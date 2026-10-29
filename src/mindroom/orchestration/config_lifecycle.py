@@ -145,14 +145,9 @@ class ConfigReloadLifecycle:
     _requested_at: float | None = field(default=None, init=False)
     # Set by process shutdown, after which no file edit is loaded or applied.
     _cancelled: bool = field(default=False, init=False)
-    # Source files of the last reload attempt that failed to load, so the
-    # config watcher can cover include files the last good config never saw.
-    # Owned by ``_update_config``, which is the only place that knows whether
-    # an attempt was adopted.
-    failed_reload_source_files: frozenset[Path] | None = field(default=None, init=False)
-    # Source topology from the latest config that loaded successfully, even
-    # when its effective authored content did not require publication.
-    loaded_source_files: frozenset[Path] | None = field(default=None, init=False)
+    # Every file the config watcher covers besides config.yaml: the files of the last load that succeeded, even when
+    # it changed nothing, plus the files each failed load since then reached.
+    watched_source_files: frozenset[Path] = field(default=frozenset(), init=False)
     # The last config whose complete update plan returned successfully.
     _fully_applied_config: Config | None = field(default=None, init=False, repr=False)
     # A transition target that may have published only part of its runtime state.
@@ -203,10 +198,9 @@ class ConfigReloadLifecycle:
         file that the last good config never read still triggers the retry.
         """
         if loaded:
-            self.loaded_source_files = source_files
-            self.failed_reload_source_files = None
+            self.watched_source_files = source_files or frozenset()
         elif source_files:
-            self.failed_reload_source_files = source_files
+            self.watched_source_files |= source_files
 
     def _starting(self) -> bool:
         """Return whether the runtime has not run yet, as opposed to having stopped."""

@@ -886,31 +886,24 @@ class TestFailedReloadWatchSet:
 
         await lifecycle._apply_queued_config_reload()
 
-        assert lifecycle.failed_reload_source_files == frozenset(
-            {config_path.resolve(), agents_path.resolve()},
-        )
+        assert {config_path.resolve(), agents_path.resolve()} <= lifecycle.watched_source_files
 
         _write(tmp_path / "agents.yaml", "code:\n  display_name: Code\n  role: Writes code\n")
         await lifecycle._apply_queued_config_reload()
 
-        assert lifecycle.failed_reload_source_files is None
+        assert lifecycle.watched_source_files == frozenset({config_path.resolve(), agents_path.resolve()})
 
     @pytest.mark.asyncio
-    async def test_config_watcher_uses_sources_from_a_successful_noop_reload(
+    async def test_config_watcher_watches_the_files_the_reload_owner_recorded(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The dynamic watcher should replace stale include topology after an equal reload."""
+        """The dynamic watcher covers config.yaml and every file the last loads recorded."""
         config_path = (tmp_path / "config.yaml").resolve()
-        old_include = (tmp_path / "old.yaml").resolve()
         new_include = (tmp_path / "new.yaml").resolve()
         orchestrator = SimpleNamespace(
-            config=SimpleNamespace(source_files=frozenset({config_path, old_include})),
-            config_reload=SimpleNamespace(
-                loaded_source_files=frozenset({config_path, new_include}),
-                failed_reload_source_files=None,
-            ),
+            config_reload=SimpleNamespace(watched_source_files=frozenset({config_path, new_include})),
         )
         watched: set[Path] = set()
 
@@ -932,7 +925,7 @@ class TestFailedReloadWatchSet:
         )
         lifecycle = _reload_lifecycle(config_path)
         await lifecycle._apply_queued_config_reload()
-        assert lifecycle.failed_reload_source_files is None
+        assert lifecycle.watched_source_files == frozenset({config_path.resolve()})
 
         # Reference a NEW include file whose content is a syntax error, so the
         # reload fails while parsing and the last good config never saw the file.
@@ -943,14 +936,14 @@ class TestFailedReloadWatchSet:
         new_file = _write(tmp_path / "agents" / "new.yaml", "code: [unclosed\n")
         await lifecycle._apply_queued_config_reload()
 
-        assert lifecycle.failed_reload_source_files is not None
-        assert new_file.resolve() in lifecycle.failed_reload_source_files
+        assert new_file.resolve() in lifecycle.watched_source_files
 
         # Fixing ONLY the new include file makes the retry reload succeed.
         _write(new_file, "code:\n  display_name: Code\n  role: Writes code\n")
         await lifecycle._apply_queued_config_reload()
 
-        assert lifecycle.failed_reload_source_files is None
+        assert lifecycle.status.status == "applied"
+        assert lifecycle.watched_source_files == frozenset({config_path.resolve(), new_file.resolve()})
 
     @pytest.mark.asyncio
     async def test_watch_paths_picks_up_a_fix_to_a_failed_reloads_new_include(
@@ -970,12 +963,8 @@ class TestFailedReloadWatchSet:
         stop_event = asyncio.Event()
 
         def provider() -> set[Path]:
-            # Mirrors orchestrator._watch_config_task: the top-level file plus
-            # whatever a failed reload attempt read.
-            watched = {config_path}
-            if lifecycle.failed_reload_source_files:
-                watched.update(lifecycle.failed_reload_source_files)
-            return watched
+            # Mirrors orchestrator._watch_config_task.
+            return {config_path, *lifecycle.watched_source_files}
 
         async def on_change() -> None:
             await lifecycle._apply_queued_config_reload()
@@ -993,8 +982,7 @@ class TestFailedReloadWatchSet:
         os.utime(new_file, (future_time, future_time))
         os.utime(config_path, (future_time, future_time))
         await asyncio.wait_for(reloads.wait(), timeout=2)
-        assert lifecycle.failed_reload_source_files is not None
-        assert new_file.resolve() in lifecycle.failed_reload_source_files
+        assert new_file.resolve() in lifecycle.watched_source_files
 
         # Let the watcher baseline the newly watched file, then fix ONLY it.
         await asyncio.sleep(0.05)
@@ -1006,4 +994,4 @@ class TestFailedReloadWatchSet:
 
         stop_event.set()
         await watch_task
-        assert lifecycle.failed_reload_source_files is None
+        assert lifecycle.status.status == "applied"

@@ -165,9 +165,7 @@ async def test_startup_load_keeps_the_watcher_on_include_files_it_read(
     assert startup_load is not None
     await asyncio.wait_for(startup_load, timeout=5)
 
-    watched = lifecycle.failed_reload_source_files if broken else lifecycle.loaded_source_files
-    assert watched is not None
-    assert included.resolve() in {path.resolve() for path in watched}
+    assert included.resolve() in {path.resolve() for path in lifecycle.watched_source_files}
 
 
 @pytest.mark.asyncio
@@ -487,8 +485,8 @@ async def test_semantic_noop_reload_records_new_include_sources(
 
     assert await lifecycle._update_config() is False
 
-    assert lifecycle.loaded_source_files == reloaded_config.source_files
-    assert included_defaults.resolve() in lifecycle.loaded_source_files
+    assert lifecycle.watched_source_files == reloaded_config.source_files
+    assert included_defaults.resolve() in lifecycle.watched_source_files
     lifecycle.apply_update_plan.assert_not_awaited()
 
 
@@ -1265,7 +1263,7 @@ async def test_reload_that_loses_to_a_dashboard_save_adopts_nothing_and_stays_pe
     assert snapshot.config_data["agents"]["agent1"]["display_name"] == "Saved From Dashboard"
     lifecycle.apply_update_plan.assert_not_awaited()
     assert lifecycle.status == ConfigReloadStatus(status="pending")
-    assert lifecycle.failed_reload_source_files is None
+    assert lifecycle.watched_source_files == frozenset()
 
 
 @pytest.mark.asyncio
@@ -1315,4 +1313,4 @@ async def test_failed_reload_load_reports_failure_and_watches_files_it_read(tmp_
 
     lifecycle.apply_update_plan.assert_not_awaited()
     assert lifecycle.status == ConfigReloadStatus(status="failed")
-    assert lifecycle.failed_reload_source_files == frozenset({runtime_paths.config_path.resolve()})
+    assert lifecycle.watched_source_files == frozenset({runtime_paths.config_path.resolve()})

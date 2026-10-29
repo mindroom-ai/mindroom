@@ -2520,7 +2520,7 @@ class ResponseRunner:
                 self.client(),
                 request.room_id,
                 requester_user_id=request.user_id,
-                enable_streaming=self.deps.runtime.enable_streaming,
+                enable_streaming=self.deps.runtime.config.defaults.enable_streaming,
             )
         )
         if request.pipeline_timing is not None:

@@ -159,7 +159,7 @@ def test_team_bot_uses_defaults_streaming_setting(
     )
 
     assert team_bot is not None
-    assert team_bot._runtime_view.enable_streaming is False
+    assert team_bot._runtime_view.config.defaults.enable_streaming is False
 
 
 def test_team_bot_uses_persisted_member_usernames(

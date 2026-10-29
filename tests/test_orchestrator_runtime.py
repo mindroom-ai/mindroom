@@ -588,7 +588,7 @@ async def test_mindroom_run_publishes_its_first_config_load_before_the_api_serve
 
     async def recording_start(orchestrator: _MultiAgentOrchestrator, config: Config) -> None:
         started_with.append(config)
-        watched_at_start.append(orchestrator.config_reload.loaded_source_files)
+        watched_at_start.append(orchestrator.config_reload.watched_source_files)
         await real_start(orchestrator, config)
 
     async def serving_api(*args: object, **_kwargs: object) -> None:
@@ -5734,7 +5734,7 @@ class TestMultiAgentOrchestrator:
 
             assert orchestrator.agent_bots
             for bot in orchestrator.agent_bots.values():
-                assert bot._runtime_view.enable_streaming is False
+                assert bot._runtime_view.config.defaults.enable_streaming is False
 
 
 @pytest.mark.asyncio
