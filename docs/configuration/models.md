@@ -310,6 +310,7 @@ Model access and usage limits depend on the logged-in ChatGPT account, so check 
 |-------|----------|----------|
 | GPT-6.1 Sol | `gpt-6.1-sol` | Near-Astra reasoning for long-running work; the starter default |
 | GPT-6 Astra | `gpt-6-astra` | The hardest end-to-end reasoning and agentic work |
+| GPT-6.1 Terra | `gpt-6.1-terra` | Fast everyday coding, writing, screenshots, and computer use |
 | GPT-6 Luna | `gpt-6-luna` | Efficient, high-volume work such as summaries and routing |
 
 Older or preview slugs work when the account exposes them, the form `openai-codex/gpt-6.1-sol` is accepted, and the legacy `gpt-5.6` alias maps to `gpt-5.6-sol`.
@@ -348,8 +349,8 @@ defaults:
 ```
 
 Use `258000` as the context window: it is the effective budget of the Codex ChatGPT surface (just under 95% of its 272000-token window), not the larger window of the OpenAI API.
-Set reasoning effort with `extra_kwargs.reasoning_effort`; GPT-6.1 Sol, GPT-6 Astra, and GPT-6 Luna accept `low`, `medium`, `high`, `xhigh`, and `max`.
-Codex clients also offer Ultra for Sol and Astra, but Ultra's Codex-managed subagents are not available through MindRoom.
+Set reasoning effort with `extra_kwargs.reasoning_effort`; GPT-6.1 Sol, GPT-6 Astra, GPT-6.1 Terra, and GPT-6 Luna accept `low`, `medium`, `high`, `xhigh`, and `max`.
+Codex clients also offer Ultra for Sol, Astra, and Terra, but Ultra's Codex-managed subagents are not available through MindRoom.
 The provider supports text and image input with text output; transcription, text-to-speech, and realtime speech are not supported.
 The adapter depends on the Codex CLI login format and backend, so a Codex CLI update can require a MindRoom update; use `provider: openai` for the public API contract and API billing.
 
@@ -360,25 +361,27 @@ Run `kimi` and `/login` first so `~/.kimi-code/credentials/kimi-code.json` conta
 
 | Model | Model ID | Best fit |
 |-------|----------|----------|
-| Kimi K3 | `k3` | Flagship reasoning, long-horizon coding, and agent work with up to a 1M-token context |
+| Kimi K3.1 Pro | `k3.1-pro` | Flagship reasoning, long-horizon coding, and agent work with up to a 1M-token context; the starter default |
+| Kimi K3.1 Pro Highspeed | `k3.1-pro-highspeed` | K3.1 Pro at about 2-3x the speed and twice the quota use, on Pro (legacy Allegretto) and higher |
+| Kimi K3 | `k3` | The previous flagship generation with up to a 1M-token context |
 | Kimi K3 256k | `k3-256k` | The same K3 generation with a 256k-token context |
 | Kimi for Coding | `kimi-for-coding` | Coding-tuned tier exposed by the Kimi Code CLI |
 | Kimi for Coding Highspeed | `kimi-for-coding-highspeed` | Faster coding tier exposed by the Kimi Code CLI |
 
-[Kimi Code context limits depend on the subscription plan](https://www.kimi.com/code/docs/en/kimi-code/models.html): `k3` supports 1,048,576 tokens on Pro (legacy Allegretto) and higher, while Plus (legacy Moderato) is limited to 262,144.
+[Kimi Code context limits depend on the subscription plan](https://www.kimi.com/code/docs/en/kimi-code/models.html): `k3.1-pro` and `k3` support 1,048,576 tokens on Pro (legacy Allegretto) and higher, while Plus (legacy Moderato) is limited to 262,144.
 The starter config and this example require Pro/Allegretto or higher; on Plus/Moderato, and for `k3-256k` on any plan, set `context_window: 262144`.
 
 ```yaml
 models:
   default:
     provider: kimi
-    id: k3
+    id: k3.1-pro
     context_window: 1048576
 ```
 
-The form `kimi-code/k3` is accepted.
+The form `kimi-code/k3.1-pro` is accepted.
 If Kimi Code state lives outside `~/.kimi-code`, set `KIMI_CODE_HOME` in the `.env` beside `config.yaml` or the process environment, or `extra_kwargs.kimi_home`; `~` prefixes are expanded.
-Kimi K3 always reasons before replying, so responses include reasoning tokens even for short answers.
+Kimi K3.1 Pro and K3 always reason before replying, so responses include reasoning tokens even for short answers.
 The adapter depends on the Kimi Code CLI login format and backend, so a Kimi Code update can require a MindRoom update.
 
 ## OpenRouter Provider Routing

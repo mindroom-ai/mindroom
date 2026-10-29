@@ -221,24 +221,26 @@ Coding model training data often lags recent releases, so never trust memorized 
 | Anthropic | Fast / cheap | Claude Haiku 5.5 | `claude-haiku-5-5` |
 | OpenAI | Frontier default | GPT-6 Astra | `gpt-6-astra` |
 | OpenAI | Balanced | GPT-6.1 Sol | `gpt-6.1-sol` |
-| OpenAI | Fast / cheap | GPT-6 Luna | `gpt-6-luna` |
+| OpenAI | Fast | GPT-6.1 Terra | `gpt-6.1-terra` |
+| OpenAI | Cheap / high-volume | GPT-6 Luna | `gpt-6-luna` |
 | OpenAI Codex ChatGPT login | Default via Codex CLI | GPT-6.1 Sol | `gpt-6.1-sol` |
 | OpenAI Codex ChatGPT login | Frontier via Codex CLI | GPT-6 Astra | `gpt-6-astra` |
-| OpenAI Codex ChatGPT login | Fast / cheap via Codex CLI | GPT-6 Luna | `gpt-6-luna` |
+| OpenAI Codex ChatGPT login | Fast via Codex CLI | GPT-6.1 Terra | `gpt-6.1-terra` |
+| OpenAI Codex ChatGPT login | Cheap / high-volume via Codex CLI | GPT-6 Luna | `gpt-6-luna` |
 | DeepSeek (OpenRouter) | Fast / cheap | DeepSeek V4.1 Flash | `deepseek/deepseek-v4.1-flash` |
 | Z.ai (OpenRouter) | Flagship | GLM-5.3 | `z-ai/glm-5.3` |
 | OpenAI | Image generation / editing | GPT Image 2.5 Sunburst | `gpt-image-2.5-sunburst` |
 | OpenAI | File transcription | GPT Transcribe | `gpt-transcribe` |
 | Google (Vertex AI) | Video generation | Veo 3.1 | `veo-3.1-generate-001` |
 | Qwen | Local 27B | Qwen3.8-27B | `qwen3.8:27b` (Ollama), `unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL` (llama.cpp) |
-| Moonshot Kimi Code login | Frontier via Kimi Code CLI | Kimi K3 | `k3` |
-| Google (Gemini API) | Max intelligence | Gemini 3.1 Pro Preview | `gemini-3.1-pro-preview` |
+| Moonshot Kimi Code login | Frontier via Kimi Code CLI | Kimi K3.1 Pro | `k3.1-pro` |
+| Google (Gemini API) | Max intelligence | Gemini 4 Argon | `gemini-4-argon` |
 | Google (Gemini API) | Standard text / coding | Gemini 3.8 Flash | `gemini-3.8-flash` |
 | Google (Gemini API) | Fast / cheap text | Gemini 3.5 Flash-Lite | `gemini-3.5-flash-lite` |
-| Google (Gemini API) | Image generation / editing | Nano Banana 2 | `gemini-3.1-flash-image` |
+| Google (Gemini API) | Image generation / editing | Nano Banana 2.1 | `gemini-nano-banana-2.1` |
 | Google (Gemini API) | Embeddings for `google` | Gemini Embedding 2 | `gemini-embedding-2` |
 
-Model IDs were checked against provider catalogs on September 28, 2026, the Haiku row on October 7, 2026, and the Codex rows against the Codex model catalog on October 1, 2026.
+Model IDs were checked against the provider and Codex model catalogs on October 29, 2026.
 OpenRouter uses `anthropic/claude-fable-5.1`, Bedrock uses `anthropic.claude-fable-5-1`, and the direct Anthropic and Vertex APIs use `claude-fable-5-1`.
 Likewise, OpenRouter uses `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5`, and Bedrock uses `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5`.
 For the direct DeepSeek API, prefer `deepseek-flash` for V4.1 Flash and `deepseek-v4-pro` for Pro; do not substitute the OpenRouter V4.1 ID on the direct API.
@@ -251,12 +253,12 @@ For `vertexai_claude`, use the current Vertex AI request name from the provider 
 Current Google Cloud docs list bare Vertex IDs for `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5`.
 Do not assume `@default` or dated `@...` suffixes are universally required for Vertex AI Claude.
 For Gemini API text and coding work, prefer `gemini-3.8-flash` as the standard stable model unless you intentionally need the cheaper `gemini-3.5-flash-lite` tier.
-Use `gemini-3.1-pro-preview` only when you need the highest Gemini API intelligence tier and accept a preview model.
+Use `gemini-4-argon` when you need the highest Gemini API intelligence tier.
 The Google rows above are for the Gemini API / AI Studio `google` provider, not for Vertex AI.
 For `vertexai`, verify the current Vertex AI docs instead of assuming Gemini API names or defaults carry over unchanged.
-Current [Vertex AI image docs](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/capabilities/image-generation) document `gemini-3-pro-image`, `gemini-3.1-flash-image`, and `gemini-3.1-flash-lite-image`; choose the tier that fits the task.
+Current [Vertex AI image docs](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/capabilities/image-generation) document `gemini-nano-banana-2.1`, `gemini-3-pro-image`, `gemini-3.1-flash-image`, and `gemini-3.1-flash-lite-image`; choose the tier that fits the task; `gemini-nano-banana-2.1` serves only the `global` location.
 For Google image work, use the official product name from the docs for the provider surface you are editing.
-Gemini API docs call `gemini-3.1-flash-image` Nano Banana 2, while Vertex AI docs use their own product naming and model tables.
+Gemini API docs call `gemini-nano-banana-2.1` Nano Banana 2.1, while Vertex AI docs use their own product naming and model tables.
 
 ## 5. Architecture
 

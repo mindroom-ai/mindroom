@@ -139,7 +139,7 @@ CODEX_GPT_ALIAS = "gpt-5.6"
 CODEX_GPT_ENDPOINT = "gpt-5.6-sol"
 # Just under the Codex catalog's 95% effective budget (258,400) of its 272k context window.
 _CODEX_CONTEXT_WINDOW = 258_000
-_KIMI_K3 = "k3"
+_KIMI = "k3.1-pro"
 _OPENAI_GPT = "gpt-6-astra"
 OPENAI_GPT_SOL = "gpt-6.1-sol"
 OPENAI_GPT_LUNA = "gpt-6-luna"
@@ -162,7 +162,7 @@ _AZURE_OPENAI_DEFAULT_DEPLOYMENT = "your-azure-openai-deployment"
 
 _GOOGLE_GEMINI_FLASH = "gemini-3.8-flash"
 _GOOGLE_GEMINI_LITE = "gemini-3.5-flash-lite"
-GOOGLE_IMAGE = "gemini-3.1-flash-image"
+GOOGLE_IMAGE = "gemini-nano-banana-2.1"
 GOOGLE_VEO = "veo-3.1-generate-001"
 # Direct Gemini API models whose requests keep the provider's sampling defaults. Literal ids, like the Claude lists
 # below, because a model keeps its sampling rule after the preferred defaults move on from it.
@@ -220,10 +220,10 @@ _OPENROUTER_OPENAI_SOL = f"openai/{OPENAI_GPT_SOL}"
 OPENROUTER_OPENAI_LUNA = f"openai/{OPENAI_GPT_LUNA}"
 # Not the ":free" variant: guardrail/data-policy restricted keys (such as
 # platform-provisioned hosted keys) have no endpoints for free models.
-_OPENROUTER_NEMOTRON = "nvidia/nemotron-3.5-lightning"
+_OPENROUTER_NEMOTRON = "nvidia/nemotron-3.5-super-vl"
 _OPENROUTER_DEEPSEEK = "deepseek/deepseek-v4.1-flash"
 _OPENROUTER_GLM = "z-ai/glm-5.3"
-_OPENROUTER_KIMI = "moonshotai/kimi-k3"
+_OPENROUTER_KIMI = "moonshotai/kimi-k3.1-pro"
 _OPENROUTER_TENCENT_HY4 = "tencent/hy4-preview"
 
 # The public endpoints of the hosted providers; Groq's and Cerebras's are hosts their routes append an API path to.
@@ -276,7 +276,7 @@ CONFIG_INIT_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
         "bedrock_claude": ModelPreset("bedrock_claude", _AWS_BEDROCK_CLAUDE_OPUS, 1_000_000),
         "azure": ModelPreset("azure", _AZURE_OPENAI_DEFAULT_DEPLOYMENT),
         "codex": ModelPreset("codex", _CODEX_GPT, _CODEX_CONTEXT_WINDOW, reasoning_effort="medium", display_name="Sol"),
-        "kimi": ModelPreset("kimi", _KIMI_K3, 1_048_576),
+        "kimi": ModelPreset("kimi", _KIMI, 1_048_576),
         "llama_cpp": ModelPreset("llama_cpp", LLAMA_CPP_GEMMA, 128_000),
         "ollama": ModelPreset("ollama", OLLAMA_GEMMA, 128_000),
         "openai": ModelPreset("openai", _OPENAI_GPT, 1_050_000),
@@ -314,7 +314,7 @@ CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]
             ("glm", ModelPreset("openrouter", _OPENROUTER_GLM, 1_048_576)),
             ("kimi", ModelPreset("openrouter", _OPENROUTER_KIMI, 1_048_576)),
             ("tencent_hy4", ModelPreset("openrouter", _OPENROUTER_TENCENT_HY4, 1_048_576)),
-            ("nemotron", ModelPreset("openrouter", _OPENROUTER_NEMOTRON, 1_000_000)),
+            ("nemotron", ModelPreset("openrouter", _OPENROUTER_NEMOTRON, 1_048_576)),
         ),
         "vertexai_claude": (
             ("fable", ModelPreset("vertexai_claude", _ANTHROPIC_FABLE, 1_000_000)),
@@ -373,7 +373,7 @@ SAAS_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
         "glm": ModelPreset("openrouter", _OPENROUTER_GLM, 1_048_576),
         "kimi": ModelPreset("openrouter", _OPENROUTER_KIMI, 1_048_576),
         "tencent_hy4": ModelPreset("openrouter", _OPENROUTER_TENCENT_HY4, 1_048_576),
-        "nemotron": ModelPreset("openrouter", _OPENROUTER_NEMOTRON, 1_000_000),
+        "nemotron": ModelPreset("openrouter", _OPENROUTER_NEMOTRON, 1_048_576),
     },
 )
 
