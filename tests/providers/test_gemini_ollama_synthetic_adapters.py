@@ -754,6 +754,27 @@ async def test_gemini_search_goes_beside_the_function_tools_only_for_a_gemini_3_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["generation_config", "generative_model_kwargs"])
+async def test_gemini_search_beside_tools_keeps_the_authored_tool_config(source: str, tmp_path: Path) -> None:
+    """Authored retrieval settings, such as the location search answers for, stay beside the server-side parts flag."""
+    retrieval = {"retrieval_config": {"lat_lng": {"latitude": 52.37, "longitude": 4.9}, "language_code": "nl"}}
+    sent = {}
+    for model_id in ("gemini-2.5-flash", "gemini-3.8-flash"):
+        config = _config({**GEMINI, "id": model_id}, search=True, **{source: {"tool_config": copy.deepcopy(retrieval)}})
+        request, _ = await run_adapter(
+            config,
+            _request(tools=[WEATHER]),
+            tmp_path,
+            gemini_sse(_gemini_chunk({"text": "ok"})),
+        )
+        sent[model_id] = request["body"]["toolConfig"]
+
+    # Search alone sends the authored tool config as it is.
+    assert set(sent["gemini-2.5-flash"]) == {"retrievalConfig"}
+    assert sent["gemini-3.8-flash"] == {**sent["gemini-2.5-flash"], "includeServerSideToolInvocations": True}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("config", "sent_tools", "json_output"),
     [

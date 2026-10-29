@@ -46,7 +46,7 @@ from mindroom.providers.google_adc import with_runtime_application_credentials
 from mindroom.providers.tool_policy import disables_tools
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 
     from google.genai import Client
     from google.genai.types import GenerateContentConfig, GenerateContentResponse
@@ -183,7 +183,7 @@ class GeminiProvider:
         # it off.
         if thinking := {key: value for key, value in thinking.items() if value is not None}:
             config["thinking_config"] = thinking
-        config.update(self._tool_settings(request))
+        config.update(self._tool_settings(request, authored_tool_config=config.get("tool_config")))
         config = {key: value for key, value in config.items() if value is not None}
         if self.capabilities.provider_default_sampling:
             config = {key: value for key, value in config.items() if key not in _SAMPLING_CONTROL_NAMES}
@@ -209,8 +209,17 @@ class GeminiProvider:
         generation = _GEMINI_GENERATION.match(self.identity.id.rsplit("/", 1)[-1].casefold())
         return generation is not None and int(generation[1]) >= 3
 
-    def _tool_settings(self, request: ModelRequest) -> dict[str, Any]:
-        """Return the request's ``tools`` and ``tool_config``; one it leaves out keeps the authored generation config's."""
+    def _tool_settings(
+        self,
+        request: ModelRequest,
+        *,
+        authored_tool_config: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Return the request's ``tools`` and ``tool_config``; one it leaves out keeps the authored generation config's.
+
+        Search beside the function tools adds its flag to the authored ``tool_config``, so authored settings such as
+        the search's ``retrieval_config`` stay.
+        """
         chosen: dict[str, Any] = {}
         declarations = function_declarations(request.tools)
         search_beside_tools = self._sends_search_beside_tools(request)
@@ -223,7 +232,7 @@ class GeminiProvider:
         if (function_calling := tool_config(request.tool_choice)) is not None:
             chosen["tool_config"] = function_calling
         elif search_beside_tools:
-            chosen["tool_config"] = {"include_server_side_tool_invocations": True}
+            chosen["tool_config"] = {**(authored_tool_config or {}), "include_server_side_tool_invocations": True}
         return chosen
 
     def _decision_config(self, config: dict[str, Any]) -> dict[str, Any] | GenerateContentConfig:
