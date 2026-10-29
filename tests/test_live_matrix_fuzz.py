@@ -6956,15 +6956,16 @@ async def test_supersession_anchor_accepts_the_revision_mindroom_answered() -> N
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("later_ts", "seen", "noted", "status", "dropped"),
+    ("later_ts", "seen", "noted", "status", "coalesced", "dropped"),
     [
-        (30, "declined", True, "error", True),
-        (50, "declined", True, "error", False),
-        (None, "declined", True, "error", False),
-        (30, "original", True, "error", False),
-        (30, "answered", True, "error", False),
-        (30, "declined", False, "streaming", False),
-        (30, "declined", True, "streaming", False),
+        (30, "declined", True, "error", False, True),
+        (50, "declined", True, "error", False, False),
+        (None, "declined", True, "error", False, False),
+        (30, "original", True, "error", False, False),
+        (30, "answered", True, "error", False, False),
+        (30, "declined", False, "streaming", False, False),
+        (30, "declined", True, "streaming", False, False),
+        (None, "declined", True, "error", True, False),
     ],
     ids=[
         "later_message_before_the_note",
@@ -6974,6 +6975,7 @@ async def test_supersession_anchor_accepts_the_revision_mindroom_answered() -> N
         "call_saw_an_answered_edit",
         "no_interrupted_note",
         "note_in_a_write_that_is_not_final",
+        "coalesced_turn_without_a_later_message",
     ],
 )
 async def test_regeneration_a_restart_cut_short_ends_interrupted_once_a_later_message_drops_it(
@@ -6982,12 +6984,16 @@ async def test_regeneration_a_restart_cut_short_ends_interrupted_once_a_later_me
     seen: str,
     noted: bool,
     status: str,
+    coalesced: bool,
     dropped: bool,
 ) -> None:
     """After a restart MindRoom declines an edit another message followed, and the cut-short reply ends interrupted."""
     ledger_path = tmp_path / "event_journal.db"
     principal_id = journal_principal_id("general", "@agent:example")
-    _write_ledger(ledger_path, {"$root": TurnRecord.create(source_event_ids=("$root",), completed=True)})
+    # A coalesced turn's own later message follows its earlier source, but nothing followed the turn.
+    turn_sources = ("$root", "$sibling") if coalesced else ("$root",)
+    turn = TurnRecord.create(source_event_ids=turn_sources, completed=True)
+    _write_ledger(ledger_path, dict.fromkeys(turn_sources, turn))
     with closing(sqlite3.connect(ledger_path)) as database:
         database.execute(
             "INSERT INTO reply_messages (principal_id, reply_id, entity_name, room_id, membership_epoch, event_id, "
@@ -7000,7 +7006,7 @@ async def test_regeneration_a_restart_cut_short_ends_interrupted_once_a_later_me
             "INSERT INTO reply_spans (principal_id, span_id, reply_id, kind, delivery_id, bot_generation, "
             "base_sequence, outcome, claimed_at_ns) VALUES (?, ?, 'answer', ?, ?, 'g', 0, ?, ?)",
             [
-                (principal_id, "turn", "turn", "$root", "completed", 1),
+                (principal_id, "turn", "turn", turn.anchor_event_id, "completed", 1),
                 (principal_id, "answered", "regeneration", "$answered-edit", "completed", 2),
                 (principal_id, "cut", "regeneration", "$edit", "lost", 3),
             ],
@@ -7061,12 +7067,15 @@ async def test_regeneration_a_restart_cut_short_ends_interrupted_once_a_later_me
         "$note": _agent_edit_event("$reply", "$note", body, ts=40),
     }
     events["$note"]["content"]["m.new_content"]["io.mindroom.stream_status"] = status
-    if later_ts is not None:
-        events["$later"] = {
-            "event_id": "$later",
+    later_messages = {"$later": later_ts} | ({"$sibling": 25} if coalesced else {})
+    for event_id, ts in later_messages.items():
+        if ts is None:
+            continue
+        events[event_id] = {
+            "event_id": event_id,
             "sender": "@user:example",
             "type": "m.room.message",
-            "origin_server_ts": later_ts,
+            "origin_server_ts": ts,
             "content": {
                 "body": "next",
                 "msgtype": "m.text",

@@ -4867,7 +4867,7 @@ class _CanonicalResponseView:
 
     @property
     def interrupted(self) -> bool:
-        """Return whether this is MindRoom's final write of a reply it ended with an interruption note."""
+        """Return whether this write shows an interruption note with the `error` status MindRoom gives it."""
         return self.stream_status == "error" and self.body.endswith(
             (INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE),
         )
@@ -4966,7 +4966,6 @@ class ExactReplyOracle:
         self._ledger_read_at = 0.0
         self.log_path: Path | None = None
         self.sent_records: Collection[_SentRecord] = ()
-        self.source_current_markers: Mapping[str, str] = {}
         self.source_revision_markers: Mapping[str, Mapping[str, str]] = {}
         self.observed_markers_for = _ModelHandler.observed_markers_for
         self.full_request_markers_for = _ModelHandler.full_request_markers_for
@@ -5072,7 +5071,6 @@ class ExactReplyOracle:
                 agent_id=self.agent_id,
                 ledger_path=self.ledger_path,
                 expected_body_for=self.expected_body_for,
-                source_current_markers=self.source_current_markers,
                 source_revision_markers=self.source_revision_markers,
                 observed_markers_for=self.observed_markers_for,
                 full_request_markers_for=self.full_request_markers_for,
@@ -7157,7 +7155,6 @@ class LiveFuzzRunner:
         # exact terminal consumption supersedes it, or its own redaction lands.
         self._pending_edit_markers: dict[str, dict[str, str]] = {}
         self.oracle.log_path = stack.log_path
-        self.oracle.source_current_markers = self.source_current_markers
         self.oracle.source_revision_markers = self.source_revision_markers
         self.oracle.pending_edit_markers = self._pending_edit_markers
         self.oracle.after_ledger_refresh = self._reconcile_edit_debts
