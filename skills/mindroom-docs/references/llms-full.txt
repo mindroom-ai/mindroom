@@ -7152,7 +7152,6 @@ A template or override that would produce an invalid agent fails validation as s
 ## Generated Agents
 
 Generated agents are ordinary agents in the running config, and workers receive them too.
-Docker workers take them from the config the runtime last accepted, and every other setting from `config.yaml`, so a rejected `config.yaml` edit can give a worker a mix of the two until you fix the file.
 They never appear in the saved config file, and the dashboard and `config_manager` edit only what you authored.
 
 - Editing the template changes every user's agent at the next reload.
