@@ -168,6 +168,8 @@ The `slack` entry of an agent takes these options:
 | `room` | string | unset | One of the agent's `rooms`, where Slack mentions of the app in its channels start threads. Needs `channels` and the `slack` section above. |
 | `write` | boolean | `true` | When `false`, the agent has no `slack_post`, `slack_edit`, `slack_delete`, `slack_react`, and `slack_upload`. An agent with `room` needs `true`, because it posts its replies to Slack. |
 
+An agent that another agent [creates](../personal-agents.md#created-agents-and-self-updates) keeps its creator's `channels` but not its `room`, because it has no rooms and never answers mentions.
+
 ## Personal Agents
 
 ```yaml

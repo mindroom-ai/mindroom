@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -56,6 +56,15 @@ class SlackAnsweringAgent:
 def _slack_overrides(agent: AgentConfig) -> dict[str, object]:
     """Return the agent's own `slack` tool overrides; `defaults.tools` cannot set `channels` or `room`."""
     return next((entry.overrides for entry in agent.tools if entry.name == _SLACK_TOOL_NAME), {})
+
+
+def drop_slack_room(tools: list[Any]) -> None:
+    """Remove `room` in place from the `slack` entry of a raw tool list, whose entries are `{name, overrides}` or `{name: overrides}`."""
+    for entry in tools:
+        if isinstance(entry, dict):
+            overrides = entry["overrides"] if entry.get("name") == _SLACK_TOOL_NAME else entry.get(_SLACK_TOOL_NAME)
+            if isinstance(overrides, dict):
+                overrides.pop("room", None)
 
 
 def slack_answering_agents(config: Config) -> tuple[SlackAnsweringAgent, ...]:
