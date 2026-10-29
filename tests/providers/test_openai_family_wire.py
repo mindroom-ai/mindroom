@@ -696,6 +696,24 @@ async def test_a_chat_route_sends_audio_and_file_attachments_inline(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["Compare them.", None], ids=["with-text", "without-text"])
+async def test_a_chat_route_keeps_file_attachments_in_the_order_they_came(tmp_path: Path, text: str | None) -> None:
+    """Each file keeps its place among the message's files, and a message without text still carries them."""
+    files = [File(content=f"%PDF-{name}".encode(), filename=f"{name}.pdf") for name in ("first", "second", "third")]
+    built = _Built(tmp_path, _OPENAI_CHAT, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
+
+    await _turn(built, ModelRequest(messages=[Message(role="user", content=text, files=files)]))
+
+    content = built.body()["messages"][0]["content"]
+    assert [part["file"]["filename"] for part in content if part["type"] == "file"] == [
+        "first.pdf",
+        "second.pdf",
+        "third.pdf",
+    ]
+    assert [part["text"] for part in content if part["type"] == "text"] == ([text] if text else [])
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("model_config", "reply"),
     [

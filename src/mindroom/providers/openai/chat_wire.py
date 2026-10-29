@@ -130,25 +130,15 @@ def _chat_message(message: Message, wire: ChatWire, system_role: str, provider: 
     if wire.route == "deepseek":
         values["reasoning_content"] = message.reasoning_content
     formatted = {key: value for key, value in values.items() if value is not None}
-    if (message.images or message.audio) and isinstance(message.content, str):
-        formatted["content"] = [
-            {"type": "text", "text": message.content},
-            *(
-                part
-                for image in message.images or ()
-                if (part := chat_image_part(image, provider=provider)) is not None
-            ),
-            *(part for audio in message.audio or () if (part := chat_audio_part(audio, provider=provider)) is not None),
-        ]
-    if message.files is not None:
+    images = [part for image in message.images or () if (part := chat_image_part(image, provider=provider)) is not None]
+    audio = [part for clip in message.audio or () if (part := chat_audio_part(clip, provider=provider)) is not None]
+    files = [part for file in message.files or () if (part := chat_file_part(file, provider=provider)) is not None]
+    if images or audio or files:
         content = formatted.get("content")
-        parts: list[Any] = [{"type": "text", "text": content}] if isinstance(content, str) else list(content or [])
-        # Each file's part goes ahead of the text.
-        for file in message.files:
-            if (part := chat_file_part(file, provider=provider)) is not None:
-                parts.insert(0, part)
-        formatted["content"] = parts
-    if message.content is None and message.role != "tool":
+        text = [{"type": "text", "text": content}] if isinstance(content, str) else list(content or [])
+        # The files go ahead of the text, and the images and audio after it.
+        formatted["content"] = [*files, *text, *images, *audio]
+    elif message.content is None and message.role != "tool":
         formatted["content"] = ""
     reasoning_details = (message.provider_data or {}).get("reasoning_details") if message.role == "assistant" else None
     if wire.route == "openrouter" and reasoning_details:

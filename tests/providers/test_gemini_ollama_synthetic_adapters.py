@@ -1569,7 +1569,7 @@ async def test_gemini_local_audio_of_unknown_type_is_sent_as_mp3(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_gemini_places_videos_before_the_prompt_and_other_media_after(tmp_path: Path) -> None:
-    """Videos lead the user turn, last one first; images, audio, and files follow the text in that order."""
+    """Videos lead the user turn in the order they came; images, audio, and files follow the text in that order."""
     message = Message(
         role="user",
         content="Compare",
@@ -1583,8 +1583,8 @@ async def test_gemini_places_videos_before_the_prompt_and_other_media_after(tmp_
 
     parts = request["body"]["contents"][0]["parts"]
     assert [next(iter(part)) for part in parts] == [
-        "inlineData",
         "fileData",
+        "inlineData",
         "text",
         "inlineData",
         "inlineData",

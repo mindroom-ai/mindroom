@@ -185,8 +185,8 @@ async def _with_media(message: Message, parts: list[dict[str, Any]], route: Medi
     videos = [part for video in message.videos or () if (part := await _video_part(video, route)) is not None]
     audio = [part for clip in message.audio or () if (part := await _audio_part(clip, route)) is not None]
     files = [part for file in message.files or () if (part := await _file_part(file, route)) is not None]
-    # Google recommends videos before the prompt; each video is placed first, so the last one leads.
-    return [*reversed(videos), *parts, *images, *audio, *files]
+    # Google recommends videos before the prompt.
+    return [*videos, *parts, *images, *audio, *files]
 
 
 def _stored_parts(stored: list[Any], tool_calls: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
