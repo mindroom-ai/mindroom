@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
@@ -25,16 +24,18 @@ from mindroom.tool_system.skills import (
 )
 from mindroom.tool_system.tool_access import tool_definition
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from tests.agno_parity.prompt_scenarios import FIXTURE_DIR
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.tool_system.tool_function import ToolFunction
 
-PROMPT_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "prompts"
 AGENT_NAME = "assistant"
 
 
 def _golden(name: str) -> dict[str, Any]:
-    return json.loads((PROMPT_FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
+    return json.loads((FIXTURE_DIR / f"{name}.json").read_text(encoding="utf-8"))
 
 
 def _write_skill(root: Path, name: str, description: str, *, body: str = "Follow the steps.") -> Path:
