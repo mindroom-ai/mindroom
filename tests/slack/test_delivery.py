@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import asyncio
-import errno
 import html
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -23,7 +22,7 @@ from mindroom.config.main import Config
 from mindroom.constants import HOOK_SOURCE_KEY, ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SOURCE_KIND_KEY
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.delivery_replay import DeliveryEventClaim, DeliveryReplayStore
+from mindroom.delivery_replay import DeliveryEventClaim, DeliveryReplayStore, DeliveryReplayStoreError
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.logging_config import get_logger
@@ -194,14 +193,15 @@ def _dm(text: str = "are you free at 3?", *, ts: str = ROOT_TS) -> dict[str, Any
 
 
 @pytest.mark.asyncio
-async def test_a_lock_error_after_the_post_still_counts_as_delivered(
+async def test_a_store_error_after_the_post_still_counts_as_delivered(
     harness: Harness,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Once the Matrix post went out, a replay-store fault must not make Slack resend and the agent answer twice."""
 
     def fail(*_args: object, **_kwargs: object) -> None:
-        raise OSError(errno.ENOLCK, "No locks available")
+        msg = "delivery replay store is unavailable"
+        raise DeliveryReplayStoreError(msg)
 
     monkeypatch.setattr(DeliveryReplayStore, "bind_thread_root", fail)
 
