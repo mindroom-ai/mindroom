@@ -24,7 +24,6 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
-from mindroom.history import summary_rows
 from mindroom.history.compaction import Summarizer, SummaryModel
 from mindroom.history.storage import (
     _with_scope_state,
@@ -65,6 +64,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY, native_checkpoint_state
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.providers.assistant_turn import stamp_model
+from mindroom.session_storage import summary_rows
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_SQL, quote_identifier
 from mindroom.session_storage.types import ConversationSession

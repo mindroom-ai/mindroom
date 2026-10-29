@@ -1196,11 +1196,6 @@ path = "mindroom.session_storage.lanes"
 depends_on = ["mindroom.background_tasks"]
 
 [[modules]]
-path = "mindroom.session_storage.summaries"
-depends_on = ["mindroom.session_storage.schema", "mindroom.session_storage.store"]
-visibility = ["mindroom.history.summary_rows"]
-
-[[modules]]
 path = "mindroom.session_storage.usage_reader"
 depends_on = ["mindroom.session_storage.schema"]
 visibility = ["mindroom.usage.stats_storage"]
@@ -3012,11 +3007,10 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.history.summary_rows"
+path = "mindroom.session_storage.summary_rows"
 depends_on = [
     "mindroom.session_storage.schema",
     "mindroom.session_storage.store",
-    "mindroom.session_storage.summaries",
     "mindroom.session_storage.types",
 ]
 visibility = [
@@ -3030,7 +3024,7 @@ depends_on = [
     "mindroom.session_storage.agent_storage",
     "mindroom.session_storage.lanes",
     "mindroom.session_storage.store",
-    "mindroom.history.summary_rows",
+    "mindroom.session_storage.summary_rows",
     "mindroom.background_tasks",
     "mindroom.constants",
     "mindroom.history.run_visibility",
@@ -9993,7 +9987,7 @@ depends_on = [
     "mindroom.history.runtime",
     "mindroom.history.storage",
     "mindroom.history.summary_message",
-    "mindroom.history.summary_rows",
+    "mindroom.session_storage.summary_rows",
     "mindroom.history.types",
     "mindroom.llm",
     "mindroom.native_compaction",

@@ -10,15 +10,15 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom import constants
-from mindroom.history import summary_rows
 from mindroom.history.mid_turn_compaction import _folded_calls
 from mindroom.history.storage import read_chunk_basis
-from mindroom.history.summary_rows import CoveredRun, Fold
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.session_storage import summary_rows
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import watch_session_row
+from mindroom.session_storage.summary_rows import CoveredRun, Fold
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session_row
 

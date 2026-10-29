@@ -17,7 +17,6 @@ from mindroom.constants import (
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     MATRIX_EVENT_ID_METADATA_KEY,
 )
-from mindroom.history import summary_rows
 from mindroom.history.compaction import (
     SummaryModel,
     _emit_compaction_hook,
@@ -62,6 +61,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.native_compaction import replay_basis
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.providers.errors import classify_provider_error
+from mindroom.session_storage import summary_rows
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_budget import estimate_compaction_input_tokens, estimate_text_tokens
 from mindroom.tool_system.runtime_context import tool_runtime_context
