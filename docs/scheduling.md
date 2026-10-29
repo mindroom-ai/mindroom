@@ -264,7 +264,7 @@ The homeserver must support `GET /_matrix/client/v3/rooms/{roomId}/state/{eventT
 
 The router runs a schedule when, at the time the schedule is saved, it may post its trigger and save schedule state in the room; otherwise the agent that saved the schedule runs it, as in a DM or an agent's personal room.
 Every agent restores the schedules it runs in a room when it joins that room, at startup or when it accepts an invitation, and the router also restores the room's pending configuration changes.
-Schedules keep running when their agent restarts, for example after a config edit, and a task that came due during the restart runs once the agent is back.
+Schedules keep running when their agent restarts, for example after a config edit: a one-time task that came due during the restart runs once the agent is back, and a recurring task runs the occurrence that came due if it is still within the catch-up window.
 A one-time task missed by less than 24 hours runs once its agent's Matrix sync is ready; an older one is marked failed instead.
 When an agent is removed from the config while MindRoom runs, each schedule it runs is marked failed and the agent says so in the schedule's thread, or in the room for a schedule without one; its schedules never move to another agent.
 When it is removed while MindRoom is stopped, a bot that may save schedule state in a room marks the agent's schedules there failed and says so when it rejoins that room, and schedules in the agent's DMs stay pending.
