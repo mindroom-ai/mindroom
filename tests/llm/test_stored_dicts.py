@@ -266,17 +266,11 @@ def test_a_message_stores_each_field_it_holds_under_its_key_and_reads_back_as_it
     assert Message.from_dict(stored) == owned
 
 
-def test_a_message_with_only_a_role_stores_its_id_flags_role_and_creation_time() -> None:
-    assert Message.from_dict({"role": "user"}).to_dict().keys() == {
-        "id",
-        "from_history",
-        "stop_after_tool_call",
-        "role",
-        "created_at",
-    }
+def test_a_message_with_only_a_role_stores_its_id_role_and_creation_time() -> None:
+    assert Message.from_dict({"role": "user"}).to_dict().keys() == {"id", "role", "created_at"}
 
 
-def test_message_to_dict_drops_empty_values_but_keeps_false_and_zero() -> None:
+def test_message_to_dict_drops_empty_values_and_default_flags_but_keeps_false_and_zero() -> None:
     message = Message(
         role="tool",
         content="",
@@ -291,12 +285,32 @@ def test_message_to_dict_drops_empty_values_but_keeps_false_and_zero() -> None:
     assert message.to_dict() == {
         "id": "m",
         "content": "",
-        "from_history": False,
-        "stop_after_tool_call": False,
         "role": "tool",
         "tool_call_error": False,
         "created_at": 0,
     }
+
+
+def test_a_message_stores_its_flags_only_when_they_differ_from_their_defaults() -> None:
+    """A stop-after-call result and a history copy store their flag as True; ``from_dict`` reads an absent one as False."""
+    stopped = Message(role="tool", content="done", stop_after_tool_call=True, id="t", created_at=1)
+    copy = Message(role="assistant", content="earlier", from_history=True, id="a", created_at=1)
+
+    assert stopped.to_dict() == {
+        "id": "t",
+        "content": "done",
+        "stop_after_tool_call": True,
+        "role": "tool",
+        "created_at": 1,
+    }
+    assert copy.to_dict() == {
+        "id": "a",
+        "content": "earlier",
+        "from_history": True,
+        "role": "assistant",
+        "created_at": 1,
+    }
+    assert [Message.from_dict(message.to_dict()) for message in (stopped, copy)] == [stopped, copy]
 
 
 def test_only_context_no_history_keeps_stores_its_flag_and_reads_back_as_it() -> None:

@@ -920,7 +920,7 @@ def test_converted_runs_keep_only_the_keys_records_model(tmp_path: Path) -> None
     assert converted is not None
     expected = expected_run_dict(stored)
     # The run holds a history copy, which no converted run keeps.
-    expected["messages"] = [message for message in expected["messages"] if not message["from_history"]]
+    expected["messages"] = [message for message in expected["messages"] if not message.get("from_history")]
     assert converted.to_dict() == expected
 
 

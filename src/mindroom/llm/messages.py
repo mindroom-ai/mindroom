@@ -160,15 +160,17 @@ class Message:
     def to_dict(self) -> dict[str, Any]:
         """Return the stored dict: None and empty values dropped, media as dicts, ``created_at`` always.
 
-        ``add_to_agent_memory`` is written only when False, which a paused run's context holds.
+        A flag is written only when it differs from its default, which ``from_dict`` reads for an absent key:
+        ``from_history`` and ``stop_after_tool_call`` only when True, and ``add_to_agent_memory`` only when False, which
+        a paused run's context holds.
         """
         values: dict[str, Any] = {
             "id": self.id,
             "content": self.content,
             "reasoning_content": self.reasoning_content,
-            "from_history": self.from_history,
+            "from_history": self.from_history or None,
             "compressed_content": self.compressed_content,
-            "stop_after_tool_call": self.stop_after_tool_call,
+            "stop_after_tool_call": self.stop_after_tool_call or None,
             "role": self.role,
             "name": self.name,
             "tool_call_id": self.tool_call_id,

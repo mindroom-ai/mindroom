@@ -2,8 +2,8 @@
 
 These are legacy inputs and never change: ``tests/fixtures/agno_parity/codecs.json`` holds what real Agno objects
 produced, and the stored-run fixtures under ``tests/fixtures/agno_parity/runs`` hold what MindRoom stored through Agno.
-Each one read and written back is the dict it was, minus the keys the owned records deliberately drop, which
-``tests.llm.agno_dict_helpers`` lists once per type. The schema MindRoom itself writes is
+Each one read and written back is the dict it was, minus the keys the owned records deliberately drop and those held
+at their defaults, which ``tests.llm.agno_dict_helpers`` lists once per type. The schema MindRoom itself writes is
 ``tests/llm/test_stored_dicts.py``'s.
 """
 # ruff: noqa: D103
@@ -28,6 +28,7 @@ from tests.llm.agno_dict_helpers import (
     DROPPED_METRICS_KEYS,
     DROPPED_RUN_KEYS,
     DROPPED_TOOL_EXECUTION_KEYS,
+    expected_message_dict,
     expected_requirement_dict,
     expected_run_dict,
     stored_run_record,
@@ -138,9 +139,9 @@ def test_model_metrics_round_trip_agno_dict() -> None:
 
 @pytest.mark.parametrize("message_id", list(AGNO["messages"]))
 def test_message_round_trips_agno_dict(message_id: str) -> None:
-    expected = agno("messages")[message_id]
+    stored = agno("messages")[message_id]
 
-    assert Message.from_dict(expected).to_dict() == expected
+    assert Message.from_dict(stored).to_dict() == expected_message_dict(stored)
 
 
 def test_a_message_agno_stored_with_a_compressed_copy_keeps_it() -> None:
@@ -424,7 +425,7 @@ FIXTURE_RUNS = FIXTURES / "runs"
 FIXTURE_CODECS: dict[str, tuple[Callable[[dict[str, Any]], Any], Callable[[dict[str, Any]], dict[str, Any]]]] = {
     "run_output": (stored_run_record, expected_run_dict),
     "team_run_output": (stored_run_record, expected_run_dict),
-    "message": (Message.from_dict, dict),
+    "message": (Message.from_dict, expected_message_dict),
     "image": (Image.from_dict, dict),
     "audio": (Audio.from_dict, dict),
     "video": (Video.from_dict, dict),
