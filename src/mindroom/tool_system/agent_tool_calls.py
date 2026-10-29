@@ -371,7 +371,7 @@ def execute_agent_tool_call(
 
     Caller must authorize immediately before dispatch. Waiting and continuation
     events require the response owner's control adapter; never bypass pause checks.
-    Closing/cancelling waits for a synchronous leaf before releasing the catalog.
+    Closing/cancelling waits for the synchronous leaves a call started before releasing the catalog.
     """
     return _execute_agent_tool_call(binding, call_id, arguments, authorize=authorize, requirement=requirement)
 
@@ -455,8 +455,8 @@ async def _execute_agent_tool_call(
                     await wait_for_future_until_complete(asyncio.create_task(catalog._lock.acquire()))
 
             function = replace(function, entrypoint=pinned_leaf)
-        # A job's call has no time limit, so what it offloads must not hold a shared pool's thread. A synchronous body
-        # the call started keeps the catalog until it finishes, so its thread never outlives the catalog.
+        # A job's call has no time limit, so what it offloads must not hold a shared pool's thread. The synchronous
+        # bodies the call started keep the catalog until they finish, so their threads never outlive the catalog.
         with catalog.execution_context():
             async with owned_sync_tool_completion(JOB_CALL_EXECUTOR if job_owns_execution() else None):
                 with cli_dispatch_scope():

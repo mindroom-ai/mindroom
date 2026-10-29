@@ -173,7 +173,7 @@ async def owned_sync_tool_completion(executor: Executor | None = None) -> AsyncI
 
     The owner's resources then never go away under a body still running. A body's own failure already reached the
     call as its result, so waiting for it never raises again. Owners that hand their resources to a retained cleanup
-    when cancelled, such as the MCP gateway and the script broker, track the body themselves instead.
+    when cancelled, such as the MCP gateway and the script broker, track the bodies themselves instead.
     """
     tracker = SyncToolCompletionTracker(executor=executor)
     try:
