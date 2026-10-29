@@ -394,9 +394,9 @@ def _hold_unresolved_edit(
 
     Both endings have to be spelled out, because the row holds a message body
     and only one of them is the ordinary case. A target that is redacted before
-    it ever arrives never lands afterwards -- ``project`` turns it away at the
-    tombstone -- so the arrival this row is waiting for is not coming, and
-    ``_project_redaction`` is the only thing left to collect it.
+    it ever arrives never lands afterwards -- ``project`` turns it away as
+    already redacted -- so the arrival this row is waiting for is not coming,
+    and ``_project_redaction`` is the only thing left to collect it.
 
     A target that neither arrives nor is redacted has no third ending, and the
     membership fence is the whole bound on it. That is deliberate: the row is
@@ -546,7 +546,7 @@ def scrub_redacted_projection(
     #
     # Unguarded it collects the case that has no other ending. A target that is
     # redacted before it arrives never arrives afterwards either, because
-    # `project` turns it away at the tombstone, so the arrival the row waits
+    # `project` turns it away as already redacted, so the arrival the row waits
     # for is not coming. It would otherwise outlive the redaction for the whole
     # membership epoch holding the only copy of the replacement text left on
     # this host, settlement having already blanked the journal's `source_json`.
@@ -626,7 +626,7 @@ def install_refetched_revision(
     install a body the sender deleted. Nothing later disturbs it: hydration does
     not re-run under the same membership, so the deleted text would be served to
     every prompt, summary and export of that room from then on. Every other
-    install path already asks the recorded redactions; this was the one that
+    install path already checks the recorded redactions; this was the one that
     did not.
     """
     membership_is_current = claim_membership_epoch(

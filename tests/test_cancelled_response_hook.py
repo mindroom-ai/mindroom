@@ -450,15 +450,20 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
     bot = _team_bot(tmp_path)
     replace_edit_regenerator_deps(bot)
     turn_store = bot._edit_regenerator.deps.turn_store
-    turn_record = TurnRecord(
-        anchor_event_id="$original",
-        source_event_ids=("$original",),
-        response_event_id="$response",
-        response_owner="team_bot",
-        requester_id="@user:localhost",
-        history_scope=HistoryScope(kind="team", scope_id="team_bot"),
-        conversation_target=MessageTarget.resolve("!room:localhost", None, "$original"),
+    await turn_store.record_responded_turn(
+        TurnRecord(
+            anchor_event_id="$original",
+            source_event_ids=("$original",),
+            response_event_id="$response",
+            response_owner="team_bot",
+            requester_id="@user:localhost",
+            history_scope=HistoryScope(kind="team", scope_id="team_bot"),
+            conversation_target=MessageTarget.resolve("!room:localhost", None, "$original"),
+        ),
     )
+    turn_record = await turn_store.get_turn_record("$original")
+    assert turn_record is not None
+    assert turn_record.turn_key is not None
     await seed_finished_reply(
         bot.journal_principal(),
         "$response",

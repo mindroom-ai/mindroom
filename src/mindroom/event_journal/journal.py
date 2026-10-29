@@ -901,7 +901,7 @@ def project_with_redactions(
         )
         return
     if settle_redacted_arrival:
-        _settle_tombstoned_turn_source(
+        _settle_redacted_turn_source(
             transaction,
             principal_id,
             room_id=projected.room_id,
@@ -943,7 +943,7 @@ def redact_for_agent(
             event_id=event_id,
             receipt_order=receipt_order,
         )
-        _settle_tombstoned_turn_source(transaction, principal_id, room_id=room_id, event_id=event_id)
+        _settle_redacted_turn_source(transaction, principal_id, room_id=room_id, event_id=event_id)
         replies.end_replies_of_deleted_source(
             transaction,
             principal_id,
@@ -970,14 +970,14 @@ def _principals_of_agent(transaction: Transaction, agent_name: str, *, room_id: 
     )
 
 
-def _settle_tombstoned_turn_source(
+def _settle_redacted_turn_source(
     transaction: Transaction,
     principal_id: str,
     *,
     room_id: str,
     event_id: str,
 ) -> None:
-    """Retire tombstoned turn ingress unless a durable continuation owns it.
+    """Retire redacted turn ingress unless a durable continuation owns it.
 
     Approval continuations dispatch before event-kind ingress, so preserving
     one cannot replay its source through a message or media callback.

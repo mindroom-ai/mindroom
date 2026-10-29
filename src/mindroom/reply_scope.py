@@ -415,7 +415,8 @@ class ReplyRuntime:
     async def deletions_ended(self) -> tuple[str, ...]:
         """Cancel the spans source deletions ended and wake the approvals they cancelled; return the replies they ended.
 
-        Each redaction's admission ended its replies, and fenced the approval
+        Projecting each deletion -- a redaction, or an event that arrived
+        already redacted -- ended its replies, and fenced the approval
         that held one, in its own commit and recorded the span it cancelled.
         The debt of the replies it ended is now due.
         """
