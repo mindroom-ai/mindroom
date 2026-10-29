@@ -431,7 +431,7 @@ async def test_composed_pipeline_recovers_logs_and_projects_for_every_family(fam
 async def test_the_request_record_holds_the_body_each_family_sent(family: str, tmp_path: Path) -> None:
     """The record, written before the request goes out, holds the body the route handed its SDK, media as base64.
 
-    The OpenAI-family and Ollama SDKs send that body as it is and the Claude SDK adds its ``stream`` flag;
+    For this request every SDK but google-genai sends that body as it is, the Claude SDK with its ``stream`` flag;
     google-genai builds its REST body from the arguments, which keep its own field names, without ``http_options``.
     """
     spec = FAMILIES[family]
