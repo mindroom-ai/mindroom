@@ -23,4 +23,4 @@ The retry adds `[Inline media unavailable for this model]` to the message that c
 If the provider error says the model does not support that kind of input, such as `does not support image input` or `is not a multimodal model`, later requests to the same model leave that media kind out from the start until MindRoom restarts.
 Other rejections, such as an image the provider could not decode, drop the media from that one request only.
 The same note replaces the request's media when an attachment file no longer exists or cannot be read, or when MindRoom cannot download media a tool returned as a URL, including media larger than 20 MiB.
-Once a reply has produced text, tool calls, or reasoning, a later provider error is reported instead of retried without media, and provider safeguard refusals and refusals for an account with no credit left are never retried without media.
+Once a reply has produced text, tool calls, or reasoning, a later provider error is reported instead of retried without media, and provider safeguard refusals and the billing refusals listed under [Retries](https://docs.mindroom.chat/configuration/models/#retries) are never retried without media.
