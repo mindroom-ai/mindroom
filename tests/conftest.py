@@ -30,6 +30,7 @@ from collections.abc import (
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass, field, replace
+from functools import partial
 from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
@@ -148,11 +149,12 @@ from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.mcp import toolkit as mcp_toolkit_module
 from mindroom.message_target import MessageTarget
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
-from mindroom.orchestration.config_lifecycle import load_startup_config
+from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle, load_published_config, load_startup_config
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
 from mindroom.providers import registry as provider_registry
 from mindroom.providers.pipeline import media as media_pipeline
 from mindroom.reaction_dispatch import ReactionDispatcher
+from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.response_lifecycle import QueuedHumanNoticeReservation
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
@@ -2549,6 +2551,30 @@ def failed_config_load(error: Exception) -> ConfigLoad:
         source_fingerprint=None,
         source_files=None,
         error=error,
+    )
+
+
+def make_config_reload_lifecycle(
+    runtime_paths: RuntimePaths,
+    *,
+    current_config: Config | None = None,
+    agent_bots: Mapping[str, AgentBot] | None = None,
+    response_admission_gate: ResponseAdmissionGate | None = None,
+    load_config: Callable[[], ConfigLoad] | None = None,
+) -> ConfigReloadLifecycle:
+    """Return a running reload lifecycle with stubbed runtime hooks; it loads the config file unless told otherwise."""
+    runtime_config = current_config if current_config is not None else Config()
+    return ConfigReloadLifecycle(
+        runtime_paths=runtime_paths,
+        is_running=lambda: True,
+        current_config=lambda: runtime_config,
+        agent_bots=lambda: agent_bots if agent_bots is not None else {},
+        load_config=load_config or partial(load_published_config, runtime_paths, api_enabled=False),
+        apply_update_plan=AsyncMock(return_value=True),
+        response_admission_gate=response_admission_gate or ResponseAdmissionGate(),
+        before_runtime_replacement=AsyncMock(),
+        rebind_published_config_consumers=MagicMock(),
+        finish_reload=AsyncMock(),
     )
 
 
