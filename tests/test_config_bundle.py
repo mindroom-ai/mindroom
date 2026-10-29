@@ -19,7 +19,9 @@ from mindroom.file_watcher import changed_watched_paths, paths_mtime_snapshot
 def _bundle(path: Path, prompt: str = "First prompt") -> Path:
     path.mkdir()
     (path / "prompts").mkdir()
-    (path / "config.yaml").write_text("agents: !include agents.yaml\n")
+    (path / "config.yaml").write_text(
+        "agents: !include agents.yaml\nmodels: {default: {provider: openai, id: test-model}}\n",
+    )
     (path / "agents.yaml").write_text(
         "helper:\n  display_name: Helper\n  instructions:\n    - !include_text prompts/helper.md\n",
     )

@@ -7,6 +7,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from mindroom.config.resolution import authored_tool_entries
 from mindroom.constants import RESERVED_ENTITY_NAMES
 from mindroom.logging_config import get_logger
 
@@ -41,7 +42,7 @@ def _generated_agent_data(
             if (value := getattr(edits, field)) is not None:
                 data[field] = value
         if edits.tools is not None:
-            offered = {entry.name: entry for entry in base._get_agent_authored_tool_configs(base_agent)}
+            offered = {entry.name: entry for entry in authored_tool_entries(base, base_agent)}
             chosen = list(dict.fromkeys(edits.tools))
             dropped = [name for name in chosen if name not in offered]
             kept = [name for name in chosen if name in offered]

@@ -91,12 +91,14 @@ from mindroom.tool_system.worker_routing import (
     build_tool_execution_identity,
     get_tool_execution_identity,
 )
+from mindroom.turn_model import ModelScope, TeamTurnModelSelection, resolve_team_turn_models
 from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import toolkit
 from tests.fakes.scripted_model import SYNTHETIC, Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.identity_helpers import persist_entity_accounts
 from tests.teams.squad import built_team, resolved_members, team_spec
 from tests.teams.squad import member as team_member
+from tests.turn_model_helpers import turn_model
 
 _QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
@@ -114,6 +116,17 @@ def _runtime_paths_for_config(config: Config, process_env: dict[str, str] | None
     runtime_paths = _runtime_paths(process_env)
     persist_entity_accounts(config, runtime_paths)
     return runtime_paths
+
+
+def _team_models(team_name: str, config: Config, runtime_paths: RuntimePaths) -> TeamTurnModelSelection:
+    """Return the models a completion of ``team_name`` freezes when the requester has no budget to spend."""
+    return resolve_team_turn_models(
+        config,
+        runtime_paths,
+        ModelScope(entity=team_name),
+        config.teams[team_name].agents,
+        None,
+    )
 
 
 def _team_identity(
@@ -490,7 +503,7 @@ def test_openai_compatible_agent_hides_approval_gated_tools(
         execution_identity=execution_identity,
         include_openai_compat_guidance=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "code"),
     )
 
     exposed_tool_names = _offered_function_names(build)
@@ -533,7 +546,7 @@ def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path, m
         execution_identity=execution_identity,
         include_openai_compat_guidance=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "code"),
     )
 
     exposed_tool_names = _offered_function_names(build)
@@ -592,7 +605,7 @@ def test_openai_compatible_dynamic_tools_hide_deferred_context_bound_todo(
         execution_identity=execution_identity,
         include_openai_compat_guidance=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "code"),
     )
 
     toolkits = {toolkit.name: toolkit for toolkit in build.spec.toolkits}
@@ -646,7 +659,7 @@ def test_openai_compatible_agent_hides_script_gated_tools(
         execution_identity=execution_identity,
         include_openai_compat_guidance=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "code"),
     )
 
     exposed_tool_names = _offered_function_names(build)
@@ -3627,7 +3640,7 @@ class TestTeamCompletion:
             scope_context,
             {},
             None,
-            models=openai_compat._openai_team_models("super_team", config, lambda model_name: model_name),
+            models=_team_models("super_team", config, runtime_paths),
         )
 
         leader_prompt = str(built.spec.leader.system_messages[0].content)
@@ -4029,7 +4042,7 @@ class TestTeamCompletion:
                 team_config,
                 runtime_paths,
                 None,
-                openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
+                _team_models("super_team", team_config, runtime_paths),
                 execution_identity=execution_identity,
                 refresh_scheduler=None,
             )
@@ -4185,7 +4198,7 @@ class TestTeamCompletion:
                 team_config,
                 runtime_paths,
                 None,
-                openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
+                _team_models("super_team", team_config, runtime_paths),
                 execution_identity=execution_identity,
                 refresh_scheduler=None,
             )
@@ -4908,7 +4921,7 @@ class TestTeamCompletion:
             runtime_paths,
             execution_identity=_team_identity("coord_team", runtime_paths),
             scope_context=scope_context,
-            models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
+            models=_team_models("coord_team", config, runtime_paths),
             unavailable_bases={},
             refresh_scheduler=None,
         )
@@ -4954,7 +4967,7 @@ class TestTeamCompletion:
             runtime_paths,
             execution_identity=execution_identity,
             scope_context=scope_context,
-            models=openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
+            models=_team_models("super_team", team_config, runtime_paths),
             unavailable_bases={},
             refresh_scheduler=None,
         )
@@ -5001,7 +5014,7 @@ class TestTeamCompletion:
                 runtime_paths,
                 execution_identity=_team_identity("coord_team", runtime_paths),
                 scope_context=scope_context,
-                models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
+                models=_team_models("coord_team", config, runtime_paths),
                 unavailable_bases={},
                 refresh_scheduler=None,
             )
@@ -5065,7 +5078,7 @@ class TestTeamCompletion:
                 runtime_paths,
                 execution_identity=_team_identity("team_with_kb", runtime_paths),
                 scope_context=scope_context,
-                models=openai_compat._openai_team_models("team_with_kb", config, lambda model_name: model_name),
+                models=_team_models("team_with_kb", config, runtime_paths),
                 unavailable_bases={},
                 refresh_scheduler=None,
             )

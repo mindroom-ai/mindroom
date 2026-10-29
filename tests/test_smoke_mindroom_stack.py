@@ -18,7 +18,11 @@ def test_migrate_stack_config_persists_legacy_access_before_compose(tmp_path: Pa
     stack_dir = tmp_path / "mindroom-stack"
     stack_dir.mkdir()
     config_path = stack_dir / "config.yaml"
-    original = b"""agents:
+    original = b"""models:
+  default:
+    provider: openai
+    id: test-model
+agents:
   assistant:
     display_name: Assistant
 authorization:

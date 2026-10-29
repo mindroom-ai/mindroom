@@ -216,7 +216,7 @@ def _agent_startup_tools(config: Config, agent_name: str) -> tuple[bool, frozens
     Startup registers the Desktop pairing receiver and holds the agent back while a
     required MCP server it uses is unavailable.
     """
-    tool_names = set(config.resolve_entity(agent_name).available_tools)
+    tool_names = set(config.resolve_agent(agent_name).tools.tool_names)
     mcp_tool_names = {mcp_tool_name(server_id) for server_id in config.mcp_servers}
     return "desktop" in tool_names, frozenset(tool_names & mcp_tool_names)
 

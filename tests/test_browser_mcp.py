@@ -57,6 +57,7 @@ def test_primary_materialization_has_no_process_or_workspace_effects(
     from mindroom.constants import resolve_primary_runtime_paths  # noqa: PLC0415
     from mindroom.credentials.manager import get_runtime_credentials_manager  # noqa: PLC0415
     from mindroom.tool_system.metadata import get_tool_by_name  # noqa: PLC0415
+    from mindroom.tool_system.sandbox_proxy import tool_placement  # noqa: PLC0415
     from mindroom.tool_system.worker_routing import (  # noqa: PLC0415
         ToolExecutionIdentity,
         build_agent_toolkit_worker_target,
@@ -102,7 +103,7 @@ def test_primary_materialization_has_no_process_or_workspace_effects(
             "browser_mcp",
             paths,
             worker_target=target,
-            worker_tools_override=["browser_mcp"],
+            runs_in_worker=tool_placement(paths).runs_in_worker("browser_mcp", ["browser_mcp"]),
             tool_output_workspace_root=workspace,
         )
     assert toolkit.get_async_functions().keys() == browser_mcp_catalog().keys()

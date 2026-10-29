@@ -28,6 +28,7 @@ from mindroom.approval.tool_approval import (
     resolve_tool_approval_approver,
     scheduled_call_offers_any_arguments,
 )
+from mindroom.config.resolution import entity_timezone
 from mindroom.constants import ROUTER_AGENT_NAME, SCHEDULED_TASK_EVENT_TYPE
 from mindroom.entity_resolution import current_entity_id, entity_identity_registry, persisted_bot_user_ids
 from mindroom.failure_text import failure_text
@@ -1225,7 +1226,7 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     task_timezone = (
         scheduled_task_timezone(existing_task.workflow, config)
         if existing_task
-        else config.get_entity_timezone(runtime.agent_name)
+        else entity_timezone(config, runtime.agent_name)
     )
     # Parse the workflow request with available responders; edits re-parse
     # against the existing task's content as authoritative prior state.
@@ -1478,7 +1479,7 @@ async def schedule_approved_tool_call(
     assert thread_id is not None
 
     task_id = str(uuid.uuid4())[:8]
-    timezone = config.get_entity_timezone(agent_name)
+    timezone = entity_timezone(config, agent_name)
     any_arguments_offered = scheduled_call_offers_any_arguments(
         config,
         tool_name,

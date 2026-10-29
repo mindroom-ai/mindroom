@@ -2364,7 +2364,8 @@ def test_kubernetes_backend_never_mounts_knowledge_another_worker_could_redirect
         "agents:\n"
         "  code:\n    display_name: Code\n    worker_scope: shared\n    knowledge_bases: [docs]\n"
         "  other:\n    display_name: Other\n    worker_scope: shared\n"
-        f"knowledge_bases:\n  docs:\n    path: ${{MINDROOM_STORAGE_PATH}}/{source}\n",
+        f"knowledge_bases:\n  docs:\n    path: ${{MINDROOM_STORAGE_PATH}}/{source}\n"
+        "models:\n  default:\n    provider: openai\n    id: test-model\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
@@ -2388,7 +2389,8 @@ def test_kubernetes_backend_normalizes_knowledge_paths_and_logs_skipped_ones(tmp
     config_path.write_text(
         "agents:\n  code:\n    display_name: Code\n    worker_scope: shared\n    knowledge_bases: [docs, outside]\n"
         "knowledge_bases:\n  docs:\n    path: ./config-dir/../storage/knowledge/docs\n"
-        f"  outside:\n    path: {outside}\n",
+        f"  outside:\n    path: {outside}\n"
+        "models:\n  default:\n    provider: openai\n    id: test-model\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
@@ -3440,7 +3442,8 @@ def test_kubernetes_user_worker_mounts_a_private_workspace_that_materializes_lat
     """The ready cache compares the mounts the pod got, so a workspace created after planning recreates the pod."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "agents:\n  notes:\n    display_name: Notes\n    private:\n      per: user\n",
+        "agents:\n  notes:\n    display_name: Notes\n    private:\n      per: user\n"
+        "models:\n  default:\n    provider: openai\n    id: test-model\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
@@ -3472,7 +3475,8 @@ def test_kubernetes_failure_from_a_replaced_pod_never_stops_its_replacement(tmp_
     """A request that failed on the pod a workspace change replaced must not scale down the new Deployment."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "agents:\n  notes:\n    display_name: Notes\n    private:\n      per: user\n",
+        "agents:\n  notes:\n    display_name: Notes\n    private:\n      per: user\n"
+        "models:\n  default:\n    provider: openai\n    id: test-model\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")

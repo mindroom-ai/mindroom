@@ -11,11 +11,9 @@ from typing import TYPE_CHECKING
 from mindroom.agent_cli.shell_access import minimal_shell_problems
 from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
 from mindroom.approval.tool_approval import tool_may_require_approval
-from mindroom.runtime_resolution import resolve_agent_storage
+from mindroom.runtime_resolution import resolve_agent_execution
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.catalog import ensure_tool_registry_loaded, get_tool_by_name
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
-from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
-from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -23,33 +21,26 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.runtime_resolution import ResolvedAgentStorage
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 
 _SETUP_URL = "https://docs.mindroom.chat/tools/agent-cli/#deployment-requirements"
 
 
 def _effective_shell(config: Config, agent_name: str) -> EffectiveToolConfig | None:
     """Return the agent's shell entry, whether it lists `shell` itself or a preset or another tool brings it in."""
-    surface = visible_tool_surface(agent_name=agent_name, config=config)
-    return next((entry for entry in surface.runtime_tool_configs if entry.name == "shell"), None)
+    return next(
+        (entry for entry in resolve_agent_tools(config, agent_name).candidates() if entry.name == "shell"),
+        None,
+    )
 
 
 def _shell_problems(
     config: Config,
     runtime_paths: RuntimePaths,
     agent_name: str,
-    execution_identity: ToolExecutionIdentity,
-    storage: ResolvedAgentStorage,
+    worker_target: ResolvedWorkerTarget,
 ) -> list[str]:
     """Check the agent's effective shell functions without opening integrations or a worker."""
-    worker_target = build_agent_toolkit_worker_target(
-        storage.execution.execution_scope,
-        agent_name,
-        is_private=storage.execution.is_private,
-        execution_identity=execution_identity,
-        runtime_paths=runtime_paths,
-    )
     try:
         ensure_tool_registry_loaded(runtime_paths, config, load_plugin_tools=False)
         shell = _effective_shell(config, agent_name)
@@ -64,7 +55,7 @@ def _shell_problems(
             allowed_shared_services=(
                 config.get_worker_grantable_credentials() if worker_target.worker_scope is not None else None
             ),
-            disable_sandbox_proxy=True,
+            runs_in_worker=False,
         )
     except (ImportError, ValueError):
         return [f"Fix the `shell` tool configuration of `{agent_name}` so it loads."]
@@ -80,18 +71,16 @@ def minimal_mode_problems(
     execution_identity: ToolExecutionIdentity,
 ) -> list[str]:
     """Return every unmet agent and deployment requirement for one agent scope."""
-    storage = resolve_agent_storage(agent_name, config, runtime_paths, execution_identity)
-    problems = _shell_problems(config, runtime_paths, agent_name, execution_identity, storage)
-    workspace = resolve_agent_workspace_from_state_path(
+    worker_target = resolve_agent_execution(
         agent_name,
         config,
-        runtime_paths=runtime_paths,
-        state_storage_path=storage.state_root,
-        use_state_storage_path=storage.execution.policy.private_workspace_enabled,
-    )
-    if workspace is None:
-        problems.append(f"Give `{agent_name}` an agent workspace, for example with `memory_backend: file`.")
-    return [*problems, *minimal_shell_problems(config, runtime_paths, agent_name)]
+        runtime_paths,
+        execution_identity=execution_identity,
+    ).worker_target
+    return [
+        *_shell_problems(config, runtime_paths, agent_name, worker_target),
+        *minimal_shell_problems(config, runtime_paths, agent_name),
+    ]
 
 
 def minimal_subagent_candidates(

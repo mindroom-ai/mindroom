@@ -28,6 +28,7 @@ from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, Ask, AutomationCo
 from mindroom.automations.threads import automations_tracking_root, record_automation_thread
 from mindroom.background_tasks import SupervisedLoop, create_background_task
 from mindroom.config.automations import PluginAutomation
+from mindroom.config.resolution import agent_automations, memory_backend
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
@@ -112,7 +113,7 @@ def _instances(config: Config, runtime_paths: RuntimePaths) -> list[_Instance]:
     return agent_instances(
         config,
         runtime_paths,
-        [agent_name for agent_name in config.agents if config.resolve_entity(agent_name).automations],
+        [agent_name for agent_name in config.agents if agent_automations(config, agent_name)],
     )
 
 
@@ -151,7 +152,7 @@ def _check(
 ) -> Ask | None:
     """Run one automation's check; raises ``OSError`` or ``ValueError`` when it cannot read what it checks."""
     agent_name, automation = chain.agent_name, chain.settings
-    if definition.requires_file_memory and config.resolve_entity(agent_name).memory_backend != "file":
+    if definition.requires_file_memory and memory_backend(config, agent_name) != "file":
         logger.warning(
             "Automation needs file memory; skipped",
             agent=agent_name,
@@ -180,7 +181,7 @@ def _check(
         settings=MappingProxyType(deepcopy(dict(definition.settings))),
         requester_id=chain.requester_id,
         execution_identity=identity,
-        workspace=runtime.workspace.root if runtime.workspace is not None else None,
+        workspace=runtime.workspace.root,
         state_dir=_state_dir(runtime_paths, chain, runtime.state_root),
     )
     return definition.check(context)
@@ -236,8 +237,9 @@ class AutomationRunner:
         clock_offset = now - datetime.now(UTC)
         for instance in instances:
             agent_name, _requester_id = instance
-            timezone = config.get_entity_timezone(agent_name)
-            for automation in config.resolve_entity(agent_name).automations:
+            resolved = config.resolve_agent(agent_name)
+            timezone = resolved.timezone
+            for automation in resolved.automations:
                 key = _key(instance, automation.name)
                 enabled.add(key)
                 schedule = (automation.cron, timezone)

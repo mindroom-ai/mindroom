@@ -10,9 +10,8 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.mcp.registry import mcp_server_id_from_tool_name
 from mindroom.mcp.toolkit import require_mcp_server_manager
 from mindroom.runtime_resolution import resolve_agent_runtime
-from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
-from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
+from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_room_flags
+from mindroom.tool_system.catalog import ensure_tool_registry_loaded
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -92,13 +91,7 @@ async def _warm_approval_mcp_catalog(
     await manager.get_request_catalog(
         server_id,
         credentials_manager=get_runtime_credentials_manager(runtime_paths),
-        worker_target=build_agent_toolkit_worker_target(
-            runtime.execution.execution_scope,
-            agent_name,
-            is_private=runtime.execution.is_private,
-            execution_identity=execution_identity,
-            runtime_paths=runtime_paths,
-        ),
+        worker_target=runtime.execution.worker_target,
         expected_config=config,
     )
 
@@ -110,33 +103,40 @@ async def required_approval_tool_names(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
+    delegation_depth: int,
 ) -> tuple[str, ...]:
-    """Return the toolkits a saved approval recorded, after checking that the agent may still use each."""
+    """Return the toolkits a saved approval recorded, after checking that the agent may still use each.
+
+    ``delegation_depth`` is the depth of the paused run, whose build offers the toolkits at that depth.
+    """
     if not calls:
         return ()
     if any(call.invoking_agent != agent_name or not call.toolkit_name for call in calls):
         msg = "Saved approval has unknown toolkit ownership; retry the request"
         raise RuntimeError(msg)
     await asyncio.to_thread(ensure_tool_registry_loaded, runtime_paths, config)
-    surface = visible_tool_surface(
-        agent_name=agent_name,
-        config=config,
-        enable_dynamic_tools_manager=True,
-        include_matrix_room_runtime_tools=execution_identity.room_id is not None,
+    agent_tools = resolve_agent_tools(config, agent_name)
+    room_tools, matrix_room_tools = turn_room_flags(execution_identity)
+    offered = agent_tools.candidates(
+        depth=delegation_depth,
+        room_tools=room_tools,
+        matrix_room_tools=matrix_room_tools,
+        portable_search=True,
     )
-    permitted = {entry.authored_name or entry.name: entry for entry in surface.runtime_tool_configs}
     required = sorted({call.toolkit_name for call in calls if call.toolkit_name is not None})
     for name in required:
-        entry = permitted.get(name)
-        if entry is None:
-            msg = f"Saved approval toolkit {name!r} is no longer permitted; retry the request"
+        # A call names its authored entry; the toolkits a preset or an implied tool brings in share that name.
+        owned = [entry for entry in offered if (entry.authored_name or entry.name) == name]
+        if not owned:
+            in_room = agent_tools.candidates(depth=delegation_depth, matrix_room_tools=True, portable_search=True)
+            needs_room = any((entry.authored_name or entry.name) == name for entry in in_room)
+            reason = "requires room context" if needs_room else "is no longer permitted"
+            msg = f"Saved approval toolkit {name!r} {reason}; retry the request"
             raise RuntimeError(msg)
-        metadata = TOOL_METADATA.get(entry.name)
-        if metadata is not None and metadata.requires_room_context and execution_identity.room_id is None:
-            msg = f"Saved approval toolkit {name!r} requires room context; retry the request"
-            raise RuntimeError(msg)
-        server_id = mcp_server_id_from_tool_name(entry.name)
-        if server_id is not None:
+        for entry in owned:
+            server_id = mcp_server_id_from_tool_name(entry.name)
+            if server_id is None:
+                continue
             server_config = config.mcp_servers.get(server_id)
             if server_config is None or not server_config.enabled:
                 msg = f"Saved approval toolkit {name!r} is unavailable; retry the request"

@@ -521,8 +521,6 @@ def _private_export_dir(
         )
     except ValueError:
         return None
-    if workspace is None:
-        return None
     return workspace.lexical_root / _WORKSPACE_EXPORT_DIRNAME
 
 

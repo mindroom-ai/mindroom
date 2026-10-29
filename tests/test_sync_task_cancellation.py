@@ -2586,20 +2586,18 @@ async def test_orchestrator_initialize_registers_router_and_agents_with_the_flee
         mock_create_bot.return_value = mock_bot
 
         # Create config with one agent
-        config = MagicMock(spec=Config, background_tool_jobs=BackgroundToolJobsConfig(enabled=False))
-        config.agents = {"test_agent": MagicMock()}
-        _configure_mock_access(config)
-        config.teams = {}
-        config.mcp_servers = {}
-        config.plugins = []
-        config.event_journal = MagicMock()
-        config.calls = Config().calls
-        config.mindroom_user = None
-        config.personal_agent_instance.return_value = None
-        config.get_all_configured_rooms.return_value = []
+        runtime_paths = orchestrator_runtime_paths(tmp_path)
+        config = Config.validate_with_runtime(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-6-luna"}},
+                "agents": {"test_agent": {"display_name": "Test Agent"}},
+                "background_tool_jobs": {"enabled": False},
+            },
+            runtime_paths,
+        )
 
         # Create orchestrator
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
         orchestrator._prepare_entity_accounts = AsyncMock(
             return_value={
                 "router": AgentMatrixUser(

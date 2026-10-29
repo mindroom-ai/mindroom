@@ -12,10 +12,10 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from mindroom import constants, file_watcher
-from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
+from mindroom.agent_policy import PolicyInputs, build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle
 from mindroom.api.agent_cli import router as agent_cli_router
@@ -187,41 +187,13 @@ class DraftAgentPolicyDefaultsRequest(BaseModel):
     worker_scope: Literal["shared", "user", "user_agent"] | None = None
 
 
-class DraftAgentPolicyKnowledgeRequest(BaseModel):
-    """Subset of private knowledge config required to preview derived policy."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    enabled: bool | None = None
-    path: str | None = None
-
-
-class DraftAgentPolicyPrivateRequest(BaseModel):
-    """Subset of private config required to preview derived policy."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    per: Literal["user", "user_agent"] | None = None
-    knowledge: DraftAgentPolicyKnowledgeRequest | None = None
-
-
-class DraftAgentPolicyAgentRequest(BaseModel):
-    """Subset of agent config required to preview derived policy."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    worker_scope: Literal["shared", "user", "user_agent"] | None = None
-    private: DraftAgentPolicyPrivateRequest | None = None
-    delegate_to: list[str] = Field(default_factory=list)
-
-
 class AgentPoliciesRequest(BaseModel):
     """Payload for deriving draft agent policies from the current editor state."""
 
     model_config = ConfigDict(extra="ignore")
 
     defaults: DraftAgentPolicyDefaultsRequest | None = None
-    agents: dict[str, DraftAgentPolicyAgentRequest]
+    agents: dict[str, PolicyInputs]
 
 
 class RawConfigSourceRequest(BaseModel):
@@ -916,17 +888,17 @@ async def get_agent_policies(
 ) -> dict[str, dict[str, dict[str, Any]]]:
     """Return backend-derived policies for the current draft agent config."""
     default_worker_scope = payload.defaults.worker_scope if payload.defaults is not None else None
-    agent_payload = {
-        agent_name: agent_config.model_dump(exclude_none=True) for agent_name, agent_config in payload.agents.items()
-    }
     policy_index = resolve_agent_policy_index(
-        build_agent_policy_seeds(
-            agent_payload,
-            default_worker_scope=default_worker_scope,
-        ),
+        build_agent_policy_seeds(payload.agents, default_worker_scope=default_worker_scope),
     )
     return {
-        "agent_policies": {agent_name: asdict(policy) for agent_name, policy in policy_index.policies.items()},
+        "agent_policies": {
+            agent_name: {
+                **asdict(policy),
+                "team_eligibility_reason": policy_index.team_eligibility_reasons[agent_name],
+            }
+            for agent_name, policy in policy_index.policies.items()
+        },
     }
 
 

@@ -42,12 +42,14 @@ import mindroom.knowledge.refresh_scheduler as knowledge_refresh_scheduler
 import mindroom.knowledge.registry as knowledge_registry
 import mindroom.knowledge.utils as knowledge_utils
 from mindroom import file_locks
+from mindroom.agent_policy import PRIVATE_KNOWLEDGE_BASE_ID_PREFIX
 from mindroom.api import config_lifecycle, main
 from mindroom.api import knowledge as knowledge_api
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
+from mindroom.config.resolution import memory_search
 from mindroom.constants import (
     DEFAULT_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS,
     KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV,
@@ -242,7 +244,6 @@ def _file_memory_config(tmp_path: Path, *agent_names: str) -> Config:
     return bind_runtime_paths(
         Config(
             agents={name: AgentConfig(display_name=name.title()) for name in agent_names},
-            models={},
             memory={"backend": "file", "search": {"mode": "semantic"}},
         ),
         runtime_paths,
@@ -328,13 +329,12 @@ async def test_only_bases_whose_files_workers_write_limit_the_vectors_a_search_l
                 "docs": KnowledgeBaseConfig(path=str(docs), watch=False),
                 "exports": KnowledgeBaseConfig(path=str(exports), watch=False),
             },
-            models={},
             memory={"backend": "file", "search": {"mode": "semantic"}},
         ),
         runtime_paths,
     )
     identity = _identity("@alice:localhost")
-    private_base_id = config.resolve_entity("helper").private_knowledge_base_id
+    private_base_id = config.resolve_agent("helper").policy.private_knowledge_base_id
     assert private_base_id is not None
     private_key = resolve_published_index_key(
         private_base_id,
@@ -415,7 +415,7 @@ async def test_cold_file_memory_overlay_waits_for_managed_content_before_publish
         scope_user_id=agent_scope_user_id("helper"),
         root=root,
         config=config,
-        search_config=config.resolve_entity("helper").memory_search,
+        search_config=memory_search(config, "helper"),
     )
 
     empty_result = await refresh_knowledge_binding(
@@ -464,15 +464,15 @@ async def test_file_memory_knowledge_is_cross_agent_isolated(tmp_path: Path) -> 
     runtime_paths = runtime_paths_for(config)
     alpha_runtime = resolve_agent_runtime("alpha", config, runtime_paths, execution_identity=None)
     beta_runtime = resolve_agent_runtime("beta", config, runtime_paths, execution_identity=None)
-    assert alpha_runtime.file_memory_root is not None
-    assert beta_runtime.file_memory_root is not None
-    assert alpha_runtime.file_memory_root != beta_runtime.file_memory_root
-    assert not alpha_runtime.file_memory_root.is_symlink()
-    assert not beta_runtime.file_memory_root.is_symlink()
+    assert alpha_runtime.workspace.file_memory_path is not None
+    assert beta_runtime.workspace.file_memory_path is not None
+    assert alpha_runtime.workspace.file_memory_path != beta_runtime.workspace.file_memory_path
+    assert not alpha_runtime.workspace.file_memory_path.is_symlink()
+    assert not beta_runtime.workspace.file_memory_path.is_symlink()
     alpha_marker = "issue256-alpha-only-marker"
     beta_marker = "issue256-beta-only-marker"
-    alpha_file = alpha_runtime.file_memory_root / "memory" / "notes.md"
-    beta_file = beta_runtime.file_memory_root / "memory" / "notes.md"
+    alpha_file = alpha_runtime.workspace.file_memory_path / "memory" / "notes.md"
+    beta_file = beta_runtime.workspace.file_memory_path / "memory" / "notes.md"
     alpha_file.parent.mkdir(parents=True)
     beta_file.parent.mkdir(parents=True)
     alpha_file.write_text(f"{alpha_marker}\n", encoding="utf-8")
@@ -708,11 +708,10 @@ async def test_knowledge_binding_failure_is_not_reported_as_initializing(tmp_pat
                     ),
                 ),
             },
-            models={},
         ),
         runtime_paths,
     )
-    base_id = config.resolve_entity("helper").private_knowledge_base_id
+    base_id = config.resolve_agent("helper").policy.private_knowledge_base_id
     assert base_id is not None
     with pytest.raises(ValueError, match="requires an active execution identity"):
         get_published_index(base_id, config=config, runtime_paths=runtime_paths)
@@ -3377,7 +3376,6 @@ def test_config_allows_exact_duplicate_local_roots_with_different_filters(tmp_pa
                     knowledge_bases=["markdown", "python"],
                 ),
             },
-            models={},
             knowledge_bases={
                 "markdown": KnowledgeBaseConfig(path=str(docs), include_extensions=[".md"]),
                 "python": KnowledgeBaseConfig(path=str(docs), include_extensions=[".py"]),
@@ -3771,11 +3769,10 @@ async def test_private_git_schedule_refresh_on_access_honors_poll_interval(
                     ),
                 ),
             },
-            models={},
         ),
         runtime_paths,
     )
-    base_id = config.resolve_entity("helper").private_knowledge_base_id
+    base_id = config.resolve_agent("helper").policy.private_knowledge_base_id
     assert base_id is not None
     identity = _identity("@alice:localhost")
     key = resolve_published_index_key(
@@ -3857,11 +3854,10 @@ async def test_private_git_updated_refresh_preserves_execution_identity(
                     ),
                 ),
             },
-            models={},
         ),
         runtime_paths,
     )
-    base_id = config.resolve_entity("helper").private_knowledge_base_id
+    base_id = config.resolve_agent("helper").policy.private_knowledge_base_id
     assert base_id is not None
     identity = _identity("@alice:localhost")
     key = resolve_published_index_key(
@@ -6931,7 +6927,7 @@ async def test_subprocess_refresh_tolerates_broken_unused_plugin(tmp_path: Path)
     config = Config.validate_with_runtime(
         {
             "agents": {"helper": {"display_name": "Helper", "knowledge_bases": ["docs"]}},
-            "models": {},
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "plugins": ["./plugins/broken"],
             "knowledge_bases": {"docs": {"path": str(docs_path)}},
         },
@@ -7968,7 +7964,6 @@ def test_shared_knowledge_path_named_memory_stays_config_relative(tmp_path: Path
                     knowledge_bases=["daily_memory"],
                 ),
             },
-            models={},
             knowledge_bases={"daily_memory": KnowledgeBaseConfig(path="./memory")},
             memory={"backend": "file", "file": {"path": "./memory"}},
         ),
@@ -8012,7 +8007,6 @@ def test_shared_relative_knowledge_base_keeps_non_memory_path_config_relative(tm
                 knowledge_bases=["docs"],
             ),
         },
-        models={},
         knowledge_bases={"docs": KnowledgeBaseConfig(path="./knowledge_docs")},
         memory={"backend": "file", "file": {"path": "./memory"}},
     )
@@ -8040,7 +8034,6 @@ def test_shared_literal_dollar_path_stays_config_relative(tmp_path: Path) -> Non
                 knowledge_bases=["daily_memory"],
             ),
         },
-        models={},
         knowledge_bases={"daily_memory": KnowledgeBaseConfig(path="./notes$archive")},
         memory={"backend": "file", "file": {"path": "./notes$archive"}},
     )
@@ -8068,7 +8061,6 @@ def test_file_memory_agent_without_configured_file_path_keeps_shared_base_config
                 knowledge_bases=["daily_memory"],
             ),
         },
-        models={},
         knowledge_bases={"daily_memory": KnowledgeBaseConfig(path="./memory")},
         memory={"backend": "mem0"},
     )
@@ -8101,11 +8093,10 @@ async def test_private_agent_knowledge_publishes_isolated_indexes(tmp_path: Path
                     ),
                 ),
             },
-            models={},
         ),
         runtime_paths,
     )
-    base_id = config.resolve_entity("helper").private_knowledge_base_id
+    base_id = config.resolve_agent("helper").policy.private_knowledge_base_id
     assert base_id is not None
     identity_a = _identity("@alice:localhost")
     identity_b = _identity("@bob:localhost")
@@ -8174,11 +8165,10 @@ async def test_private_agent_knowledge_schedules_refresh_when_source_changes(
                     ),
                 ),
             },
-            models={},
         ),
         runtime_paths,
     )
-    base_id = config.resolve_entity("helper").private_knowledge_base_id
+    base_id = config.resolve_agent("helper").policy.private_knowledge_base_id
     assert base_id is not None
     identity = _identity("@alice:localhost")
     key = resolve_published_index_key(
@@ -8247,11 +8237,10 @@ def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path, monkeypa
                     ),
                 ),
             },
-            models={},
         ),
         runtime_paths,
     )
-    base_id = config.resolve_entity("helper").private_knowledge_base_id
+    base_id = config.resolve_agent("helper").policy.private_knowledge_base_id
     assert base_id is not None
     max_entries = max(
         knowledge_registry._MAX_PRIVATE_PUBLISHED_INDEXES,
@@ -8303,7 +8292,7 @@ def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path, monkeypa
         _create_idle_refresh_lock(knowledge_registry.source_root_for_refresh_target(refresh_target))
 
     private_index_count = sum(
-        key.base_id.startswith(config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX) for key in knowledge_registry._published_indexes
+        key.base_id.startswith(PRIVATE_KNOWLEDGE_BASE_ID_PREFIX) for key in knowledge_registry._published_indexes
     )
     assert private_index_count <= knowledge_registry._MAX_PRIVATE_PUBLISHED_INDEXES
     assert len(knowledge_utils._refresh_scheduled_at) <= knowledge_utils._MAX_REFRESH_SCHEDULED_COOLDOWNS
@@ -8325,11 +8314,10 @@ def test_private_index_read_path_cache_insertion_is_bounded(tmp_path: Path) -> N
                     ),
                 ),
             },
-            models={},
         ),
         runtime_paths,
     )
-    base_id = config.resolve_entity("helper").private_knowledge_base_id
+    base_id = config.resolve_agent("helper").policy.private_knowledge_base_id
     assert base_id is not None
     count = knowledge_registry._MAX_PRIVATE_PUBLISHED_INDEXES + 10
 
@@ -8371,7 +8359,7 @@ def test_private_index_read_path_cache_insertion_is_bounded(tmp_path: Path) -> N
         assert lookup.index is not None
 
     private_index_count = sum(
-        key.base_id.startswith(config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX) for key in knowledge_registry._published_indexes
+        key.base_id.startswith(PRIVATE_KNOWLEDGE_BASE_ID_PREFIX) for key in knowledge_registry._published_indexes
     )
     assert private_index_count <= knowledge_registry._MAX_PRIVATE_PUBLISHED_INDEXES
 

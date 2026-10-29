@@ -21,6 +21,7 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.test_agent_cli_authority import _runtime_context
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -45,7 +46,7 @@ def _minimal_build(runtime: ToolRuntimeContext, *, tools: tuple[str, ...] = ("sh
         agent_mode="minimal",
         persist_runtime_state=False,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
     )
 
 

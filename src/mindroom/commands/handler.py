@@ -209,7 +209,7 @@ def _format_agent_description(agent_name: str, config: Config) -> str:
     """Format a concise agent description for the welcome message."""
     if agent_name in config.agents:
         agent_config = config.agents[agent_name]
-        tool_names = config.resolve_entity(agent_name).available_tools
+        tool_names = config.resolve_agent(agent_name).tools.tool_names
         desc_parts = []
 
         # Add role first

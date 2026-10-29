@@ -18,6 +18,7 @@ from mindroom.ai import run_delegated_child_response
 from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import approval_decisions, with_resumed_turn_log_context
 from mindroom.approval.tool_owners import require_original_toolkit, required_approval_tool_names
+from mindroom.config.resolution import entity_timezone
 from mindroom.delegation.execution import drive_delegation_stream, has_delegation_state
 from mindroom.delegation.state import member_call_id, member_delegation_card, pending_call_slot
 from mindroom.helper_usage import helper_usage_context
@@ -48,6 +49,7 @@ from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.turn_model import ModelScope, resolve_team_turn_models
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
@@ -335,6 +337,7 @@ async def continue_paused_team_run(
                         config=config,
                         runtime_paths=runtime_paths,
                         execution_identity=execution_identity,
+                        delegation_depth=0,
                     ),
                 )
                 for name in member_names
@@ -347,7 +350,20 @@ async def continue_paused_team_run(
             execution_identity=execution_identity,
             refresh_scheduler=refresh_scheduler,
             supports_native_tool_approval=True,
-            active_model_names=member_model_names,
+            # A pause a resume made saves no member models, so its own resume resolves them by the team rule.
+            active_model_names=member_model_names
+            if member_model_names is not None
+            else resolve_team_turn_models(
+                config,
+                runtime_paths,
+                ModelScope(
+                    entity=configured_team_name,
+                    room_id=execution_identity.room_id,
+                    thread_id=execution_identity.resolved_thread_id,
+                ),
+                member_names,
+                None,
+            ).member_model_names,
             required_tool_names={name: task.result() for name, task in required_tool_tasks.items()},
         )
         if team_name is None:
@@ -361,7 +377,7 @@ async def continue_paused_team_run(
             execution_identity=execution_identity,
             model_name=model_name,
             configured_team_name=team_name,
-            timezone=config.get_entity_timezone(configured_team_name),
+            timezone=entity_timezone(config, configured_team_name),
         )
         await _build_paused_members(built.spec, persisted)
         native = restore_native_history(built.spec.leader.model, persisted_run=persisted, session=scope.session)

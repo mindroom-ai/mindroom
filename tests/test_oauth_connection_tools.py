@@ -93,7 +93,7 @@ def _tool_and_context(
         agent_reply_memberships=isolated_membership_index(),
     )
     worker_target = build_agent_toolkit_worker_target(
-        config.resolve_entity("research").execution_scope,
+        config.resolve_agent("research").policy.effective_execution_scope,
         "research",
         is_private=False,
         execution_identity=build_execution_identity_from_runtime_context(context),

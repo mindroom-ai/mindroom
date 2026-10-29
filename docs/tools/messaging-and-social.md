@@ -47,9 +47,9 @@ Archiving, trashing, attachment downloads, and sending existing drafts are not a
 `send_email_to_self(subject, body)` always sends to the connected account's own address, so an approval rule can allow it while still requiring approval for `send_email`; see [Tool Approval](../tool-approval.md).
 
 Draft and send functions accept attachment file paths, not Matrix attachment IDs.
-Allowed paths follow the agent's [`file_access`](../architecture/security-posture.md#file-access) setting: with the default `workspace`, attachments must be files inside the agent workspace, and an agent without a workspace cannot attach files.
+Allowed paths follow the agent's [`file_access`](../architecture/security-posture.md#file-access) setting: with the default `workspace`, attachments must be files inside the agent workspace.
 With `unrestricted`, any file MindRoom can read is allowed.
-Relative paths resolve from the workspace root, or from the MindRoom working directory when an `unrestricted` agent has no workspace.
+Relative paths resolve from the workspace root.
 Attachments may total at most 25 MiB per message; larger sets fail with `Gmail attachments exceed the 25 MiB limit`.
 
 Each option below defaults to `true`, and setting it to `false` removes the matching function.

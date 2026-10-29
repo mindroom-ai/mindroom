@@ -383,6 +383,7 @@ def _policy(compaction: _MidTurnCompaction, state: LoopState) -> _Policy | None:
     """Return the limit text compaction keeps requests under, or None when it cannot run for this request."""
     inputs = resolve_entity_preparation_inputs(
         config=compaction.config,
+        runtime_paths=compaction.runtime_paths,
         entity_name=compaction.entity_name,
         static_prompt_tokens=0,
         active_model_name=compaction.model_name,

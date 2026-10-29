@@ -64,7 +64,7 @@ def _entity_model_names(config: Config) -> list[str]:
     """Return the model names used by the router, agents, and teams, in first-use order."""
     names = [config.router.model]
     names.extend(agent.model for agent in config.agents.values())
-    names.extend(team.model for team in config.teams.values() if team.model is not None)
+    names.extend(team.model for team in config.teams.values())
     return list(dict.fromkeys(names))
 
 

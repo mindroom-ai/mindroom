@@ -664,15 +664,13 @@ def _route_workspace(
     in its absolute ``base_dir``.
     """
     if route.routing_agent_name is not None and (worker is None or route.base_dir is None):
-        agent_workspace = resolve_agent_runtime(
+        return resolve_agent_runtime(
             route.routing_agent_name,
             config,
             _runtime_paths_for_runner_agent_paths(runtime_paths),
             execution_identity=identity,
             create=True,
-        ).tool_base_dir
-        if worker is None or agent_workspace is not None:
-            return agent_workspace
+        ).workspace.root
     if worker is not None:
         workspace = worker.base_dir
     elif route.base_dir is not None:
@@ -862,7 +860,7 @@ def _resolve_entrypoint(
         toolkit = get_tool_by_name(
             tool_name,
             runtime_paths=runtime_paths,
-            disable_sandbox_proxy=True,
+            runs_in_worker=False,
             credential_overrides=credential_overrides,
             credentials_manager=credentials_manager or get_runtime_credentials_manager(runtime_paths),
             runtime_config=config,
@@ -1202,7 +1200,7 @@ def _subprocess_config_yaml(config: Config, tool_name: str) -> str:
         # Plugin paths let the child register plugin tools; their settings stay out of the process running tool code.
         include = {"plugins": {"__all__": {"path", "enabled"}}, "defaults": default_fields}
         if ToolManagedInitArg.FILE_ACCESS in builtin_metadata.managed_init_args:
-            # The injected file_access resolves the routing agent through config.resolve_entity().
+            # The injected file_access resolves the routing agent through config.resolution.file_access().
             default_fields.add("file_access")
             include["agents"] = {"__all__": {"display_name", "file_access"}}
     payload = config.model_dump(

@@ -272,6 +272,9 @@ async def test_reload_drains_active_responses_before_applying(
     assert gate.closed is False
 
 
+_AGENT1_YAML = "models:\n  default: {provider: openai, id: test-model}\nagents:\n  agent1:\n    display_name: Agent 1\n"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("apply_fails", [False, True])
 async def test_a_reload_ends_the_script_launch_fence_once_published_or_failed(
@@ -338,9 +341,6 @@ async def test_another_update_waiting_for_the_config_lock_starts_after_the_launc
     await asyncio.wait_for(asyncio.gather(reload_task, queued), timeout=1)
 
     assert order == ["fence ended", "queued update"]
-
-
-_AGENT1_YAML = "agents:\n  agent1:\n    display_name: Agent 1\n"
 
 
 @pytest.mark.asyncio
@@ -1238,7 +1238,10 @@ async def test_reload_that_loses_to_a_dashboard_save_adopts_nothing_and_stays_pe
     initialize_api_app(api_app, runtime_paths)
     assert api_config_lifecycle.load_config_into_app(runtime_paths, api_app).loaded
     runtime_paths.config_path.write_text(stale_edit, encoding="utf-8")
-    saved_payload = {"agents": {"agent1": {"display_name": "Saved From Dashboard"}}}
+    saved_payload = {
+        "models": {"default": {"provider": "openai", "id": "test-model"}},
+        "agents": {"agent1": {"display_name": "Saved From Dashboard"}},
+    }
     real_load_attempt = api_config_lifecycle.load_config_attempt
 
     def load_then_lose_to_dashboard_save(paths: object) -> object:

@@ -71,7 +71,7 @@ def _tool(tmp_path: Path, **overrides: object) -> agno_lumalab.LumaLabTools:
             "lumalabs",
             paths,
             worker_target=None,
-            disable_sandbox_proxy=True,
+            runs_in_worker=False,
             credentials_manager=CredentialsManager(tmp_path / "credentials"),
             credential_overrides={"api_key": "test-luma-key"},
             tool_config_overrides=overrides,

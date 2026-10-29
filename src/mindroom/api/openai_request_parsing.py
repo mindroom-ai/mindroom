@@ -15,6 +15,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from mindroom.api.openai_streaming_protocol import error_response
+from mindroom.config.resolution import agent_policy
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
@@ -237,7 +238,7 @@ def _openai_incompatible_agent_closure(
             closures=delegation_closures,
         )
         if target_name in config.agents
-        and config.resolve_entity(target_name).execution_scope not in _OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES
+        and agent_policy(config, target_name).effective_execution_scope not in _OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES
     )
 
 
@@ -254,7 +255,7 @@ def _unsupported_worker_scope_error(agent_names: list[str], config: Config) -> J
         )
     }
     invalid_execution_scopes = {
-        config.resolve_entity(agent_name).execution_scope
+        agent_policy(config, agent_name).effective_execution_scope
         for agent_name in invalid_scope_agents
         if agent_name in config.agents
     }

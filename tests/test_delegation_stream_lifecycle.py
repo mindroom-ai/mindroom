@@ -33,6 +33,7 @@ from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, 
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
 from tests.test_delegation_direct_audit import _identity
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -273,7 +274,7 @@ async def test_a_consumer_failure_during_the_continuation_stores_the_cancelled_p
         history_storage=store,
         supports_native_tool_approval=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, paths, "leader"),
     )
     session = new_scope_session(session_id=identity.session_id or "", scope_id="leader", is_team=False)
     ctx = RunContext(run_id="parent-run", session=UnstoredSession(session.session_id), user_id=identity.requester_id)

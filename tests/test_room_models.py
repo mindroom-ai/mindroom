@@ -28,6 +28,7 @@ from mindroom.room_model_overrides import (
 from mindroom.teams.members import resolve_exact_team_members
 from mindroom.thread_models import set_thread_model_override
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.turn_model import ModelScope, resolve_turn_model
 from tests.authorization_helpers import make_test_command_handler_context
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, runtime_paths_for, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer
@@ -139,10 +140,11 @@ async def test_room_model_command_sets_runtime_default_without_writing_config(tm
         requester_user_id="@admin:localhost",
     )
 
-    runtime_model = context.config.resolve_runtime_model(
-        entity_name="assistant",
-        room_id=ROOM_ID,
-        runtime_paths=context.runtime_paths,
+    runtime_model = resolve_turn_model(
+        context.config,
+        context.runtime_paths,
+        ModelScope(entity="assistant", room_id=ROOM_ID),
+        None,
     )
     assert runtime_model.model_name == "large"
     assert runtime_model.context_window == 32_000
@@ -179,10 +181,11 @@ async def test_room_model_command_reset_restores_configured_default(tmp_path: Pa
         requester_user_id="@admin:localhost",
     )
 
-    runtime_model = context.config.resolve_runtime_model(
-        entity_name="assistant",
-        room_id=ROOM_ID,
-        runtime_paths=context.runtime_paths,
+    runtime_model = resolve_turn_model(
+        context.config,
+        context.runtime_paths,
+        ModelScope(entity="assistant", room_id=ROOM_ID),
+        None,
     )
     assert runtime_model.model_name == "default"
     response = context.send_response.await_args.args[0]
@@ -302,11 +305,7 @@ def test_runtime_room_override_precedence(tmp_path: Path, monkeypatch: pytest.Mo
     )
 
     assert (
-        config.resolve_runtime_model(
-            entity_name="assistant",
-            room_id=ROOM_ID,
-            runtime_paths=runtime_paths,
-        ).model_name
+        resolve_turn_model(config, runtime_paths, ModelScope(entity="assistant", room_id=ROOM_ID), None).model_name
         == "large"
     )
 
@@ -319,21 +318,20 @@ def test_runtime_room_override_precedence(tmp_path: Path, monkeypatch: pytest.Mo
         config=config,
     )
     assert (
-        config.resolve_runtime_model(
-            entity_name="assistant",
-            room_id=ROOM_ID,
-            thread_id=thread_id,
-            runtime_paths=runtime_paths,
+        resolve_turn_model(
+            config,
+            runtime_paths,
+            ModelScope(entity="assistant", room_id=ROOM_ID, thread_id=thread_id),
+            None,
         ).model_name
         == "default"
     )
     assert (
-        config.resolve_runtime_model(
-            entity_name="assistant",
-            active_model_name="large",
-            room_id=ROOM_ID,
-            thread_id=thread_id,
-            runtime_paths=runtime_paths,
+        resolve_turn_model(
+            config,
+            runtime_paths,
+            ModelScope(entity="assistant", room_id=ROOM_ID, thread_id=thread_id, explicit="large"),
+            None,
         ).model_name
         == "large"
     )
@@ -391,7 +389,14 @@ def test_runtime_model_precedence_applies_to_materialized_team_members(tmp_path:
             session_id=None,
         ),
         refresh_scheduler=None,
-        active_model_names=None,
+        active_model_names={
+            "assistant": resolve_turn_model(
+                context.config,
+                context.runtime_paths,
+                ModelScope(entity="assistant", room_id=ROOM_ID),
+                None,
+            ).model_name,
+        },
     )
     assert members.build("assistant", members.model_names["assistant"]).spec.model.identity.id == "large-model"
 
@@ -417,7 +422,14 @@ def test_runtime_model_precedence_applies_to_materialized_team_members(tmp_path:
             session_id=f"{ROOM_ID}:{thread_id}",
         ),
         refresh_scheduler=None,
-        active_model_names=None,
+        active_model_names={
+            "assistant": resolve_turn_model(
+                context.config,
+                context.runtime_paths,
+                ModelScope(entity="assistant", room_id=ROOM_ID, thread_id=thread_id),
+                None,
+            ).model_name,
+        },
     )
     assert (
         thread_members.build("assistant", thread_members.model_names["assistant"]).spec.model.identity.id
@@ -449,11 +461,7 @@ def test_stale_runtime_room_override_falls_back_to_static_room_model(
         model_name="removed",
     )
 
-    runtime_model = config.resolve_runtime_model(
-        entity_name="assistant",
-        room_id=ROOM_ID,
-        runtime_paths=runtime_paths,
-    )
+    runtime_model = resolve_turn_model(config, runtime_paths, ModelScope(entity="assistant", room_id=ROOM_ID), None)
     assert runtime_model.model_name == "default"
 
 

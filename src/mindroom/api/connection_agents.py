@@ -10,11 +10,13 @@ from fastapi import HTTPException
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api.auth import require_same_origin
 from mindroom.authorization import is_sender_allowed_for_agent_credential_management, is_sender_allowed_for_responder
+from mindroom.config.resolution import agent_policy
 from mindroom.matrix.identity import try_parse_historical_matrix_user_id
 from mindroom.mcp_gateway.types import GatewayOwner
 from mindroom.origins import deployment_origin, is_local_origin
 from mindroom.requester_identity import resolve_human_requester_alias
-from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
+from mindroom.runtime_resolution import resolve_agent_execution
+from mindroom.tool_system.worker_routing import build_tool_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -135,7 +137,7 @@ def resolve_connection_user(
     gateway = tuple(
         name
         for name in usable
-        if config.resolve_entity(name).execution_scope in {"user", "user_agent"}
+        if agent_policy(config, name).effective_execution_scope in {"user", "user_agent"}
         or config.agents[name].mcp_gateway_shared_credentials
     )
     return ConnectionUserContext(
@@ -166,14 +168,12 @@ def _connection_agent_identity_and_target(
         resolved_thread_id=None,
         session_id=None,
     )
-    target = build_agent_toolkit_worker_target(
-        config.resolve_entity(agent_name).execution_scope,
+    return identity, resolve_agent_execution(
         agent_name,
-        is_private=config.agents[agent_name].private is not None,
+        config,
+        runtime_paths,
         execution_identity=identity,
-        runtime_paths=runtime_paths,
-    )
-    return identity, target
+    ).worker_target
 
 
 def build_connection_agent_target(
