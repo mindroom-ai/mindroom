@@ -767,7 +767,7 @@ class TurnAdapter[ChunkT]:
     ]
     discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]
     make_text_chunk: Callable[[str], ChunkT]
-    # The current-turn user message the turn's runs store, which its record keeps.
+    # The current-turn user message the turn's record keeps, which an interrupted row stores.
     user_message: str
     on_scope_loaded: Callable[[ScopeSessionContext | None], None] | None = None
     finalize_attempt: Callable[[ScopeSessionContext | None], Awaitable[None]] | None = None
