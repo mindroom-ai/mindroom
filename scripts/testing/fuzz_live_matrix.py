@@ -4748,7 +4748,7 @@ class _SupersessionSnapshot:
     records: Mapping[str, TurnRecord]
     sources: Mapping[str, _SettledJournalSource]
     pending_deliveries: tuple[_PendingSupersessionDelivery, ...]
-    # Edit events a regeneration claimed a reply for.
+    # Edit events a completed regeneration answered.
     regenerated_edits: frozenset[str] = frozenset()
     # Events the agent recorded redacted.
     redacted: frozenset[str] = frozenset()
@@ -4787,9 +4787,11 @@ def _read_supersession_snapshot(path: Path, principal_id: str) -> _SupersessionS
             ):
                 msg = "malformed supersession outbox row"
                 raise AssertionError(msg)
+            # A regeneration a restart cut short answered nothing: its edit is replayed, and MindRoom declines it
+            # when another message followed meanwhile.
             regenerated = database.execute(
                 "SELECT span.delivery_id FROM reply_spans AS span WHERE span.principal_id = ? "
-                "AND span.kind = 'regeneration'",
+                "AND span.kind = 'regeneration' AND span.outcome = 'completed'",
                 (principal_id,),
             ).fetchall()
             return _SupersessionSnapshot(

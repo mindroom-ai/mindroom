@@ -6804,6 +6804,60 @@ def test_ledger_read_attributes_ai_answers_from_reply_records(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_an_edit_whose_regeneration_a_restart_cut_short_counts_as_declined(tmp_path: Path) -> None:
+    """A regeneration a restart left lost answered nothing, so MindRoom settling its edit declines that edit."""
+    ledger_path = tmp_path / "event_journal.db"
+    principal_id = journal_principal_id("general", "@agent:example")
+    _write_ledger(ledger_path, {"$root": TurnRecord.create(source_event_ids=("$root",), completed=True)})
+    with closing(sqlite3.connect(ledger_path)) as database:
+        database.execute(
+            "INSERT INTO reply_messages (principal_id, reply_id, entity_name, room_id, membership_epoch, event_id, "
+            "state, last_span_id, presentation_json, revision, placeholder_only, reply_sequence, created_at_ns, "
+            "updated_at_ns) VALUES (?, 'answer', 'general', '!room:example', 0, '$reply', 'completed', 'cut', "
+            "'{}', 1, 0, 1, 1, 1)",
+            (principal_id,),
+        )
+        database.executemany(
+            "INSERT INTO reply_spans (principal_id, span_id, reply_id, kind, delivery_id, bot_generation, "
+            "base_sequence, outcome, claimed_at_ns) VALUES (?, ?, 'answer', ?, ?, 'g', 0, ?, ?)",
+            [
+                (principal_id, "turn", "turn", "$root", "completed", 1),
+                (principal_id, "answered", "regeneration", "$answered-edit", "completed", 2),
+                (principal_id, "cut", "regeneration", "$cut-edit", "lost", 3),
+            ],
+        )
+        database.executemany(
+            "INSERT INTO journal_events (principal_id, event_id, room_id, thread_id, kind, sender, origin_server_ts, "
+            "source_json, membership_epoch, state) VALUES (?, ?, '!room:example', '', 'message', '@user:example', ?, "
+            "'{}', 0, 'settled')",
+            [(principal_id, "$answered-edit", 20), (principal_id, "$cut-edit", 30)],
+        )
+        database.commit()
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example", coalescing_threads=True, ledger_path=ledger_path)
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=_short_body_for,
+        ledger_path=ledger_path,
+        pending_edit_markers={"$root": {"$cut-edit": _source_marker("root:0", "edit:3")}},
+    )
+    try:
+        snapshot = live_fuzz._read_supersession_snapshot(ledger_path, principal_id)
+        assert snapshot.regenerated_edits == frozenset({"$answered-edit"})
+        auditor._observe_supersession({})
+        assert oracle.declined_edit_sources == frozenset({"$root"})
+
+        # Debt that also names an edit a completed regeneration answered waits for that answer instead.
+        auditor.pending_edit_markers["$root"]["$answered-edit"] = _source_marker("root:0", "edit:2")
+        auditor._observe_supersession({})
+        assert oracle.declined_edit_sources == frozenset()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("note", [INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE])
 async def test_supersession_proof_reads_the_interrupted_reply_of_an_unanswered_turn(
     tmp_path: Path,
