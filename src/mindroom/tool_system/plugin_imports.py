@@ -63,7 +63,7 @@ class _PluginCacheEntry:
 class _ModuleCacheEntry:
     mtime: float
     module: ModuleType
-    replaced_modules: tuple[ModuleType, ...] = ()
+    replaced_modules: tuple[ModuleType, ...]
 
 
 _PLUGIN_CACHE: dict[Path, _PluginCacheEntry] = {}

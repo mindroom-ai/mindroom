@@ -3330,9 +3330,13 @@ def _write_task_hooks_plugin(plugin_root: Path, *, plugin_name: str) -> Path:
 
 
 def _set_hooks_version(hooks_path: Path, version: int) -> None:
+    """Edit the hooks file to a new version whose modification time is strictly later than the previous version's."""
+    previous_mtime = hooks_path.stat().st_mtime
     source = hooks_path.read_text(encoding="utf-8")
     hooks_path.write_text(re.sub(r"VERSION = \d+", f"VERSION = {version}", source), encoding="utf-8")
-    _bump_mtime(hooks_path)
+    # The write resets the time to now, which can equal a previous bump within one timestamp tick.
+    mtime = previous_mtime + 10
+    os.utime(hooks_path, (mtime, mtime))
 
 
 @pytest.mark.asyncio
