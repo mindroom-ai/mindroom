@@ -37,6 +37,8 @@ from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.credentials.sync import get_api_key_for_provider, get_embedder_api_key, sync_env_to_credentials
 from mindroom.llm.errors import ProviderError, ProviderUnavailable
 from mindroom.providers.anthropic import messages as claude_messages
+from tests.providers.anthropic_family_support import ROUTE_CONFIGS, provider_for
+from tests.providers.golden_support import Wire
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -89,6 +91,52 @@ def test_service_disabled_explains_api_enablement() -> None:
 
     assert valid is False
     assert detail == "HTTP 403: the Vertex AI API (aiplatform.googleapis.com) is not enabled in this project"
+
+
+# Google's answer to a Vertex AI request whose project has the Vertex AI API disabled, in Google's AIP-193 error shape
+# rather than Anthropic's; Google may also send it as a one-element list.
+_VERTEX_API_DISABLED = {
+    "error": {
+        "code": 403,
+        "message": "Vertex AI API has not been used in project 123 before or it is disabled. Enable it by visiting "
+        "https://console.developers.google.com/apis/api/aiplatform.googleapis.com/overview?project=123 then retry.",
+        "status": "PERMISSION_DENIED",
+        "details": [
+            {
+                "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                "reason": "SERVICE_DISABLED",
+                "domain": "googleapis.com",
+            },
+        ],
+    },
+}
+
+
+@pytest.mark.parametrize("body", [_VERTEX_API_DISABLED, [_VERTEX_API_DISABLED]], ids=["object", "list"])
+def test_a_disabled_vertex_ai_api_is_named_from_google_s_answer(
+    body: object,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Google's 403 reaches the check through the Claude adapter with the reason that says the API is disabled."""
+    wire = Wire(httpx.Response(403, json=body))
+    monkeypatch.setattr(
+        claude_messages,
+        "build_provider",
+        lambda _config, _paths: provider_for(ROUTE_CONFIGS["vertexai_claude"], tmp_path / "probe", wire.client),
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    model = ModelConfig(**ROUTE_CONFIGS["vertexai_claude"])
+
+    assert _validate_vertexai_claude_connection(model, runtime_paths) == (
+        False,
+        "HTTP 403: the Vertex AI API (aiplatform.googleapis.com) is not enabled in this project",
+    )
+    assert len(wire.requests) == 1
 
 
 def test_plain_permission_denied_points_at_iam() -> None:

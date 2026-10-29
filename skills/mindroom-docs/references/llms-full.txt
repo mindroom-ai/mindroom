@@ -2526,7 +2526,7 @@ Before each retry it waits as long as the provider's `Retry-After` or Azure's `r
 SDK retry settings in `client_params`, such as `max_retries` or Gemini's `http_options.retry_options`, have no effect; the Gemini SDK still resends on its own after a dropped connection and during a file upload's transfer.
 A request that still fails ends the turn with "⏱️ Rate limited. Please wait a moment and try again." for a rate limit, or "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly." otherwise.
 A request larger than the account's tokens-per-minute limit, which OpenAI rejects as "Request too large", is not retried, since only a smaller request can pass; it ends the turn with "⚠️ This request is larger than the account's tokens-per-minute limit. Start a new thread or compact the conversation, then try again."
-A request that OpenAI or Gemini refuses because the account has no credit left or reached its monthly spend or usage limit is not retried either, and the turn ends with the provider's own message, such as "⚠️ Error: You exceeded your current quota, please check your plan and billing details."
+A request that OpenAI, Anthropic, Gemini, or Moonshot refuses because the account has no credit left or reached its monthly spend or usage limit is not retried either, and the turn ends with an error that shows the provider's message, such as "⚠️ Error: You exceeded your current quota, please check your plan and billing details."
 
 ## Stalled Streams
 
@@ -3687,7 +3687,7 @@ Rewriting leaves free space inside an index file, which later writes reuse; once
 Changing `chunk_size`, `chunk_overlap`, `chunk_context_model`, the embedder, or any file filter re-embeds the whole base on the next refresh.
 An explicit reindex from the dashboard or API rebuilds every vector, which is how you replace an index you no longer trust.
 An interrupted or failed semantic build continues where it stopped on the next refresh instead of starting over.
-Temporary embedding failures (timeouts, connection errors, and HTTP 408, 409, 429, and any 5xx status) are retried, while permanent failures such as authentication errors, or a 429 that says the OpenAI account has no credit left or reached its monthly spend or usage limit, stop the refresh until you fix the cause.
+Temporary embedding failures (timeouts, connection errors, and HTTP 408, 409, 429, and any other 5xx status) are retried, while permanent failures such as authentication errors, or a 429 that says the OpenAI account has no credit left or reached its monthly spend or usage limit, stop the refresh until you fix the cause.
 A batch of chunks larger than the account's tokens-per-minute limit is embedded again one chunk per request.
 
 Knowledge base configuration hot-reloads.
@@ -21806,7 +21806,7 @@ These `error_type` values are stable; any other value is the class name of an un
 - `InvalidRequest`: the provider rejected the request, such as a malformed or oversized body or an unknown model.
 - `ModelSafeguardRefusal`: the model's safeguards refused the request.
 - `ModelOutputLimitError`: the model's responses kept stopping at the output limit before their tool calls were complete.
-- `ProviderError`: any other provider rejection, such as an HTTP `403`, or an OpenAI or Gemini account with no credit left or past its monthly spend or usage limit.
+- `ProviderError`: any other provider rejection, such as an HTTP `403`, or an OpenAI, Anthropic, Gemini, or Moonshot account with no credit left or past its monthly spend or usage limit.
 
 Count it grouped by `error_type` and alert when one value is far more frequent than usual.
 `RateLimited` and `ProviderUnavailable` from many agents mean a provider is failing, while `InvalidRequest` or `ContextWindowExceeded` from one agent is more likely one conversation the provider cannot accept.

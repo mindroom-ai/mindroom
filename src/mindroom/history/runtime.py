@@ -69,13 +69,13 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.storage import FoldBasis
-    from mindroom.history.summary_rows import Fold
     from mindroom.history.types import CompactionLifecycle, CompactionOutcome, NativeHistory
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelIdentity, ModelProvider, PortableReplayEstimator
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
     from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.summary_rows import Fold
     from mindroom.session_storage.types import ConversationSession
     from mindroom.timing import DispatchPipelineTiming
 

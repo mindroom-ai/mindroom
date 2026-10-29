@@ -24,7 +24,7 @@ from mindroom.history.types import ResolvedReplayPlan
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.media_inputs import MediaInputs
-from mindroom.usage.storage import quote_identifier
+from mindroom.session_storage.schema import quote_identifier
 from tests.history_helpers import replay_settings
 
 if TYPE_CHECKING:

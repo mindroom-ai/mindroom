@@ -1,9 +1,8 @@
 """File and table names and layout of a conversation database.
 
 A database holds its sessions table, the six ``*_log_*`` tables of the run log, which hold a run's messages and tool
-executions as rows of their own, and the usage ledger, whose DDL lives with its owner. ``*_log_meta`` records the
-layout version and the database's owner, which the Agno layout a conversion starts from (``legacy_agno3_schema``)
-lacks.
+executions as rows of their own, and the usage ledger. ``*_log_meta`` records the layout version and the database's
+owner, which the Agno layout a conversion starts from (``legacy_agno3_schema``) lacks.
 """
 
 from __future__ import annotations
@@ -14,7 +13,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.history.run_visibility import NON_VISIBLE_RUN_STATUSES
-from mindroom.usage.storage import quote_identifier, usage_table_name, usage_table_sql
 
 if TYPE_CHECKING:
     import sqlite3
@@ -85,7 +83,7 @@ class TableNames:
     @property
     def usage(self) -> str:
         """The usage ledger."""
-        return usage_table_name(self.sessions)
+        return f"{self.sessions}_usage"
 
     @property
     def log_meta(self) -> str:
@@ -163,7 +161,25 @@ def log_schema_sql(names: TableNames) -> tuple[str, ...]:
         index_sql(names.log_summaries, "session_id", "scope_key", "id"),
         f"CREATE TABLE IF NOT EXISTS {quote_identifier(names.log_removed)} (run_id TEXT NOT NULL PRIMARY KEY, "
         f"session_id TEXT NOT NULL REFERENCES {sessions}(session_id) ON DELETE CASCADE)",
-        usage_table_sql(names.sessions),
+        usage_table_sql(names),
+    )
+
+
+def usage_table_sql(names: TableNames) -> str:
+    """Create the usage ledger; its publication also marks completed initial seeding."""
+    return (
+        f"CREATE TABLE IF NOT EXISTS {quote_identifier(names.usage)} ("
+        "id INTEGER PRIMARY KEY, "
+        f"session_id TEXT NOT NULL REFERENCES {quote_identifier(names.sessions)}(session_id) ON DELETE CASCADE, "
+        "run_id TEXT, usage_data TEXT, UNIQUE(session_id, run_id))"
+    )
+
+
+def usage_upsert_sql(names: TableNames) -> str:
+    """Replace a saved run's snapshot; missing historical IDs remain distinct rows."""
+    return (
+        f"INSERT INTO {quote_identifier(names.usage)} (session_id, run_id, usage_data) "  # noqa: S608
+        "VALUES (?, ?, ?) ON CONFLICT(session_id, run_id) DO UPDATE SET usage_data = excluded.usage_data"
     )
 
 
@@ -197,10 +213,20 @@ def table_names(connection: sqlite3.Connection) -> set[str]:
     return {name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
 
 
+def table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    """Return the names of ``table``'s columns, or none when the database lacks the table."""
+    return {row[1] for row in connection.execute(f"PRAGMA table_info({quote_identifier(table)})")}
+
+
 def is_current_layout(connection: sqlite3.Connection, names: TableNames) -> bool:
     """Return whether the database holds ``*_log_meta``, the marker of the current layout."""
     query = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?"
     return connection.execute(query, (names.log_meta,)).fetchone() is not None
+
+
+def quote_identifier(value: str) -> str:
+    """Quote a SQLite identifier supplied by the storage owner."""
+    return '"' + value.replace('"', '""') + '"'
 
 
 def index_name(table: str, *columns: str) -> str:
@@ -227,5 +253,9 @@ __all__ = [
     "layout_version",
     "log_schema_sql",
     "meta_version",
+    "quote_identifier",
+    "table_columns",
     "table_names",
+    "usage_table_sql",
+    "usage_upsert_sql",
 ]

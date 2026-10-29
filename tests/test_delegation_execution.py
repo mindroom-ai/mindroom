@@ -37,11 +37,11 @@ from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
+from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.tool_system.progress import tool_progress_reporter
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
-from mindroom.usage.storage import quote_identifier
 from tests.access_schema_support import with_responder_access
 from tests.approval_continuation_helpers import approval_continuation, repeats_each_request
 from tests.delegation_helpers import (

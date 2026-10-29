@@ -19,15 +19,14 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom.history.summary_message import is_scope_summary
-from mindroom.history.summary_rows import cut_at_event
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_schema_sql, run_from_row
-from mindroom.session_storage.schema import TableNames, table_names
+from mindroom.session_storage.schema import TableNames, quote_identifier, table_names
+from mindroom.session_storage.summary_rows import cut_at_event
 from mindroom.session_storage.types import ConversationSession
-from mindroom.usage.storage import quote_identifier
 from tests.llm.agno_dict_helpers import PAUSED_NOTICE_OPENINGS
 from tests.storage_oracle.actions import Scenario
 from tests.storage_oracle.backend import SESSION_ID

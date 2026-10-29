@@ -11,10 +11,10 @@ from typing import TYPE_CHECKING, Any
 from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import prepare_conversation_database
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
-from mindroom.session_storage.schema import TableNames, table_names
+from mindroom.session_storage.schema import TableNames, quote_identifier, table_names, usage_table_sql
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
-from mindroom.usage.storage import SYSTEM_USAGE_OWNER, SYSTEM_USAGE_STORAGE_NAME, quote_identifier, usage_table_sql
+from mindroom.usage.storage import SYSTEM_USAGE_OWNER, SYSTEM_USAGE_STORAGE_NAME
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -77,7 +77,7 @@ def write_agno_database(path: Path, *sessions: ConversationSession, usage: bool 
     names = AgnoTableNames.of_database(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(path)) as connection, connection:
-        for statement in (*agno_runs_sql(names), *((usage_table_sql(names.sessions),) if usage else ())):
+        for statement in (*agno_runs_sql(names), *((usage_table_sql(names),) if usage else ())):
             connection.execute(statement)
         for session in sessions:
             summary = None if session.summary is None else json.dumps({"summary": session.summary.text})

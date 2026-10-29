@@ -1365,6 +1365,21 @@ def test_a_stored_continuation_does_not_resend_the_instructions() -> None:
     assert _input(messages, store=True, cache_system_prompt=True) == [{"role": "user", "content": "Continue."}]
 
 
+def test_rebuilding_a_request_leaves_a_message_s_content_list_unchanged() -> None:
+    """A message whose content is a list keeps it as stored, so every rebuild sends its file part once."""
+    message = Message(
+        role="user",
+        content=[{"type": "input_text", "text": "Read the attachment."}],
+        files=[File(content=b"%PDF", filename="report.pdf")],
+    )
+
+    first = _input([message])
+
+    assert _input([message]) == first
+    assert [part["type"] for part in first[0]["content"]] == ["input_text", "input_file"]
+    assert message.content == [{"type": "input_text", "text": "Read the attachment."}]
+
+
 # --- Files ----------------------------------------------------------------------------------------------------
 
 

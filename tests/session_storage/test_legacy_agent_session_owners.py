@@ -19,9 +19,9 @@ from mindroom.llm.runs import RunRecord
 from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
 from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
-from mindroom.session_storage.schema import LOG_VERSION, TableNames
+from mindroom.session_storage.schema import LOG_VERSION, TableNames, quote_identifier
 from mindroom.session_storage.types import ConversationSession
-from mindroom.usage.storage import SYSTEM_USAGE_ENTITY, SYSTEM_USAGE_OWNER, SYSTEM_USAGE_STORAGE_NAME, quote_identifier
+from mindroom.usage.storage import SYSTEM_USAGE_ENTITY, SYSTEM_USAGE_OWNER, SYSTEM_USAGE_STORAGE_NAME
 from tests.conftest import seed_session
 from tests.history_helpers import compact_runs, stored_run_ids, summary_rows_of
 from tests.session_storage.agno_layout import write_agno_database

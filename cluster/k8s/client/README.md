@@ -206,7 +206,19 @@ nginx:
     }
 ```
 
-The chart rejects `nginx.serverSnippet` when the nginx config is not chart-managed, because an external ConfigMap cannot receive the snippet.
+Set `nginx.httpSnippet` for directives that nginx accepts only outside a server block, such as `log_format`.
+The chart renders it above the server block, at nginx's http level, and evaluates it as a Helm template too.
+This example writes one JSON access log line per request:
+
+```yaml
+nginx:
+  httpSnippet: |
+    log_format json_access escape=json '{"time":"$time_iso8601","method":"$request_method","uri":"$request_uri","status":$status,"user_agent":"$http_user_agent"}';
+  serverSnippet: |
+    access_log /dev/stdout json_access;
+```
+
+The chart rejects `nginx.serverSnippet` and `nginx.httpSnippet` when the nginx config is not chart-managed, because an external ConfigMap cannot receive the snippet.
 
 The app shell responses send `Content-Security-Policy: frame-ancestors 'self'` and `X-Frame-Options: SAMEORIGIN`, so only the client's own origin can frame the signed-in client.
 The device pairing page at `basePath/connect` sends `frame-ancestors 'none'` and `X-Frame-Options: DENY` instead, so no origin can frame it.

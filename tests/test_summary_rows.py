@@ -10,15 +10,15 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom import constants
-from mindroom.history import summary_rows
 from mindroom.history.mid_turn_compaction import _folded_calls
 from mindroom.history.storage import read_chunk_basis
-from mindroom.history.summary_rows import CoveredRun, Fold
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.session_storage import summary_rows
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import watch_session_row
+from mindroom.session_storage.summary_rows import CoveredRun, Fold
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session_row
 
@@ -1025,6 +1025,24 @@ def test_retiring_writes_a_barrier_and_removes_every_run_that_folded_mid_turn(st
     # The retired folds' provenance holds nothing any more.
     assert not _redact(store, "$done")
     assert not _redact(store, "$live")
+
+
+def test_a_barrier_is_a_row_without_text_events_or_provenance(
+    store: ConversationStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retirement's barrier records when it was written, through the latest row, with empty event sets."""
+    _save(store, _run("r1"))
+    assert _chunk(store, ["r1"], "S1") is not None
+    monkeypatch.setattr(summary_rows, "time", lambda: 1_750_000_000.5)
+
+    summary_rows.retire(store, session=_session(), scope_key=_AGENT)
+
+    assert _query(
+        store,
+        "SELECT through, summary, legacy, created_at, event_ids, seen_event_ids, fold_run_id, fold_event_ids, "
+        "fold_seen_event_ids FROM code_sessions_log_summaries WHERE summary IS NULL",
+    ) == [(1, None, 0, 1_750_000_000, "[]", "[]", None, None, None)]
 
 
 def test_a_barrier_hides_what_it_retired_from_replay_seen_ids_and_cuts(store: ConversationStore) -> None:

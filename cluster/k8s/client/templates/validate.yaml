@@ -53,6 +53,9 @@
 {{- if and .Values.nginx.serverSnippet (or (not .Values.nginx.create) .Values.nginx.existingConfigMap) -}}
 {{- fail "nginx.serverSnippet requires the chart-managed nginx config" -}}
 {{- end -}}
+{{- if and .Values.nginx.httpSnippet (or (not .Values.nginx.create) .Values.nginx.existingConfigMap) -}}
+{{- fail "nginx.httpSnippet requires the chart-managed nginx config" -}}
+{{- end -}}
 {{- if and .Values.matrixRTC.enabled (not .Values.matrix.homeserverUrl) -}}
 {{- fail "matrix.homeserverUrl is required when matrixRTC.enabled=true" -}}
 {{- end -}}

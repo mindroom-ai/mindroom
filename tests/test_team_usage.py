@@ -19,10 +19,10 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
+from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.usage.stats import collect_admin_usage, collect_private_usage, collect_self_usage
-from mindroom.usage.storage import quote_identifier
 from tests.conftest import persist_runs, seed_session_row
 
 if TYPE_CHECKING:

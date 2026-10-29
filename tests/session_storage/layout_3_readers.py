@@ -14,8 +14,9 @@ from dataclasses import fields, is_dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
+from mindroom.session_storage.schema import quote_identifier
 from mindroom.usage.stats_storage import UsageStorageSource, iter_usage_storage_rows
-from mindroom.usage.storage import SYSTEM_USAGE_ENTITY, quote_identifier
+from mindroom.usage.storage import SYSTEM_USAGE_ENTITY
 from tests.storage_oracle.observe import observe
 
 if TYPE_CHECKING:

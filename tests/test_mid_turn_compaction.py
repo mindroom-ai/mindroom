@@ -65,6 +65,7 @@ from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
+from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.store import persist_to
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.runtime_context import (
@@ -72,7 +73,7 @@ from mindroom.tool_system.runtime_context import (
     detached_requester_context,
     tool_runtime_context,
 )
-from mindroom.usage.storage import project_usage, quote_identifier
+from mindroom.usage.storage import project_usage
 from tests.conftest import install_model_providers, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (

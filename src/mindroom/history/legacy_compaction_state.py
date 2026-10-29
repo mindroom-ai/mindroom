@@ -20,9 +20,8 @@ from mindroom.session_storage.legacy_agno3_schema import (
     agno_summary_rows_sql,
     delete_run_subtrees_in_transaction,
 )
-from mindroom.session_storage.schema import table_names
+from mindroom.session_storage.schema import quote_identifier, table_names
 from mindroom.session_storage.store import decoded_mapping
-from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:
     import sqlite3

@@ -52,9 +52,14 @@ _INVALID_REQUEST_STATUSES = frozenset({400, 404, 413, 422})
 _HTTP_CLIENT_ERROR_RANGE = range(400, 500)
 # The names providers give a throttled request: Anthropic's error type and the Responses code.
 _RATE_LIMIT_NAMES = frozenset({"rate_limit_error", "rate_limit_exceeded"})
-# The codes OpenAI sends with the 429 of an account that only a change to its billing or limits lets through: prepaid
-# credit used up, a reached organization or project spend limit, and a reached OpenAI-assigned usage limit, besides
-# ``insufficient_quota``, the older code of an account without credit and still the error type of the others.
+# The names of a refusal that only a change to the account's billing or limits lets through, whatever its status.
+# OpenAI's codes: prepaid credit used up, a reached organization or project spend limit, and a reached OpenAI-assigned
+# usage limit, besides ``insufficient_quota``, the older code of an account without credit and still the error type of
+# the others.
+# Moonshot's error type, which it sends without a code, for an account whose balance or token quota ran out or that was
+# disabled. Anthropic's error type for a problem with the organization's billing or payment details, which it sends
+# with a 402, and the ``details.error_code`` of its 429 ``rate_limit_error`` once the organization reached its usage
+# tier's monthly spend cap, which carries no ``retry-after``.
 _QUOTA_EXHAUSTED_NAMES = frozenset(
     {
         "insufficient_quota",
@@ -62,7 +67,24 @@ _QUOTA_EXHAUSTED_NAMES = frozenset(
         "organization_spend_limit_exceeded",
         "project_spend_limit_exceeded",
         "organization_usage_limit_exceeded",
+        "exceeded_current_quota_error",
+        "billing_error",
+        "enforced_spend_limit_reached",
     },
+)
+# How providers word a refusal their account's billing causes when they send no billing name, which no retry passes
+# until the credit or the limit changes. Anthropic's 400 ``invalid_request_error``: "Your credit balance is too low to
+# access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits." for an organization without
+# prepaid credit, and a message that begins "You have reached your specified API usage limits" or "You have reached
+# your specified workspace API usage limits" for a spend limit the organization or a workspace set. Gemini's 429
+# ``RESOURCE_EXHAUSTED``, which it also sends for a rate limit: "Your prepayment credits are depleted. Please go to AI
+# Studio at https://ai.studio/projects to manage your project and billing." and "Your project has exceeded its monthly
+# spending cap.", or "Your billing account has ..." for the billing account's cap.
+_QUOTA_EXHAUSTED_WORDING = (
+    "credit balance is too low",
+    "you have reached your specified",
+    "prepayment credits are depleted",
+    "exceeded its monthly spending cap",
 )
 # The name Anthropic gives rejected credentials, with or without its 401 status.
 _AUTHENTICATION_ERROR_TYPE = "authentication_error"
@@ -98,7 +120,9 @@ _REQUEST_TOO_LARGE = "request too large"
 
 # Wording providers use when a request does not fit the model's context window, such as the payload-size wording of
 # OpenAI-compatible servers and Anthropic, older Claude models' "input length and `max_tokens` exceed context limit",
-# and llama.cpp's "the request exceeds the available context size". A bare ``max_tokens`` is too broad to count.
+# llama.cpp's "the request exceeds the available context size", and Vertex AI's "Unable to submit request because the
+# input token count is 106244 but model only supports up to 65536.", whose "only supports up to" alone also names
+# other limits, such as a number of images. A bare ``max_tokens`` is too broad to count.
 _CONTEXT_WINDOW_MARKERS = (
     "context_length_exceeded",
     "context window",
@@ -116,7 +140,12 @@ _CONTEXT_WINDOW_MARKERS = (
     "prompt too long",
     "exceeds the model",
     "available context size",
+    "because the input token count is",
 )
+# How a llama.cpp server words the 500 of an input it must take in one physical batch, such as an embedding, that is
+# larger than that batch: "input (9000 tokens) is too large to process. increase the physical batch size (current batch
+# size: 512)". Only a smaller input passes, though the status is a server error's.
+_PHYSICAL_BATCH_TOO_SMALL = "too large to process. increase the physical batch size"
 
 
 class CliLoginError(ValueError):
@@ -151,21 +180,27 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
     name the failure as the provider does, such as ``rate_limit_error`` or ``server_error``; the error keeps ``code``
     as its ``provider_code``. ``retry_after_seconds`` is the response's ``Retry-After`` hint.
 
-    1. A 429 status or a rate-limit name is ``RateLimited``, unless its wording says the request alone is larger than
-       the account's tokens-per-minute limit, which makes it ``ContextWindowExceeded`` marked ``TOKENS_PER_MINUTE``:
-       only a smaller request passes.
-    2. A transient status, 408, 409, or any 5xx, is ``ProviderUnavailable``.
+    1. A 429 status, or a rate-limit name on an event without a status, is ``RateLimited``, unless its wording says the
+       request alone is larger than the account's tokens-per-minute limit, which makes it ``ContextWindowExceeded``
+       marked ``TOKENS_PER_MINUTE``: only a smaller request passes. A rate-limit name with that wording decides on any
+       status, as Groq sends it with a 413; otherwise a status other than 429 outranks a rate-limit name.
+    2. A transient status, 408, 409, or any 5xx, is ``ProviderUnavailable``, unless its wording is llama.cpp's for an
+       input larger than the server's physical batch, which makes it ``ContextWindowExceeded``: only a smaller input
+       passes.
     3. A 401 status or Anthropic's ``authentication_error`` is ``AuthenticationFailed``.
     4. Wording or a code that names the context window, on a client error or an event without a status, is
        ``ContextWindowExceeded``: a retry cannot make the request fit. A 5xx that mentions it stays transient.
-    5. A transient name, or Anthropic's overloaded wording, is ``ProviderUnavailable``.
+    5. A transient name, or Anthropic's overloaded wording, is ``ProviderUnavailable``, unless the status is a client
+       error, which outranks the name a server gives it: Ollama's OpenAI-compatible endpoint names every status but
+       400 and 404 ``api_error``.
     6. Wording that names the credentials, on a client error or an event without a status, is
        ``AuthenticationFailed``.
     7. An invalid-request status is ``InvalidRequest``.
     8. Anything else, such as a 403 or an unknown status, is a final ``ProviderError``.
 
-    A name that says the account has no credit left or reached its monthly spend or usage limit outranks every rule:
-    whatever its status, it is a final ``ProviderError`` marked ``QUOTA_EXHAUSTED``, since no wait lets it through.
+    A name or wording that says the account has no credit left or reached its monthly spend or usage limit outranks
+    every rule: whatever its status, it is a final ``ProviderError`` marked ``QUOTA_EXHAUSTED``, since no wait lets it
+    through.
     """
     status = status_code if status_code is not None else (int(code) if code is not None and code.isdecimal() else None)
     names = {code, error_type}
@@ -182,18 +217,19 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
             retry_after_seconds=retry_after_seconds,
         )
 
-    if names & _QUOTA_EXHAUSTED_NAMES:
+    if names & _QUOTA_EXHAUSTED_NAMES or any(wording in lowered for wording in _QUOTA_EXHAUSTED_WORDING):
         return typed(ProviderError, marker=QUOTA_EXHAUSTED)
-    if status == _RATE_LIMIT_STATUS or names & _RATE_LIMIT_NAMES:
-        too_large = _REQUEST_TOO_LARGE in lowered
-        return typed(ContextWindowExceeded, marker=TOKENS_PER_MINUTE) if too_large else typed(RateLimited)
+    over_tokens_per_minute = _REQUEST_TOO_LARGE in lowered
+    if status == _RATE_LIMIT_STATUS or (names & _RATE_LIMIT_NAMES and (status is None or over_tokens_per_minute)):
+        return typed(ContextWindowExceeded, marker=TOKENS_PER_MINUTE) if over_tokens_per_minute else typed(RateLimited)
     if status in _TRANSIENT_CLIENT_STATUSES or status in _SERVER_ERROR_RANGE:
-        return typed(ProviderUnavailable)
+        too_large = _PHYSICAL_BATCH_TOO_SMALL in lowered
+        return typed(ContextWindowExceeded) if too_large else typed(ProviderUnavailable)
     if status == _UNAUTHORIZED_STATUS or _AUTHENTICATION_ERROR_TYPE in names:
         return typed(AuthenticationFailed)
     if client_side and _is_context_window_error(lowered, code=code):
         return typed(ContextWindowExceeded)
-    if names & _TRANSIENT_NAMES or _OVERLOADED_ERROR_TYPE in lowered:
+    if (names & _TRANSIENT_NAMES or _OVERLOADED_ERROR_TYPE in lowered) and status not in _HTTP_CLIENT_ERROR_RANGE:
         return typed(ProviderUnavailable)
     if client_side and _CREDENTIAL_WORDING.search(lowered):
         return typed(AuthenticationFailed)
