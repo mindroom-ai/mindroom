@@ -4806,6 +4806,21 @@ def _read_supersession_snapshot(path: Path, principal_id: str) -> _SupersessionS
         raise AssertionError(msg) from exc
 
 
+def _declined_edits(
+    snapshot: _SupersessionSnapshot,
+    source_revision_markers: Mapping[str, Mapping[str, str]],
+) -> frozenset[str]:
+    """Return the edits MindRoom settled without a completed regeneration answering them."""
+    return frozenset(
+        edit_id
+        for revisions in source_revision_markers.values()
+        for edit_id in revisions
+        if (row := snapshot.sources.get(edit_id)) is not None
+        and row.state == "settled"
+        and edit_id not in snapshot.regenerated_edits
+    )
+
+
 _SUPERSESSION_GUARD_MESSAGES = (
     "Skipping older message — newer unresponded message from same sender in thread",
     "Skipping older message — newer pending journal event from same sender in degraded thread replay guard",
@@ -4854,6 +4869,7 @@ class _CanonicalResponseView:
     body: str
     stream_status: str | None
     completed: bool
+    origin_server_ts: int | None = None
 
 
 def _response_payload_completed(payload: object) -> bool:
@@ -4900,10 +4916,12 @@ def _canonical_response_view(
             body = _canonical_message_body(content, is_edit=edit)
             if body is None:
                 continue
+            timestamp = candidate.get("origin_server_ts")
             view = _CanonicalResponseView(
                 body,
                 status if isinstance(status, str) else None,
                 _response_payload_completed(payload),
+                timestamp if isinstance(timestamp, int) else None,
             )
             candidates.append((_replacement_order(event_id, candidate.get("origin_server_ts"), is_edit=edit), view))
     return (
@@ -4960,6 +4978,8 @@ class ExactReplyOracle:
         # wait can see the debts that block a supersession proof clear.
         self.after_ledger_refresh: Callable[[], None] | None = None
         self.supersession_proofs: dict[str, SupersessionProof] = {}
+        # Replies whose cut-short regeneration MindRoom dropped because a later message followed.
+        self.dropped_regenerations: frozenset[str] = frozenset()
         self.canonical_events: dict[str, Mapping[str, Any]] = {}
         self.next_batch: str | None = None
         self.expected_sources: dict[str, str] = {}
@@ -5031,6 +5051,7 @@ class ExactReplyOracle:
             return
         self._ledger_read_at = now
         self.supersession_proofs = {}
+        self.dropped_regenerations = frozenset()
         self.declined_edit_sources = frozenset()
         self.journal_event_states = {}
         if self.log_path is None:
@@ -5063,6 +5084,7 @@ class ExactReplyOracle:
             except (AssertionError, OSError):
                 # A concurrent write may invalidate this poll, never final qualification.
                 self.supersession_proofs = {}
+                self.dropped_regenerations = frozenset()
                 self.declined_edit_sources = frozenset()
                 self.journal_event_states = {}
                 self._ledger_observations = {}
@@ -5473,17 +5495,18 @@ class ExactReplyOracle:
             self.latest_reply_bodies[reply_event_id] = (order, body)
         return True
 
-    def _reply_body_complete(self, body: str, *, source_event_id: str) -> bool:
+    def _reply_body_complete(self, reply_event_id: str, body: str, *, source_event_id: str) -> bool:
         """Return whether one reply body is a settled terminal state.
 
         A body is terminal when its newest attempt is the exact completed stream
         for its model call. Replay continues an interrupted reply in place, so a
         body ending in an interruption note is terminal only once deliberate
-        supersession is proven for its source. Placeholders and partial streams
-        are not terminal, so they must keep settlement open.
+        supersession is proven for its source, or once MindRoom dropped the
+        regeneration a restart cut short. Placeholders and partial streams are
+        not terminal, so they must keep settlement open.
         """
         if body.endswith((INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE)):
-            return self._supersession_proven(source_event_id)
+            return self._supersession_proven(source_event_id) or reply_event_id in self.dropped_regenerations
         body = _final_attempt_body(body)
         call_id = _body_call_id(body)
         return call_id is not None and body == self.expected_body_for(call_id)
@@ -5505,7 +5528,7 @@ class ExactReplyOracle:
             if reply_event_id is None:
                 continue
             latest = self.latest_reply_bodies.get(reply_event_id)
-            if latest is None or not self._reply_body_complete(latest[1], source_event_id=event_id):
+            if latest is None or not self._reply_body_complete(reply_event_id, latest[1], source_event_id=event_id):
                 blocking.append(event_id)
         return blocking
 
@@ -5767,8 +5790,9 @@ def _body_call_id(body: str) -> int | None:
     body = _final_attempt_body(body)
     if not body.startswith(_CALL_ID_PREFIX):
         return None
-    digits = body[len(_CALL_ID_PREFIX) :].split(" ", 1)[0]
-    return int(digits) if digits.isdigit() else None
+    # A cut-short attempt can end at its ID, right before the interrupted note's line break.
+    digits = body[len(_CALL_ID_PREFIX) :].split(maxsplit=1)
+    return int(digits[0]) if digits and digits[0].isdigit() else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -5914,6 +5938,7 @@ class FinalStateAuditor:
         self.runtime_redaction_path = runtime_redaction_path
         self.pending_edit_markers = {source: dict(edits) for source, edits in (pending_edit_markers or {}).items()}
         self.supersession_proofs: dict[str, SupersessionProof] = {}
+        self.dropped_regenerations: frozenset[str] = frozenset()
 
     def _observe_supersession(
         self,
@@ -5940,6 +5965,8 @@ class FinalStateAuditor:
         # with the same retained ancestry before joining durable ownership.
         replies = self._canonical_agent_replies(events, sent_records=sent_records) if replies is None else replies
         authored = {record.event_id: record for record in sent_records}
+        self.dropped_regenerations = self._dropped_regenerations(snapshot, events, replies, authored)
+        self.oracle.dropped_regenerations = self.dropped_regenerations
         proofs: dict[str, SupersessionProof] = {}
         for chain in self.oracle.chains.values():
             for index in range(len(chain) - 1, -1, -1):
@@ -6112,6 +6139,44 @@ class FinalStateAuditor:
         ):
             return None
         return source, response
+
+    def _dropped_regenerations(
+        self,
+        snapshot: _SupersessionSnapshot,
+        events: Mapping[str, Mapping[str, Any]],
+        replies: Mapping[str, set[str]],
+        authored: Mapping[str, _SentRecord],
+    ) -> frozenset[str]:
+        """Return replies left on a regeneration a restart cut short, of an edit MindRoom then declined.
+
+        The restarted MindRoom replays the edit and declines it once another
+        message followed the edited one, and the reply keeps what the cut-short
+        regeneration showed, ended by the interrupted note. The later message
+        must have reached Matrix before that note, which MindRoom wrote after
+        its decision.
+        """
+        declined = _declined_edits(snapshot, self.source_revision_markers)
+        dropped: set[str] = set()
+        for source_event_id, revisions in self.source_revision_markers.items():
+            markers = {marker for edit_id, marker in revisions.items() if edit_id in declined}
+            record = snapshot.records.get(source_event_id)
+            if not markers or record is None:
+                continue
+            for reply_event_id in self._visible_record_reply_ids(record, replies):
+                view = _canonical_response_view(events, reply_event_id, self.agent_id)
+                call_id = _body_call_id(view.body)
+                if (
+                    view.body.endswith((INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE))
+                    and call_id is not None
+                    and view.origin_server_ts is not None
+                    and not markers.isdisjoint(self.observed_markers_for(call_id))
+                    and all(
+                        self._later_message_in_conversation(source, events, authored, before=view.origin_server_ts)
+                        for source in record.source_event_ids
+                    )
+                ):
+                    dropped.add(reply_event_id)
+        return frozenset(dropped)
 
     def _source_markers(self, source_id: str) -> set[str]:
         """Return the marker of every revision of one source: its original and each edit."""
@@ -6825,22 +6890,17 @@ class FinalStateAuditor:
         if self.ledger_path is None or not self.ledger_path.exists():
             return frozenset()
         snapshot = _read_supersession_snapshot(self.ledger_path, journal_principal_id(AGENT_NAME, self.agent_id))
-        return frozenset(
-            edit_id
-            for revisions in self.source_revision_markers.values()
-            for edit_id in revisions
-            if (row := snapshot.sources.get(edit_id)) is not None
-            and row.state == "settled"
-            and edit_id not in snapshot.regenerated_edits
-        )
+        return _declined_edits(snapshot, self.source_revision_markers)
 
     def _later_message_in_conversation(
         self,
         source_id: str,
         events: Mapping[str, Mapping[str, Any]],
         authored: Mapping[str, _SentRecord],
+        *,
+        before: int | None = None,
     ) -> bool:
-        """Return whether the fuzzer wrote another message in the source's conversation after it."""
+        """Return whether the fuzzer wrote another message in the source's conversation after it, and before `before`."""
         root = self._source_thread_root(source_id, events, authored, seen=set())
         source_ts = events.get(source_id, {}).get("origin_server_ts")
         if root is None or not isinstance(source_ts, int):
@@ -6855,6 +6915,7 @@ class FinalStateAuditor:
                 or (isinstance(relation, dict) and relation.get("rel_type") == "m.replace")
                 or not isinstance(event.get("origin_server_ts"), int)
                 or event["origin_server_ts"] <= source_ts
+                or (before is not None and event["origin_server_ts"] >= before)
             ):
                 continue
             if self._source_thread_root(event_id, events, authored, seen=set()) == root:
@@ -6974,8 +7035,9 @@ class FinalStateAuditor:
         """Every required reply ends as one exact completed stream or a superseded interruption.
 
         A restart may leave a stream on a visible interrupted note only when
-        independently proven deliberate supersession closes it; otherwise
-        replay continues the interrupted reply in the same message. Superseded
+        independently proven deliberate supersession closes it, or when MindRoom
+        dropped the regeneration it cut short; otherwise replay continues the
+        interrupted reply in the same message. Superseded
         interruptions are counted separately from completed generation;
         unfinished partial streams still fail.
         """
@@ -6990,7 +7052,9 @@ class FinalStateAuditor:
         for source_event_id, logical_ref in self.oracle.expected_sources.items():
             for reply_event_id in replies.get(source_event_id, ()):
                 proof = self.supersession_proofs.get(source_event_id)
-                if proof is not None and proof.interrupted_response_event_id == reply_event_id:
+                if (
+                    proof is not None and proof.interrupted_response_event_id == reply_event_id
+                ) or reply_event_id in self.dropped_regenerations:
                     continue
                 body = _final_attempt_body(self._latest_agent_body(events, reply_event_id))
                 call_id = _body_call_id(body)

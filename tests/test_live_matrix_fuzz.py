@@ -6949,6 +6949,117 @@ async def test_supersession_anchor_accepts_the_revision_mindroom_answered() -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("later_ts", "dropped"),
+    [(30, True), (50, False), (None, False)],
+    ids=["later_message_before_the_note", "later_message_after_the_note", "no_later_message"],
+)
+async def test_regeneration_a_restart_cut_short_ends_interrupted_once_a_later_message_drops_it(
+    tmp_path: Path,
+    later_ts: int | None,
+    dropped: bool,
+) -> None:
+    """After a restart MindRoom declines an edit another message followed, and the cut-short reply ends interrupted."""
+    ledger_path = tmp_path / "event_journal.db"
+    principal_id = journal_principal_id("general", "@agent:example")
+    _write_ledger(ledger_path, {"$root": TurnRecord.create(source_event_ids=("$root",), completed=True)})
+    with closing(sqlite3.connect(ledger_path)) as database:
+        database.execute(
+            "INSERT INTO reply_messages (principal_id, reply_id, entity_name, room_id, membership_epoch, event_id, "
+            "state, last_span_id, presentation_json, revision, placeholder_only, reply_sequence, created_at_ns, "
+            "updated_at_ns) VALUES (?, 'answer', 'general', '!room:example', 0, '$reply', 'failed', 'cut', "
+            "'{}', 1, 0, 1, 1, 1)",
+            (principal_id,),
+        )
+        database.executemany(
+            "INSERT INTO reply_spans (principal_id, span_id, reply_id, kind, delivery_id, bot_generation, "
+            "base_sequence, outcome, claimed_at_ns) VALUES (?, ?, 'answer', ?, ?, 'g', 0, ?, ?)",
+            [
+                (principal_id, "turn", "turn", "$root", "completed", 1),
+                (principal_id, "cut", "regeneration", "$edit", "lost", 2),
+            ],
+        )
+        database.execute(
+            "INSERT INTO reply_span_sources (principal_id, span_id, event_id, role, ordinal) "
+            "VALUES (?, 'turn', '$root', 'logical', 0)",
+            (principal_id,),
+        )
+        database.execute(
+            "INSERT INTO journal_events (principal_id, event_id, room_id, thread_id, kind, sender, origin_server_ts, "
+            "source_json, membership_epoch, state) VALUES (?, '$edit', '!room:example', '', 'message', "
+            "'@user:example', 20, '{}', 0, 'settled')",
+            (principal_id,),
+        )
+        database.commit()
+    edited = _source_marker("root:0", "edit:3")
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example", coalescing_threads=True, ledger_path=ledger_path)
+    oracle.expect("root:0", "$root", thread=0)
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=_short_body_for,
+        ledger_path=ledger_path,
+        source_current_markers={"$root": edited},
+        source_revision_markers={"$root": {"$edit": edited}},
+        observed_markers_for=lambda call_id: frozenset({edited}) if call_id == 87 else frozenset(),
+    )
+    interrupted = f"LIVE-FUZZ call=87\n\n{INTERRUPTED_RESPONSE_NOTE}"
+    events: dict[str, dict[str, Any]] = {
+        "$root": {
+            "event_id": "$root",
+            "sender": "@user:example",
+            "type": "m.room.message",
+            "origin_server_ts": 10,
+            "content": {"body": "root", "msgtype": "m.text"},
+        },
+        "$edit": {
+            "event_id": "$edit",
+            "sender": "@user:example",
+            "type": "m.room.message",
+            "origin_server_ts": 20,
+            "content": {"m.relates_to": {"rel_type": "m.replace", "event_id": "$root"}},
+        },
+        "$reply": _agent_reply_event("$root", "$reply", "Thinking..."),
+        "$note": _agent_edit_event("$reply", "$note", interrupted, ts=40),
+    }
+    if later_ts is not None:
+        events["$later"] = {
+            "event_id": "$later",
+            "sender": "@user:example",
+            "type": "m.room.message",
+            "origin_server_ts": later_ts,
+            "content": {
+                "body": "next",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$root", "m.in_reply_to": {"event_id": "$root"}},
+            },
+        }
+    for event in events.values():
+        event["_audit_room_id"] = "!room:example"
+    sent = [
+        _SentRecord(event_id, "!room:example", "m.room.message", sender="@user:example", content=event["content"])
+        for event_id, event in events.items()
+        if event["sender"] == "@user:example"
+    ]
+    try:
+        auditor._observe_supersession(events, sent_records=sent)
+
+        assert oracle.dropped_regenerations == (frozenset({"$reply"}) if dropped else frozenset())
+        assert oracle._reply_body_complete("$reply", interrupted, source_event_id="$root") is dropped
+        if dropped:
+            assert auditor._assert_final_bodies_complete(events, {"$root": {"$reply"}}) == 0
+            # The cut-short attempt answered the edit, so the answer stays bound to its revision.
+            auditor._assert_model_saw_current_sources(events, sent_records=sent)
+        else:
+            with pytest.raises(AssertionError, match="non-canonical body"):
+                auditor._assert_final_bodies_complete(events, {"$root": {"$reply"}})
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_final_audit_reuses_one_ledger_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
