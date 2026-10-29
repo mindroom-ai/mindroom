@@ -51,6 +51,7 @@ from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.schema import quote_identifier
 from mindroom.teams import envelope
 from mindroom.teams import leader as leader_module
 from mindroom.teams.members import _as_member
@@ -64,7 +65,6 @@ from mindroom.tool_system.events import StructuredStreamChunk
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_function import ToolFunction
-from mindroom.usage.storage import quote_identifier
 from tests.ai_user_id_helpers import _install_inert_post_response_effects
 from tests.approval_continuation_helpers import (
     carries_approval_receipt,

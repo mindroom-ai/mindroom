@@ -19,9 +19,9 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, SessionMetrics, TokenCounts
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
+from mindroom.session_storage.schema import usage_upsert_sql
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.stats import collect_admin_usage
-from mindroom.usage.storage import usage_upsert_sql
 from tests.conftest import persist_runs, seed_session_row
 
 if TYPE_CHECKING:
@@ -277,7 +277,7 @@ def test_a_compaction_summary_stored_with_an_untagged_request_reports_its_model(
     seed_session_row(storage, _session())
     with storage.transaction(write=True) as connection:
         connection.execute(
-            usage_upsert_sql(storage.names.sessions),
+            usage_upsert_sql(storage.names),
             ("session", "compaction:summary", json.dumps(stored)),
         )
 

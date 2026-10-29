@@ -66,10 +66,9 @@ from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY, native_checkpoint_
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.providers.assistant_turn import stamp_model
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_SQL
+from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_SQL, quote_identifier
 from mindroom.session_storage.types import ConversationSession
 from mindroom.token_budget import estimate_compaction_input_tokens
-from mindroom.usage.storage import quote_identifier
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )

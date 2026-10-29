@@ -6,8 +6,8 @@ import json
 from typing import TYPE_CHECKING, cast
 
 from mindroom.session_storage.legacy_agno2_runs import decode_session_json, has_blob_column
-from mindroom.session_storage.schema import table_names
-from mindroom.usage.storage import project_usage, quote_identifier, usage_table_sql, usage_upsert_sql
+from mindroom.session_storage.schema import quote_identifier, table_names, usage_table_sql, usage_upsert_sql
+from mindroom.usage.storage import project_usage
 
 if TYPE_CHECKING:
     import sqlite3
@@ -52,7 +52,7 @@ def _needs_migration(connection: sqlite3.Connection, names: AgnoTableNames) -> b
 
 
 def _seed_usage(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
-    connection.execute(usage_table_sql(names.sessions))
+    connection.execute(usage_table_sql(names))
     legacy_column = "runs" if has_blob_column(connection, names) else "NULL"
     has_runs = names.runs in table_names(connection)
     for session_id, blob in connection.execute(
@@ -97,4 +97,4 @@ def _insert_usage(
     run: object,
 ) -> None:
     payload = json.dumps(project_usage(cast("dict[str, object]", run))) if isinstance(run, dict) else None
-    connection.execute(usage_upsert_sql(names.sessions), (session_id, run_id, payload))
+    connection.execute(usage_upsert_sql(names), (session_id, run_id, payload))

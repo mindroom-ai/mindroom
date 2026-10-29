@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from time import time
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
-from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_SQL, NON_VISIBLE_RUN_STATUS_VALUES
+from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_SQL, NON_VISIBLE_RUN_STATUS_VALUES, quote_identifier
 from mindroom.session_storage.store import (
     decoded_mapping,
     delete_runs_in_transaction,
@@ -33,7 +33,6 @@ from mindroom.session_storage.store import (
     store_fold,
     summary_event_sets,
 )
-from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:
     import sqlite3

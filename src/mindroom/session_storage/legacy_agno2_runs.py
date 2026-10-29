@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.session_storage.codec import decode_json
-from mindroom.usage.storage import quote_identifier
+from mindroom.session_storage.schema import quote_identifier, table_columns
 
 if TYPE_CHECKING:
     import sqlite3
@@ -51,7 +51,7 @@ def decode_session_json(raw_value: object) -> object:
 # tests/test_legacy_usage_storage.py::test_a_blob_run_with_an_unusable_timestamp_keeps_its_usage.
 def has_blob_column(connection: sqlite3.Connection, names: AgnoTableNames) -> bool:
     """Return whether the sessions table still has the column Agno 2 kept run blobs in, which may hold some."""
-    return "runs" in {row[1] for row in connection.execute(f"PRAGMA table_info({quote_identifier(names.sessions)})")}
+    return "runs" in table_columns(connection, names.sessions)
 
 
 def move_blob_runs_to_rows(connection: sqlite3.Connection, names: AgnoTableNames) -> None:

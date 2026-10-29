@@ -56,6 +56,8 @@ from mindroom.session_storage.schema import (
     create_log_schema,
     is_current_layout,
     layout_version,
+    quote_identifier,
+    table_columns,
     table_names,
 )
 from mindroom.session_storage.store import (
@@ -69,7 +71,7 @@ from mindroom.session_storage.store import (
     upsert_run,
 )
 from mindroom.usage.legacy_usage_storage import seed_usage_ledger
-from mindroom.usage.storage import SYSTEM_USAGE_OWNER, SYSTEM_USAGE_STORAGE_NAME, quote_identifier
+from mindroom.usage.storage import SYSTEM_USAGE_OWNER, SYSTEM_USAGE_STORAGE_NAME
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -281,7 +283,7 @@ def _convert(
 # and tests/test_legacy_compaction_state.py::test_opening_storage_reads_double_encoded_legacy_metadata.
 def _session_json_encoded_once(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
     sessions = quote_identifier(names.sessions)
-    present = {row[1] for row in connection.execute(f"PRAGMA table_info({sessions})")}
+    present = table_columns(connection, names.sessions)
     columns = [column for column in ("session_data", "metadata", "summary") if column in present]
     rows = connection.execute(f"SELECT session_id, {', '.join(columns)} FROM {sessions}").fetchall()  # noqa: S608
     for session_id, *values in rows:

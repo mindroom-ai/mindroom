@@ -23,13 +23,12 @@ from mindroom.private_storage.private_instance_identity import (
 from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.session_storage.legacy_agno2_runs import decode_session_json
-from mindroom.session_storage.schema import TableNames, table_names
+from mindroom.session_storage.schema import TableNames, quote_identifier, table_names
 from mindroom.tool_system.worker_routing import build_requester_execution_identity, worker_dir_name
 from mindroom.usage.storage import (
     SYSTEM_USAGE_ENTITY,
     SYSTEM_USAGE_STORAGE_NAME,
     USAGE_KINDS,
-    quote_identifier,
 )
 
 if TYPE_CHECKING:

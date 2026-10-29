@@ -32,9 +32,8 @@ from mindroom.history.storage import has_queued_force_compaction
 from mindroom.history.summary_rows import folded_tool_call_ids, history_event_ids, latest_row
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
-from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_VALUES
+from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_VALUES, quote_identifier
 from mindroom.session_storage.store import ConversationStore
-from mindroom.usage.storage import quote_identifier
 from tests.storage_oracle.backend import SESSION_ID
 from tests.storage_oracle.store_backend import (
     StoreBackend,

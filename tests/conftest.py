@@ -167,6 +167,7 @@ from mindroom.response_runner import (
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedAttempt, ResponseTurnContext, TurnSinks
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.store import _session_state, _write_session_state, ensure_session_row, persist_to
 from mindroom.thread_utils import decide_agent_response
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
@@ -176,7 +177,6 @@ from mindroom.turns.dispatch import TurnDispatcher, _DispatchPreparation, _Repla
 from mindroom.turns.facts import IngressFacts
 from mindroom.turns.ingress import TurnIngress
 from mindroom.turns.interactive_selection import InteractiveSelections
-from mindroom.usage.storage import quote_identifier
 from mindroom.user_stop_reconciliation import UserStopReconciler
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
 from mindroom.voice.ingress import VoiceIngress
