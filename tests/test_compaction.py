@@ -345,7 +345,7 @@ def test_team_scope_storage_is_shared_across_requesters(tmp_path: Path) -> None:
     session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(first_storage, session)
 
-    persisted = second_storage.load_session("session-1", "team")
+    persisted = second_storage.load_session("session-1")
 
     assert first_storage.path == second_storage.path
     assert persisted is not None

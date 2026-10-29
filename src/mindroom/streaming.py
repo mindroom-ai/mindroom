@@ -288,7 +288,7 @@ def _tool_trace_identity(entry: ToolTraceEntry) -> tuple[object, ...]:
         entry.result_preview,
         entry.truncated,
         entry.tool_call_id,
-        entry.scope_key,
+        entry.member_id,
         entry.parent_bash_call_id,
         entry.toolkit_name,
         entry.is_error,

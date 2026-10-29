@@ -14,7 +14,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.stats_storage import UsageSessionRow, UsageStorageSource, iter_usage_storage_rows
@@ -34,7 +34,7 @@ def _session() -> ConversationSession:
 @pytest.fixture
 def usage_db(tmp_path: Path) -> ConversationStore:
     """Use the production storage owner with a real session row."""
-    storage = create_state_storage("code", tmp_path)
+    storage = create_agent_state_storage("code", tmp_path)
     seed_session_row(storage, _session())
     return storage
 
@@ -136,7 +136,7 @@ def test_concurrent_saves_keep_run_and_usage_snapshots_consistent(usage_db: Conv
         futures = [pool.submit(_save, usage_db, _run(tokens, status=RunStatus.paused)) for tokens in (20, 30)]
         for future in futures:
             future.result()
-    session = usage_db.load_session("session", "agent")
+    session = usage_db.load_session("session")
     assert session is not None
     assert session.runs[0].metrics.tokens.total_tokens in (20, 30)
     assert _rows(usage_db)[0][1]["metrics"]["total_tokens"] == session.runs[0].metrics.tokens.total_tokens
@@ -174,7 +174,7 @@ def test_run_cleanup_preserves_usage_before_regeneration(usage_db: ConversationS
         ("run-1", 10),
         ("run-2", 20),
     ]
-    session = usage_db.load_session("session", "agent")
+    session = usage_db.load_session("session")
     assert session is not None
     assert [run.run_id for run in session.runs] == ["run-2"]
 
@@ -192,7 +192,7 @@ def test_usage_write_failure_rolls_back_the_run(usage_db: ConversationStore) -> 
     with pytest.raises(sqlite3.IntegrityError, match="usage write failed"):
         _save(usage_db, _run(30))
 
-    session = usage_db.load_session("session", "agent")
+    session = usage_db.load_session("session")
     assert session is not None
     assert session.runs[0].metrics.tokens.total_tokens == 10
     assert _rows(usage_db)[0][1]["metrics"]["total_tokens"] == 10
@@ -235,7 +235,7 @@ def test_reporting_keeps_usage_after_real_compaction_and_reopen(usage_db: Conver
     before = list(iter_usage_storage_rows(source))
     assert isinstance(before[0], UsageSessionRow)
     assert before[0].runs[0].metrics["total_tokens"] == 10
-    session = usage_db.load_session("session", "agent")
+    session = usage_db.load_session("session")
     assert session is not None
     compact_runs(usage_db, session, HistoryScope(kind="agent", scope_id="code"), ["run-1"], "summary")
     assert session.runs == []

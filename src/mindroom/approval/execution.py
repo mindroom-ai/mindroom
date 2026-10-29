@@ -434,7 +434,7 @@ class AgentApprovalExecution:
         )
         store = await asyncio.to_thread(storage_factory)
         set_consumption_storage(storage_factory)
-        session = await asyncio.to_thread(store.load_session, continuation.session_id, "agent")
+        session = await asyncio.to_thread(store.load_session, continuation.session_id)
         persisted = await asyncio.to_thread(store.get_run, continuation.run_id)
         if (
             session is None

@@ -20,7 +20,7 @@ from mindroom.llm.runs import RunRecord
 from mindroom.message_target import MessageTarget
 from mindroom.reply_scope import ReplyRuntime
 from mindroom.response_runner import ResponseRunner
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import TurnClaim, TurnStore
@@ -179,7 +179,7 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
     store = await _store(journal_store)
 
     def storage_factory(*_args: object, **_kwargs: object) -> ConversationStore:
-        return create_state_storage("agent", tmp_path)
+        return create_agent_state_storage("agent", tmp_path)
 
     store.deps.state_writer.create_storage.side_effect = storage_factory
     store.deps.state_writer.history_scope.return_value = scope
@@ -265,7 +265,7 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
     )
     assert preparation.invalid == ()
     storage = storage_factory()
-    persisted = storage.load_session(target.session_id, "agent")
+    persisted = storage.load_session(target.session_id)
     assert persisted is not None
     assert "deleted prompt" not in str([run.messages for run in persisted.runs or []])
 

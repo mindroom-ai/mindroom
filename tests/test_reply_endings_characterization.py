@@ -365,7 +365,7 @@ class _Turn:
             runtime_paths=self.bot.runtime_paths,
             execution_identity=None,
         )
-        session = storage.load_session(_target().session_id, "team")
+        session = storage.load_session(_target().session_id)
         return [] if session is None else session.runs
 
 

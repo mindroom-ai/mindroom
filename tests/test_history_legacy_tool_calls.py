@@ -247,7 +247,7 @@ def test_a_turns_transcript_reads_converted_calls_as_replay_does(tmp_path: Path)
         {"role": "tool", "tool_call_id": "call_0", "content": "orphan"},
         {"role": "tool", "tool_call_id": "call_1", "content": "sunny"},
     )
-    session = store.load_session(SESSION_ID, "agent")
+    session = store.load_session(SESSION_ID)
     assert session is not None
 
     said = [utterance for parts in conversation_messages(session, _SCOPE) for utterance in parts]

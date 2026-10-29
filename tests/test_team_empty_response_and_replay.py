@@ -84,7 +84,7 @@ def _team(
 
 
 def _team_run_ids(team: TeamTurn) -> list[str]:
-    session = team.storage.load_session(SESSION_ID, "team")
+    session = team.storage.load_session(SESSION_ID)
     assert session is not None
     return [run.run_id for run in session.runs if isinstance(run, TeamRunRecord)]
 

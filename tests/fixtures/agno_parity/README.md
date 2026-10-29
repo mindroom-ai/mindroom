@@ -260,7 +260,7 @@ Every run with a provider request also has its usage row in `<table>_usage`.
 - `legacy_agno3/storage/<store>.sql`: `iterdump` of each database; restore it with `sqlite3` `executescript`, as `tests.conftest.create_agno_2_sessions_db` does.
 - `legacy_agno3/storage/stores.json`: each store's database path under the storage root and its sessions with their stored session type.
   The database `<name>.db` holds the sessions table `<name>_sessions`.
-  Open a restored store with `create_state_storage(name, <storage root>/<path without sessions/<name>.db>)`.
+  Open a restored store with `create_state_storage(name, <storage root>/<path without sessions/<name>.db>, owner)`, `owner` being the agent or team scope its sessions name.
 - `legacy_agno3/storage/loaded_sessions.json`: `AgentSession.to_dict()` or `TeamSession.to_dict()` of every session as `get_agent_session` or `get_team_session` loads it: runs after the scope's latest summary row plus every non-visible run and its descendants, folded messages removed, and the summary taken from the latest summary row.
 - `legacy_agno3/runs/<type>.json`: `{case: dict}` for every value of that type nested in the stored `run_data` columns, summary-row segments, and `session_data`, exactly as stored.
   A case key is `<store>:<run id or segment:<row id>>` followed by its path, such as `agent_code:run-tools.messages[3].metrics`.

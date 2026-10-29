@@ -380,7 +380,7 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
         )
         await wait_for_background_tasks(timeout=0.2)
 
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is None
     assert len(persisted.runs) == 4

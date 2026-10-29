@@ -130,7 +130,7 @@ def _start_team_session(store: ConversationStore, session_id: str, *, team_id: s
 
 def _persisted_runs(store: ConversationStore) -> list[TeamRunRecord]:
     """Return the team runs the reply's session holds, in the order they were stored."""
-    session = store.load_session(TEAM_SESSION_ID, "team")
+    session = store.load_session(TEAM_SESSION_ID)
     assert session is not None
     return [run for run in session.runs if isinstance(run, TeamRunRecord)]
 
@@ -979,7 +979,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
         "stream",
         "started:team:ultimate:!test:localhost:$thread-root:$thread-root",
     ]
-    assert store.load_session(TEAM_SESSION_ID, "team") is not None
+    assert store.load_session(TEAM_SESSION_ID) is not None
 
 
 @pytest.mark.asyncio
@@ -1228,7 +1228,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_f
     # The reply's own event: the placeholder its stream and notes write into.
     # An interruption whose note did not land leaves its turn to replay.
     assert resolution is None
-    assert store.load_session(TEAM_SESSION_ID, "team") is None
+    assert store.load_session(TEAM_SESSION_ID) is None
 
 
 @pytest.mark.asyncio
@@ -1295,7 +1295,7 @@ async def test_generate_team_response_helper_preserves_visible_stream_when_final
     # The reply's own event: the placeholder its stream and notes write into.
     # An interruption whose note did not land leaves its turn to replay.
     assert resolution is None
-    assert store.load_session(TEAM_SESSION_ID, "team") is None
+    assert store.load_session(TEAM_SESSION_ID) is None
 
 
 @pytest.mark.asyncio

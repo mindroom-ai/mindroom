@@ -229,19 +229,14 @@ def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAtt
     card of a member's own delegation call adds no marker: the member's slot already shows that call pending under
     its own id, and the resume finishes it there. Every other call waits under its own id.
     """
-    member_names = presentation.config_names_by_id.values()
+    member_ids = presentation.member_ids
     for requirement in paused.requirements:
-        if member_delegation_card(requirement, member_names):
+        if member_delegation_card(requirement, member_ids):
             continue
-        member_id, _ = pending_call_slot(requirement, member_names)
-        call = requirement.tool_execution.call
-        if member_id is None:
-            presentation.start_tool("team", call)
-        else:
-            presentation.start_member_tool(
-                presentation.resolve_member_id(member_id, requirement.member_display_name),
-                call,
-            )
+        member_id, _ = pending_call_slot(requirement, member_ids)
+        if member_id is not None:
+            member_id = presentation.resolve_member_id(member_id, requirement.member_display_name)
+        presentation.start_tool(requirement.tool_execution.call, member_id=member_id)
     return replace(
         paused,
         response_text=presentation.render_body(finished=False),

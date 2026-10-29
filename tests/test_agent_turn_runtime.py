@@ -390,7 +390,7 @@ async def test_a_streamed_reply_runs_its_tool_calls_and_stores_one_completed_run
     assert reply.recorder.outcome == "completed"
     assert reply.recorder.assistant_text == "The probe answered."
     assert [tool.tool_name for tool in reply.recorder.completed_tools] == ["touch"]
-    assert reply.storage.load_session(SESSION_ID, "agent") is not None
+    assert reply.storage.load_session(SESSION_ID) is not None
 
 
 @pytest.mark.asyncio
@@ -920,7 +920,7 @@ async def test_a_turn_that_reads_the_approval_receipt_keeps_it_for_its_run_and_n
     assert RECEIPT_TEXT not in system_text(first.messages)
     assert second.messages[: len(first.messages)] == first.messages
     assert all(RECEIPT_TEXT not in str(message.content) for message in retried.messages)
-    session = reply.storage.load_session(SESSION_ID, "agent")
+    session = reply.storage.load_session(SESSION_ID)
     assert session is not None
     assert len(session.runs) == 2
     assert all(RECEIPT_TEXT not in str(message.content) for run in session.runs for message in run.messages)
@@ -989,7 +989,7 @@ async def test_only_a_model_switch_that_ran_continues_the_turn(
     assert probe.calls == ["a"]
     assert len(reply.model.requests) == 3
     assert "".join(streamed_text(chunks)).endswith("Done.")
-    session = reply.storage.load_session(SESSION_ID, "agent")
+    session = reply.storage.load_session(SESSION_ID)
     assert session is not None
     assert len(session.runs) == runs
     # The refused switch is recorded as a failed call; the one that ran answered with the tool's own error payload.
@@ -1226,7 +1226,7 @@ async def test_session_state_a_tool_changes_is_saved_with_the_run(
 
     await _stream(reply)
 
-    session = reply.storage.load_session(SESSION_ID, "agent")
+    session = reply.storage.load_session(SESSION_ID)
     assert session is not None
     assert session.session_state == {"remembered": "blue"}
 
@@ -1434,7 +1434,7 @@ async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_a
             await runner.generate_response(_request())
 
     assert probe.calls == []
-    session = reply.storage.load_session(SESSION_ID, "agent")
+    session = reply.storage.load_session(SESSION_ID)
     assert session is not None
     [record] = session.runs
     assert record.status is RunStatus.completed

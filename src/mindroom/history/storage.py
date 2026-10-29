@@ -439,7 +439,7 @@ def read_fold_basis(storage: ConversationStore, session: ConversationSession, sc
     Returns ``None`` when the stored history changed between the reads.
     """
     based_on, latest_summary = _latest_summary_row(storage, session, scope)
-    stored = storage.load_session(session.session_id, session.kind)
+    stored = storage.load_session(session.session_id)
     runs = [run for run in (stored.runs if stored is not None else []) if replays_in_scope(run, scope)]
     run_ids = [run.run_id for run in runs]
     covered = tuple(summary_rows.covered_runs(storage, session_id=session.session_id, run_ids=run_ids))

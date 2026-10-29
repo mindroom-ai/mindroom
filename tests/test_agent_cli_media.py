@@ -27,6 +27,7 @@ from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.ai import _process_stream_events, _StreamingAttemptState
 from mindroom.attachments.media import resolve_scoped_attachments
+from mindroom.history.types import HistoryScope
 from mindroom.llm.events import ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.response_turn import collect_streamed_response_content
@@ -79,7 +80,7 @@ async def _run(tmp_path, result, *, policy=None):  # noqa: C901
         middleware=(hook,),
     )
     catalog.runtime_context = replace(catalog.runtime_context, storage_path=tmp_path / "storage")
-    catalog.store = create_state_storage("helper", tmp_path)
+    catalog.store = create_state_storage("helper", tmp_path, HistoryScope(kind="agent", scope_id="helper"))
     receipts = []
 
     async def authorize(key, arguments):

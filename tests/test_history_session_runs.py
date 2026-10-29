@@ -11,7 +11,7 @@ from mindroom.history.session_runs import session_runs, unredacted_runs, updated
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
@@ -28,7 +28,7 @@ SESSION = f"{ROOM}:$thread"
 @pytest.fixture
 def storage(tmp_path: Path) -> Iterator[ConversationStore]:
     """The production conversation storage owner."""
-    db = create_state_storage("mind", tmp_path)
+    db = create_agent_state_storage("mind", tmp_path)
     assert isinstance(db, ConversationStore)
     return db
 
@@ -61,7 +61,7 @@ def test_session_runs_read_compacted_and_later_runs_in_order(storage: Conversati
     """Runs a summary folded are still read, in time order with the later ones, each once."""
     session = _seed(storage, [_run("r1", 100), _run("r2", 200), _run("r3", 300)])
     compact_runs(storage, session, HistoryScope(kind="agent", scope_id="mind"), ["r1", "r2"], "summary")
-    loaded = storage.load_session(SESSION, "agent")
+    loaded = storage.load_session(SESSION)
     assert loaded is not None
     assert [run.run_id for run in loaded.runs or []] == ["r3"]
 
@@ -88,10 +88,10 @@ def test_updated_sessions_lists_sessions_changed_after_the_cursor(storage: Conve
     _seed(storage, [_run("r1", 100)], session_id="!a:x:$t1")
     _seed(storage, [_run("r2", 100)], session_id="!a:x:$t1:dynamic_workflow:w:p")
 
-    listed = updated_sessions(storage, "mind", since=0)
+    listed = updated_sessions(storage, since=0)
 
     assert [session_id for session_id, _ in listed] == ["!a:x:$t1"]
-    assert updated_sessions(storage, "mind", since=listed[0][1]) == []
+    assert updated_sessions(storage, since=listed[0][1]) == []
 
 
 @pytest.mark.asyncio

@@ -415,7 +415,6 @@ class _MemoryAutoFlushWorker:
         changed = False
         for session_id, updated_at in updated_sessions(
             storage,
-            scope.agent_name,
             # Update times are whole seconds, so one in the start's own second is listed too.
             since=state["agents"][scope.agent_name] - 1,
         ):

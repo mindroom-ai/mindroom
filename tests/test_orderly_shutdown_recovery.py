@@ -18,6 +18,7 @@ from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.event_journal.opening import OpenEventJournal
+from mindroom.history.types import HistoryScope
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.event_info import EventInfo
@@ -98,7 +99,7 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     principal = journal_store.principal("agent@alice")
     store = await _store_with_storage(
         journal_store,
-        create_state_storage(AGENT_NAME, tmp_path / "history"),
+        create_state_storage(AGENT_NAME, tmp_path / "history", HistoryScope(kind="agent", scope_id=AGENT_NAME)),
         agent_name=AGENT_NAME,
     )
     await store.record_responded_turn(_turn_record(source_event_prompts={ORIGINAL_EVENT_ID: "original"}))

@@ -729,7 +729,7 @@ class TurnStore:
             self.deps.tool_runtime.build_execution_identity(target=target, user_id=requester_user_id),
             scope=scope,
         )
-        session = await run_blocking_until_complete(storage.load_session, target.session_id, scope.kind)
+        session = await run_blocking_until_complete(storage.load_session, target.session_id)
         if session is not None:
             await remove_history_of_redacted_events(storage, session, partial(self.redacted_history_events, target))
         removed_any = await run_blocking_until_complete(

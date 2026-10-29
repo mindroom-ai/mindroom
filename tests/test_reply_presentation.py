@@ -43,7 +43,7 @@ def _trace(name: str, *, call_id: str | None = None) -> ToolTraceEntry:
         args_preview="{}",
         result_preview="ok",
         tool_call_id=call_id,
-        scope_key="scope" if call_id else None,
+        member_id="member" if call_id else None,
     )
 
 
@@ -61,7 +61,7 @@ def test_codec_round_trips_every_field() -> None:
                 kind="answer",
                 text="team body",
                 span_id="span-2",
-                team_state={"kind": "team_stream", "version": 2, "members": ["a"]},
+                team_state={"kind": "team_stream", "version": 3, "members": ["a"]},
             ),
         ),
         trailing_note=note_segment(NoteKind.ERROR, format_error_note("boom")),
@@ -73,7 +73,7 @@ def test_codec_round_trips_every_field() -> None:
 
     assert restored == presentation
     assert restored.segments[0].tool_trace[0].tool_call_id == "call-1"
-    assert restored.segments[0].tool_trace[0].scope_key == "scope"
+    assert restored.segments[0].tool_trace[0].member_id == "member"
 
 
 def test_codec_rejects_unknown_versions_and_malformed_segments() -> None:
