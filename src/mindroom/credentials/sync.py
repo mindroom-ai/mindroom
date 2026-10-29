@@ -589,8 +589,8 @@ def get_ollama_host(runtime_paths: RuntimePaths, *, configured_host: str | None,
     """Return the Ollama server a client reaches: ``configured_host`` or the saved ``OLLAMA_HOST``, else the default.
 
     ``configured_host`` wins unless ``saved_first``. A model's own host wins. The memory LLM and the Ollama embedder
-    put the saved host first, because the dashboard's Memory page saved ``http://localhost:11434`` as the embedder
-    host of configs whose Ollama server only ``OLLAMA_HOST`` names, such as a Docker install's host.
+    put the saved host first, because the dashboard's Memory page saved ``OLLAMA_HOST_DEFAULT`` as the embedder host
+    of configs whose Ollama server only ``OLLAMA_HOST`` names, such as a Docker install's host.
     """
     if configured_host and not saved_first:
         return configured_host
