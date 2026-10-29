@@ -257,7 +257,7 @@ async def _record_delivery(
             now=now,
             ttl_seconds=_DELIVERED_SECONDS,
         )
-    except DeliveryReplayStoreError as exc:
+    except (DeliveryReplayStoreError, OSError) as exc:
         _log_store_failure(attempt.event, exc)
         return
     if bound_root != root:

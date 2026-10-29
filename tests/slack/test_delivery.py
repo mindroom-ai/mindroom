@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import html
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -190,6 +191,23 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
 
 def _dm(text: str = "are you free at 3?", *, ts: str = ROOT_TS) -> dict[str, Any]:
     return event_payload("message", author="dana", text=text, ts=ts, channel=DM, channel_type="im")
+
+
+@pytest.mark.asyncio
+async def test_a_lock_error_after_the_post_still_counts_as_delivered(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once the Matrix post went out, a replay-store fault must not make Slack resend and the agent answer twice."""
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(DeliveryReplayStore, "bind_thread_root", fail)
+
+    assert await harness.deliver(event_payload()) == "delivered"
+    await harness.settle()
+    assert len(harness.matrix.sent) == 1
 
 
 @pytest.mark.asyncio
