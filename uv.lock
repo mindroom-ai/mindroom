@@ -4454,9 +4454,6 @@ serper = [
 shopify = [
     { name = "httpx" },
 ]
-slack = [
-    { name = "slack-sdk" },
-]
 spider = [
     { name = "spider-client" },
 ]
@@ -4740,7 +4737,6 @@ requires-dist = [
     { name = "scrapegraph-py", marker = "extra == 'scrapegraph'", specifier = ">=2.1" },
     { name = "segno", specifier = ">=1.6.6" },
     { name = "sentence-transformers", marker = "extra == 'sentence-transformers'", specifier = ">=6.1" },
-    { name = "slack-sdk", marker = "extra == 'slack'" },
     { name = "spider-client", marker = "extra == 'spider'" },
     { name = "spotipy", marker = "extra == 'spotify'", specifier = ">=2.25.1" },
     { name = "sqlalchemy", marker = "extra == 'sql'" },
@@ -8854,15 +8850,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
-]
-
-[[package]]
-name = "slack-sdk"
-version = "3.41.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/22/35/fc009118a13187dd9731657c60138e5a7c2dea88681a7f04dc406af5da7d/slack_sdk-3.41.0.tar.gz", hash = "sha256:eb61eb12a65bebeca9cb5d36b3f799e836ed2be21b456d15df2627cfe34076ca", size = 250568, upload-time = "2026-03-12T16:10:11.381Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/a1/df/2e4be347ff98281b505cc0ccf141408cdd25eb5ca9f3830deb361b2472d3/slack_sdk-3.41.0-py2.py3-none-any.whl", hash = "sha256:bb18dcdfff1413ec448e759cf807ec3324090993d8ab9111c74081623b692a89", size = 313885, upload-time = "2026-03-12T16:10:09.811Z" },
 ]
 
 [[package]]

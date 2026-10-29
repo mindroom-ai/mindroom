@@ -139,6 +139,8 @@ class _MindroomAppState:
     thread_export_runner: WorkspaceThreadExportRunner | None = None
     leave_matrix_room: Callable[[str, str], Awaitable[bool]] | None = None
     external_trigger_runtime: ExternalTriggerRuntime | None = None
+    # Each bound integration's runtime by integration name; the integration's own routes read its entry.
+    integration_runtimes: dict[str, object] = field(default_factory=dict)
     agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=AgentReplyMembershipIndex)
     response_admission_gate: ResponseAdmissionGate | None = None
     budget_monitor: BudgetMonitor | None = None

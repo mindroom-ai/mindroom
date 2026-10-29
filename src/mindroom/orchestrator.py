@@ -60,6 +60,7 @@ from mindroom.hooks import (
     build_hook_room_state_querier,
     emit,
 )
+from mindroom.integrations import bind_integrations, unbind_integrations
 from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
@@ -767,6 +768,23 @@ class _MultiAgentOrchestrator:
         )
         self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
         self._computer_runtime.bind_if_ready(self.config, self.agent_bots)
+        self._bind_integrations()
+
+    def _bind_integrations(self) -> None:
+        """Let integration events reach the live agent bots; `self.agent_bots` stays current, so one binding lasts."""
+        if not self.api_enabled:
+            return
+        from mindroom.api import main as api_main  # noqa: PLC0415
+
+        bind_integrations(api_main.app, self.agent_bots, self.agent_reply_memberships)
+
+    def _unbind_integrations(self) -> list[tuple[str, object]]:
+        """Refuse new integration events and return each unbound runtime by name, which owns its running deliveries."""
+        if not self.api_enabled:
+            return []
+        from mindroom.api import main as api_main  # noqa: PLC0415
+
+        return unbind_integrations(api_main.app)
 
     def _configure_approval_store_transport(self) -> None:
         """Bind approval transport hooks to the current shared runtime services."""
@@ -2495,6 +2513,8 @@ class _MultiAgentOrchestrator:
         """Stop all agent bots."""
         self.running = False
         self._runtime_ready_event.clear()
+        # First, so integration events that arrive from now on are refused instead of reaching stopping bots.
+        integration_runtimes = self._unbind_integrations()
         for bot in self.agent_bots.values():
             bot.begin_process_shutdown()
         self.agent_cli_registry.close()
@@ -2527,6 +2547,12 @@ class _MultiAgentOrchestrator:
                 shutdown_intent=ORDERLY_SHUTDOWN,
             ),
         )
+        for name, runtime in integration_runtimes:
+            # Acknowledged deliveries still retrying after this are cancelled: the documented accepted loss.
+            await _run_shutdown_step(
+                f"{name}_events",
+                wait_for_background_tasks(5.0, owner=runtime, shutdown_intent=ORDERLY_SHUTDOWN),
+            )
         await _run_shutdown_step("startup_maintenance", self._startup_maintenance.cancel())
         await _run_shutdown_step("todo_poke", self._todo_poke_runtime.stop())
         await _run_shutdown_step("thread_exports", self._thread_export_runner.stop())

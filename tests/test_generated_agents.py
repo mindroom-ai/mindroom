@@ -29,6 +29,7 @@ from mindroom.config.personal_agents import (
     read_personal_agent_roster_file,
 )
 from mindroom.config.resolution import authored_tool_entries
+from mindroom.config.slack import slack_answering_agents
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.personal_agents import (
@@ -275,6 +276,20 @@ def _with_template() -> dict[str, Any]:
     return deepcopy(BASE) | {"personal_agents": {"mind": deepcopy(PERSONAL_TEMPLATE)}}
 
 
+def _slack_creator() -> dict[str, Any]:
+    """A config whose creator answers Slack mentions in its room and may create agents."""
+    data = deepcopy(BASE)
+    data["slack"] = {"email_domain": "example.com", "matrix_user_id_template": "@{localpart}:localhost"}
+    data["agents"]["creator"]["tools"].append({"slack": {"channels": ["C0123ABCD"], "room": "lobby"}})
+    data["agents"]["creator"]["created_agents_per_owner"] = 3
+    return data
+
+
+def _slack_overrides(config: Config, agent_name: str) -> dict[str, Any]:
+    (entry,) = (entry for entry in authored_tool_entries(config, agent_name) if entry.name == "slack")
+    return entry.tool_config_overrides
+
+
 def _skipped(logs: list[dict[str, Any]]) -> list[tuple[str, str]]:
     return [(log["agent_name"], log["reason"]) for log in logs if log["event"] == "created_agent_skipped"]
 
@@ -409,6 +424,23 @@ def test_a_created_entry_with_a_reserved_name_is_skipped_alone(tmp_path: Path) -
     assert config.generated_agent("router") is None
     assert _skipped(logs) == [("router", "name_taken")]
     assert "generated_agents_invalid" not in [log["event"] for log in logs]
+
+
+def test_a_stored_agent_from_a_slack_answering_creator_loads_without_the_creators_room(tmp_path: Path) -> None:
+    """A roster entry copies the creator's Slack channels but not its room, so it loads beside the other created agents."""
+    created = [
+        _created(),
+        _created(agent_name="creator_writer", edits=GeneratedAgentEdits(tools=["slack"])),
+        _created(agent_name="creator_reader", edits=GeneratedAgentEdits(tools=["calculator"])),
+    ]
+    with capture_logs() as logs:
+        config = _load(tmp_path, _slack_creator(), created=created)
+    assert "generated_agents_invalid" not in [log["event"] for log in logs]
+    assert {"creator_research", "creator_writer", "creator_reader"} <= set(config.agents)
+    for name in ("creator_research", "creator_writer"):
+        assert _slack_overrides(config, name) == {"channels": ["C0123ABCD"]}
+    assert _slack_overrides(config, "creator") == {"channels": ["C0123ABCD"], "room": "lobby"}
+    assert [answering.agent for answering in slack_answering_agents(config)] == ["creator"]
 
 
 def test_an_invalid_pass_two_falls_back_to_pass_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -720,6 +752,26 @@ async def test_create_names_the_agent_after_its_creator_and_registers_it(tmp_pat
     reloaded = Config.validate_with_runtime(deepcopy(BASE), paths)
     assert reloaded.generated_agent("creator_research") is not None
     assert [entry.name for entry in authored_tool_entries(reloaded, "creator_research")] == ["shell"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tools", [None, ["slack"]])
+async def test_a_slack_answering_creator_creates_an_agent_without_its_room(
+    tmp_path: Path,
+    tools: list[str] | None,
+) -> None:
+    """The created agent reads the creator's Slack channels, has no room to answer in, and loads."""
+    config = Config.validate_with_runtime(_slack_creator(), test_runtime_paths(tmp_path))
+    paths = test_runtime_paths(tmp_path)
+
+    await _create(config, paths, _register(), tools=tools)
+
+    assert [entry.agent_name for entry in read_personal_agent_roster_file(paths).created] == ["creator_research"]
+    reloaded = Config.validate_with_runtime(_slack_creator(), paths)
+    assert reloaded.generated_agent("creator_research") is not None
+    assert _slack_overrides(reloaded, "creator_research") == {"channels": ["C0123ABCD"]}
+    assert _slack_overrides(reloaded, "creator") == {"channels": ["C0123ABCD"], "room": "lobby"}
+    assert _slack_overrides(config, "creator") == {"channels": ["C0123ABCD"], "room": "lobby"}
 
 
 @pytest.mark.asyncio

@@ -63,6 +63,7 @@ from mindroom.config.personal_agents import personal_agent_data
 from mindroom.credentials.legacy_tool_credentials import migrate_tool_credential_defaults
 from mindroom.credentials.sync import sync_env_to_credentials
 from mindroom.embeddings.embedder_health import get_embedder_failure
+from mindroom.integrations import integration_routers
 from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
@@ -750,6 +751,8 @@ app.include_router(workers_router, dependencies=[Depends(verify_user)])
 app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify_user
 app.include_router(report_publishing_public_router)
 app.include_router(external_triggers_router)
+for integration_router in integration_routers():
+    app.include_router(integration_router)  # Each integration authenticates its own requests.
 app.include_router(computers_router)
 app.include_router(script_gateway_router)
 app.include_router(agent_cli_router)

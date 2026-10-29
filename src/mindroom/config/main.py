@@ -93,6 +93,7 @@ from mindroom.config.resolution import (
 )
 from mindroom.config.resolution import cheap_model as agent_cheap_model
 from mindroom.config.schema_hints import DashboardJsonSchema, dashboard_hint, redact_config_for_display
+from mindroom.config.slack import SlackConfig
 from mindroom.config.tool_entries import raw_tool_entry_name_and_lazy_flag_fields, raw_tools_entries
 from mindroom.config.validation import TimezoneName  # noqa: TC001
 from mindroom.config.voice import VoiceConfig
@@ -118,6 +119,7 @@ from mindroom.credentials.manager import SERVICE_NAME_CHARACTERS, SERVICE_NAME_P
 from mindroom.git_urls import credential_free_repo_url
 
 # config layer loads BEFORE the history runtime; import leaf types so config load does not drag in agents+tools.
+from mindroom.integrations import validate_integrations
 from mindroom.logging_config import get_logger
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
@@ -465,6 +467,10 @@ class Config(BaseModel):
         default_factory=MatrixSyncConfig,
         description="Matrix event sync transport configuration",
     )
+    slack: SlackConfig = Field(
+        default_factory=SlackConfig,
+        description="Slack integration: how Slack workspace members map to Matrix users",
+    )
     timezone: TimezoneName = Field(
         default="UTC",
         description="IANA timezone for dates, times, and schedules (e.g., 'America/New_York'); agents can override it",
@@ -760,6 +766,12 @@ class Config(BaseModel):
                 invalid_room_references,
             )
             raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_integration_config(self) -> Config:
+        """Run each built-in integration's own config checks."""
+        validate_integrations(self)
         return self
 
     @model_validator(mode="after")

@@ -46,6 +46,7 @@ from mindroom.hooks import (
     emit,
     send_hook_message,
 )
+from mindroom.integrations import reply_mirror_for
 from mindroom.legacy_handled_turns import legacy_responses_file_path
 from mindroom.matrix.decrypt_diagnostics import DecryptionDiagnostics
 from mindroom.matrix.durable_ingestion import run_ingestion_pump
@@ -672,6 +673,13 @@ class AgentBot:
                 redact_message_event=self._redact_message_event,
                 response_hooks=ResponseHookService(
                     hook_context=self._hook_context_support,
+                    # Reads the live config, which a reload replaces.
+                    reply_mirror=lambda envelope, response_text: reply_mirror_for(
+                        envelope,
+                        response_text,
+                        config=self.config,
+                        runtime_paths=self.runtime_paths,
+                    ),
                 ),
                 outbox=self._journal_store.principal(self._journal_principal_id),
                 turn_handoff=TurnHandoff(

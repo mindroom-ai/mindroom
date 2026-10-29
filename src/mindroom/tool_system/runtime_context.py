@@ -151,6 +151,9 @@ class ToolRuntimeContext:
     source_kind: str | None = None
     config_provider: Callable[[], Config] | None = None
     cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None = None
+    # What posted this turn's message when a hook did; a resumed approval turn restores it.
+    # Keep `hook_source` last: plugins construct this context positionally.
+    hook_source: str | None = None
 
     @property
     def current_config(self) -> Config:
@@ -384,6 +387,7 @@ class ToolRuntimeSupport:
             membership=self.membership,
             membership_turn_id=source_envelope.source_event_id if source_envelope is not None else None,
             source_kind=source_envelope.source_kind if source_envelope is not None else None,
+            hook_source=source_envelope.hook_source if source_envelope is not None else None,
             agent_reply_memberships=self.runtime.agent_reply_memberships,
             config_provider=lambda: self.runtime.config,
         )

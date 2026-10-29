@@ -15,16 +15,17 @@ from mindroom.custom_tools.microsoft_graph import (
     GRAPH_URL,
     GraphSession,
     MicrosoftGraphError,
-    checked_upload_source,
     graph_error_payload,
     graph_session,
     graph_tool_result,
+    graph_upload_errors,
     next_page_token,
     page_offset,
     page_path,
     path_segment,
     share_id,
 )
+from mindroom.file_access import checked_upload_source
 from mindroom.oauth.microsoft import microsoft_files_oauth_provider
 
 if TYPE_CHECKING:
@@ -332,12 +333,13 @@ class MicrosoftFilesTools(Toolkit):
         return session.json("GET", item.path, params={"$select": _ITEM_SELECT})
 
     def _upload_source(self, local_path: str) -> AuthorizedFile:
-        return checked_upload_source(
-            local_path,
-            workspace_root=self._workspace_root,
-            file_access=self._file_access,
-            max_bytes=_MAX_UPLOAD_BYTES,
-        )
+        with graph_upload_errors():
+            return checked_upload_source(
+                local_path,
+                workspace_root=self._workspace_root,
+                file_access=self._file_access,
+                max_bytes=_MAX_UPLOAD_BYTES,
+            )
 
     def microsoft_files_search(self, query: str, limit: int = 25, page_token: str | None = None) -> str:
         """Search the OneDrive and SharePoint files the requester can open, by name and content.

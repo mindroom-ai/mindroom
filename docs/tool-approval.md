@@ -10,16 +10,16 @@ icon: lucide/shield-check
 </video>
 
 Use the top-level `tool_approval` block to make chosen tool calls wait for a person to approve them in the Matrix conversation.
-This example gates Slack message sending and file uploads, plus shell calls selected by a review script:
+This example gates Slack posting and reactions, plus shell calls selected by a review script:
 
 ```yaml
 tool_approval:
   default: auto_approve
   timeout_days: 7
   rules:
-    - match: send_message*
+    - match: slack_post
       action: require_approval
-    - match: upload_file
+    - match: slack_react
       action: require_approval
     - match: run_shell_command
       script: ./approval_scripts/shell_review.py
