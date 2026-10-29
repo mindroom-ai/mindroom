@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import CompactionConfig
     from mindroom.llm.provider import NativeCompactionReplay
+    from mindroom.session_storage.types import ConversationSession
 
 COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS = 1_000
 
@@ -74,6 +75,11 @@ class HistoryScope:
         if kind not in {"agent", "team"} or not isinstance(scope_id, str) or not scope_id:
             return None
         return cls(kind=cast("_ScopeKind", kind), scope_id=scope_id)
+
+
+def owner_scope(session: ConversationSession) -> HistoryScope:
+    """Return the history scope that owns ``session``: its kind and owner, which a load takes from its database's."""
+    return HistoryScope(kind=session.kind, scope_id=session.owner_id)
 
 
 @dataclass(frozen=True)

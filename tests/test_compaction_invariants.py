@@ -342,7 +342,6 @@ async def test_chunk_progress_survives_interruption_and_restart(
         await compact_scope_history(
             storage=storage,
             session=session,
-            scope=_SCOPE,
             state=read_scope_state(session),
             summarizer=_summarizer(
                 summary_model(),
@@ -1094,7 +1093,6 @@ async def test_claude_compaction_splits_dense_preserved_metadata_before_the_inpu
         outcome = await compact_scope_history(
             storage=storage,
             session=session,
-            scope=_SCOPE,
             state=read_scope_state(session),
             summarizer=_summarizer(
                 summary_model(model_id="claude-sonnet-5", claude=True),
@@ -1158,7 +1156,6 @@ async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_pa
         outcome = await compact_scope_history(
             storage=storage,
             session=session,
-            scope=_SCOPE,
             state=read_scope_state(session),
             summarizer=_summarizer(
                 summary_model(),
@@ -1373,7 +1370,6 @@ async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_pat
         outcome = await compact_scope_history(
             storage=storage,
             session=session,
-            scope=_SCOPE,
             state=read_scope_state(session),
             summarizer=_summarizer(
                 primary,
@@ -1437,7 +1433,6 @@ async def test_small_refused_summary_request_fails_without_identical_retry_or_pe
         await compact_scope_history(
             storage=storage,
             session=session,
-            scope=_SCOPE,
             state=read_scope_state(session),
             summarizer=_summarizer(
                 summary_model(),
@@ -1498,7 +1493,6 @@ async def test_minimum_available_budget_can_issue_smaller_degradation_retry(tmp_
         outcome = await compact_scope_history(
             storage=storage,
             session=session,
-            scope=_SCOPE,
             state=read_scope_state(session),
             summarizer=_summarizer(
                 summary_model(),
@@ -1560,7 +1554,6 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
         outcome = await compact_scope_history(
             storage=storage,
             session=session,
-            scope=_SCOPE,
             state=read_scope_state(session),
             summarizer=_summarizer(
                 summary_model(),
@@ -1712,7 +1705,6 @@ async def test_compaction_retries_transient_provider_error_at_same_budget(
         outcome = await compact_scope_history(
             storage=storage,
             session=session,
-            scope=_SCOPE,
             state=read_scope_state(session),
             summarizer=_summarizer(
                 summary_model(),

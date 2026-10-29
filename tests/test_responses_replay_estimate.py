@@ -123,7 +123,6 @@ def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_byte
     for _ in range(2):
         tokens = estimate_prompt_visible_history_tokens(
             session=session,
-            scope=_SCOPE,
             history_settings=resolved.history_settings,
             replay_estimator=adapter,
         )
@@ -195,7 +194,6 @@ def test_unknown_image_model_preserves_transport_floors(tmp_path: Path, floor: s
     before = deepcopy(session)
     tokens = estimate_prompt_visible_history_tokens(
         session=session,
-        scope=_SCOPE,
         history_settings=_ALL_HISTORY,
         native_route=route,
         replay_estimator=adapter,
@@ -306,7 +304,6 @@ def test_native_checkpoint_tail_images_keep_visual_cost_without_transport_bytes(
         estimates.append(
             estimate_prompt_visible_history_tokens(
                 session=session,
-                scope=_SCOPE,
                 history_settings=_ALL_HISTORY,
                 native_route=native.route,
                 replay_estimator=adapter,
@@ -544,14 +541,12 @@ def test_native_checkpoint_estimate_does_not_count_the_summary_it_replaced() -> 
 
     without_summary = estimate_prompt_visible_history_tokens(
         session=_session("session", runs=runs),
-        scope=_SCOPE,
         history_settings=_ALL_HISTORY,
         native_route=route,
         replay_estimator=None,
     )
     with_summary = estimate_prompt_visible_history_tokens(
         session=_session("session", runs=runs, summary=ScopeSummary(text="S" * 400, updated_at=datetime.now(UTC))),
-        scope=_SCOPE,
         history_settings=_ALL_HISTORY,
         native_route=route,
         replay_estimator=None,
@@ -610,13 +605,11 @@ async def test_reply_preparation_sizes_and_fits_history_with_the_route_estimate(
     )
     route_estimate = estimate_prompt_visible_history_tokens(
         session=session,
-        scope=_SCOPE,
         history_settings=inputs.history_settings,
         replay_estimator=adapter,
     )
     canonical_estimate = estimate_prompt_visible_history_tokens(
         session=session,
-        scope=_SCOPE,
         history_settings=inputs.history_settings,
         replay_estimator=None,
     )

@@ -18,6 +18,7 @@ from mindroom.history.types import (
     HistoryScope,
     ResolvedHistorySettings,
     ResolvedReplayPlan,
+    owner_scope,
     replayed_summary_text,
 )
 from mindroom.logging_config import get_logger
@@ -55,12 +56,11 @@ class HistorySummaryBudgetError(RuntimeError):
 def estimate_prompt_visible_history_tokens(
     *,
     session: ConversationSession,
-    scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
     replay_estimator: PortableReplayEstimator | None,
     native_route: str | None = None,
 ) -> int:
-    """Estimate the durable summary plus visible persisted history for one run.
+    """Estimate the durable summary plus visible persisted history of the scope owning ``session`` for one run.
 
     The history is the selection a request under ``history_settings`` sends, so the estimate counts exactly what the
     model will read. Stale Anthropic replay fields are left in place because the char estimate never counts them.
@@ -68,7 +68,7 @@ def estimate_prompt_visible_history_tokens(
     policy = history_settings.policy
     history_messages = scope_history_messages(
         session.runs,
-        scope=scope,
+        scope=owner_scope(session),
         num_history_runs=policy.num_history_runs,
         num_history_messages=policy.num_history_messages,
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
@@ -175,8 +175,9 @@ def estimate_summary_tokens(session: ConversationSession) -> int:
     return estimate_text_tokens(str(compaction_summary_message(summary, run_local=False).content))
 
 
-def scope_visible_runs(session: ConversationSession, scope: HistoryScope) -> list[AnyRunRecord]:
-    """Return this scope's model-history-visible runs in stored order."""
+def scope_visible_runs(session: ConversationSession) -> list[AnyRunRecord]:
+    """Return the model-history-visible runs of the scope owning ``session``, in stored order."""
+    scope = owner_scope(session)
     return [run for run in session.runs if replays_in_scope(run, scope)]
 
 
@@ -193,7 +194,8 @@ def compaction_marker(session: ConversationSession, scope: HistoryScope) -> tupl
     checkpoint = next(
         (
             checkpoint_id
-            for run in reversed(scope_visible_runs(session, scope))
+            for run in reversed(session.runs)
+            if replays_in_scope(run, scope)
             for message in reversed(run.messages)
             if (checkpoint_id := native_checkpoint_id(message)) is not None
         ),
@@ -217,13 +219,12 @@ def _image_fallback_tokens(messages: list[Message]) -> int:
 def plan_replay_that_fits(
     *,
     session: ConversationSession,
-    scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
     available_history_budget: int,
     current_history_tokens: int,
     replay_estimator: PortableReplayEstimator | None,
 ) -> ResolvedReplayPlan:
-    """Return the safest persisted-replay plan that fits the current run budget."""
+    """Return the safest plan for replaying the persisted history of the scope owning ``session`` within the budget."""
     summary_tokens = estimate_summary_tokens(session)
     if summary_tokens > available_history_budget:
         raise HistorySummaryBudgetError(summary_tokens=summary_tokens, available_tokens=available_history_budget)
@@ -233,14 +234,9 @@ def plan_replay_that_fits(
             estimated_tokens=current_history_tokens,
         )
 
-    limit_mode, max_limit = _context_window_guard_limit_bounds(
-        session=session,
-        scope=scope,
-        history_settings=history_settings,
-    )
+    limit_mode, max_limit = _context_window_guard_limit_bounds(session=session, history_settings=history_settings)
     fitting_limit, fitting_tokens = _find_fitting_history_limit_for_budget(
         session=session,
-        scope=scope,
         history_settings=history_settings,
         available_history_budget=available_history_budget,
         limit_mode=limit_mode,
@@ -269,20 +265,18 @@ def plan_replay_that_fits(
 def _context_window_guard_limit_bounds(
     *,
     session: ConversationSession,
-    scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
 ) -> tuple[Literal["runs", "messages"], int]:
     policy = history_settings.policy
     if policy.mode == "messages":
         return "messages", policy.limit or 0
-    visible_run_count = len(scope_visible_runs(session, scope))
+    visible_run_count = len(scope_visible_runs(session))
     return "runs", visible_run_count if policy.mode == "all" else min(policy.limit or 0, visible_run_count)
 
 
 def _find_fitting_history_limit_for_budget(
     *,
     session: ConversationSession,
-    scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
     available_history_budget: int,
     limit_mode: Literal["runs", "messages"],
@@ -300,7 +294,6 @@ def _find_fitting_history_limit_for_budget(
         mid = (low + high) // 2
         candidate_tokens = estimate_prompt_visible_history_tokens(
             session=session,
-            scope=scope,
             history_settings=replace(history_settings, policy=HistoryPolicy(mode=limit_mode, limit=mid)),
             replay_estimator=replay_estimator,
         )
@@ -360,15 +353,10 @@ def configured_replay_plan(
     )
 
 
-def has_effective_persisted_replay(
-    *,
-    session: ConversationSession,
-    scope: HistoryScope,
-    replay_plan: ResolvedReplayPlan,
-) -> bool:
-    """Report whether a summary or permitted raw runs will reach the model."""
+def has_effective_persisted_replay(*, session: ConversationSession, replay_plan: ResolvedReplayPlan) -> bool:
+    """Report whether a summary or permitted raw runs of the scope owning ``session`` will reach the model."""
     if current_summary_text(session) is not None:
         return True
     if not replay_plan.add_history_to_context or replay_plan.num_history_runs == 0:
         return False
-    return bool(scope_visible_runs(session, scope))
+    return bool(scope_visible_runs(session))

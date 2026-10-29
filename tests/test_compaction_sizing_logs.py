@@ -11,7 +11,6 @@ import tiktoken
 from structlog.testing import capture_logs
 
 from mindroom.history.compaction import _rewrite_working_session_for_compaction
-from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import create_session_storage
 from tests.conftest import seed_session
 from tests.fakes.summary_model import summary_model as _summary_model
@@ -43,7 +42,6 @@ async def _rewrite_with_summary_model(
         storage=storage,
         persisted_session=working_session,
         working_session=working_session,
-        scope=HistoryScope(kind="agent", scope_id="test_agent"),
         summarizer=_summarizer(summary_model, summary_input_budget, session_id=working_session.session_id),
         runs=[run for run in working_session.runs or [] if run.run_id == "run-1"],
         before_persist=AsyncMock(),

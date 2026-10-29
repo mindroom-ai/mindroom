@@ -41,7 +41,7 @@ from mindroom.constants import (
 )
 from mindroom.history import summary_rows
 from mindroom.history.run_visibility import is_model_history_visible_run, replays_in_scope, run_in_scope
-from mindroom.history.types import HistoryScope, HistoryScopeState, replayed_summary_text
+from mindroom.history.types import HistoryScope, HistoryScopeState, owner_scope, replayed_summary_text
 from mindroom.session_storage.agent_storage import save_compaction_usage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.store import seen_event_ids, source_event_ids
@@ -96,7 +96,7 @@ def new_scope_session(*, session_id: str, scope: HistoryScope) -> ConversationSe
 
 def read_scope_state(session: ConversationSession) -> HistoryScopeState:
     """Return the compaction state of the scope owning ``session``."""
-    return _scope_state(session.metadata, _owner_scope(session))
+    return _scope_state(session.metadata, owner_scope(session))
 
 
 def _scope_state(metadata: dict[str, Any] | None, scope: HistoryScope) -> HistoryScopeState:
@@ -172,7 +172,7 @@ def read_scope_seen_event_ids(storage: ConversationStore, session: ConversationS
     Loaded runs carry their own ids, the summary rows supply those of compacted
     history, and session metadata adds ids no stored run carries.
     """
-    scope = _owner_scope(session)
+    scope = owner_scope(session)
     seen = _read_preserved_scope_seen_event_ids(session.metadata, scope)
     seen |= summary_rows.history_event_ids(storage, session_id=session.session_id, scope_key=scope.key, kind="seen")
     for run in session.runs:
@@ -188,7 +188,7 @@ def _read_scope_history_event_ids(storage: ConversationStore, session: Conversat
     answered, or wrote, including a run paused for approval, and what compacted
     history represents.
     """
-    scope = _owner_scope(session)
+    scope = owner_scope(session)
     event_ids = summary_rows.history_event_ids(storage, session_id=session.session_id, scope_key=scope.key, kind="all")
     for run in session.runs:
         if run_in_scope(run, scope) and run.parent_run_id is None:
@@ -200,7 +200,7 @@ def update_scope_seen_event_ids(storage: ConversationStore, session: Conversatio
     """Merge consumed Matrix event ids into the owner scope's preserved seen ids on ``session``'s stored row."""
     storage.update_metadata(
         session,
-        partial(_with_merged_scope_seen_event_ids, scope=_owner_scope(session), event_ids=event_ids),
+        partial(_with_merged_scope_seen_event_ids, scope=owner_scope(session), event_ids=event_ids),
     )
 
 
@@ -235,7 +235,7 @@ def _remove_redacted_event_from_history(
     return as unseen thread context. ``session`` is synced to the stored result.
     Returns whether the scope's history changed.
     """
-    session_id, scope = session.session_id, _owner_scope(session)
+    session_id, scope = session.session_id, owner_scope(session)
     legacy_event_ids = summary_rows.legacy_event_ids(storage, session_id=session_id, scope_key=scope.key)
     if legacy_event_ids is not None and _legacy_summary_may_contain(event_id, legacy_source_event_id, legacy_event_ids):
         summary_rows.cut_at_legacy_row(storage, session=session, scope_key=scope.key)
@@ -321,7 +321,7 @@ def update_scope_state_on_latest(
     ``session`` then holds the stored metadata. The update callable sees the latest stored state, so it can refuse to
     write (return its input unchanged) when the durable row moved since the caller read it.
     """
-    scope = _owner_scope(session)
+    scope = owner_scope(session)
 
     def change(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
         latest = _scope_state(metadata, scope)
@@ -348,7 +348,7 @@ def set_force_compaction(
 
 def _latest_summary_row(storage: ConversationStore, session: ConversationSession) -> tuple[int | None, str | None]:
     """Return the id of the owner scope's latest summary row and its text as replay reads it, or ``None`` for each."""
-    latest = summary_rows.latest_row(storage, session_id=session.session_id, scope_key=_owner_scope(session).key)
+    latest = summary_rows.latest_row(storage, session_id=session.session_id, scope_key=owner_scope(session).key)
     if latest is None:
         return None, None
     return latest.id, replayed_summary_text(latest.summary)
@@ -398,7 +398,7 @@ def append_compaction_chunk(
     row_id = summary_rows.append_summary(
         storage,
         session_id=session.session_id,
-        scope_key=_owner_scope(session).key,
+        scope_key=owner_scope(session).key,
         based_on=basis.based_on,
         covered=[run for run in basis.covered if run.run_id in included_run_ids],
         summary=summary,
@@ -427,7 +427,7 @@ def read_fold_basis(storage: ConversationStore, session: ConversationSession) ->
     """
     based_on, latest_summary = _latest_summary_row(storage, session)
     stored = storage.load_session(session.session_id)
-    scope = _owner_scope(session)
+    scope = owner_scope(session)
     runs = [run for run in (stored.runs if stored is not None else []) if replays_in_scope(run, scope)]
     run_ids = [run.run_id for run in runs]
     covered = tuple(summary_rows.covered_runs(storage, session_id=session.session_id, run_ids=run_ids))
@@ -455,7 +455,7 @@ def append_fold(
     what a fresh load does, so a request rebuilt from it within the turn, as a delegation continuation is, replays
     only what the summary does not cover.
     """
-    scope = _owner_scope(session)
+    scope = owner_scope(session)
     row_id = summary_rows.append_summary(
         storage,
         session_id=session.session_id,
@@ -473,11 +473,6 @@ def append_fold(
 def run_folded_tool_call_ids(storage: ConversationStore, *, session_id: str, run_id: str) -> set[str]:
     """Return the tool calls the run's mid-turn folds summarized, from the rows they flagged."""
     return summary_rows.folded_tool_call_ids(storage, session_id=session_id, run_id=run_id)
-
-
-def _owner_scope(session: ConversationSession) -> HistoryScope:
-    """Return the history scope that owns ``session``: its kind and owner, which a load takes from the database's owner."""
-    return HistoryScope(kind=session.kind, scope_id=session.owner_id)
 
 
 def _read_preserved_scope_seen_event_ids(metadata: dict[str, Any] | None, scope: HistoryScope) -> set[str]:

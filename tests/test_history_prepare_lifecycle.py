@@ -596,14 +596,12 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
     )
     replay_budget = estimate_prompt_visible_history_tokens(
         session=after_first_session,
-        scope=scope,
         history_settings=history_settings,
         replay_estimator=None,
     )
     assert (
         estimate_prompt_visible_history_tokens(
             session=session,
-            scope=scope,
             history_settings=history_settings,
             replay_estimator=None,
         )
@@ -921,7 +919,6 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     history_tokens = estimate_prompt_visible_history_tokens(
         session=session,
-        scope=scope,
         history_settings=_ALL_HISTORY_SETTINGS,
         replay_estimator=None,
     )
@@ -996,7 +993,6 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
     assert (
         estimate_prompt_visible_history_tokens(
             session=persisted,
-            scope=scope,
             history_settings=_ALL_HISTORY_SETTINGS,
             replay_estimator=None,
         )
@@ -1029,7 +1025,6 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
         "session-1",
         runs=previous_runs,
     )
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
     seed_session(storage, session)
     history_settings = config.resolve_scope("test_agent").history_settings
     visible_runs = list(session.runs or [])
@@ -1057,13 +1052,11 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     )
     replay_budget = estimate_prompt_visible_history_tokens(
         session=after_first_session,
-        scope=scope,
         history_settings=history_settings,
         replay_estimator=None,
     )
     before_tokens = estimate_prompt_visible_history_tokens(
         session=session,
-        scope=scope,
         history_settings=history_settings,
         replay_estimator=None,
     )
@@ -1149,7 +1142,6 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     assert (
         estimate_prompt_visible_history_tokens(
             session=current_run_session,
-            scope=scope,
             history_settings=history_settings,
             replay_estimator=None,
         )
@@ -1233,7 +1225,6 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
     )
     replay_budget = estimate_prompt_visible_history_tokens(
         session=after_first_session,
-        scope=scope,
         history_settings=history_settings,
         replay_estimator=None,
     )
@@ -1996,7 +1987,6 @@ async def _prepare_with_reported_usage(
             compact_runs(storage, session, list(folded_run_ids), "Earlier summary")
     estimate = estimate_prompt_visible_history_tokens(
         session=session,
-        scope=scope,
         history_settings=history_settings,
         replay_estimator=None,
     )

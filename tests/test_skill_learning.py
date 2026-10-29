@@ -593,7 +593,7 @@ def _transcript(*runs: RunRecord, summary: str | None = None, budget_chars: int)
     for run in runs:
         run.user_id = "@alice:x"
     return render_transcript(
-        conversation_messages(_stored("session", *runs), _MIND),
+        conversation_messages(_stored("session", *runs)),
         summary=summary,
         budget_chars=budget_chars,
     )
@@ -641,7 +641,7 @@ def test_a_replayed_review_reads_the_turns_a_request_of_the_agent_replays() -> N
         RunRecord(run_id="stopped", agent_id="mind", status=RunStatus.cancelled, messages=exchange("stopped")),
     )
 
-    said = [part.unredacted for message in conversation_messages(session, _MIND) for part in message]
+    said = [part.unredacted for message in conversation_messages(session) for part in message]
 
     assert said == ["own question", "own answer"]
 

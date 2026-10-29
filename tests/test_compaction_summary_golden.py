@@ -89,7 +89,6 @@ async def test_the_compaction_summary_request_equals_the_golden(tmp_path: Path) 
             _reported,
             storage=storage,
             session=session,
-            scope=scope,
             state=read_scope_state(session),
             resolved_inputs=inputs,
             history_budget=None,

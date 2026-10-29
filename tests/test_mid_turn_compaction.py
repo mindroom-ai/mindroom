@@ -1546,7 +1546,10 @@ async def test_mid_turn_compaction_builds_no_transcript_without_hooks(
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("summary_calls")
 async def test_mid_turn_compaction_hooks_see_who_said_each_line_without_what_mindroom_added(tmp_path: Path) -> None:
-    """The stored runs and the running turn's folded part each name their senders, without enrichment or tool calls."""
+    """The stored runs and the running turn's folded part each name their senders, without enrichment or tool calls.
+
+    Both hooks name the scope the fold lands in.
+    """
     config, paths = _config(tmp_path)
     storage = create_session_storage("test_agent", config, paths, execution_identity=None)
     asked = RunRecord(
@@ -1602,6 +1605,7 @@ async def test_mid_turn_compaction_hooks_see_who_said_each_line_without_what_min
         for number in range(1, len(steps) + 1)
     )
     assert [ctx.event_name for ctx in observed[:2]] == [EVENT_COMPACTION_BEFORE, EVENT_COMPACTION_AFTER]
+    assert [ctx.scope for ctx in observed[:2]] == [TEST_AGENT_SCOPE, TEST_AGENT_SCOPE]
     assert observed[1].transcript == transcript
 
 

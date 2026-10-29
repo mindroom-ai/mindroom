@@ -104,8 +104,8 @@ class _MidTurnCompaction:
     stopped: bool = False
 
     @property
-    def scope_fold(self) -> tuple[ConversationStore, ConversationSession, HistoryScope] | None:
-        """Return the store, session, and scope a fold appends its summary row to, checked once for the fold to use.
+    def scope_fold(self) -> tuple[ConversationStore, ConversationSession] | None:
+        """Return the store and session a fold appends its summary row to, checked once for the fold to use.
 
         None when the run's requests replay no history or the run stores in no scope, so its folds stay within it.
         """
@@ -113,7 +113,7 @@ class _MidTurnCompaction:
         if storage is None or storage.store is None or storage.scope is None:
             return None
         replays_history = self.replay_plan is not None and self.replay_plan.add_history_to_context
-        return (storage.store, storage.session, storage.scope) if replays_history else None
+        return (storage.store, storage.session) if replays_history else None
 
 
 @dataclass(frozen=True)
@@ -264,7 +264,7 @@ async def _summarize(
     layout: _Layout,
     messages: list[Message],
     record: AnyRunRecord,
-    scope_fold: tuple[ConversationStore, ConversationSession, HistoryScope] | None,
+    scope_fold: tuple[ConversationStore, ConversationSession] | None,
     request_tokens: int,
     size_request: Callable[[], int],
 ) -> _Fold | None:
@@ -283,7 +283,7 @@ async def _summarize(
             _finish(messages, layout, summary_message, record)
             # Sizing can tokenize the whole request, so it stays off the event loop that serves every room.
             return _Fold(summary_message, await asyncio.to_thread(size_request))
-        store, session, scope = scope_fold
+        store, session = scope_fold
         return await _compact_scope(
             compaction,
             inputs,
@@ -294,7 +294,6 @@ async def _summarize(
             size_request,
             store=store,
             session=session,
-            scope=scope,
         )
     except Exception:
         logger.exception("Mid-turn compaction failed; continuing without it", run_id=record.run_id)
@@ -317,9 +316,8 @@ async def _compact_scope(
     *,
     store: ConversationStore,
     session: ConversationSession,
-    scope: HistoryScope,
 ) -> _Fold | None:
-    """Append one summary row to ``scope`` covering its stored runs after the latest row and this run's exchanges.
+    """Append one summary row to ``session``'s scope, covering its runs after the latest row and this run's exchanges.
 
     The append stores the run's folded part with the row and leaves the turn's session as the store holds it, and
     once the row is stored, the run's request and record follow.
@@ -343,7 +341,6 @@ async def _compact_scope(
     outcome = await compact_scope_mid_turn(
         storage=store,
         session=session,
-        scope=scope,
         resolved_inputs=inputs,
         basis=basis,
         fold=fold,

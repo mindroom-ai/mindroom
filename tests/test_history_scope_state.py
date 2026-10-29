@@ -139,7 +139,7 @@ def test_seen_event_ids_match_model_history_visibility(tmp_path: Path, *, is_tea
     update_scope_seen_event_ids(storage, session, ["preserved-event"])
 
     assert read_scope_seen_event_ids(storage, session) == {"completed-event", "preserved-event", "running-event"}
-    assert [run.run_id for run in scope_visible_runs(session, scope)] == ["completed", "running"]
+    assert [run.run_id for run in scope_visible_runs(session)] == ["completed", "running"]
 
 
 def test_scope_states_do_not_bleed_between_scopes(tmp_path: Path) -> None:

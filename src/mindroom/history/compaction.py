@@ -36,6 +36,7 @@ from mindroom.history.types import (
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
     ScopeSummary,
+    owner_scope,
 )
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, TranscriptLine, emit
 from mindroom.llm.errors import ModelSafeguardRefusal
@@ -327,7 +328,6 @@ async def compact_scope_history(
     *,
     storage: ConversationStore,
     session: ConversationSession,
-    scope: HistoryScope,
     state: HistoryScopeState,
     summarizer: Summarizer,
     available_history_budget: int | None,
@@ -338,13 +338,14 @@ async def compact_scope_history(
     complete: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]],
     replay_estimator: PortableReplayEstimator | None,
 ) -> CompactionOutcome | None:
-    """Compact one scope by appending summary rows that fold its oldest runs, chunk by chunk.
+    """Compact the scope owning ``session`` by appending summary rows that fold its oldest runs, chunk by chunk.
 
     ``progress`` receives the progress after each stored chunk that leaves runs to replay, and ``complete`` the
     outcome after the last stored chunk.
     """
+    scope = owner_scope(session)
     history_settings = summarizer.history_settings
-    visible_runs = scope_visible_runs(session, scope)
+    visible_runs = scope_visible_runs(session)
     over_budget = available_history_budget is not None and before_tokens > available_history_budget
     runs = visible_runs if state.force_compact_before_next_run or over_budget else []
     if not runs:
@@ -368,12 +369,11 @@ async def compact_scope_history(
     async def after_persist(chunk: _SummaryChunk, compacted_run_count: int, runs_remaining: int) -> None:
         if hooks_registered:
             compacted_transcript.extend(_transcript(chunk.included_runs))
-        if progress is None or not scope_visible_runs(working_session, scope):
+        if progress is None or not scope_visible_runs(working_session):
             return
         after_tokens = await asyncio.to_thread(
             estimate_prompt_visible_history_tokens,
             session=working_session,
-            scope=scope,
             history_settings=history_settings,
             replay_estimator=replay_estimator,
         )
@@ -398,7 +398,6 @@ async def compact_scope_history(
             storage=storage,
             persisted_session=session,
             working_session=working_session,
-            scope=scope,
             summarizer=summarizer,
             runs=runs,
             before_persist=before_persist,
@@ -426,7 +425,6 @@ async def compact_scope_history(
         after_tokens = await asyncio.to_thread(
             estimate_prompt_visible_history_tokens,
             session=session,
-            scope=scope,
             history_settings=history_settings,
             replay_estimator=replay_estimator,
         )
@@ -441,7 +439,7 @@ async def compact_scope_history(
             window_tokens=replay_window_tokens or 0,
             threshold_tokens=threshold_tokens or 0,
             runs_before=len(visible_runs),
-            runs_after=len(scope_visible_runs(session, scope)),
+            runs_after=len(scope_visible_runs(session)),
             compacted_run_count=rewrite_result.compacted_run_count,
             compacted_at=compacted_at,
             history_budget_tokens=available_history_budget,
@@ -463,13 +461,13 @@ async def _rewrite_working_session_for_compaction(
     storage: ConversationStore,
     persisted_session: ConversationSession,
     working_session: ConversationSession,
-    scope: HistoryScope,
     summarizer: Summarizer,
     runs: Sequence[AnyRunRecord],
     before_persist: Callable[[Sequence[AnyRunRecord]], Awaitable[None]],
     after_persist: Callable[[_SummaryChunk, int, int], Awaitable[None]],
 ) -> _CompactionRewriteResult | None:
     """Fold ``runs``, oldest first, into one appended summary row per chunk, stopping when the conversation changes."""
+    scope = owner_scope(persisted_session)
     summary_text: str | None = None
     compacted_run_count = 0
     remaining = list(runs)
@@ -577,7 +575,6 @@ async def compact_running_turn(
     *,
     storage: ConversationStore,
     session: ConversationSession,
-    scope: HistoryScope,
     basis: FoldBasis,
     fold: Fold,
     snapshots: Sequence[AnyRunRecord],
@@ -599,6 +596,7 @@ async def compact_running_turn(
     after ``on_commit`` rewrote it, so the report compares one request before and after. Raises when the conversation
     changed since ``basis`` was read.
     """
+    scope = owner_scope(session)
     runs = [*basis.runs, *snapshots]
     # Hooks see the folded messages themselves, not the per-call units the summarizer reads, under the running turn's
     # requester and metadata, which decide who said each message.
