@@ -298,10 +298,6 @@ class ScheduledTaskRuntime:
                 entities=sorted(bot.agent_name for bot in bots if bot in self._in_flight),
             )
 
-    def _is_fenced(self, bot: AgentBot) -> bool:
-        """Return whether this bot is stopping, so its operations may have lost their client."""
-        return bot in self._fenced
-
     async def stop(self) -> None:
         """Cancel every runner before process shutdown stops the bots."""
         self._stopping = True
@@ -529,7 +525,7 @@ class _TaskRunner:
                         writers=self.runtime,
                     )
                 except Exception:
-                    if not self.runtime._is_fenced(bot):
+                    if bot not in self.runtime._fenced:
                         logger.exception(
                             "Failed to persist one-time task final state",
                             task_id=self.task_id,

@@ -1712,7 +1712,7 @@ class AgentBot:
         invited_rooms: dict[str, frozenset[str]] = {}
         for agent_name in self.config.calls.agents:
             bot = agent_bots.get(agent_name)
-            if isinstance(bot, AgentBot):
+            if bot is not None:
                 invited_rooms[agent_name] = frozenset(bot._room_lifecycle.invited_rooms)
         return invited_rooms
 
@@ -2396,7 +2396,7 @@ class AgentBot:
         """Project a connected fleet member into its service and sync readiness."""
         orchestrator = self.orchestrator
         target = orchestrator.agent_bots.get(agent_name) if orchestrator is not None else None
-        if not isinstance(target, AgentBot) or target.client is None:
+        if target is None or target.client is None:
             return None
         return PersonalRoomTarget(target.personal_rooms, target.first_sync_complete)
 

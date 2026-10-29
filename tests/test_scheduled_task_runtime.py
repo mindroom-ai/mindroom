@@ -196,7 +196,7 @@ async def test_release_fences_the_owner_then_waits_for_its_in_flight_operation(t
     await asyncio.sleep(0)
 
     assert runtime._ready_bot("general") is None
-    assert runtime._is_fenced(bot)
+    assert bot in runtime._fenced
     assert not release.done()
     finish_operation.set()
     await release
@@ -771,7 +771,7 @@ async def test_orchestrator_fences_changing_entities_and_fails_removed_entities_
     ):
         unresolved = await orchestrator._reconcile_removed_entities({"general"})
 
-    assert orchestrator.scheduled_tasks._is_fenced(bot)
+    assert bot in orchestrator.scheduled_tasks._fenced
     assert unresolved == set()
     assert order == ["scheduled tasks ['general']", "approvals ['general']"]
 
