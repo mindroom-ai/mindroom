@@ -169,7 +169,7 @@ Failures from one `sender_device_id` point at that client, while failures across
 
 ### `conversation_converted`
 
-Logged once for each conversation database the first start after [upgrading to conversation storage v2](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-conversation-storage-v2) or [to one owner per conversation database](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-one-owner-per-conversation-database) converts, or that converts at its first use later, such as a restored backup.
+Logged once for each conversation database the first start after an upgrade that changes the database layout converts, such as [upgrading to conversation storage v2](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-conversation-storage-v2) or [to one owner per conversation database](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-one-owner-per-conversation-database), or that converts at its first use later, such as a restored backup.
 
 | Field | Meaning |
 |-------|---------|

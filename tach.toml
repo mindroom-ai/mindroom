@@ -1097,6 +1097,7 @@ visibility = ["mindroom.session_storage.legacy_agno3_conversion", "mindroom.sess
 [[modules]]
 path = "mindroom.session_storage.legacy_session_columns"
 depends_on = [
+    "mindroom.delegation.legacy_snapshots",
     "mindroom.history.types",
     "mindroom.session_storage.legacy_agent_session_owners",
     "mindroom.session_storage.legacy_conversion_backup",
@@ -1115,6 +1116,7 @@ path = "mindroom.session_storage.legacy_agno3_conversion"
 depends_on = [
     "mindroom.background_tasks",
     "mindroom.constants",
+    "mindroom.delegation.legacy_snapshots",
     "mindroom.history.legacy_compaction_state",
     "mindroom.history.legacy_stored_tool_calls",
     "mindroom.history.storage",
@@ -1173,6 +1175,7 @@ expose = [
     "begun",
     "connect_by_name",
     "connect_conversation_database",
+    "database_owner",
     "decoded_mapping",
     "delete_runs_in_transaction",
     "ensure_session_row",
@@ -2112,6 +2115,7 @@ depends_on = [
     "mindroom.knowledge.refresh_scheduler",
     "mindroom.private_storage.legacy_private_storage",
     "mindroom.legacy_state_root_records",
+    "mindroom.delegation.legacy_snapshots",
     "mindroom.credentials.legacy_tool_credentials",
     "mindroom.session_storage.legacy_agno3_conversion",
     "mindroom.api.computers",
@@ -3340,6 +3344,7 @@ depends_on = [
     "mindroom.knowledge.refresh_scheduler",
     "mindroom.private_storage.legacy_private_storage",
     "mindroom.legacy_state_root_records",
+    "mindroom.delegation.legacy_snapshots",
     "mindroom.credentials.legacy_tool_credentials",
     "mindroom.session_storage.legacy_agno3_conversion",
     "mindroom.orchestration.computer_runtime",
@@ -8226,6 +8231,24 @@ path = "mindroom.delegation.legacy_records"
 depends_on = ["mindroom.path_confinement"]
 visibility = ["mindroom.delegation.records"]
 
+# Delegation child snapshots earlier releases stored, rewritten once at startup and in the conversation layout's step to
+# version 5.
+[[modules]]
+path = "mindroom.delegation.legacy_snapshots"
+depends_on = [
+    "mindroom.background_tasks",
+    "mindroom.constants",
+    "mindroom.delegation.state",
+    "mindroom.session_storage.schema",
+    "mindroom.session_storage.store",
+]
+visibility = [
+    "mindroom.api.main",
+    "mindroom.orchestrator",
+    "mindroom.session_storage.legacy_agno3_conversion",
+    "mindroom.session_storage.legacy_session_columns",
+]
+
 [[modules]]
 path = "mindroom.delegation.records"
 depends_on = [
@@ -8483,6 +8506,7 @@ visibility = ["mindroom.config.agent", "mindroom.turn_policy", "mindroom.respons
 [[modules]]
 path = "mindroom.delegation.sessions"
 depends_on = [
+    "mindroom.constants",
     "mindroom.delegation.state",
     "mindroom.delegation.storage",
     "mindroom.tool_system.worker_routing",

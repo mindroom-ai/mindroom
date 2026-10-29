@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import resolve_session_state_root
+from mindroom.delegation.legacy_snapshots import rewrite_run_snapshots
 from mindroom.history.legacy_compaction_state import adopt_summary_rows, adoption_copy_bytes
 from mindroom.history.legacy_stored_tool_calls import repair_legacy_tool_calls
 from mindroom.history.types import HistoryScope
@@ -53,6 +54,7 @@ from mindroom.session_storage.legacy_session_columns import (
 from mindroom.session_storage.legacy_usage_ledger import seed_usage_ledger
 from mindroom.session_storage.schema import (
     LOG_VERSION,
+    OWNER_VERSION,
     TableNames,
     create_log_schema,
     is_current_layout,
@@ -64,6 +66,7 @@ from mindroom.session_storage.schema import (
 from mindroom.session_storage.store import (
     begun,
     connect_by_name,
+    database_owner,
     decoded_mapping,
     flag_folded,
     seen_event_ids,
@@ -103,8 +106,9 @@ def convert_conversation_database(
 
     In one ``BEGIN IMMEDIATE``: the backup, the Agno-era steps (usage ledger seeding, summary-row adoption with Agno 2
     blob runs and positions), the conversion, the drop of the Agno tables, the log tables and the meta row, which
-    records the current version and ``owner``, and, once an agent ``owner``'s session rows name it
-    (``adopt_agent_session_owners``), the sessions table's conversion (``convert_session_columns``). A file in
+    records the current version and ``owner``, once an agent ``owner``'s session rows name it
+    (``adopt_agent_session_owners``), the sessions table's conversion (``convert_session_columns``), and the rewrite of
+    the delegation children its runs hold (``rewrite_run_snapshots``). A file in
     write-ahead-log mode returns to the rollback journal first, which checkpoints its log. The file is then compacted
     when that pays off (``_compact``), and its conversion is logged. ``descriptors`` takes the backup's descriptor of
     the file, which the caller closes after ``connection``.
@@ -124,6 +128,7 @@ def convert_conversation_database(
             if owner.kind == "agent":
                 adopt_agent_session_owners(connection, names, owner.scope_id)
             convert_session_columns(connection, names)
+        rewrite_run_snapshots(connection, names)
         runs, messages = stored_counts(connection, names)
     compacted = _compact(connection, path)
     logger.info(
@@ -203,6 +208,9 @@ def _convert_at_startup(path: Path, names: TableNames, owner: HistoryScope | Non
         version = layout_version(connection, names)
         if (version is not None and version >= LOG_VERSION) or not table_names(connection):
             return
+        if version is not None and version >= OWNER_VERSION:
+            # The meta row names the owner from version 4 on, and a team's rows no longer do.
+            owner = database_owner(connection, names)
         owner = owner or team_owner(connection, names)
         if owner is None:
             # A team's database with no session row naming its scope converts at that scope's next store open.

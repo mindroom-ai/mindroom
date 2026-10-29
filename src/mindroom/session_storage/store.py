@@ -187,7 +187,7 @@ class ConversationStore:
         ).fetchone()
         if row is None:
             return None
-        owner = _database_owner(connection, names)
+        owner = database_owner(connection, names)
         runs, summaries = quote_identifier(names.log_runs), quote_identifier(names.log_summaries)
         loaded = (
             f"run.session_id = ? AND ({_loads_sql('run', summaries)} OR run.parent_run_id IN "  # noqa: S608
@@ -591,7 +591,7 @@ def _session_state(raw_session_state: object) -> dict[str, Any]:
     return decoded_mapping(raw_session_state) or {}
 
 
-def _database_owner(connection: sqlite3.Connection, names: TableNames) -> HistoryScope:
+def database_owner(connection: sqlite3.Connection, names: TableNames) -> HistoryScope:
     """Return the agent, team scope, or system usage ledger that owns the database, as its meta row records it."""
     kind, scope_id = connection.execute(
         f"SELECT owner_kind, owner_id FROM {quote_identifier(names.log_meta)} WHERE id = 1",  # noqa: S608
@@ -1164,6 +1164,7 @@ __all__ = [
     "begun",
     "connect_by_name",
     "connect_conversation_database",
+    "database_owner",
     "decoded_mapping",
     "delete_runs_in_transaction",
     "ensure_session_row",

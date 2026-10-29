@@ -456,12 +456,7 @@ def prepare_child_turn(
         )
     )
     if previous is not None:
-        # LEGACY_COMPAT: Delegated children persisted without a requested model.
-        # Legacy format: Parent delegation state and subagent session records stored only model_name, the model the child ran on.
-        # Last legacy release: v2026.10.244; replacement: the next release also persists requested_model_name.
-        # Handling: An absent requested model reads as the recorded model, so follow-ups keep the model they ran on before.
-        # Coverage: tests/test_budget_enforcement.py::test_delegated_follow_up_of_a_child_saved_without_a_requested_model.
-        model = previous.requested_model_name or previous.model_name
+        model = previous.requested_model_name
     # Each turn checks the budget against the requested model, so a follow-up recovers once spend is under the cap.
     turn_model = resolve_turn_model(
         config,

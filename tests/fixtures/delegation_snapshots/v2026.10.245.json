@@ -1,0 +1,583 @@
+{
+ "conversation_database": [
+  "BEGIN TRANSACTION;",
+  "CREATE TABLE agno_schema_versions (\n\ttable_name VARCHAR NOT NULL, \n\tversion VARCHAR NOT NULL, \n\tcreated_at VARCHAR NOT NULL, \n\tupdated_at VARCHAR, \n\tPRIMARY KEY (table_name)\n);",
+  "INSERT INTO \"agno_schema_versions\" VALUES('leader_sessions','3.0.0','2026-10-29T11:44:58.853695','2026-10-29T11:44:58.853695');",
+  "INSERT INTO \"agno_schema_versions\" VALUES('leader_sessions_runs','3.0.0','2026-10-29T11:44:58.909146','2026-10-29T11:44:58.909146');",
+  "CREATE TABLE leader_sessions (\n\tsession_id VARCHAR NOT NULL, \n\tsession_type VARCHAR NOT NULL, \n\tagent_id VARCHAR, \n\tteam_id VARCHAR, \n\tworkflow_id VARCHAR, \n\tuser_id VARCHAR, \n\tsession_data JSON, \n\tagent_data JSON, \n\tteam_data JSON, \n\tworkflow_data JSON, \n\tmetadata JSON, \n\tsummary JSON, \n\tcreated_at BIGINT NOT NULL, \n\tupdated_at BIGINT, \n\tPRIMARY KEY (session_id)\n);",
+  "INSERT INTO \"leader_sessions\" VALUES('parent-session','agent','leader',NULL,NULL,'@alice:example.org','null','null',NULL,NULL,'null','null',1760000000,1760000000);",
+  "CREATE TABLE leader_sessions_runs (\n\trun_id VARCHAR NOT NULL, \n\tsession_id VARCHAR NOT NULL, \n\trun_type VARCHAR NOT NULL, \n\tagent_id VARCHAR, \n\tteam_id VARCHAR, \n\tworkflow_id VARCHAR, \n\tuser_id VARCHAR, \n\tparent_run_id VARCHAR, \n\tstatus VARCHAR, \n\trun_index BIGINT, \n\trun_data JSON NOT NULL, \n\tcreated_at BIGINT NOT NULL, \n\tupdated_at BIGINT, \n\tPRIMARY KEY (run_id), \n\tFOREIGN KEY(session_id) REFERENCES leader_sessions (session_id) ON DELETE CASCADE\n);",
+  "INSERT INTO \"leader_sessions_runs\" VALUES('parent-run','parent-session','agent','leader',NULL,NULL,'@alice:example.org',NULL,'PAUSED',0,'{\"run_id\": \"parent-run\", \"agent_id\": \"leader\", \"session_id\": \"parent-session\", \"user_id\": \"@alice:example.org\", \"content\": \"\", \"content_type\": \"str\", \"created_at\": 1760000001, \"status\": \"PAUSED\", \"metadata\": {\"mindroom_delegation\": {\"children\": [{\"delegation_id\": \"c7e238db0c6f4aebb821d74dba544025\", \"parent_tool_call_id\": \"call-a\", \"caller_agent_name\": \"leader\", \"child_agent_name\": \"helper\", \"task\": \"Review with tools\", \"session_id\": \"delegate:leader:helper:c7e238db0c6f4aebb821d74dba544025\", \"run_id\": \"3bbdf707a6bd46e4aeba87b6d0f7853b\", \"model_name\": \"default\", \"depth\": 1, \"execution_identity\": {\"channel\": \"matrix\", \"agent_name\": \"helper\", \"requester_id\": \"@alice:example.org\", \"room_id\": \"!room:example.org\", \"thread_id\": \"$thread\", \"resolved_thread_id\": \"$thread\", \"session_id\": \"delegate:leader:helper:c7e238db0c6f4aebb821d74dba544025\", \"tenant_id\": null, \"account_id\": null, \"transport_agent_name\": null}, \"subagent_id\": \"c7e238db0c6f4aebb821d74dba544025\", \"previous_delegation_id\": null, \"parent_requirement_id\": \"req-call-a\", \"storage_bindings\": {\"leader\": {\"display_name\": \"leader\", \"private\": null, \"worker_scope\": null}, \"helper\": {\"display_name\": \"helper\", \"private\": null, \"worker_scope\": null}}, \"record_locator\": {}, \"status\": \"paused\", \"result\": null, \"agent_mode\": \"standard\", \"requested_model_name\": \"default\", \"persona\": {\"source_kind\": \"inline\", \"source_name\": \"\", \"system_prompt\": \"Review the plan carefully.\", \"tools\": [\"file\"]}}, {\"delegation_id\": \"1eaaa0638b6c453d812536e4c57c2090\", \"parent_tool_call_id\": \"call-b\", \"caller_agent_name\": \"leader\", \"child_agent_name\": \"helper\", \"task\": \"Review with everything\", \"session_id\": \"delegate:leader:helper:1eaaa0638b6c453d812536e4c57c2090\", \"run_id\": \"0282664fc57d45e79cf94f370344a0e8\", \"model_name\": \"alternate\", \"depth\": 1, \"execution_identity\": {\"channel\": \"matrix\", \"agent_name\": \"helper\", \"requester_id\": \"@alice:example.org\", \"room_id\": \"!room:example.org\", \"thread_id\": \"$thread\", \"resolved_thread_id\": \"$thread\", \"session_id\": \"delegate:leader:helper:1eaaa0638b6c453d812536e4c57c2090\", \"tenant_id\": null, \"account_id\": null, \"transport_agent_name\": null}, \"subagent_id\": \"1eaaa0638b6c453d812536e4c57c2090\", \"previous_delegation_id\": null, \"parent_requirement_id\": \"req-call-b\", \"storage_bindings\": {\"leader\": {\"display_name\": \"leader\", \"private\": null, \"worker_scope\": null}, \"helper\": {\"display_name\": \"helper\", \"private\": null, \"worker_scope\": null}}, \"record_locator\": {}, \"status\": \"completed\", \"result\": \"Answer to Review with everything\", \"agent_mode\": \"standard\", \"requested_model_name\": \"alternate\", \"persona\": {\"source_kind\": \"inline\", \"source_name\": \"\", \"system_prompt\": \"Review the plan carefully.\", \"tools\": null}}, {\"delegation_id\": \"1615e4db3b1c4d63a61e70a3c5715dee\", \"parent_tool_call_id\": \"call-c\", \"caller_agent_name\": \"leader\", \"child_agent_name\": \"helper\", \"task\": \"Plain task\", \"session_id\": \"delegate:leader:helper:1615e4db3b1c4d63a61e70a3c5715dee\", \"run_id\": \"d0e05d902bfe452386fdcdad33e22325\", \"model_name\": \"default\", \"depth\": 1, \"execution_identity\": {\"channel\": \"matrix\", \"agent_name\": \"helper\", \"requester_id\": \"@alice:example.org\", \"room_id\": \"!room:example.org\", \"thread_id\": \"$thread\", \"resolved_thread_id\": \"$thread\", \"session_id\": \"delegate:leader:helper:1615e4db3b1c4d63a61e70a3c5715dee\", \"tenant_id\": null, \"account_id\": null, \"transport_agent_name\": null}, \"subagent_id\": \"1615e4db3b1c4d63a61e70a3c5715dee\", \"previous_delegation_id\": null, \"parent_requirement_id\": \"req-call-c\", \"storage_bindings\": {\"leader\": {\"display_name\": \"leader\", \"private\": null, \"worker_scope\": null}, \"helper\": {\"display_name\": \"helper\", \"private\": null, \"worker_scope\": null}}, \"record_locator\": {}, \"status\": \"completed\", \"result\": \"Answer to Plain task\", \"agent_mode\": \"standard\", \"requested_model_name\": \"default\", \"persona\": null}], \"gates\": {}, \"hooks\": {}, \"pending_tools\": [], \"pending_tool_sources\": {\"c7e238db0c6f4aebb821d74dba544025:child-call\": {\"child\": {\"delegation_id\": \"c7e238db0c6f4aebb821d74dba544025\", \"parent_tool_call_id\": \"call-a\", \"caller_agent_name\": \"leader\", \"child_agent_name\": \"helper\", \"task\": \"Review with tools\", \"session_id\": \"delegate:leader:helper:c7e238db0c6f4aebb821d74dba544025\", \"run_id\": \"3bbdf707a6bd46e4aeba87b6d0f7853b\", \"model_name\": \"default\", \"depth\": 1, \"execution_identity\": {\"channel\": \"matrix\", \"agent_name\": \"helper\", \"requester_id\": \"@alice:example.org\", \"room_id\": \"!room:example.org\", \"thread_id\": \"$thread\", \"resolved_thread_id\": \"$thread\", \"session_id\": \"delegate:leader:helper:c7e238db0c6f4aebb821d74dba544025\", \"tenant_id\": null, \"account_id\": null, \"transport_agent_name\": null}, \"subagent_id\": \"c7e238db0c6f4aebb821d74dba544025\", \"previous_delegation_id\": null, \"parent_requirement_id\": \"req-call-a\", \"storage_bindings\": {\"leader\": {\"display_name\": \"leader\", \"private\": null, \"worker_scope\": null}, \"helper\": {\"display_name\": \"helper\", \"private\": null, \"worker_scope\": null}}, \"record_locator\": {}, \"status\": \"paused\", \"result\": null, \"agent_mode\": \"standard\", \"requested_model_name\": \"default\", \"persona\": {\"source_kind\": \"inline\", \"source_name\": \"\", \"system_prompt\": \"Review the plan carefully.\", \"tools\": [\"file\"]}}, \"tool_call_id\": \"child-call\", \"toolkit_name\": \"file\"}}, \"pending_requirements\": [], \"pending_agent_name\": \"helper\", \"pending_child_id\": \"c7e238db0c6f4aebb821d74dba544025\", \"storage_bindings\": {}}}}',1760000001,1793299498);",
+  "CREATE TABLE \"leader_sessions_usage\" (id INTEGER PRIMARY KEY, session_id TEXT NOT NULL REFERENCES \"leader_sessions\"(session_id) ON DELETE CASCADE, run_id TEXT, usage_data TEXT, UNIQUE(session_id, run_id));",
+  "INSERT INTO \"leader_sessions_usage\" VALUES(1,'parent-session','parent-run','{\"run_id\": \"parent-run\", \"user_id\": \"@alice:example.org\", \"created_at\": 1760000001, \"metrics\": {}}');",
+  "CREATE INDEX idx_leader_sessions_session_type ON leader_sessions (session_type);",
+  "CREATE INDEX idx_leader_sessions_created_at ON leader_sessions (created_at);",
+  "CREATE INDEX idx_agno_schema_versions_created_at ON agno_schema_versions (created_at);",
+  "CREATE INDEX idx_leader_sessions_runs_session_id_run_index ON leader_sessions_runs (session_id, run_index);",
+  "CREATE INDEX idx_leader_sessions_runs_user_id ON leader_sessions_runs (user_id);",
+  "CREATE INDEX idx_leader_sessions_runs_status ON leader_sessions_runs (status);",
+  "CREATE INDEX idx_leader_sessions_runs_session_id ON leader_sessions_runs (session_id);",
+  "CREATE INDEX idx_leader_sessions_runs_workflow_id ON leader_sessions_runs (workflow_id);",
+  "CREATE INDEX idx_leader_sessions_runs_agent_id ON leader_sessions_runs (agent_id);",
+  "CREATE INDEX idx_leader_sessions_runs_created_at ON leader_sessions_runs (created_at);",
+  "CREATE INDEX idx_leader_sessions_runs_team_id ON leader_sessions_runs (team_id);",
+  "CREATE INDEX idx_leader_sessions_runs_run_type ON leader_sessions_runs (run_type);",
+  "COMMIT;"
+ ],
+ "release": "v2026.10.245",
+ "subagent_sessions": {
+  "1615e4db3b1c4d63a61e70a3c5715dee.json": {
+   "child": {
+    "agent_mode": "standard",
+    "caller_agent_name": "leader",
+    "child_agent_name": "helper",
+    "delegation_id": "1615e4db3b1c4d63a61e70a3c5715dee",
+    "depth": 1,
+    "execution_identity": {
+     "account_id": null,
+     "agent_name": "helper",
+     "channel": "matrix",
+     "requester_id": "@alice:example.org",
+     "resolved_thread_id": "$thread",
+     "room_id": "!room:example.org",
+     "session_id": "delegate:leader:helper:1615e4db3b1c4d63a61e70a3c5715dee",
+     "tenant_id": null,
+     "thread_id": "$thread",
+     "transport_agent_name": null
+    },
+    "model_name": "default",
+    "parent_requirement_id": "req-call-c",
+    "parent_tool_call_id": "call-c",
+    "persona": null,
+    "previous_delegation_id": null,
+    "record_locator": {},
+    "requested_model_name": "default",
+    "result": "Answer to Plain task",
+    "run_id": "d0e05d902bfe452386fdcdad33e22325",
+    "session_id": "delegate:leader:helper:1615e4db3b1c4d63a61e70a3c5715dee",
+    "status": "completed",
+    "storage_bindings": {
+     "helper": {
+      "display_name": "helper",
+      "private": null,
+      "worker_scope": null
+     },
+     "leader": {
+      "display_name": "leader",
+      "private": null,
+      "worker_scope": null
+     }
+    },
+    "subagent_id": "1615e4db3b1c4d63a61e70a3c5715dee",
+    "task": "Plain task"
+   },
+   "owner": {
+    "account_id": null,
+    "agent_name": "leader",
+    "channel": "matrix",
+    "requester_id": "@alice:example.org",
+    "resolved_thread_id": "$thread",
+    "room_id": "!room:example.org",
+    "session_id": "parent-session",
+    "tenant_id": null,
+    "thread_id": "$thread",
+    "transport_agent_name": null
+   }
+  },
+  "1eaaa0638b6c453d812536e4c57c2090.json": {
+   "child": {
+    "agent_mode": "standard",
+    "caller_agent_name": "leader",
+    "child_agent_name": "helper",
+    "delegation_id": "1eaaa0638b6c453d812536e4c57c2090",
+    "depth": 1,
+    "execution_identity": {
+     "account_id": null,
+     "agent_name": "helper",
+     "channel": "matrix",
+     "requester_id": "@alice:example.org",
+     "resolved_thread_id": "$thread",
+     "room_id": "!room:example.org",
+     "session_id": "delegate:leader:helper:1eaaa0638b6c453d812536e4c57c2090",
+     "tenant_id": null,
+     "thread_id": "$thread",
+     "transport_agent_name": null
+    },
+    "model_name": "alternate",
+    "parent_requirement_id": "req-call-b",
+    "parent_tool_call_id": "call-b",
+    "persona": {
+     "source_kind": "inline",
+     "source_name": "",
+     "system_prompt": "Review the plan carefully.",
+     "tools": null
+    },
+    "previous_delegation_id": null,
+    "record_locator": {},
+    "requested_model_name": "alternate",
+    "result": "Answer to Review with everything",
+    "run_id": "0282664fc57d45e79cf94f370344a0e8",
+    "session_id": "delegate:leader:helper:1eaaa0638b6c453d812536e4c57c2090",
+    "status": "completed",
+    "storage_bindings": {
+     "helper": {
+      "display_name": "helper",
+      "private": null,
+      "worker_scope": null
+     },
+     "leader": {
+      "display_name": "leader",
+      "private": null,
+      "worker_scope": null
+     }
+    },
+    "subagent_id": "1eaaa0638b6c453d812536e4c57c2090",
+    "task": "Review with everything"
+   },
+   "owner": {
+    "account_id": null,
+    "agent_name": "leader",
+    "channel": "matrix",
+    "requester_id": "@alice:example.org",
+    "resolved_thread_id": "$thread",
+    "room_id": "!room:example.org",
+    "session_id": "parent-session",
+    "tenant_id": null,
+    "thread_id": "$thread",
+    "transport_agent_name": null
+   }
+  },
+  "c7e238db0c6f4aebb821d74dba544025.json": {
+   "child": {
+    "agent_mode": "standard",
+    "caller_agent_name": "leader",
+    "child_agent_name": "helper",
+    "delegation_id": "c7e238db0c6f4aebb821d74dba544025",
+    "depth": 1,
+    "execution_identity": {
+     "account_id": null,
+     "agent_name": "helper",
+     "channel": "matrix",
+     "requester_id": "@alice:example.org",
+     "resolved_thread_id": "$thread",
+     "room_id": "!room:example.org",
+     "session_id": "delegate:leader:helper:c7e238db0c6f4aebb821d74dba544025",
+     "tenant_id": null,
+     "thread_id": "$thread",
+     "transport_agent_name": null
+    },
+    "model_name": "default",
+    "parent_requirement_id": "req-call-a",
+    "parent_tool_call_id": "call-a",
+    "persona": {
+     "source_kind": "inline",
+     "source_name": "",
+     "system_prompt": "Review the plan carefully.",
+     "tools": [
+      "file"
+     ]
+    },
+    "previous_delegation_id": null,
+    "record_locator": {},
+    "requested_model_name": "default",
+    "result": null,
+    "run_id": "3bbdf707a6bd46e4aeba87b6d0f7853b",
+    "session_id": "delegate:leader:helper:c7e238db0c6f4aebb821d74dba544025",
+    "status": "paused",
+    "storage_bindings": {
+     "helper": {
+      "display_name": "helper",
+      "private": null,
+      "worker_scope": null
+     },
+     "leader": {
+      "display_name": "leader",
+      "private": null,
+      "worker_scope": null
+     }
+    },
+    "subagent_id": "c7e238db0c6f4aebb821d74dba544025",
+    "task": "Review with tools"
+   },
+   "owner": {
+    "account_id": null,
+    "agent_name": "leader",
+    "channel": "matrix",
+    "requester_id": "@alice:example.org",
+    "resolved_thread_id": "$thread",
+    "room_id": "!room:example.org",
+    "session_id": "parent-session",
+    "tenant_id": null,
+    "thread_id": "$thread",
+    "transport_agent_name": null
+   }
+  }
+ },
+ "views": {
+  "run_children": [
+   {
+    "agent_mode": "standard",
+    "caller_agent_name": "leader",
+    "child_agent_name": "helper",
+    "delegation_id": "c7e238db0c6f4aebb821d74dba544025",
+    "depth": 1,
+    "execution_identity": {
+     "account_id": null,
+     "agent_name": "helper",
+     "channel": "matrix",
+     "requester_id": "@alice:example.org",
+     "resolved_thread_id": "$thread",
+     "room_id": "!room:example.org",
+     "session_id": "delegate:leader:helper:c7e238db0c6f4aebb821d74dba544025",
+     "tenant_id": null,
+     "thread_id": "$thread",
+     "transport_agent_name": null
+    },
+    "model_name": "default",
+    "parent_requirement_id": "req-call-a",
+    "parent_tool_call_id": "call-a",
+    "persona": {
+     "kept_knowledge": [],
+     "kept_skills": [],
+     "knowledge": null,
+     "skills": [],
+     "source_kind": "inline",
+     "source_name": "",
+     "system_prompt": "Review the plan carefully.",
+     "tools": [
+      "file"
+     ]
+    },
+    "previous_delegation_id": null,
+    "record_locator": {},
+    "requested_model_name": "default",
+    "result": null,
+    "run_id": "3bbdf707a6bd46e4aeba87b6d0f7853b",
+    "session_id": "delegate:leader:helper:c7e238db0c6f4aebb821d74dba544025",
+    "status": "paused",
+    "storage_bindings": {
+     "helper": {
+      "display_name": "helper",
+      "private": null,
+      "worker_scope": null
+     },
+     "leader": {
+      "display_name": "leader",
+      "private": null,
+      "worker_scope": null
+     }
+    },
+    "subagent_id": "c7e238db0c6f4aebb821d74dba544025",
+    "task": "Review with tools"
+   },
+   {
+    "agent_mode": "standard",
+    "caller_agent_name": "leader",
+    "child_agent_name": "helper",
+    "delegation_id": "1eaaa0638b6c453d812536e4c57c2090",
+    "depth": 1,
+    "execution_identity": {
+     "account_id": null,
+     "agent_name": "helper",
+     "channel": "matrix",
+     "requester_id": "@alice:example.org",
+     "resolved_thread_id": "$thread",
+     "room_id": "!room:example.org",
+     "session_id": "delegate:leader:helper:1eaaa0638b6c453d812536e4c57c2090",
+     "tenant_id": null,
+     "thread_id": "$thread",
+     "transport_agent_name": null
+    },
+    "model_name": "alternate",
+    "parent_requirement_id": "req-call-b",
+    "parent_tool_call_id": "call-b",
+    "persona": {
+     "kept_knowledge": null,
+     "kept_skills": [],
+     "knowledge": null,
+     "skills": [],
+     "source_kind": "inline",
+     "source_name": "",
+     "system_prompt": "Review the plan carefully.",
+     "tools": null
+    },
+    "previous_delegation_id": null,
+    "record_locator": {},
+    "requested_model_name": "alternate",
+    "result": "Answer to Review with everything",
+    "run_id": "0282664fc57d45e79cf94f370344a0e8",
+    "session_id": "delegate:leader:helper:1eaaa0638b6c453d812536e4c57c2090",
+    "status": "completed",
+    "storage_bindings": {
+     "helper": {
+      "display_name": "helper",
+      "private": null,
+      "worker_scope": null
+     },
+     "leader": {
+      "display_name": "leader",
+      "private": null,
+      "worker_scope": null
+     }
+    },
+    "subagent_id": "1eaaa0638b6c453d812536e4c57c2090",
+    "task": "Review with everything"
+   },
+   {
+    "agent_mode": "standard",
+    "caller_agent_name": "leader",
+    "child_agent_name": "helper",
+    "delegation_id": "1615e4db3b1c4d63a61e70a3c5715dee",
+    "depth": 1,
+    "execution_identity": {
+     "account_id": null,
+     "agent_name": "helper",
+     "channel": "matrix",
+     "requester_id": "@alice:example.org",
+     "resolved_thread_id": "$thread",
+     "room_id": "!room:example.org",
+     "session_id": "delegate:leader:helper:1615e4db3b1c4d63a61e70a3c5715dee",
+     "tenant_id": null,
+     "thread_id": "$thread",
+     "transport_agent_name": null
+    },
+    "model_name": "default",
+    "parent_requirement_id": "req-call-c",
+    "parent_tool_call_id": "call-c",
+    "persona": null,
+    "previous_delegation_id": null,
+    "record_locator": {},
+    "requested_model_name": "default",
+    "result": "Answer to Plain task",
+    "run_id": "d0e05d902bfe452386fdcdad33e22325",
+    "session_id": "delegate:leader:helper:1615e4db3b1c4d63a61e70a3c5715dee",
+    "status": "completed",
+    "storage_bindings": {
+     "helper": {
+      "display_name": "helper",
+      "private": null,
+      "worker_scope": null
+     },
+     "leader": {
+      "display_name": "leader",
+      "private": null,
+      "worker_scope": null
+     }
+    },
+    "subagent_id": "1615e4db3b1c4d63a61e70a3c5715dee",
+    "task": "Plain task"
+   }
+  ],
+  "run_pending_sources": {
+   "c7e238db0c6f4aebb821d74dba544025:child-call": {
+    "agent_mode": "standard",
+    "caller_agent_name": "leader",
+    "child_agent_name": "helper",
+    "delegation_id": "c7e238db0c6f4aebb821d74dba544025",
+    "depth": 1,
+    "execution_identity": {
+     "account_id": null,
+     "agent_name": "helper",
+     "channel": "matrix",
+     "requester_id": "@alice:example.org",
+     "resolved_thread_id": "$thread",
+     "room_id": "!room:example.org",
+     "session_id": "delegate:leader:helper:c7e238db0c6f4aebb821d74dba544025",
+     "tenant_id": null,
+     "thread_id": "$thread",
+     "transport_agent_name": null
+    },
+    "model_name": "default",
+    "parent_requirement_id": "req-call-a",
+    "parent_tool_call_id": "call-a",
+    "persona": {
+     "kept_knowledge": [],
+     "kept_skills": [],
+     "knowledge": null,
+     "skills": [],
+     "source_kind": "inline",
+     "source_name": "",
+     "system_prompt": "Review the plan carefully.",
+     "tools": [
+      "file"
+     ]
+    },
+    "previous_delegation_id": null,
+    "record_locator": {},
+    "requested_model_name": "default",
+    "result": null,
+    "run_id": "3bbdf707a6bd46e4aeba87b6d0f7853b",
+    "session_id": "delegate:leader:helper:c7e238db0c6f4aebb821d74dba544025",
+    "status": "paused",
+    "storage_bindings": {
+     "helper": {
+      "display_name": "helper",
+      "private": null,
+      "worker_scope": null
+     },
+     "leader": {
+      "display_name": "leader",
+      "private": null,
+      "worker_scope": null
+     }
+    },
+    "subagent_id": "c7e238db0c6f4aebb821d74dba544025",
+    "task": "Review with tools"
+   }
+  },
+  "subagent_sessions": {
+   "1615e4db3b1c4d63a61e70a3c5715dee.json": {
+    "agent_mode": "standard",
+    "caller_agent_name": "leader",
+    "child_agent_name": "helper",
+    "delegation_id": "1615e4db3b1c4d63a61e70a3c5715dee",
+    "depth": 1,
+    "execution_identity": {
+     "account_id": null,
+     "agent_name": "helper",
+     "channel": "matrix",
+     "requester_id": "@alice:example.org",
+     "resolved_thread_id": "$thread",
+     "room_id": "!room:example.org",
+     "session_id": "delegate:leader:helper:1615e4db3b1c4d63a61e70a3c5715dee",
+     "tenant_id": null,
+     "thread_id": "$thread",
+     "transport_agent_name": null
+    },
+    "model_name": "default",
+    "parent_requirement_id": "req-call-c",
+    "parent_tool_call_id": "call-c",
+    "persona": null,
+    "previous_delegation_id": null,
+    "record_locator": {},
+    "requested_model_name": "default",
+    "result": "Answer to Plain task",
+    "run_id": "d0e05d902bfe452386fdcdad33e22325",
+    "session_id": "delegate:leader:helper:1615e4db3b1c4d63a61e70a3c5715dee",
+    "status": "completed",
+    "storage_bindings": {
+     "helper": {
+      "display_name": "helper",
+      "private": null,
+      "worker_scope": null
+     },
+     "leader": {
+      "display_name": "leader",
+      "private": null,
+      "worker_scope": null
+     }
+    },
+    "subagent_id": "1615e4db3b1c4d63a61e70a3c5715dee",
+    "task": "Plain task"
+   },
+   "1eaaa0638b6c453d812536e4c57c2090.json": {
+    "agent_mode": "standard",
+    "caller_agent_name": "leader",
+    "child_agent_name": "helper",
+    "delegation_id": "1eaaa0638b6c453d812536e4c57c2090",
+    "depth": 1,
+    "execution_identity": {
+     "account_id": null,
+     "agent_name": "helper",
+     "channel": "matrix",
+     "requester_id": "@alice:example.org",
+     "resolved_thread_id": "$thread",
+     "room_id": "!room:example.org",
+     "session_id": "delegate:leader:helper:1eaaa0638b6c453d812536e4c57c2090",
+     "tenant_id": null,
+     "thread_id": "$thread",
+     "transport_agent_name": null
+    },
+    "model_name": "alternate",
+    "parent_requirement_id": "req-call-b",
+    "parent_tool_call_id": "call-b",
+    "persona": {
+     "kept_knowledge": null,
+     "kept_skills": [],
+     "knowledge": null,
+     "skills": [],
+     "source_kind": "inline",
+     "source_name": "",
+     "system_prompt": "Review the plan carefully.",
+     "tools": null
+    },
+    "previous_delegation_id": null,
+    "record_locator": {},
+    "requested_model_name": "alternate",
+    "result": "Answer to Review with everything",
+    "run_id": "0282664fc57d45e79cf94f370344a0e8",
+    "session_id": "delegate:leader:helper:1eaaa0638b6c453d812536e4c57c2090",
+    "status": "completed",
+    "storage_bindings": {
+     "helper": {
+      "display_name": "helper",
+      "private": null,
+      "worker_scope": null
+     },
+     "leader": {
+      "display_name": "leader",
+      "private": null,
+      "worker_scope": null
+     }
+    },
+    "subagent_id": "1eaaa0638b6c453d812536e4c57c2090",
+    "task": "Review with everything"
+   },
+   "c7e238db0c6f4aebb821d74dba544025.json": {
+    "agent_mode": "standard",
+    "caller_agent_name": "leader",
+    "child_agent_name": "helper",
+    "delegation_id": "c7e238db0c6f4aebb821d74dba544025",
+    "depth": 1,
+    "execution_identity": {
+     "account_id": null,
+     "agent_name": "helper",
+     "channel": "matrix",
+     "requester_id": "@alice:example.org",
+     "resolved_thread_id": "$thread",
+     "room_id": "!room:example.org",
+     "session_id": "delegate:leader:helper:c7e238db0c6f4aebb821d74dba544025",
+     "tenant_id": null,
+     "thread_id": "$thread",
+     "transport_agent_name": null
+    },
+    "model_name": "default",
+    "parent_requirement_id": "req-call-a",
+    "parent_tool_call_id": "call-a",
+    "persona": {
+     "kept_knowledge": [],
+     "kept_skills": [],
+     "knowledge": null,
+     "skills": [],
+     "source_kind": "inline",
+     "source_name": "",
+     "system_prompt": "Review the plan carefully.",
+     "tools": [
+      "file"
+     ]
+    },
+    "previous_delegation_id": null,
+    "record_locator": {},
+    "requested_model_name": "default",
+    "result": null,
+    "run_id": "3bbdf707a6bd46e4aeba87b6d0f7853b",
+    "session_id": "delegate:leader:helper:c7e238db0c6f4aebb821d74dba544025",
+    "status": "paused",
+    "storage_bindings": {
+     "helper": {
+      "display_name": "helper",
+      "private": null,
+      "worker_scope": null
+     },
+     "leader": {
+      "display_name": "leader",
+      "private": null,
+      "worker_scope": null
+     }
+    },
+    "subagent_id": "c7e238db0c6f4aebb821d74dba544025",
+    "task": "Review with tools"
+   }
+  }
+ }
+}
