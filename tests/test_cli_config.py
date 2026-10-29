@@ -72,7 +72,9 @@ from tests.providers.golden_support import httpx2_transport, streamed_reply
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-runner = CliRunner()
+# Rich wraps at the width of the terminal running pytest, or 80 columns without one, and `normalize_console_output`
+# rejoins a line wrapped at a space without that space. No output line with a temporary path reaches this width.
+runner = CliRunner(env={"COLUMNS": "1000"})
 
 
 @pytest.fixture(autouse=True)
