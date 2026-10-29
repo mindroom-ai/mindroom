@@ -17839,8 +17839,9 @@ ResponseResult(
 - In `schedule:fired`, omitting `thread_id` posts to `ctx.thread_id`, while an explicit `thread_id=None` posts at room level.
 - A plain send triggers agents only when it would as a normal message, for example when it mentions an agent.
 - `trigger_dispatch=True` sends the message as `source_kind` `"hook_dispatch"`, which agents may answer without a mention, subject to normal permissions and routing.
+- Hook-sent text never runs as a chat command, even when it starts with `!`; agents receive it as conversation.
 - A hook-sent message passes through `message:received` once, skipping the plugin that sent it if the send came from `message:received`.
-  Messages sent by hooks in response to hook-sent messages are still posted, but they skip `message:received` and do not trigger commands or agent replies, which prevents feedback loops.
+  Messages sent by hooks in response to hook-sent messages are still posted, but they skip `message:received` and do not trigger agent replies, which prevents feedback loops.
 
 ### Room state and recent messages
 
@@ -23389,7 +23390,7 @@ Collect everything the backend stored about one conversation into a single JSON 
 The input is the JSON file a MindRoom Chat **Report a bug** message carries, or plain identifiers.
 See [Bug Reports](https://docs.mindroom.chat/bug-reports/) for how users send those reports and how administrators receive them.
 
-The report includes the event journal's turn records, admitted events, and outbound deliveries, the conversation's stored runs of agents, teams, private instances, and system usage, `tracking/tool_calls.jsonl` and its rotations, the LLM request logs, and the `mindroom_*.log` files.
+The report includes the event journal's turn records, message deletions, admitted events, and outbound deliveries, the conversation's stored runs of agents, teams, private instances, and system usage, `tracking/tool_calls.jsonl` and its rotations, the LLM request logs, and the `mindroom_*.log` files.
 Each source lists the files it read under `paths` and has a `status` of `ok`, `missing` (nothing to read there), or `error` with the message under `error`; a source that cannot be read, such as a locked or corrupt database, does not stop the others.
 Successful tool calls and LLM requests are only logged when `debug.log_llm_requests` is enabled.
 Nothing is redacted, and the newest matches are kept: up to 100 runs, 1,000 records per JSONL source, and 2,000 log lines of 4,000 characters each, with `dropped` and `truncated` counting what was left out or shortened.

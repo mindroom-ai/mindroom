@@ -13,15 +13,16 @@ import pytest
 
 from mindroom.cancellation import request_task_cancel
 from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind
-from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
+from mindroom.turn_record import TurnRecord
 from tests.conftest import (
-    journal_edit_regenerator_deps,
+    make_ingress_facts,
     patch_response_runner_module,
     unwrap_extracted_collaborator,
 )
@@ -36,7 +37,6 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.asyncio
-@pytest.mark.ledger_loads_from_disk
 @pytest.mark.parametrize("streaming", [False, True])
 async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: PLR0915
     tmp_path: Path,
@@ -65,7 +65,7 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
     bot.client.room_get_event.side_effect = read_delivered
     target = MessageTarget.resolve(room_id, None, source_id, room_mode=True)
     store = await _store(journal_store, agent_name="general")
-    store.deps = replace(store.deps, state_writer=bot._conversation_state_writer, resolver=bot._conversation_resolver)
+    store.deps = replace(store.deps, state_writer=bot._conversation_state_writer)
     record = TurnRecord.create(
         [source_id],
         response_event_id=answer_id,
@@ -103,8 +103,6 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
         deps=replace(
             gateway.deps,
             outbox=principal,
-            terminal_turn_for=store.terminal_turn_record,
-            terminal_turn_committed=store.publish_completed_turn,
         ),
     )
     runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -114,7 +112,7 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
         runner.deps,
         delivery_gateway=gateway,
         approval_store=principal.approvals,
-        replies=replace(runner.deps.replies, store=principal, complete_turn=store.publish_completed_turn),
+        replies=replace(runner.deps.replies, store=principal),
     )
     runner.inbox.replies = runner.deps.replies
     regenerator = unwrap_extracted_collaborator(bot._edit_regenerator)
@@ -122,7 +120,7 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
         regenerator.deps,
         turn_store=store,
         receipt_order=AsyncMock(return_value=1),
-        **journal_edit_regenerator_deps(bot, principal),
+        store=principal,
     )
     await seed_finished_reply(
         principal,
@@ -161,7 +159,7 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
             nio.MatrixRoom(room_id, bot.matrix_id.full_id),
             event,
             EventInfo.from_event(event.source),
-            "@user:localhost",
+            make_ingress_facts(event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id="@user:localhost"),
         )
         (task,) = runner.inbox._inbox_response_tasks
         try:
@@ -180,9 +178,8 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
                 never_finish.set()
                 request_task_cancel(task, process_shutdown=True)
                 await asyncio.gather(task, return_exceptions=True)
-    _reset_handled_turn_ledger_runtime()
     reopened = await _store(journal_store, agent_name="general")
-    persisted = reopened.get_turn_record(source_id)
+    persisted = await reopened.get_turn_record(source_id)
     assert persisted is not None
     assert persisted.completed
     assert persisted.source_event_revisions == {source_id: (20, edit_id)}

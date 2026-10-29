@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
     from pathlib import Path
 
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.orchestration.config_updates import ConfigUpdatePlan
@@ -127,7 +127,7 @@ class ConfigReloadLifecycle:
     is_running: Callable[[], bool]
     # Reloads run only once startup published its config, so a config always exists here.
     current_config: Callable[[], Config]
-    agent_bots: Callable[[], Mapping[str, AgentBot | TeamBot]]
+    agent_bots: Callable[[], Mapping[str, AgentBot]]
     load_config: Callable[[], ConfigLoad]
     apply_update_plan: Callable[[Config, ConfigUpdatePlan], Awaitable[bool]]
     response_admission_gate: ResponseAdmissionGate

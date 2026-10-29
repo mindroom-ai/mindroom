@@ -42,11 +42,11 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.event_journal import (
         DeliveryAcknowledgement,
+        FinalAnswerEnqueue,
         MatrixDelivery,
         MatrixDeliveryView,
         PermanentDeliveryFailure,
         ProjectedEvent,
-        TerminalTurnWrite,
     )
     from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowEnqueue, ReplyRowRequest, ReplyStore
     from mindroom.llm.provider import ModelRequest, StreamEvent
@@ -121,7 +121,6 @@ class _WatchedOutbox:
         payload: Mapping[str, object],
         result: Mapping[str, object] | None = None,
         edits_event_id: str | None = None,
-        settle_source_event_ids: tuple[str, ...] = (),
         permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Record intent, noting the stage on the timeline first."""
@@ -135,7 +134,33 @@ class _WatchedOutbox:
             payload=payload,
             result=result,
             edits_event_id=edits_event_id,
-            settle_source_event_ids=settle_source_event_ids,
+            permanent_failure_reason=permanent_failure_reason,
+        )
+
+    async def enqueue_final_answer(
+        self,
+        *,
+        delivery_id: str,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+        turn_key: str | None,
+        result: Mapping[str, object] | None = None,
+        event_type: str = "m.room.message",
+        edits_event_id: str | None = None,
+        permanent_failure_reason: str | None = None,
+    ) -> FinalAnswerEnqueue | None:
+        """Record a FINAL answer and its handoff, noting the stage on the timeline first."""
+        self.timeline.append(f"enqueue:{DeliveryStage.FINAL.value}")
+        return await self.inner.enqueue_final_answer(
+            delivery_id=delivery_id,
+            room_id=room_id,
+            thread_id=thread_id,
+            payload=payload,
+            turn_key=turn_key,
+            result=result,
+            event_type=event_type,
+            edits_event_id=edits_event_id,
             permanent_failure_reason=permanent_failure_reason,
         )
 
@@ -216,7 +241,7 @@ class _WatchedOutbox:
         stage: DeliveryStage,
         event_id: str,
         delivered_projections: tuple[ProjectedEvent, ...],
-        terminal_turn: TerminalTurnWrite | None = None,
+        terminal_response_event_id: str | None = None,
     ) -> DeliveryAcknowledgement:
         """Record the Matrix event one claimed delivery produced, and the turn it completes."""
         return await self.inner.acknowledge_matrix_delivery(
@@ -224,7 +249,7 @@ class _WatchedOutbox:
             stage=stage,
             event_id=event_id,
             delivered_projections=delivered_projections,
-            terminal_turn=terminal_turn,
+            terminal_response_event_id=terminal_response_event_id,
         )
 
     async def unacknowledged_matrix_deliveries(

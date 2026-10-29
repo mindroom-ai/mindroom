@@ -1,0 +1,12 @@
+{
+ "$m1": {
+  "anchor_event_id": "$m1",
+  "completed": true,
+  "redacted_source_event_ids": [],
+  "response_event_id": "$r1",
+  "source_event_ids": [
+   "$m1"
+  ],
+  "timestamp": 1799913600.0
+ }
+}

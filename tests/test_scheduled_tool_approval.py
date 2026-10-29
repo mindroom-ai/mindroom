@@ -42,6 +42,7 @@ from mindroom.event_journal import (
     approval_arguments_digest,
     scheduled_call_run_id,
 )
+from mindroom.event_journal.identity import journal_principal_id
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
@@ -223,7 +224,7 @@ async def _armed(manager: ApprovalManager, *, scope: str | None = None) -> None:
 
 async def _ordinary_card(journal: EventJournalStore, manager: ApprovalManager, name: str) -> ApprovalContinuation:
     """Pause one agent run on a gated call made directly, which asks for approval the ordinary way."""
-    responder = journal.principal("agent@" + _AGENT)
+    responder = journal.principal(journal_principal_id("agent", _AGENT))
     await responder.admit(
         InboundEvent(
             event_id="$source-" + name,

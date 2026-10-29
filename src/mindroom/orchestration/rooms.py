@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
     import nio
 
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.room_reconciliation import RoomStateSnapshot
@@ -115,7 +115,7 @@ class RoomSetup:
     router_client: Callable[[], nio.AsyncClient | None]
     refresh_agent_reply_memberships: Callable[[], Awaitable[None]]
 
-    async def setup(self, bots: list[AgentBot | TeamBot]) -> None:
+    async def setup(self, bots: list[AgentBot]) -> None:
         """Setup rooms and ensure all bots have correct memberships.
 
         This shared flow is used during both initial startup and config updates.
@@ -231,7 +231,7 @@ class RoomSetup:
 
         logger.info("Ensured room invitations for all configured responders and authorized users")
 
-    def resolve_aliases(self, bots: list[AgentBot | TeamBot], config: Config) -> None:
+    def resolve_aliases(self, bots: list[AgentBot], config: Config) -> None:
         """Resolve currently known room aliases into each bot's configured room IDs."""
         for bot in bots:
             room_aliases = get_rooms_for_entity(bot.agent_name, config)

@@ -381,9 +381,7 @@ def _patch_orchestrator_plugin_update_test_runtime(monkeypatch: pytest.MonkeyPat
     )
     monkeypatch.setattr("mindroom.orchestration.entity_fleet.EntityFleet.start_sync", _noop_start_sync)
     monkeypatch.setattr("mindroom.bot.AgentBot.start", _noop_start)
-    monkeypatch.setattr("mindroom.bot.TeamBot.start", _noop_start)
     monkeypatch.setattr("mindroom.bot.AgentBot.stop", _noop_stop)
-    monkeypatch.setattr("mindroom.bot.TeamBot.stop", _noop_stop)
 
 
 @pytest.mark.asyncio
@@ -3322,7 +3320,7 @@ async def test_team_room_changes_on_config_reload(
 @pytest.mark.asyncio
 @pytest.mark.requires_matrix  # This test requires a real Matrix server or extensive mocking
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
+async def test_orchestrator_handles_config_reload(
     initial_config: Config,
     updated_config: Config,
     monkeypatch: pytest.MonkeyPatch,
@@ -3353,8 +3351,6 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
 
     monkeypatch.setattr("mindroom.bot.AgentBot.start", mock_start)
     monkeypatch.setattr("mindroom.bot.AgentBot.sync_forever", AsyncMock())
-    monkeypatch.setattr("mindroom.bot.TeamBot.start", mock_start)
-    monkeypatch.setattr("mindroom.bot.TeamBot.sync_forever", AsyncMock())
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
     monkeypatch.setattr("mindroom.orchestration.rooms.RoomSetup.setup", AsyncMock())
 
@@ -3384,9 +3380,8 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
             self.client = AsyncMock()
             self.client.user_id = self.agent_user.user_id
 
-    # Patch AgentBot.start and TeamBot.start to use our mock
+    # Patch AgentBot.start to use our mock
     monkeypatch.setattr("mindroom.bot.AgentBot.start", mock_start_with_thread_manager)
-    monkeypatch.setattr("mindroom.bot.TeamBot.start", mock_start_with_thread_manager)
 
     # Mock bot operations for update
     for bot in orchestrator.agent_bots.values():

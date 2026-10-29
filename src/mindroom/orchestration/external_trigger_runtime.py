@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
 
@@ -27,7 +27,7 @@ class ExternalTriggerRuntimeCoordinator:
     def bind_if_ready(
         self,
         config: Config | None,
-        bots: Mapping[str, AgentBot | TeamBot],
+        bots: Mapping[str, AgentBot],
     ) -> None:
         """Bind trigger delivery runtime after router is running."""
         if not self.api_enabled:
@@ -75,7 +75,7 @@ class ExternalTriggerRuntimeCoordinator:
     async def _is_ready(
         self,
         snapshot: TriggerDeliverySnapshot,
-        bots: Mapping[str, AgentBot | TeamBot],
+        bots: Mapping[str, AgentBot],
     ) -> bool:
         """Return whether router and target clients are currently joined to one trigger room."""
         if not snapshot.enabled:

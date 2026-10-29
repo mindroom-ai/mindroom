@@ -27,7 +27,6 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_source import HOOK_DISPATCH_SOURCE_KIND, SCHEDULED_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.conversation_reads import ConversationReader, ThreadReadMode
@@ -35,8 +34,10 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.router_relay import execute_router_relay
 from mindroom.session_ids import create_session_id
 from mindroom.streaming import StreamingResponse, send_streaming_response
+from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -479,7 +480,8 @@ class TestRouterHandoffThreadMode:
                 new_callable=AsyncMock,
             ) as mock_get_latest,
         ):
-            await bot._turn_controller._execute_router_relay(
+            await execute_router_relay(
+                bot._turn_dispatcher.deps,
                 room,
                 self._routing_event(),
                 [],
@@ -517,7 +519,8 @@ class TestRouterHandoffThreadMode:
                 return_value="$latest",
             ) as mock_get_latest,
         ):
-            await bot._turn_controller._execute_router_relay(
+            await execute_router_relay(
+                bot._turn_dispatcher.deps,
                 room,
                 self._routing_event(),
                 [],
@@ -1407,6 +1410,7 @@ class TestCommandThreadContextRoomMode:
                 command=command,
                 target=MessageTarget.resolve(room.room_id, None, event.event_id, room_mode=True),
                 handled_turn=TurnRecord.create([event.event_id]),
+                acts_for_requester=False,
             )
 
         assert mock_schedule.await_args.kwargs["thread_id"] is None
@@ -1467,6 +1471,7 @@ class TestCommandThreadContextRoomMode:
                 command=command,
                 target=stable_target,
                 handled_turn=TurnRecord.create([event.event_id]),
+                acts_for_requester=False,
             )
 
         assert mock_schedule.await_args.kwargs["thread_id"] == "$stable_thread"

@@ -48,7 +48,7 @@ from mindroom.scheduling.tasks import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ScheduledApprovalArmState
@@ -58,7 +58,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-type _Bot = AgentBot | TeamBot
 
 # How often a runner checks whether its owner runs again.
 _OWNER_POLL_INTERVAL_SECONDS = 1.0
@@ -77,13 +76,13 @@ class ScheduledTaskRuntime:
 
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
-    bots: Callable[[], Mapping[str, _Bot]]
+    bots: Callable[[], Mapping[str, AgentBot]]
     # The router-backed admin helper that schedule hooks receive.
     matrix_admin: Callable[[], HookMatrixAdmin | None]
     _runners: dict[str, tuple[_TaskRunner, asyncio.Task[None]]] = field(default_factory=dict, init=False)
     # Bots that are stopping; a replacement bot is a new object and is never fenced.
-    _fenced: weakref.WeakSet[_Bot] = field(default_factory=weakref.WeakSet, init=False)
-    _in_flight: dict[_Bot, int] = field(default_factory=dict, init=False)
+    _fenced: weakref.WeakSet[AgentBot] = field(default_factory=weakref.WeakSet, init=False)
+    _in_flight: dict[AgentBot, int] = field(default_factory=dict, init=False)
     _operation_ended: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _stopping: bool = field(default=False, init=False)
 
@@ -118,7 +117,7 @@ class ScheduledTaskRuntime:
         if running is not None:
             running[1].cancel()
 
-    async def restore_room(self, bot: _Bot, room_id: str) -> int:
+    async def restore_room(self, bot: AgentBot, room_id: str) -> int:
         """Start runners for the pending tasks this bot owns in a room it joined; return how many started.
 
         A task whose owner is no longer configured is failed by any restoring bot
@@ -137,7 +136,7 @@ class ScheduledTaskRuntime:
             logger.info("restored_scheduled_tasks", agent=bot.agent_name, room_id=room_id, restored_task_count=restored)
         return restored
 
-    async def _restore_room(self, bot: _Bot, client: nio.AsyncClient, room_id: str) -> int:
+    async def _restore_room(self, bot: AgentBot, client: nio.AsyncClient, room_id: str) -> int:
         response = await client.room_get_state(room_id)
         if not isinstance(response, nio.RoomGetStateResponse):
             logger.warning("scheduled_task_room_state_unread", room_id=room_id, error=str(response))
@@ -179,7 +178,7 @@ class ScheduledTaskRuntime:
 
     async def _restore_task(
         self,
-        bot: _Bot,
+        bot: AgentBot,
         client: nio.AsyncClient,
         task: ScheduledTaskRecord,
         config: Config,
@@ -248,7 +247,7 @@ class ScheduledTaskRuntime:
                 timeout_seconds=SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS,
             )
 
-    async def _fail_owner_removed_task(self, bot: _Bot, room_id: str, task_id: str, owner: str) -> None:
+    async def _fail_owner_removed_task(self, bot: AgentBot, room_id: str, task_id: str, owner: str) -> None:
         """Mark one pending task failed because its owner was removed, and say so where it posts; log any failure."""
         client = bot.client
         assert client is not None
@@ -299,7 +298,7 @@ class ScheduledTaskRuntime:
                 entities=sorted(bot.agent_name for bot in bots if bot in self._in_flight),
             )
 
-    def _is_fenced(self, bot: _Bot) -> bool:
+    def _is_fenced(self, bot: AgentBot) -> bool:
         """Return whether this bot is stopping, so its operations may have lost their client."""
         return bot in self._fenced
 
@@ -313,7 +312,7 @@ class ScheduledTaskRuntime:
         await asyncio.gather(*cancelled, return_exceptions=True)
 
     @asynccontextmanager
-    async def operation(self, entity_name: str) -> AsyncIterator[tuple[_Bot, nio.AsyncClient]]:
+    async def operation(self, entity_name: str) -> AsyncIterator[tuple[AgentBot, nio.AsyncClient]]:
         """Use one entity's bot and client for Matrix work once it runs, has synced, and is not stopping."""
         while True:
             bot = self._ready_bot(entity_name)
@@ -349,14 +348,14 @@ class ScheduledTaskRuntime:
         router = self.bots().get(ROUTER_AGENT_NAME)
         return None if router is None else router.client
 
-    def _ready_bot(self, entity_name: str) -> _Bot | None:
+    def _ready_bot(self, entity_name: str) -> AgentBot | None:
         bot = self.bots().get(entity_name)
         if bot is None or bot in self._fenced or not bot.running or not bot.first_sync_complete or bot.client is None:
             return None
         return bot
 
     @contextmanager
-    def _tracked(self, bot: _Bot) -> Iterator[None]:
+    def _tracked(self, bot: AgentBot) -> Iterator[None]:
         self._in_flight[bot] = self._in_flight.get(bot, 0) + 1
         try:
             yield

@@ -7,7 +7,7 @@ from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from tests.conftest import unwrap_extracted_collaborator
 
 if TYPE_CHECKING:
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.event_journal import MatrixDeliveryView, PrincipalStore
     from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowEnqueue, ReplyRowRequest
 
@@ -50,7 +50,7 @@ class _DirectResponseOutbox:
         return await self.inner.enqueue_reply_row(request, prepared)
 
 
-def install_direct_response_admission(bot: "AgentBot | TeamBot") -> None:
+def install_direct_response_admission(bot: "AgentBot") -> None:
     """Opt a direct-runner fixture into the admission normally provided by ingress.
 
     Existing admissions remain untouched, including conflicting room/epoch facts.

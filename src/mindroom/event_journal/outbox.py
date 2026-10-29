@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.interactive_models import INTERACTIVE_PROMPT_KEY
 
-from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
+from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id, matrix_user_of_principal
 from .membership_state import claim_membership_epoch
 from .models import DURABLE_DELIVERY_ID_KEY, DeliveryStage, MatrixDelivery, ReplyRowFacts, UnreadableMatrixDelivery
 
@@ -687,7 +687,7 @@ def event_belongs_to_membership(
     """Return whether a delivery event belongs to this room membership."""
     delivery: Row | None = None
     delivery_identity = _delivery_identity(content)
-    sender_owns_principal = principal_id.endswith(f"@{sender}")
+    sender_owns_principal = matrix_user_of_principal(principal_id) == sender
     if delivery_identity is not None and sender_owns_principal:
         marked_principal, delivery_id, stage = delivery_identity
         if marked_principal == principal_id:

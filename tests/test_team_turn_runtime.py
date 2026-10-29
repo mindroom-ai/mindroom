@@ -73,7 +73,7 @@ from tests.approval_continuation_helpers import (
     repeats_each_request,
     request_call_ids,
 )
-from tests.bot_helpers import make_test_agent_bot, make_test_team_bot, unique_room_send_responses
+from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_PASSWORD,
     handle_card_response_for_test,
@@ -107,6 +107,7 @@ from tests.team_turn_helpers import (
 from tests.teams.squad import member as squad_member
 from tests.test_tool_hooks import _plugin
 from tests.tool_job_helpers import saved_jobs, tool_job_runtime
+from tests.turn_dispatch_helpers import nothing_else_queued
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
@@ -2792,8 +2793,7 @@ def _team_bot(team: TeamTurn, tmp_path: Path, entity: str = "squad") -> AgentBot
     A completed reply would otherwise queue a thread summary on the config's real ``default`` model. An agent
     ``entity`` builds that agent's bot instead, which runs a team request as an ad hoc team.
     """
-    make_bot = make_test_team_bot if entity in team.config.teams else make_test_agent_bot
-    bot = make_bot(
+    bot = make_test_agent_bot(
         AgentMatrixUser(
             agent_name=entity,
             password=TEST_PASSWORD,
@@ -2902,6 +2902,7 @@ async def test_an_ad_hoc_team_turn_is_dated_in_the_zone_of_the_agent_whose_bot_r
             for event_id, body, timestamp_ms in (messages if coalesced else messages[1:])
         ],
         timestamp_formatter=bot._coalescing_gate._timestamp_formatter,
+        queues_other_run=nothing_else_queued,
     )
     assert batch.current_prompt_is_structured is coalesced
     request = _request(batch.event.body)

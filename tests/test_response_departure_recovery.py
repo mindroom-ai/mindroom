@@ -10,12 +10,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
-from mindroom.handled_turns import TurnRecord
 from mindroom.response_runner import ResponseRunner
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
+from mindroom.turn_record import TurnRecord
+from mindroom.turn_store import TurnClaim
 from tests.journal_membership_helpers import admit_room_membership
-from tests.test_response_delivery_gateway import _response_recovery_bot
-from tests.test_turn_store import _store
+from tests.test_turn_store import _in_room, _store
 
 if TYPE_CHECKING:
     from mindroom.event_journal import EventJournalStore
@@ -48,25 +48,23 @@ async def test_departure_during_generation_allows_orderly_shutdown(
     sources = ("$first", "$second")
     for source_id in sources:
         await principal.admit(_source(source_id))
-    turn = TurnRecord.create(sources)
+    turn = _in_room(TurnRecord.create(sources), ROOM)
     turn_store = await _store(journal_store, agent_name="agent")
     await turn_store.record_pending_turn(turn)
-    bot = _response_recovery_bot(journal_store, turn_store)
     runner = ResponseRunner(deps=MagicMock())
     generating = asyncio.Event()
+    claim = await turn_store.claim(turn)
+    assert isinstance(claim, TurnClaim)
 
     async def generate() -> None:
-        assert turn_store.try_claim_turn(turn)
         generating.set()
-        try:
-            await asyncio.Event().wait()
-        finally:
-            turn_store.release_pending_turn_claim(turn)
+        await asyncio.Event().wait()
 
     response = runner.inbox.track_inbox_response(
         generate(),
         name="generation_during_departure",
-        recovery_proof_ready=lambda: bot._response_recovery_ready(turn),
+        recovery_proof_ready=lambda: turn_store.response_recovery_ready(turn),
+        claim=claim,
         source_event_ids=sources,
         room_id=ROOM,
     )
@@ -102,10 +100,9 @@ async def test_departure_proof_rejects_unexplained_or_inexact_sources(
     principal = journal_store.principal("agent@alice")
     await admit_room_membership(principal, ROOM, "join")
     await principal.admit(_source("$source"))
-    turn = TurnRecord.create(["$source"])
+    turn = _in_room(TurnRecord.create(["$source"]), ROOM)
     turn_store = await _store(journal_store, agent_name="agent")
     await turn_store.record_pending_turn(turn)
-    bot = _response_recovery_bot(journal_store, turn_store)
     await principal.settle("$source")
     if case == "other_room":
         await admit_room_membership(principal, "!other:localhost", "join")
@@ -118,11 +115,14 @@ async def test_departure_proof_rejects_unexplained_or_inexact_sources(
         await principal.admit(_source("$current", "!current:localhost"))
         await principal.settle("$current")
         turn = TurnRecord.create(["$source", "$current"])
-    elif case == "live_claim":
-        assert turn_store.try_claim_turn(turn)
+    claim = None
+    if case == "live_claim":
+        claim = await turn_store.claim(turn)
+        assert isinstance(claim, TurnClaim)
     elif case == "no_anchor":
         turn = replace(turn, anchor_event_id=None)
     try:
-        assert await bot._response_recovery_ready(turn) is False
+        assert await turn_store.response_recovery_ready(turn) is False
     finally:
-        turn_store.release_pending_turn_claim(turn)
+        if claim is not None:
+            claim.release()

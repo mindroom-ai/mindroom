@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, cast
-from unittest.mock import DEFAULT, AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 
@@ -30,7 +30,6 @@ from mindroom.dispatch_source import (
 )
 from mindroom.event_journal import EventClass, EventKind
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EnrichmentItem,
@@ -47,6 +46,7 @@ from mindroom.response_runner import (
 )
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
+from mindroom.turn_record import SourceEventMetadata, TurnRecord, canonicalize_turn_record
 from tests.access_schema_support import with_current_room_member_access
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
@@ -55,7 +55,7 @@ from tests.conftest import (
     drain_coalescing,
     make_matrix_client_mock,
     message_origin,
-    replace_turn_controller_deps,
+    replace_turn_deps,
     runtime_paths_for,
     test_runtime_paths,
     unwrap_extracted_collaborator,
@@ -66,9 +66,9 @@ from tests.identity_helpers import entity_ids, persist_entity_accounts
 from tests.journal_helpers import admit_dispatch_event
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.coalescing.gate import ReadyPendingEvent
     from mindroom.config.knowledge import KnowledgeBaseConfig
     from mindroom.conversation_resolver import MessageContext
@@ -92,15 +92,6 @@ def make_test_agent_bot(*args: Any, **kwargs: Any) -> AgentBot:  # noqa: ANN401
             membership_sync.memberships if membership_sync is not None else AgentReplyMembershipIndex()
         )
     return RuntimeAgentBot(*args, **kwargs)
-
-
-def make_test_team_bot(*args: Any, **kwargs: Any) -> TeamBot:  # noqa: ANN401
-    """Build a standalone test team bot with an explicit real membership index."""
-    from mindroom.agent_reply_membership import AgentReplyMembershipIndex  # noqa: PLC0415
-    from mindroom.bot import TeamBot as RuntimeTeamBot  # noqa: PLC0415
-
-    kwargs.setdefault("agent_reply_memberships", AgentReplyMembershipIndex())
-    return RuntimeTeamBot(*args, **kwargs)
 
 
 def _stream_outcome(
@@ -195,7 +186,7 @@ def _handled_response_event_id(outcome: FinalDeliveryOutcome | str | None) -> st
 
 def _assert_ready_voice_text_fallback(ready_event: ReadyPendingEvent | None) -> None:
     assert ready_event is not None
-    assert ready_event.pending_event.event.source_kind == VOICE_SOURCE_KIND
+    assert ready_event.pending_event.facts.source_kind == VOICE_SOURCE_KIND
     assert isinstance(ready_event.pending_event.event, PreparedIngress)
     assert ready_event.pending_event.event.body == "🎤 [Attached voice message]"
     assert ready_event.pending_event.event.source["content"][VOICE_RAW_AUDIO_FALLBACK_KEY] is True
@@ -217,7 +208,7 @@ async def _run_orchestrator_start_until_ready(
     def mark_ready() -> None:
         ready.set()
 
-    def start_sync_and_publish_router_readiness(bots: list[AgentBot | TeamBot]) -> None:
+    def start_sync_and_publish_router_readiness(bots: list[AgentBot]) -> None:
         # Stand in for the router's first sync, which publishes its reply memberships.
         start_sync(bots)
         if any(bot.agent_name == ROUTER_AGENT_NAME for bot in bots):
@@ -259,7 +250,7 @@ def owned_matrix_login(client: object, session: object | None = None) -> SimpleN
 def _wrap_extracted_collaborators(bot: AgentBot) -> AgentBot:
     """Wrap frozen extracted collaborators so tests can patch their methods."""
     wrapped_bot = wrap_extracted_collaborators(bot)
-    replace_turn_controller_deps(
+    replace_turn_deps(
         wrapped_bot,
         resolver=wrapped_bot._conversation_resolver,
         normalizer=wrapped_bot._inbound_turn_normalizer,
@@ -281,44 +272,46 @@ def _replace_turn_policy_deps(bot: AgentBot, **changes: object) -> TurnPolicy:
     return shared_replace_turn_policy_deps(bot, **changes)
 
 
-def _turn_store(bot: AgentBot | TeamBot) -> TurnStore:
+def _turn_store(bot: AgentBot) -> TurnStore:
     """Return the real turn store behind one wrapped bot."""
     return unwrap_extracted_collaborator(bot._turn_store)
 
 
-def _set_turn_store_tracker(bot: AgentBot | TeamBot, tracker: MagicMock) -> MagicMock:
-    """Swap the private handled-turn ledger behind one turn store for test assertions."""
-    stored_records: dict[str, TurnRecord] = {}
-    tracker.get_turn_record.return_value = None
-    # Records written through the tracker read back unless a test pins the read.
-    tracker.get_turn_record.side_effect = lambda event_id: stored_records.get(event_id, DEFAULT)
-    tracker.has_responded.return_value = False
+def _stored_facts(record: TurnRecord) -> TurnRecord:
+    """Return a turn's facts as a test writes them: without its storage identity or materialized attribution.
 
-    async def update_handled_turn(
-        lookup_event_ids: Sequence[str],
-        update: Callable[[Mapping[str, TurnRecord]], TurnRecord],
-    ) -> TurnRecord:
-        existing_records = {
-            source_event_id: turn_record
-            for source_event_id in lookup_event_ids
-            if isinstance(
-                (turn_record := tracker.get_turn_record(source_event_id)),
-                TurnRecord,
-            )
-            or isinstance((turn_record := stored_records.get(source_event_id)), TurnRecord)
-        }
-        turn_record = update(existing_records)
-        for source_event_id in turn_record.indexed_event_ids:
-            stored_records[source_event_id] = turn_record
-        if turn_record.completed:
-            tracker.record_handled_turn(turn_record)
-        else:
-            tracker.record_pending_turn(turn_record)
-        return turn_record
+    The store names every one-source turn's sender (its requester when the write
+    named none) and always reads back a sender map; a test's expected turn
+    usually names neither.
+    """
+    metadata = record.source_event_metadata
+    sources = record.source_event_ids
+    inferred = len(sources) == 1 and metadata == {sources[0]: SourceEventMetadata(record.requester_id or "")}
+    return canonicalize_turn_record(
+        record,
+        turn_key=None,
+        source_event_metadata=None if metadata == {} or inferred else metadata,
+    )
 
-    tracker.update_handled_turn.side_effect = update_handled_turn
-    _turn_store(bot)._ledger = tracker
-    return tracker
+
+async def assert_turn_answered(bot: AgentBot, expected: TurnRecord) -> None:
+    """Assert the bot's turn store holds ``expected`` answered, as its terminal write recorded it."""
+    stored = await _turn_store(bot).get_turn_record(expected.source_event_ids[0])
+    assert stored is not None, f"no turn recorded for {expected.source_event_ids}"
+    assert stored.completed, f"turn {stored.source_event_ids} is not answered"
+    assert _stored_facts(stored) == _stored_facts(expected)
+
+
+async def assert_no_turn_answered(bot: AgentBot) -> None:
+    """Assert the bot's agent has recorded no turn answered."""
+    store = _turn_store(bot)
+    rows = await store.deps.turn_records.read(
+        lambda transaction, agent_name: transaction.fetchall(
+            "SELECT turn_key FROM turns WHERE agent_name = ? AND completed",
+            (agent_name,),
+        ),
+    )
+    assert not rows, "a turn was recorded answered"
 
 
 def _set_knowledge_for_agent(bot: AgentBot, knowledge_for_agent: MagicMock) -> MagicMock:
@@ -369,7 +362,7 @@ def _matrix_room(
 
 
 def _policy_dispatch(
-    bot: AgentBot | TeamBot,
+    bot: AgentBot,
     room: nio.MatrixRoom,
     context: MessageContext,
     requester_user_id: str,
@@ -509,7 +502,7 @@ def _fake_indexing_settings(base_id: str) -> IndexingSettings:
 
 
 def _configured_team_test_config(runtime_root: Path) -> Config:
-    """Return a runtime-bound config with one configured team for TeamBot tests."""
+    """Return a runtime-bound config with one configured team for team bot tests."""
     return _runtime_bound_config(
         with_current_room_member_access(
             Config(
@@ -533,7 +526,7 @@ def _configured_team_test_config(runtime_root: Path) -> Config:
 
 
 def _configured_team_user(config: Config, runtime_paths: RuntimePaths) -> AgentMatrixUser:
-    """Return the Matrix user for the configured TeamBot test team."""
+    """Return the Matrix user for the configured test team."""
     team_name = "support_team"
     ids = entity_ids(config, runtime_paths)
     team_config = config.teams[team_name]

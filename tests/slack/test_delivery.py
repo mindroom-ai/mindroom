@@ -1068,6 +1068,8 @@ async def test_slack_turn_reaches_the_agent_with_its_hook_source_and_requester(h
             matrix_id=matrix_id,
             turn_store=MagicMock(),
             turn_policy=MagicMock(),
+            wait_for_admission_or_shutdown=AsyncMock(return_value=True),
+            settle_ignored_sources=AsyncMock(),
         ),
     )
     resolver = ConversationResolver(
@@ -1082,14 +1084,14 @@ async def test_slack_turn_reaches_the_agent_with_its_hook_source_and_requester(h
         ),
     )
 
-    requester_id = validator.requester_user_id(sender=matrix_id.full_id, source=event.source)
-    envelope = resolver.build_ingress_envelope(
+    facts = validator.classify(event)
+    envelope = resolver.build_envelope(
         event=event,
-        requester_user_id=requester_id,
+        facts=facts,
         target=MessageTarget.resolve(room_id, None, event.event_id),
     )
 
-    assert requester_id == requester
+    assert facts.run_requester_id == requester
     assert envelope.requester_id == requester
     assert envelope.hook_source == hook_source
     assert envelope.source_kind == "hook_dispatch"

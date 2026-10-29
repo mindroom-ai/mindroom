@@ -42,7 +42,6 @@ from mindroom.reply_presentation import (
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, ResponsePausedForApproval
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.turn_store import TurnStore
 from tests.approval_continuation_helpers import dispatch_approval
 from tests.conftest import (
     initialize_approval_store_for_test,
@@ -168,11 +167,9 @@ async def _respond(
 def _journal_wakes(bot: AgentBot) -> Iterator[list[tuple[str, ...]]]:
     """Collect the sources the reply records hand back to the journal, which these tests do not run."""
     wakes: list[tuple[str, ...]] = []
-    with patch.object(
-        bot._journal_dispatcher,
-        "retry_turn_sources",
-        side_effect=lambda _room_id, sources: wakes.append(sources),
-    ):
+    replies = unwrap_extracted_collaborator(bot._response_runner).deps.replies
+    assert replies is not None
+    with patch.object(replies, "retry_sources", side_effect=lambda _room_id, sources: wakes.append(sources)):
         yield wakes
 
 
@@ -210,14 +207,13 @@ async def test_a_finished_approval_records_its_turn_answered(tmp_path: Path) -> 
     """Finishing the continuation settles the turn's sources through the reply path, which records the turn answered."""
     async with _approval_bot(tmp_path, requires_human=False) as bot:
         await _pending_turn(bot)
-        with patch.object(TurnStore, "terminal_turn_record", return_value=None):
-            await _respond(bot, resume=AsyncMock(return_value=CompletedApprovalRun("Approved answer.", {})))
+        await _respond(bot, resume=AsyncMock(return_value=CompletedApprovalRun("Approved answer.", {})))
 
         assert await bot.journal_principal().approvals.approval_continuation_for_source("$event") is None
-        record = bot._turn_store.get_turn_record("$event")
+        record = await bot._turn_store.get_turn_record("$event")
         assert record is not None
         assert record.completed
-        assert bot._turn_store.is_handled("$event")
+        assert await bot._turn_store.is_handled(_target().room_id, "$event")
 
 
 async def test_a_pause_waiting_for_a_human_leaves_the_reply_paused(tmp_path: Path) -> None:
@@ -329,8 +325,8 @@ async def _send_message(bot: AgentBot, event_id: str, body: str, *, thread_id: s
             source={},
         ),
     )
-    await bot._turn_controller.handle_text_event(room, message)
-    await wait_for_background_tasks(timeout=5.0, owner=bot._turn_controller.deps.runtime)
+    await bot._turn_ingress.handle_text_event(room, message)
+    await wait_for_background_tasks(timeout=5.0, owner=bot._turn_ingress.deps.runtime)
 
 
 def _reactions(bot: AgentBot) -> list[dict[str, str]]:

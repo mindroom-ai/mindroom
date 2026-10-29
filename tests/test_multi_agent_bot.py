@@ -28,7 +28,6 @@ from mindroom.event_journal import (
     IngestionRecordDisposition,
     RoomMembershipPosition,
 )
-from mindroom.handled_turns import TurnRecord
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.state import MatrixState
@@ -41,15 +40,17 @@ from mindroom.orchestrator import (
     _MultiAgentOrchestrator,
 )
 from mindroom.startup_errors import PermanentStartupError
+from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import (
     AgentBotTestBase,
     _make_matrix_client_mock,
     _runtime_bound_config,
-    _set_turn_store_tracker,
     _turn_store,
     _visible_message,
     _wrap_extracted_collaborators,
+    assert_no_turn_answered,
+    assert_turn_answered,
     make_mock_agent_user,
     make_test_agent_bot,
     unique_room_send_responses,
@@ -322,7 +323,7 @@ class TestAgentBot(AgentBotTestBase):
         assert bot._tool_runtime_support.matrix_id.full_id == actual_user_id
         assert bot._response_runner.deps.matrix_full_id == actual_user_id
         assert bot._turn_policy.deps.matrix_id.full_id == actual_user_id
-        assert bot._turn_controller.deps.matrix_id.full_id == actual_user_id
+        assert bot._turn_ingress.deps.matrix_id.full_id == actual_user_id
         mock_client.add_event_callback.assert_called_once_with(
             bot._on_invite_before_sync_certification,
             nio.InviteEvent,
@@ -1143,7 +1144,9 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = AsyncMock()
 
         mock_room = MagicMock()
+        mock_room.room_id = "!test:localhost"
         mock_event = MagicMock()
+        mock_event.event_id = "$hello"
         mock_event.sender = "@user:localhost"
         mock_event.body = "Hello everyone!"
         mock_event.source = {"content": {"body": "Hello everyone!"}}
@@ -1371,8 +1374,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        tracker = _set_turn_store_tracker(bot, MagicMock())
-        tracker.has_responded.return_value = False
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
@@ -1386,11 +1387,9 @@ class TestAgentBot(AgentBotTestBase):
             await self._invoke_handler(bot, handler_name, room, event)
 
         if marks_responded:
-            tracker.record_handled_turn.assert_called_once_with(
-                TurnRecord.create([event.event_id]),
-            )
+            await assert_turn_answered(bot, TurnRecord.create([event.event_id]))
         else:
-            tracker.record_handled_turn.assert_not_called()
+            await assert_no_turn_answered(bot)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1421,8 +1420,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        tracker = _set_turn_store_tracker(bot, MagicMock())
-        tracker.has_responded.return_value = False
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
@@ -1449,7 +1446,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch.object(bot._turn_policy, "can_reply_to_sender_in_room", return_value=False),
             patch.object(
-                bot._turn_controller.deps.turn_policy,
+                bot._turn_ingress.deps.turn_policy,
                 "can_reply_to_sender_in_room",
                 return_value=False,
             ),
@@ -1457,11 +1454,9 @@ class TestAgentBot(AgentBotTestBase):
             await self._invoke_handler(bot, handler_name, room, event)
 
         if marks_responded:
-            tracker.record_handled_turn.assert_called_once_with(
-                TurnRecord.create([event.event_id]),
-            )
+            await assert_turn_answered(bot, TurnRecord.create([event.event_id]))
         else:
-            tracker.record_handled_turn.assert_not_called()
+            await assert_no_turn_answered(bot)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
@@ -1682,7 +1677,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = AsyncMock()
 
         # Mark an event as already responded
-        await _turn_store(bot).record_turn(TurnRecord.create(["event123"]))
+        await _turn_store(bot).record_turn(TurnRecord.create(["event123"]), room_id="!test:localhost")
 
         # Create mock room and event
         mock_room = MagicMock()

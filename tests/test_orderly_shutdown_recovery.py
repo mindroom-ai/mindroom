@@ -15,9 +15,9 @@ from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.cancellation import current_task_is_process_shutdown
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
+from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.event_journal.opening import OpenEventJournal
-from mindroom.handled_turns import _reset_handled_turn_ledger_runtime
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.event_info import EventInfo
@@ -32,7 +32,7 @@ from mindroom.runtime_shutdown import (
     RuntimeShutdownIntent,
 )
 from mindroom.session_storage.agent_storage import create_state_storage
-from tests.conftest import install_bots, unwrap_extracted_collaborator
+from tests.conftest import install_bots, make_ingress_facts, unwrap_extracted_collaborator
 from tests.journal_helpers import admit_dispatch_event
 from tests.response_runner_helpers import _bot, _plain_request, _target
 from tests.test_edit_regenerator import (
@@ -46,7 +46,6 @@ from tests.test_edit_regenerator import (
     _turn_record,
 )
 from tests.test_response_attempt import _Span
-from tests.test_response_delivery_gateway import _response_recovery_bot
 from tests.test_turn_store import _store, _store_with_storage
 
 if TYPE_CHECKING:
@@ -56,7 +55,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal import EventJournalStore, PrincipalStore
     from mindroom.response_runner import ResponseRequest
 
-pytestmark = [pytest.mark.ledger_loads_from_disk, pytest.mark.usefixtures("enforce_turn_authorization")]
+pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
 
 def _dispatcher(
@@ -139,7 +138,7 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
             room,
             event,
             EventInfo.from_event(event.source),
-            USER_ID,
+            make_ingress_facts(event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id=USER_ID),
         )
         return TurnDispatchOutcome.DEFERRED if handed_off else TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
@@ -163,7 +162,7 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     await asyncio.gather(*harness.regenerations, return_exceptions=True)
 
     assert await principal.is_pending(EDIT_EVENT_ID)
-    interrupted = store.get_turn_record(ORIGINAL_EVENT_ID)
+    interrupted = await store.get_turn_record(ORIGINAL_EVENT_ID)
     assert interrupted is not None
     # The turn took the edit when its regeneration claimed the reply.
     assert interrupted.source_event_revisions == {ORIGINAL_EVENT_ID: (1_000_001, EDIT_EVENT_ID)}
@@ -177,9 +176,8 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     recovered = _dispatcher(principal, callback, source_has_live_owner=regenerating)
     assert await recovered.drain_once() == 1
     await asyncio.gather(*harness.regenerations)
-    _reset_handled_turn_ledger_runtime()
     reopened = await _store(journal_store, agent_name=AGENT_NAME)
-    recovered_record = reopened.get_turn_record(ORIGINAL_EVENT_ID)
+    recovered_record = await reopened.get_turn_record(ORIGINAL_EVENT_ID)
     assert recovered_record is not None
     assert recovered_record.completed
     assert recovered_record.response_event_id == NEW_RESPONSE_EVENT_ID
@@ -310,8 +308,7 @@ async def test_recovery_proof_rejects_settlement_without_final_output(journal_st
         ),
     )
     await principal.settle("$missing-output")
-    proof_owner = _response_recovery_bot(journal_store, store)
-    assert not await proof_owner._response_recovery_ready(record)
+    assert not await store.response_recovery_ready(record)
 
 
 @pytest.mark.asyncio

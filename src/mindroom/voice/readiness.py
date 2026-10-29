@@ -65,7 +65,7 @@ def _text_only_fallback(event: AudioMessageEvent, *, thread_id: str | None) -> P
         body=body,
         source=source,
         server_timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
-        source_kind_override=VOICE_SOURCE_KIND,
+        payload_trusted=True,
     )
 
 
@@ -78,10 +78,10 @@ class VoiceReadiness:
     visible_echo: VisibleVoiceEchoLifecycle
     logger: structlog.stdlib.BoundLogger
 
-    def prepared_source(self, source_event_id: str) -> PreparedVoiceSource | None:
-        """Read the checkpoint before the controller resolves the conversation target."""
+    async def prepared_source(self, source_event_id: str) -> PreparedVoiceSource | None:
+        """Read the checkpoint before voice ingress resolves the conversation target."""
         try:
-            return self.turn_store.prepared_voice_for_source(source_event_id)
+            return await self.turn_store.prepared_voice_for_source(source_event_id)
         except Exception as exc:
             self.logger.exception("Prepared voice checkpoint read failed", event_id=source_event_id)
             raise IngressRetryError from exc
@@ -106,7 +106,7 @@ class VoiceReadiness:
             ),
         )
         try:
-            checkpoint = self.prepared_source(event.event_id)
+            checkpoint = await self.prepared_source(event.event_id)
             if checkpoint is not None:
                 prepared_event = PreparedIngress(
                     sender=event.sender,
@@ -114,7 +114,7 @@ class VoiceReadiness:
                     body=checkpoint.body,
                     source={**event.source, "content": checkpoint.to_content()},
                     server_timestamp=event.server_timestamp,
-                    source_kind_override=VOICE_SOURCE_KIND,
+                    payload_trusted=True,
                 )
             else:
                 if dispatch_timing is not None:
@@ -125,6 +125,7 @@ class VoiceReadiness:
                 if dispatch_timing is not None:
                     dispatch_timing.mark("ingress_normalize_ready")
                 checkpoint = await self.turn_store.record_prepared_voice(
+                    room.room_id,
                     event.event_id,
                     PreparedVoiceSource.from_content(
                         prepared_event.body,

@@ -90,7 +90,6 @@ from mindroom.event_journal import (
 )
 from mindroom.event_journal.replies import ReplyStore
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.handled_turns import TurnRecord
 from mindroom.history.storage import new_scope_session
 from mindroom.history.types import HistoryScope
 from mindroom.llm.events import TextDelta
@@ -165,6 +164,8 @@ from mindroom.tool_system.runtime_context import ToolDispatchContext, build_exec
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_model import TurnModel
 from mindroom.turn_policy import PreparedDispatch
+from mindroom.turn_record import TurnRecord
+from mindroom.turn_store import SourcePreparation
 from tests.approval_card_helpers import resolve_card_event
 from tests.approval_continuation_helpers import (
     advance_continuation,
@@ -180,6 +181,7 @@ from tests.conftest import (
     FakeApprovalTransport,
     initialize_approval_store_for_test,
     install_model_providers,
+    live_turn_claim,
     live_turn_tools_for_test,
     make_matrix_client_mock,
     make_visible_message,
@@ -188,6 +190,7 @@ from tests.conftest import (
     replace_response_runner_deps,
     request_envelope,
     seed_session,
+    turn_claim_is_live,
     unwrap_extracted_collaborator,
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
@@ -309,20 +312,16 @@ async def test_process_shutdown_releases_claim_when_response_never_starts() -> N
     """Task-lifetime cleanup must release a claim before recovery proof."""
     runner = ResponseRunner(deps=MagicMock())
     response_started = False
-    claim_live = True
+    claim = live_turn_claim("$source")
     proof_claim_states: list[bool] = []
 
     async def never_started_response() -> None:
         nonlocal response_started
         response_started = True
 
-    def release_claim() -> None:
-        nonlocal claim_live
-        claim_live = False
-
     def recovery_proof_ready() -> bool:
-        proof_claim_states.append(claim_live)
-        return not claim_live
+        proof_claim_states.append(turn_claim_is_live(claim))
+        return not turn_claim_is_live(claim)
 
     response = never_started_response()
     try:
@@ -330,7 +329,7 @@ async def test_process_shutdown_releases_claim_when_response_never_starts() -> N
             response,
             name="test_never_started_claimed_response",
             recovery_proof_ready=recovery_proof_ready,
-            on_terminal=release_claim,
+            claim=claim,
             room_id=_target().room_id,
         )
     except BaseException:
@@ -345,9 +344,67 @@ async def test_process_shutdown_releases_claim_when_response_never_starts() -> N
     await asyncio.gather(response_task, return_exceptions=True)
 
     assert response_started is False
-    assert claim_live is False
+    assert not turn_claim_is_live(claim)
     assert proof_claim_states == [False]
     assert runner.inbox.pending_inbox_response_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_before_start", [False, True])
+async def test_inbox_response_releases_its_claim_before_its_sources_return_to_the_journal(
+    *,
+    cancel_before_start: bool,
+) -> None:
+    """A retried source must not meet the claim of the response that just ended, however early that response ended."""
+    deps = MagicMock()
+    deps.replies.waits_to_claim.return_value = False
+    claim = live_turn_claim("$source")
+    claim_live_at_retry: list[bool] = []
+    deps.retry_approval_sources.side_effect = lambda _room_id, _sources: claim_live_at_retry.append(
+        turn_claim_is_live(claim),
+    )
+    runner = ResponseRunner(deps=deps)
+    held = asyncio.Event()
+
+    async def response() -> None:
+        assert turn_claim_is_live(claim), "a running response owns its claim"
+        held.set()
+
+    task = runner.inbox.track_inbox_response(
+        response(),
+        name="inbox_response:$source",
+        recovery_proof_ready=lambda: True,
+        claim=claim,
+        source_event_ids=("$source",),
+        room_id=_target().room_id,
+    )
+    if cancel_before_start:
+        task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    assert held.is_set() is not cancel_before_start
+    assert claim_live_at_retry == [False]
+
+
+@pytest.mark.asyncio
+async def test_inbox_response_refused_at_shutdown_releases_its_claim() -> None:
+    """A response refused because shutdown began never runs, so the claim handed to it goes back at once."""
+    runner = ResponseRunner(deps=MagicMock())
+    runner.inbox.begin_process_shutdown()
+    claim = live_turn_claim("$source")
+    response = asyncio.sleep(0)
+
+    with pytest.raises(ResponseAdmissionRefusedError):
+        runner.inbox.track_inbox_response(
+            response,
+            name="inbox_response:$source",
+            recovery_proof_ready=lambda: True,
+            claim=claim,
+            room_id=_target().room_id,
+        )
+
+    assert not turn_claim_is_live(claim)
 
 
 @pytest.mark.asyncio
@@ -1469,10 +1526,10 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
     preparations = 0
     on_source_turn_suppressed = AsyncMock()
 
-    async def prepare_source_turn(_history: object) -> bool:
+    async def prepare_source_turn(_history: object) -> SourcePreparation:
         nonlocal preparations
         preparations += 1
-        return True
+        return SourcePreparation(invalid=(envelope.source_event_id,))
 
     request = ResponseRequest(
         sources=ResponseSources(
@@ -1521,7 +1578,9 @@ async def test_final_source_gate_uses_refreshed_history_without_repeating_lifecy
         is_full_history=True,
     )
     runner.deps.resolver.fetch_thread_history = AsyncMock(return_value=history)
-    prepare = AsyncMock(side_effect=[False, final_result])
+    prepare = AsyncMock(
+        side_effect=[SourcePreparation(), SourcePreparation(invalid=("$event",) if final_result else ())],
+    )
     acquired = MagicMock()
     suppressed = AsyncMock()
     request = ResponseRequest(
@@ -1561,10 +1620,10 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
     preparation_started = asyncio.Event()
     allow_preparation_finish = asyncio.Event()
 
-    async def prepare_source_turn(_history: object) -> bool:
+    async def prepare_source_turn(_history: object) -> SourcePreparation:
         preparation_started.set()
         await allow_preparation_finish.wait()
-        return False
+        return SourcePreparation()
 
     request = ResponseRequest(
         sources=ResponseSources(
@@ -6246,7 +6305,7 @@ async def test_queued_human_notice_is_registered_exactly_once() -> None:
         is None
     )
     assert queued_signal.pending_human_messages == 1
-    reservation.consume()
+    reservation.release()
     assert queued_signal.pending_human_messages == 0
 
     async def second_turn(_target: MessageTarget) -> str:
@@ -8766,3 +8825,59 @@ def test_an_automation_turn_is_not_queued_for_memory(hook_source: str | None, fl
     )
 
     assert (queue is not None) is flushed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply_exists", [False, True])
+async def test_a_batch_whose_source_ended_answers_the_rest_only_while_no_reply_exists(
+    tmp_path: Path,
+    reply_exists: bool,
+) -> None:
+    """Before a reply exists only the ended source settles and the rest answer apart; once one exists, the batch ends."""
+    bot = _bot(tmp_path)
+    target = _target(thread_id="$thread", reply_to_event_id="$f")
+    envelope = _envelope(target, source_event_id="$f")
+    delivery_gateway = MagicMock(spec=DeliveryGateway)
+    delivery_gateway.send_text = AsyncMock(return_value="$placeholder")
+    # Whether an earlier attempt left a reply whose records now settle the batch.
+    delivery_gateway.settle_unclaimed_reply = AsyncMock(return_value=reply_exists)
+    request_preparer = MagicMock(spec=ResponsePayloadPreparer)
+    request_preparer.prepare = AsyncMock()
+    runner = ResponseRunner(
+        replace(
+            unwrap_extracted_collaborator(bot._response_runner).deps,
+            delivery_gateway=delivery_gateway,
+            request_preparer=request_preparer,
+        ),
+    )
+    preparation = SourcePreparation(invalid=("$s",), surviving=("$f",))
+    on_sources_invalidated = AsyncMock()
+    on_source_turn_suppressed = AsyncMock()
+    request = ResponseRequest(
+        sources=ResponseSources(pending_event_ids=("$f", "$s"), logical_source_event_ids=("$s", "$f")),
+        thread_history=[],
+        prompt="first and second",
+        user_id="@user:localhost",
+        response_envelope=envelope,
+        payload_preparation=_preparation(target, envelope),
+        prepare_source_turn=AsyncMock(return_value=preparation),
+        on_source_turn_suppressed=on_source_turn_suppressed,
+        on_sources_invalidated=on_sources_invalidated,
+    )
+
+    prepared_request = await runner._begin_locked_turn(
+        request,
+        resolved_target=target,
+        history_scope=runner.deps.state_writer.history_scope(),
+        execution_identity=runner.deps.tool_runtime.build_execution_identity(target=target, user_id=request.user_id),
+        placeholder_message="Thinking...",
+    )
+
+    assert prepared_request is None
+    delivery_gateway.send_text.assert_not_awaited()
+    request_preparer.prepare.assert_not_awaited()
+    on_source_turn_suppressed.assert_not_awaited()
+    if reply_exists:
+        on_sources_invalidated.assert_not_awaited()
+    else:
+        on_sources_invalidated.assert_awaited_once_with(preparation)

@@ -19,16 +19,15 @@ from mindroom.orchestration.runtime import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 
-type _StartupBot = AgentBot | TeamBot
-type _SetupRooms = Callable[[list[_StartupBot]], Awaitable[None]]
+type _SetupRooms = Callable[[list[AgentBot]], Awaitable[None]]
 type _SyncRuntimeSupport = Callable[[Config], Awaitable[None]]
 type _MarkRuntimeSupportReady = Callable[[], Awaitable[None]]
-type _RunningBots = Callable[[], list[_StartupBot]]
+type _RunningBots = Callable[[], list[AgentBot]]
 
 
 @dataclass
@@ -40,7 +39,7 @@ class StartupMaintenanceController:
     mark_runtime_support_ready: _MarkRuntimeSupportReady
     task: asyncio.Task[None] | None = field(default=None, init=False)
 
-    def start(self, bots: list[_StartupBot], config: Config) -> None:
+    def start(self, bots: list[AgentBot], config: Config) -> None:
         """Schedule detached startup maintenance for one startup generation."""
         self.task = create_logged_task(
             self._run(bots, config),
@@ -79,7 +78,7 @@ class StartupMaintenanceController:
                 if bots:
                     self.start(bots, config)
 
-    async def _run(self, bots: list[_StartupBot], config: Config) -> None:
+    async def _run(self, bots: list[AgentBot], config: Config) -> None:
         await self._run_phase(
             "startup_maintenance.rooms_and_memberships",
             lambda: self.setup_rooms_and_memberships(bots),

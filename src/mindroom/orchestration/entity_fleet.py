@@ -38,21 +38,19 @@ from .runtime import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Iterator
 
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 
 _DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS = 5.0
 
-type _Bot = AgentBot | TeamBot
-
 
 @dataclass(slots=True)
 class EntityStartResults:
     """Result of one pass trying to start a batch of entities."""
 
-    started_bots: list[_Bot] = field(default_factory=list)
+    started_bots: list[AgentBot] = field(default_factory=list)
     retryable_entities: list[str] = field(default_factory=list)
     permanently_failed_entities: list[str] = field(default_factory=list)
 
@@ -62,7 +60,7 @@ class EntityFleetHooks:
     """What the fleet asks of the rest of the runtime when entities change."""
 
     # Build bots for configured entities, preparing their Matrix accounts first.
-    create_bots: Callable[[set[str], Config], Awaitable[dict[str, _Bot]]]
+    create_bots: Callable[[set[str], Config], Awaitable[dict[str, AgentBot]]]
     # Entities that must not start yet because a required MCP server is unavailable.
     start_blocked: Callable[[set[str]], set[str]]
     # Withdraw capabilities bound to these entities, and drain work borrowing their clients, before any of them stops.
@@ -89,19 +87,19 @@ class _FleetShutdown:
 
 @dataclass
 class _EntitySlot:
-    bot: _Bot
+    bot: AgentBot
     sync_task: asyncio.Task[None] | None = None
     retry_task: asyncio.Task[None] | None = None
     disabled: bool = False
 
 
-class _BotsView(Mapping[str, "_Bot"]):
+class _BotsView(Mapping[str, "AgentBot"]):
     """Read-only live view of the fleet's bots by entity name."""
 
     def __init__(self, slots: dict[str, _EntitySlot]) -> None:
         self._slots = slots
 
-    def __getitem__(self, entity_name: str) -> _Bot:
+    def __getitem__(self, entity_name: str) -> AgentBot:
         return self._slots[entity_name].bot
 
     def __iter__(self) -> Iterator[str]:
@@ -117,7 +115,7 @@ class EntityFleet:
     def __init__(self, hooks: EntityFleetHooks) -> None:
         self._hooks = hooks
         self._slots: dict[str, _EntitySlot] = {}
-        self.bots: Mapping[str, _Bot] = _BotsView(self._slots)
+        self.bots: Mapping[str, AgentBot] = _BotsView(self._slots)
 
     @property
     def names(self) -> frozenset[str]:
@@ -129,7 +127,7 @@ class EntityFleet:
         slot = self._slots.get(entity_name)
         return slot is not None and slot.disabled
 
-    def add(self, entity_name: str, bot: _Bot) -> None:
+    def add(self, entity_name: str, bot: AgentBot) -> None:
         """Register one built bot that has not started yet."""
         if entity_name in self._slots:
             msg = f"Entity {entity_name} already has a bot"
@@ -180,7 +178,7 @@ class EntityFleet:
         await self.create(names, config)
         return await self.start(names)
 
-    def start_sync(self, bots: Iterable[_Bot]) -> None:
+    def start_sync(self, bots: Iterable[AgentBot]) -> None:
         """Ensure one Matrix sync task runs for each started bot."""
         for bot in bots:
             slot = self._slots[bot.agent_name]
@@ -425,7 +423,7 @@ class EntityFleet:
         await self._hooks.entities_changing(set(slots))
 
 
-async def _start_once(entity_name: str, bot: _Bot) -> bool | None:
+async def _start_once(entity_name: str, bot: AgentBot) -> bool | None:
     """Start one bot once: True when started, False when worth retrying, None when it can never start."""
     try:
         await bot.start()
@@ -482,7 +480,7 @@ def _succeeded(
     return succeeded
 
 
-def _response_phase_counts(bots: Iterable[_Bot]) -> dict[str, int]:
+def _response_phase_counts(bots: Iterable[AgentBot]) -> dict[str, int]:
     """Sum fixed response phase counts across bots for one shutdown warning."""
     aggregate: dict[str, int] = {}
     for bot in bots:
@@ -491,7 +489,7 @@ def _response_phase_counts(bots: Iterable[_Bot]) -> dict[str, int]:
     return dict(sorted(aggregate.items()))
 
 
-def _deferred_stop_phase_counts(bots: Iterable[_Bot]) -> dict[str, int]:
+def _deferred_stop_phase_counts(bots: Iterable[AgentBot]) -> dict[str, int]:
     """Count fixed deferred-release phases without exposing bot identities."""
     aggregate: dict[str, int] = {}
     for bot in bots:
@@ -502,7 +500,7 @@ def _deferred_stop_phase_counts(bots: Iterable[_Bot]) -> dict[str, int]:
 
 
 async def _gather_with_periodic_log(
-    bots: list[_Bot],
+    bots: list[AgentBot],
     event: str,
     phase_count_field: str,
     *awaitables: Awaitable[object],

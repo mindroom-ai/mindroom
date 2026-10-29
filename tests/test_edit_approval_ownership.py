@@ -18,7 +18,6 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import ApprovalFailure, DeliveryStage, EventClass, EventKind
 from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowRequest
-from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.history.types import HistoryScope
 from mindroom.journal_dispatch import JournalDispatcher
 from mindroom.llm.runs import ToolExecution
@@ -31,15 +30,16 @@ from mindroom.reply_scope import ReplyRuntime
 from mindroom.response_runner import DeliveryProgress, ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
+from mindroom.turn_record import TurnRecord
 from mindroom.user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
 from tests.approval_continuation_helpers import claim_continuation, dispatch_approval
 from tests.conftest import (
     finish_edit_regenerations,
     handle_card_response_for_test,
     initialize_approval_store_for_test,
-    journal_edit_regenerator_deps,
     patch_response_runner_module,
     unwrap_extracted_collaborator,
+    update_turn_owner_deps,
 )
 from tests.reply_span_helpers import reply_span, response_span, seed_finished_reply
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target, streamed_answer
@@ -56,8 +56,8 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.edit_regenerator import EditRegenerator
     from mindroom.event_journal import ApprovalContinuation, EventJournalStore, MatrixDelivery, PrincipalStore
-    from mindroom.turn_controller import TurnController
     from mindroom.turn_store import TurnStore
+    from mindroom.turns.ingress import TurnIngress
 
 
 @dataclass
@@ -69,7 +69,7 @@ class _ApprovalCase:
     gateway: DeliveryGateway
     runner: ResponseRunner
     regenerator: EditRegenerator
-    controller: TurnController
+    ingress: TurnIngress
     resolver: ConversationResolver
     manager: ApprovalManager
     target: MessageTarget
@@ -116,7 +116,7 @@ class _ApprovalCase:
             ),
             patch.object(self.bot, "_delivery_gateway", self.gateway),
         ):
-            outcome = await self.controller.handle_text_event(self.room, event)
+            outcome = await self.ingress.handle_text_event(self.room, event)
             await finish_edit_regenerations(self.bot)
         return outcome
 
@@ -136,7 +136,6 @@ class _ApprovalCase:
             _inbound_event(self.room.room_id, event, EventKind.REDACTION, EventClass.CONTEXT_ONLY),
             _projected_event(self.room.room_id, event, EventKind.REDACTION, self_sender=self.bot.matrix_id.full_id),
         )
-        await self.store.mark_source_redacted(redacts, room_id=self.room.room_id)
 
     async def stop(self) -> None:
         reconciler = UserStopReconciler(UserStopReconcilerDeps(self.store, self.gateway))
@@ -158,12 +157,12 @@ class _ApprovalCase:
         assert failing is not None
         assert failing.state == "failing"
         assert await self.principal.is_pending("$edit")
-        assert self.store.get_turn_record("$source").source_event_revisions == {"$source": (20, "$edit")}
+        assert (await self.store.get_turn_record("$source")).source_event_revisions == {"$source": (20, "$edit")}
 
     async def assert_stopped_edit_settled(self) -> None:
         assert await self.principal.approvals.approval_continuation_for_source("$edit") is None
         assert not await self.principal.is_pending("$edit")
-        assert self.store.get_turn_record("$source").source_event_revisions == {"$source": (20, "$edit")}
+        assert (await self.store.get_turn_record("$source")).source_event_revisions == {"$source": (20, "$edit")}
         resumed = AsyncMock(side_effect=AssertionError("Stopped approval must not execute"))
         with patch.object(self.runner._approvals, "_continue_entity_call", resumed):
             await self.runner.handoff_approval_source("$edit")
@@ -219,14 +218,11 @@ class _ApprovalCase:
             await self.runner.inbox.wait_for_source_owned_inbox_responses()
 
     async def restart(self) -> None:
-        _reset_handled_turn_ledger_runtime()
         self.store = await _store(self.journal_store, agent_name="general")
         self.gateway = replace(
             self.gateway,
             deps=replace(
                 self.gateway.deps,
-                terminal_turn_for=self.store.terminal_turn_record,
-                terminal_turn_committed=self.store.publish_completed_turn,
             ),
         )
         self.runner = ResponseRunner(
@@ -249,7 +245,7 @@ async def _paused_case(  # noqa: PLR0915
     bot.client.room_send.return_value = nio.RoomSendResponse("$answer-edit", room_id)
     target = MessageTarget.resolve(room_id, None, source_id, room_mode=True)
     store = await _store(journal_store, agent_name="general")
-    store.deps = replace(store.deps, state_writer=bot._conversation_state_writer, resolver=bot._conversation_resolver)
+    store.deps = replace(store.deps, state_writer=bot._conversation_state_writer)
     await store.record_responded_turn(
         TurnRecord.create(
             (source_id,),
@@ -298,8 +294,6 @@ async def _paused_case(  # noqa: PLR0915
         deps=replace(
             gateway.deps,
             outbox=principal,
-            terminal_turn_for=store.terminal_turn_record,
-            terminal_turn_committed=store.publish_completed_turn,
         ),
     )
     runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -312,7 +306,6 @@ async def _paused_case(  # noqa: PLR0915
         replies=replace(
             runner.deps.replies,
             store=principal,
-            complete_turn=store.publish_completed_turn,
         ),
     )
     runner.inbox.replies = runner.deps.replies
@@ -322,7 +315,7 @@ async def _paused_case(  # noqa: PLR0915
         regenerator.deps,
         turn_store=store,
         receipt_order=AsyncMock(return_value=3),
-        **journal_edit_regenerator_deps(bot, principal),
+        store=principal,
     )
     await seed_finished_reply(
         principal,
@@ -332,12 +325,12 @@ async def _paused_case(  # noqa: PLR0915
         thread_id=None,
         entity_name="general",
     )
-    controller = unwrap_extracted_collaborator(bot._turn_controller)
-    controller.deps = replace(controller.deps, edit_regenerator=regenerator)
+    ingress = bot._turn_ingress
+    update_turn_owner_deps(bot, edit_regenerator=regenerator)
     outcomes: list[TurnDispatchOutcome] = []
 
     async def dispatch_edit(room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
-        outcome = await controller.handle_text_event(room, event)
+        outcome = await ingress.handle_text_event(room, event)
         outcomes.append(outcome)
         return outcome
 
@@ -420,7 +413,7 @@ async def _paused_case(  # noqa: PLR0915
         assert not await principal.is_pending(source_id)
         assert await principal.approvals.approval_continuation_for_source(source_id) is None
         # The turn took the edit when its regeneration claimed the reply.
-        assert store.get_turn_record(source_id).source_event_revisions == {source_id: (20, edit_id)}
+        assert (await store.get_turn_record(source_id)).source_event_revisions == {source_id: (20, edit_id)}
 
         yield _ApprovalCase(
             bot,
@@ -430,7 +423,7 @@ async def _paused_case(  # noqa: PLR0915
             gateway,
             runner,
             regenerator,
-            controller,
+            ingress,
             resolver,
             manager,
             target,
@@ -455,10 +448,9 @@ async def approval_case(
 
 
 @pytest.mark.asyncio
-@pytest.mark.ledger_loads_from_disk
 @pytest.mark.parametrize("requires_human", [False, True])
 class TestEditApprovalOwnership:
-    """Exercise independent pause, resume, and settlement contracts through real controllers."""
+    """Exercise independent pause, resume, and settlement contracts through real turn owners."""
 
     async def test_a_newer_edit_of_the_paused_reply_cancels_its_approval_and_regenerates(
         self,
@@ -531,12 +523,12 @@ class TestEditApprovalOwnership:
         assert final is not None
         assert final.acknowledged_event_id is not None
         assert final.edits_event_id == "$answer"
-        _reset_handled_turn_ledger_runtime()
-        consumed = (await _store(case.journal_store, agent_name="general")).get_turn_record("$source")
+        restarted = await _store(case.journal_store, agent_name="general")
+        consumed = await restarted.get_turn_record("$source")
         assert consumed is not None
         assert consumed.source_event_ids == ("$source",)
         if redaction == "revision":
-            assert consumed.revision_replay["$edit"].redacted
+            assert await restarted.redacted_event_ids(case.room.room_id, ("$edit",)) == {"$edit"}
             assert "$source" not in (consumed.source_event_prompts or {})
         else:
             assert consumed.source_event_revisions == {"$source": (20, "$edit")}
@@ -577,7 +569,6 @@ class TestEditApprovalOwnership:
 
 
 @pytest.mark.asyncio
-@pytest.mark.ledger_loads_from_disk
 async def test_failed_pause_handoff_keeps_the_regenerated_answer(
     tmp_path: Path,
     journal_store: EventJournalStore,
@@ -597,6 +588,7 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
             completed=True,
             source_event_prompts={"$source": "original"},
         ),
+        room_id="!room:localhost",
     )
     bot._turn_store = store
     gateway = unwrap_extracted_collaborator(runner.deps.delivery_gateway)
@@ -605,8 +597,6 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
         deps=replace(
             gateway.deps,
             outbox=principal,
-            terminal_turn_for=store.terminal_turn_record,
-            terminal_turn_committed=store.publish_completed_turn,
         ),
     )
     assert runner.deps.replies is not None
@@ -614,7 +604,7 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
         runner.deps,
         approval_store=principal.approvals,
         delivery_gateway=gateway,
-        replies=replace(runner.deps.replies, store=principal, complete_turn=store.publish_completed_turn),
+        replies=replace(runner.deps.replies, store=principal),
     )
     runner.inbox.replies = runner.deps.replies
     request = replace(
@@ -663,8 +653,7 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
     bot.client.room_send.assert_not_awaited()
     assert not await principal.is_pending("$edit")
     assert not await principal.is_pending("$source")
-    _reset_handled_turn_ledger_runtime()
-    persisted = (await _store(journal_store, agent_name="general")).get_turn_record("$source")
+    persisted = await (await _store(journal_store, agent_name="general")).get_turn_record("$source")
     assert persisted is not None
     assert persisted.response_event_id == "$waiting"
 

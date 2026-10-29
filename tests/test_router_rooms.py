@@ -10,7 +10,6 @@ import pytest
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
-from mindroom.bot import TeamBot
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -18,6 +17,7 @@ from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.turn_policy import ResponseAction
 from tests.authorization_helpers import (
     make_test_bot_for_entity,
 )
@@ -197,8 +197,9 @@ def test_team_bot_uses_persisted_member_usernames(
         tmp_path,
     )
 
-    assert isinstance(team_bot, TeamBot)
-    assert [member.full_id for member in team_bot.current_configured_team_agents()] == [
+    action = team_bot._turn_policy.effective_response_action(ResponseAction(kind="individual"))
+    assert action.form_team is not None
+    assert [member.full_id for member in action.form_team.requested_members] == [
         "@mindroom_agent1_oldns:localhost",
         "@mindroom_agent2_oldns:localhost",
     ]
@@ -359,10 +360,6 @@ async def test_router_updates_rooms_on_config_change(
     monkeypatch.setattr("mindroom.bot.AgentBot.sync_forever", AsyncMock())
     monkeypatch.setattr("mindroom.bot.AgentBot.join_configured_rooms", AsyncMock())
     monkeypatch.setattr("mindroom.bot.AgentBot.leave_unconfigured_rooms", AsyncMock())
-    monkeypatch.setattr("mindroom.bot.TeamBot.start", AsyncMock())
-    monkeypatch.setattr("mindroom.bot.TeamBot.sync_forever", AsyncMock())
-    monkeypatch.setattr("mindroom.bot.TeamBot.join_configured_rooms", AsyncMock())
-    monkeypatch.setattr("mindroom.bot.TeamBot.leave_unconfigured_rooms", AsyncMock())
 
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     monkeypatch.setattr(orchestrator.config_reload, "load_config", lambda: published_config_load(updated_config))

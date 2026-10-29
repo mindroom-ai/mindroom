@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -47,7 +47,7 @@ class TodoPokeRuntimeCoordinator:
     name = "todo_poke"
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
-    bot_provider: Callable[[str], AgentBot | TeamBot | None]
+    bot_provider: Callable[[str], AgentBot | None]
     agent_reply_memberships: AgentReplyMembershipIndex
     _loop: SupervisedLoop = field(init=False)
 
@@ -99,7 +99,7 @@ class TodoPokeRuntimeCoordinator:
                 return False
         return True
 
-    def _agent_bot(self, agent_name: str) -> AgentBot | TeamBot | None:
+    def _agent_bot(self, agent_name: str) -> AgentBot | None:
         """Return the assigned agent bot when todo poke I/O is ready."""
         agent_bot = self.bot_provider(agent_name)
         if agent_bot is None or not agent_bot.running or agent_bot.client is None:
@@ -110,7 +110,7 @@ class TodoPokeRuntimeCoordinator:
         self,
         room_id: str,
         agent_names: tuple[str, ...],
-    ) -> AgentBot | TeamBot | None:
+    ) -> AgentBot | None:
         """Return the first ready candidate with authoritative membership in the target room."""
         for agent_name in agent_names:
             agent_bot = self._agent_bot(agent_name)

@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
     from pathlib import Path
 
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.config.load_attempt import ConfigLoad
     from mindroom.orchestration.config_updates import ConfigUpdatePlan
 
@@ -40,7 +40,7 @@ def _make_lifecycle(
     *,
     running: bool = True,
     current_config: Config | None = None,
-    agent_bots: Mapping[str, AgentBot | TeamBot] | None = None,
+    agent_bots: Mapping[str, AgentBot] | None = None,
     response_admission_gate: ResponseAdmissionGate | None = None,
     load_config: Callable[[], ConfigLoad] | None = None,
 ) -> ConfigReloadLifecycle:

@@ -7,6 +7,7 @@ import enum
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from functools import partial
 from itertools import chain
 from typing import TYPE_CHECKING
 
@@ -14,10 +15,12 @@ from mindroom.logging_config import get_logger
 from mindroom.timing import elapsed_ms_since
 
 from .batch import RequesterCoalescingOwner
-from .cleanup import ReadyPendingEvent, close_ready_task_result_metadata
+from .cleanup import ReadyPendingEvent, close_ready_result
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+
+    from mindroom.turn_store import TurnClaim
 
     from .batch import CoalescingKey, CoalescingOwner
 
@@ -53,11 +56,13 @@ class LaneDelivery:
 
     key: CoalescingKey
     source_event_id: str | None
-    source_kind: str
     ready_result: ReadyPendingEvent | None
     ready_task: asyncio.Task[ReadyPendingEvent | None] | None
     received_at: float
     busy_at_submit: bool = False
+    # The turn claim of a readiness task's source: the lane attaches it to the
+    # ready event, or releases it once the readiness task has ended.
+    claim: TurnClaim | None = None
 
 
 @dataclass
@@ -149,10 +154,9 @@ class IngressLanes:
         *,
         key: CoalescingKey,
         source_event_id: str | None,
-        source_kind: str,
         ready_result: ReadyPendingEvent | None = None,
         ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None,
-        received_at: float | None = None,
+        claim: TurnClaim | None = None,
         busy_at_submit: bool = False,
     ) -> None:
         """Load one slot with its conversation key and ready payload."""
@@ -165,11 +169,11 @@ class IngressLanes:
         slot.delivery = LaneDelivery(
             key=key,
             source_event_id=source_event_id,
-            source_kind=source_kind,
             ready_result=ready_result,
             ready_task=ready_task,
-            received_at=received_at if received_at is not None else time.time(),
+            received_at=time.time(),
             busy_at_submit=busy_at_submit,
+            claim=claim,
         )
         slot.loaded.set()
         self._ensure_worker(slot.lane_key)
@@ -243,19 +247,20 @@ class IngressLanes:
         if delivery is None:
             return _LaneAbandonOutcome()
         if delivery.ready_result is not None:
-            return _LaneAbandonOutcome(dropped_ready_count=close_ready_task_result_metadata(delivery.ready_result))
+            return _LaneAbandonOutcome(dropped_ready_count=close_ready_result(delivery.ready_result))
         ready_task = delivery.ready_task
         if ready_task is None:
             return _LaneAbandonOutcome()
         ready_task.cancel()
         done, pending = await asyncio.wait({ready_task}, timeout=ready_timeout_seconds)
         if pending:
-            ready_task.add_done_callback(_close_late_ready_task_result)
+            drop_readiness(ready_task, _take_claim(delivery))
             return _LaneAbandonOutcome(cancelled_unready_count=1)
         result = await asyncio.gather(*done, return_exceptions=True)
+        _release_claim(delivery)
         return _LaneAbandonOutcome(
             cancelled_unready_count=1,
-            dropped_ready_count=close_ready_task_result_metadata(result[0]),
+            dropped_ready_count=close_ready_result(result[0]),
         )
 
     def _ensure_worker(self, lane_key: ReceiptLaneKey) -> None:
@@ -299,6 +304,11 @@ class IngressLanes:
             slot.released = True
             slot.loaded.set()
             slot.settled.set()
+            if (delivery := slot.delivery) is not None:
+                if delivery.ready_task is not None:
+                    drop_readiness(delivery.ready_task, _take_claim(delivery))
+                else:
+                    close_ready_result(delivery.ready_result)
 
     async def _run_lane(self, lane_key: ReceiptLaneKey) -> None:
         lane = self._lanes.get(lane_key)
@@ -419,6 +429,7 @@ class IngressLanes:
                 ready = await asyncio.shield(delivery.ready_task)
             except asyncio.CancelledError:
                 if delivery.ready_task.cancelled():
+                    _release_claim(delivery)
                     logger.warning(
                         "ingress_lane_ready_task_cancelled",
                         source_event_id=delivery.source_event_id,
@@ -427,8 +438,11 @@ class IngressLanes:
                         age_ms=elapsed_ms_since(delivery.received_at, clock=time.time),
                     )
                     return _LaneDeliveryOutcome.RETRY
+                # Readiness outlives this worker and may still be writing a checkpoint, so its source stays claimed.
+                drop_readiness(delivery.ready_task, _take_claim(delivery))
                 raise
             except Exception as error:
+                _release_claim(delivery)
                 if not isinstance(error, IngressRetryError):
                     logger.exception(
                         "ingress_lane_ready_task_failed",
@@ -443,18 +457,22 @@ class IngressLanes:
         # Only after the exception split: a successful None result intentionally
         # consumed this source without entering the gate.
         if ready is None:
+            _release_claim(delivery)
             return _LaneDeliveryOutcome.INTENTIONALLY_IGNORED
         if slot.released:
             # A bounded drain abandoned this slot while its readiness resolved;
-            # the drain already counted it dropped and closed its metadata, so
-            # delivering now would dispatch work the drain reported as dropped.
-            close_ready_task_result_metadata(ready)
+            # the drain already counted it dropped, released its claim, and
+            # closed it, so delivering now would dispatch work it reported dropped.
+            close_ready_result(ready)
             return _LaneDeliveryOutcome.DELIVERED
         ready.pending_event.enqueue_time = delivery.received_at
+        if (claim := _take_claim(delivery)) is not None:
+            # Attached before admission, so an admission that fails closes the event and releases its claim.
+            ready.pending_event.claim = claim
         try:
             await self._deliver(slot, delivery, ready)
         except Exception:
-            close_ready_task_result_metadata(ready)
+            close_ready_result(ready)
             logger.exception(
                 "ingress_lane_delivery_failed",
                 source_event_id=delivery.source_event_id,
@@ -465,9 +483,32 @@ class IngressLanes:
         return _LaneDeliveryOutcome.DELIVERED
 
 
-def _close_late_ready_task_result(task: asyncio.Task[ReadyPendingEvent | None]) -> None:
+def _take_claim(delivery: LaneDelivery) -> TurnClaim | None:
+    claim, delivery.claim = delivery.claim, None
+    return claim
+
+
+def _release_claim(delivery: LaneDelivery) -> None:
+    if (claim := _take_claim(delivery)) is not None:
+        claim.release()
+
+
+def drop_readiness(ready_task: asyncio.Task[ReadyPendingEvent | None], claim: TurnClaim | None) -> None:
+    """Close what dropped readiness produces and release its source's claim, once the task ends.
+
+    Readiness can be finishing a checkpoint write that completes despite
+    cancellation, so its source stays claimed until then: another owner of the
+    same agent must not start on it meanwhile. A task cancelled before its
+    first step still ends, so this covers it too.
+    """
+    ready_task.add_done_callback(partial(_finish_dropped_readiness, claim))
+
+
+def _finish_dropped_readiness(claim: TurnClaim | None, task: asyncio.Task[ReadyPendingEvent | None]) -> None:
     try:
         result = task.result()
     except BaseException:
-        return
-    close_ready_task_result_metadata(result)
+        result = None
+    close_ready_result(result)
+    if claim is not None:
+        claim.release()

@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import nio
@@ -26,6 +26,7 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.dispatch_source import HOOK_DISPATCH_SOURCE_KIND, MESSAGE_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import MessageEnvelope
+from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.slack import app as slack_app
@@ -104,15 +105,27 @@ class World:
                 "content": self.turn_content,
             },
         )
+        runtime = BotRuntimeState(
+            client=None,
+            config=self.config,
+            runtime_paths=self.paths,
+            agent_reply_memberships=AgentReplyMembershipIndex(),
+            orchestrator=None,
+        )
+        validator = IngressValidator(
+            IngressValidatorDeps(
+                runtime=runtime,
+                runtime_paths=self.paths,
+                matrix_id=launch_id,
+                turn_store=MagicMock(),
+                turn_policy=MagicMock(),
+                wait_for_admission_or_shutdown=AsyncMock(return_value=True),
+                settle_ignored_sources=AsyncMock(),
+            ),
+        )
         resolver = ConversationResolver(
             ConversationResolverDeps(
-                runtime=BotRuntimeState(
-                    client=None,
-                    config=self.config,
-                    runtime_paths=self.paths,
-                    agent_reply_memberships=AgentReplyMembershipIndex(),
-                    orchestrator=None,
-                ),
+                runtime=runtime,
                 logger=get_logger(__name__),
                 runtime_paths=self.paths,
                 agent_name="launch",
@@ -127,7 +140,9 @@ class World:
             reply_to_event_id=event.event_id,
             event_source=event.source,
         )
-        return resolver.build_ingress_envelope(event=event, requester_user_id=ADA, target=target)
+        envelope = resolver.build_envelope(event=event, facts=validator.classify(event), target=target)
+        assert envelope.requester_id == ADA
+        return envelope
 
     def envelope(
         self,

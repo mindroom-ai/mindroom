@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     from mindroom.reply_scope import ReplyRuntime
     from mindroom.runtime_shutdown import RuntimeShutdownIntent
+    from mindroom.turn_store import TurnClaim
 
 _PROCESS_SHUTDOWN_CANCEL_RETRY_SECONDS = 0.01
 
@@ -63,6 +64,8 @@ class _InboxResponseOwnership:
     shutdown_phase_trace: ResponseShutdownPhaseTrace
     source_event_ids: frozenset[str]
     room_id: str
+    # Released when the task ends, before its sources go back to the journal.
+    claim: TurnClaim | None = None
     drain_intent: RuntimeShutdownIntent | None = None
     proof_task: asyncio.Task[bool] | None = None
 
@@ -87,16 +90,18 @@ class InboxResponses:
         room_id: str,
         recovery_proof_ready: Callable[[], bool | Awaitable[bool]],
         on_failure: Callable[[], None] | None = None,
-        on_terminal: Callable[[], None] | None = None,
+        claim: TurnClaim | None = None,
         source_event_ids: tuple[str, ...] = (),
     ) -> asyncio.Task[None]:
-        """Own one detached inbox response until it completes or a drain settles it.
+        """Own one detached inbox response, and the turn claim handed to it, until it completes or a drain settles it.
 
         Its sources go back to the journal when it finishes, unless a deferred
         claim of them waits for what blocks it, which retries them then.
         """
         if self._process_shutdown_started:
             response.close()
+            if claim is not None:
+                claim.release()
             raise ResponseAdmissionRefusedError
         shutdown_phase_trace = ResponseShutdownPhaseTrace()
         task = asyncio.create_task(
@@ -110,9 +115,10 @@ class InboxResponses:
             shutdown_phase_trace=shutdown_phase_trace,
             source_event_ids=frozenset(source_event_ids),
             room_id=room_id,
+            claim=claim,
         )
-        if on_terminal is not None:
-            task.add_done_callback(lambda _finished: on_terminal())
+        # A done callback rather than the coroutine's own cleanup, so a task cancelled before its first step still
+        # releases its claim.
         task.add_done_callback(self._finish_inbox_response_task)
         return task
 
@@ -160,6 +166,8 @@ class InboxResponses:
         ownership = self._inbox_response_tasks.get(task)
         if ownership is not None and ownership.drain_intent is None:
             self._inbox_response_tasks.pop(task)
+        if ownership is not None and ownership.claim is not None:
+            ownership.claim.release()
         if (
             ownership is not None
             and ownership.source_event_ids

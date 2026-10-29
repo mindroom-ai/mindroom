@@ -21,6 +21,7 @@ from nio.crypto.attachments import encrypt_attachment
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.event_journal import DepartureSource, EventClass, EventKind, HydrationPolicy
+from mindroom.event_journal.identity import journal_principal_id
 from mindroom.matrix.conversation_hydration import (
     _MAX_FETCHED_EVENTS,
     _MAX_MESSAGES_REQUESTS,
@@ -55,7 +56,7 @@ ROOT = "$root:example.org"
 ALICE = "@alice:example.org"
 ROUTER = "@mindroom_router:example.org"
 HELPER = "@mindroom_helper:example.org"
-PRINCIPAL = f"router@{ROUTER}"
+PRINCIPAL = journal_principal_id("router", ROUTER)
 SIDECAR_URL = "mxc://example.org/whole-message"
 SIDECAR_TEXT = "the whole long message, all of it, well past any preview"
 THREAD_SUMMARY_KEY = "io.mindroom.thread_summary"
