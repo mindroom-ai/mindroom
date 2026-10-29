@@ -473,8 +473,11 @@ class _TaskRunner:
         async with self.runtime.operation(self.owner) as (_bot, client):
             return client.homeserver, client.user_id
 
-    async def _plan_occurrence(self, workflow: ScheduledWorkflow, cron: str, now: datetime) -> RecurringOccurrence:
+    async def _plan_occurrence(self, workflow: ScheduledWorkflow, cron: str) -> RecurringOccurrence:
         homeserver, sender = await self._checkpoint_identity()
+        # Sampled once the owner is ready, so an owner restart's wait counts against the catch-up window. Cron has
+        # second precision; normal subsecond wake-up jitter must still fire a live timer when catch-up is disabled.
+        now = datetime.now(UTC).replace(microsecond=0)
         return await plan_recurring_occurrence(
             self.runtime.runtime_paths,
             homeserver=homeserver,
@@ -562,11 +565,8 @@ class _TaskRunner:
                         logger.error("No cron schedule provided for recurring task", task_id=task_id)
                         return
                     cron_string = cron_schedule.to_cron_string()
-                    # Cron has second precision; normal subsecond wake-up jitter
-                    # must still fire a live timer when catch-up is disabled.
-                    now = datetime.now(UTC).replace(microsecond=0)
                     try:
-                        occurrence = await self._plan_occurrence(workflow, cron_string, now)
+                        occurrence = await self._plan_occurrence(workflow, cron_string)
                     except RecurringCheckpointUnavailableError:
                         await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
                         continue

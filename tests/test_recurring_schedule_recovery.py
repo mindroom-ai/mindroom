@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock
@@ -386,6 +386,40 @@ async def test_live_timer_fires_with_catch_up_disabled(
     task = workflow()
     await run_until_wait(task, client_for(task), tmp_path, Config(scheduler_catch_up_grace_seconds=0))
     assert sent.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_an_owner_restart_before_planning_counts_against_the_catch_up_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    controlled_clock: Clock,
+) -> None:
+    """A due occurrence whose planning waited out its owner's restart follows catch-up, so with 0 it is skipped."""
+    due = datetime(2026, 1, 15, 7, 0, tzinfo=UTC)
+    sleeps = 0
+
+    async def reach_due_time_once(_delay: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps > 1:
+            raise asyncio.CancelledError
+        controlled_clock.now = due
+
+    checkpoint_identity = scheduling._TaskRunner._checkpoint_identity
+
+    async def owner_restarts_while_planning(runner: scheduling._TaskRunner) -> tuple[str, str]:
+        identity = await checkpoint_identity(runner)
+        if controlled_clock.now == due:
+            controlled_clock.now = due + timedelta(seconds=5)
+        return identity
+
+    monkeypatch.setattr(scheduling.asyncio, "sleep", reach_due_time_once)
+    monkeypatch.setattr(scheduling._TaskRunner, "_checkpoint_identity", owner_restarts_while_planning)
+    sent = AsyncMock(side_effect=delivered_matrix_side_effect("$trigger"))
+    monkeypatch.setattr(client_delivery, "send_message_outcome", sent)
+    task = workflow()
+    await run_until_wait(task, client_for(task), tmp_path, Config(scheduler_catch_up_grace_seconds=0))
+    sent.assert_not_awaited()
 
 
 @pytest.mark.asyncio
