@@ -1203,7 +1203,10 @@ async def test_the_owner_of_a_cancelled_call_waits_for_every_request_its_nested_
         ping = toolkit_functions(toolkit)["ping"]
 
         async def tool() -> list[object]:
-            return await asyncio.gather(ping(), ping())
+            # The second request starts after the first arrives, so arrival order is the order the owner holds them in.
+            earlier = asyncio.create_task(ping())
+            await asyncio.to_thread(starts[0].wait, 30)
+            return await asyncio.gather(earlier, ping())
 
         async def owned_call() -> list[object]:
             async with owned_sync_tool_completion(ThreadPoolExecutor(max_workers=2)):

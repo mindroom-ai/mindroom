@@ -434,7 +434,10 @@ async def test_a_cancelled_call_with_two_nested_worker_calls_keeps_capacity_unti
 
     async def work() -> list[str]:
         inner = toolkit_functions(sibling)["inner"]
-        return list(await asyncio.gather(inner(), inner()))
+        # The second request starts after the first arrives, so arrival order is the order the call holds them in.
+        earlier = asyncio.create_task(inner())
+        await _wait(starts[0])
+        return list(await asyncio.gather(earlier, inner()))
 
     monkeypatch.setattr(sandbox_proxy, "_call_proxy_sync", proxy)
     monkeypatch.setattr(
