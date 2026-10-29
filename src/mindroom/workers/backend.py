@@ -7,11 +7,16 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from mindroom.workers.models import WorkerMaintenanceResult
 
 if TYPE_CHECKING:
-    from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerSpec, WorkerStatus
+    from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerLaunchConfig, WorkerSpec, WorkerStatus
 
 
 class WorkerBackendError(RuntimeError):
     """Raised when a worker backend cannot satisfy a request."""
+
+
+def mirrored_credential_services(spec: WorkerSpec, launch: WorkerLaunchConfig) -> frozenset[str]:
+    """Return the shared credential services mirrored into the spec's dedicated worker launched from ``launch``."""
+    return launch.grantable_credentials if spec.mirror_grantable_credentials else frozenset()
 
 
 def effective_idle_status(

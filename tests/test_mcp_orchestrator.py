@@ -17,10 +17,12 @@ from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.external_triggers.store import ExternalTriggerTarget, TriggerDeliverySnapshot
+from mindroom.integrations import unbind_integrations
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
 from mindroom.orchestration.runtime import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.slack.integration import bound_slack_runtime
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -36,6 +38,7 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
 def _config(tmp_path: Path, *, tool_name: str = "mcp_demo", command: str = "npx", required: bool = False) -> Config:
     return Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {
                 "demo": {
                     "transport": "stdio",
@@ -73,6 +76,7 @@ def _config_with_code_agent(
     external_trigger_policy: dict[str, object] | None = None,
 ) -> Config:
     payload: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "test-model"}},
         "agents": {
             "code": {
                 "display_name": "Code",
@@ -357,9 +361,18 @@ async def test_startup_room_setup_binds_external_trigger_runtime_after_setup(tmp
         patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=setup_rooms),
         patch.object(orchestrator._external_trigger_runtime, "bind_if_ready", side_effect=bind_runtime),
     ):
-        await orchestrator._setup_startup_rooms_and_memberships([bot])
+        try:
+            await orchestrator._setup_startup_rooms_and_memberships([bot])
+            slack_runtime = bound_slack_runtime(api_main.app)
+            # Slack events reach the live bot mapping, so setup that runs again keeps the same runtime.
+            assert slack_runtime is not None
+            assert slack_runtime.bots is orchestrator.agent_bots
+            await orchestrator._setup_startup_rooms_and_memberships([bot])
+            assert bound_slack_runtime(api_main.app) is slack_runtime
+        finally:
+            unbind_integrations(api_main.app)
 
-    assert call_order == ["setup", "bind"]
+    assert call_order == ["setup", "bind", "setup", "bind"]
 
 
 @pytest.mark.asyncio
@@ -591,6 +604,7 @@ async def test_unreferenced_mcp_catalog_change_skips_response_drain(tmp_path: Pa
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {
                 "demo": {
                     "transport": "stdio",
@@ -626,6 +640,7 @@ async def test_handle_mcp_catalog_change_sets_up_rooms_before_trigger_runtime_re
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {
                 "demo": {
                     "transport": "stdio",
@@ -1187,6 +1202,7 @@ async def test_handle_mcp_catalog_change_serializes_overlapping_restarts(tmp_pat
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {
                 "demo": {
                     "transport": "stdio",
@@ -1255,6 +1271,7 @@ async def test_update_config_stops_mcp_entities_before_syncing_manager(tmp_path:
     }
     updated_config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "code": {
                     "display_name": "Code",

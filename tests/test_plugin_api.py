@@ -226,7 +226,7 @@ _SIGNATURES = {
         "runtime_attachment_ids, runtime_media_attachments, hook_registry, hook_registry_state, correlation_id, "
         "hook_message_sender, matrix_admin, room_state_querier, room_state_putter, message_received_depth, "
         "orchestrator, tool_function_filter, persona, membership, membership_turn_id, source_kind, config_provider, "
-        "cli_approval_handler)"
+        "cli_approval_handler, hook_source)"
     ),
     "ToolRuntimeHookBindings": (
         "(message_sender, matrix_admin, room_state_querier, room_state_putter, message_received_depth)"
@@ -249,10 +249,10 @@ _SIGNATURES = {
     "emit_custom_event": "(plugin_name, event_name, payload)",
     "get_logger": "(name)",
     "get_tool_by_name": (
-        "(tool_name, runtime_paths, *, disable_sandbox_proxy, credential_overrides, credentials_manager, "
-        "runtime_config, tool_config_overrides, tool_init_overrides, worker_tools_override, runtime_overrides, "
-        "shared_storage_root_path, allowed_shared_services, tool_output_workspace_root, agent_state_root, "
-        "tool_output_auto_save_threshold_bytes, worker_target)"
+        "(tool_name, runtime_paths, *, runs_in_worker, credential_overrides, credentials_manager, "
+        "runtime_config, tool_config_overrides, tool_init_overrides, runtime_overrides, "
+        "allowed_shared_services, tool_output_workspace_root, agent_state_root, "
+        "tool_output_auto_save_threshold_bytes, workspace_in_worker, worker_target)"
     ),
     "get_tool_runtime_context": "()",
     "google_cloud_oauth_provider": "()",
@@ -303,7 +303,7 @@ _ENUM_MEMBERS = {
         "WORKER_TARGET",
         "RUNTIME_CONFIG",
         "TOOL_OUTPUT_WORKSPACE_ROOT",
-        "WORKER_TOOLS_OVERRIDE",
+        "WORKSPACE_IN_WORKER",
         "CURRENT_ROOM_ID",
         "AGENT_NAME",
         "FILE_ACCESS",

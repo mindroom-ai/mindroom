@@ -61,7 +61,7 @@
       },
       "messages": [
         {
-          "content": "<your_role>\n## Your Identity\nYou are Assistant, the MindRoom agent exposed through the OpenAI-compatible API as model `assistant`.\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nIn OpenAI-compatible API contexts, prior turns may instead appear as plain `role: body` lines. Always use the sender or role labels exactly as provided in the prompt.\nFollow your assigned role and any leader-assigned subtasks; respond only to requests relevant to your assignment.\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (this agent has no workspace, so path tools in the primary runtime reach only attachments).\n\nAnswer questions about the team handbook.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.",
+          "content": "<your_role>\n## Your Identity\nYou are Assistant, the MindRoom agent exposed through the OpenAI-compatible API as model `assistant`.\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nIn OpenAI-compatible API contexts, prior turns may instead appear as plain `role: body` lines. Always use the sender or role labels exactly as provided in the prompt.\nFollow your assigned role and any leader-assigned subtasks; respond only to requests relevant to your assignment.\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n\nAnswer questions about the team handbook.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n\n- To save a tool's full supported output to a file in your workspace instead of returning it, pass `mindroom_output_path: <relative-path>` and then inspect the saved file with file, coding, python, or shell tools. In shell tools, `$MINDROOM_AGENT_WORKSPACE` points at that workspace; in worker-routed shell and python tools, `~` and `$HOME` point there too.\n\nIf you have file or shell tools, you can create new skills for yourself by writing files inside your own workspace; you never need write access to a global skills directory.\nA skill is a folder `skills/<skill-name>/` in your workspace containing a `SKILL.md` file, plus optional `scripts/` and `references/` subfolders.\n`SKILL.md` starts with YAML frontmatter declaring `name` and `description`, followed by the markdown instructions:\n\n---\nname: my-skill\ndescription: One-line summary of when to use this skill\n---\n\n# My Skill\nStep-by-step instructions...\n\nDo not write to the bundled, plugin, or user skill directories (for example `~/.mindroom/skills`); they may be read-only, and workspace skills take precedence over them anyway.\nA workspace skill you create or edit becomes available on your next run, without any config change.",
           "role": "system"
         },
         {
@@ -95,6 +95,18 @@
               "b": {
                 "type": "number",
                 "description": "(float) Second number."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -116,6 +128,18 @@
               "b": {
                 "type": "number",
                 "description": "(float) Denominator."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -137,6 +161,18 @@
               "b": {
                 "type": "number",
                 "description": "(float) Exponent."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -154,6 +190,18 @@
               "n": {
                 "type": "integer",
                 "description": "(int) Number to calculate the factorial of, at most 1558."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -170,6 +218,18 @@
               "n": {
                 "type": "integer",
                 "description": "(int) Number to check if prime, at most 10**12."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -190,6 +250,18 @@
               "b": {
                 "type": "number",
                 "description": "(float) Second number."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -207,6 +279,18 @@
               "n": {
                 "type": "number",
                 "description": "(float) Number to calculate the square root of."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -227,6 +311,18 @@
               "b": {
                 "type": "number",
                 "description": "(float) Second number."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [

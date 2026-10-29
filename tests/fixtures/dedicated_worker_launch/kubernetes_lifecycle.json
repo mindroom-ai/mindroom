@@ -1,0 +1,115 @@
+{
+  "created_annotations": [
+    {
+      "mindroom.ai/worker-key": "v1:tenant-123:shared:code",
+      "mindroom.ai/state-subpath": "workers/v1_tenant-123_shared_code-f360bf3b80bdca4d",
+      "mindroom.ai/created-at": "10.0",
+      "mindroom.ai/last-used-at": "10.0",
+      "mindroom.ai/startup-count": "1",
+      "mindroom.ai/failure-count": "0",
+      "mindroom.ai/worker-status": "starting",
+      "mindroom.ai/last-started-at": "10.0",
+      "mindroom.ai/template-hash": "2a01dbae1d653c6f3f7afbbdda9e815c8e5db9c5cdc88746fde30acd0cdd7b9e",
+      "mindroom.ai/workspace-template-hash": "2a01dbae1d653c6f3f7afbbdda9e815c8e5db9c5cdc88746fde30acd0cdd7b9e"
+    },
+    {
+      "mindroom.ai/worker-key": "v1:tenant-123:shared:code",
+      "mindroom.ai/state-subpath": "workers/v1_tenant-123_shared_code-f360bf3b80bdca4d",
+      "mindroom.ai/created-at": "10.0",
+      "mindroom.ai/last-used-at": "30.0",
+      "mindroom.ai/startup-count": "1",
+      "mindroom.ai/failure-count": "0",
+      "mindroom.ai/worker-status": "starting",
+      "mindroom.ai/last-started-at": "10.0",
+      "mindroom.ai/template-hash": "2a01dbae1d653c6f3f7afbbdda9e815c8e5db9c5cdc88746fde30acd0cdd7b9e",
+      "mindroom.ai/workspace-template-hash": "2a01dbae1d653c6f3f7afbbdda9e815c8e5db9c5cdc88746fde30acd0cdd7b9e"
+    }
+  ],
+  "patched_annotations": [
+    {
+      "mindroom.ai/worker-key": "v1:tenant-123:shared:code",
+      "mindroom.ai/state-subpath": "workers/v1_tenant-123_shared_code-f360bf3b80bdca4d",
+      "mindroom.ai/created-at": "10.0",
+      "mindroom.ai/last-used-at": "10.0",
+      "mindroom.ai/startup-count": "1",
+      "mindroom.ai/failure-count": "0",
+      "mindroom.ai/worker-status": "ready",
+      "mindroom.ai/last-started-at": "10.0",
+      "mindroom.ai/template-hash": "2a01dbae1d653c6f3f7afbbdda9e815c8e5db9c5cdc88746fde30acd0cdd7b9e",
+      "mindroom.ai/workspace-template-hash": "2a01dbae1d653c6f3f7afbbdda9e815c8e5db9c5cdc88746fde30acd0cdd7b9e"
+    },
+    {
+      "mindroom.ai/worker-key": "v1:tenant-123:shared:code",
+      "mindroom.ai/state-subpath": "workers/v1_tenant-123_shared_code-f360bf3b80bdca4d",
+      "mindroom.ai/created-at": "10.0",
+      "mindroom.ai/last-used-at": "20.0",
+      "mindroom.ai/startup-count": "1",
+      "mindroom.ai/failure-count": "0",
+      "mindroom.ai/worker-status": "starting",
+      "mindroom.ai/last-started-at": "10.0",
+      "mindroom.ai/template-hash": "2a01dbae1d653c6f3f7afbbdda9e815c8e5db9c5cdc88746fde30acd0cdd7b9e",
+      "mindroom.ai/workspace-template-hash": "2a01dbae1d653c6f3f7afbbdda9e815c8e5db9c5cdc88746fde30acd0cdd7b9e"
+    },
+    {
+      "mindroom.ai/worker-key": "v1:tenant-123:shared:code",
+      "mindroom.ai/state-subpath": "workers/v1_tenant-123_shared_code-f360bf3b80bdca4d",
+      "mindroom.ai/created-at": "10.0",
+      "mindroom.ai/last-used-at": "20.0",
+      "mindroom.ai/startup-count": "1",
+      "mindroom.ai/failure-count": "0",
+      "mindroom.ai/worker-status": "ready",
+      "mindroom.ai/last-started-at": "10.0",
+      "mindroom.ai/template-hash": "2a01dbae1d653c6f3f7afbbdda9e815c8e5db9c5cdc88746fde30acd0cdd7b9e",
+      "mindroom.ai/workspace-template-hash": "2a01dbae1d653c6f3f7afbbdda9e815c8e5db9c5cdc88746fde30acd0cdd7b9e"
+    },
+    {
+      "mindroom.ai/last-used-at": "25.0",
+      "mindroom.ai/worker-status": "ready",
+      "mindroom.ai/failure-reason": ""
+    },
+    {
+      "mindroom.ai/last-used-at": "26.0",
+      "mindroom.ai/worker-status": "ready",
+      "mindroom.ai/failure-reason": ""
+    },
+    {
+      "mindroom.ai/worker-key": "v1:tenant-123:shared:code",
+      "mindroom.ai/state-subpath": "workers/v1_tenant-123_shared_code-f360bf3b80bdca4d",
+      "mindroom.ai/created-at": "10.0",
+      "mindroom.ai/last-used-at": "30.0",
+      "mindroom.ai/startup-count": "1",
+      "mindroom.ai/failure-count": "0",
+      "mindroom.ai/worker-status": "starting",
+      "mindroom.ai/last-started-at": "10.0",
+      "mindroom.ai/template-hash": "2a01dbae1d653c6f3f7afbbdda9e815c8e5db9c5cdc88746fde30acd0cdd7b9e",
+      "mindroom.ai/workspace-template-hash": "2a01dbae1d653c6f3f7afbbdda9e815c8e5db9c5cdc88746fde30acd0cdd7b9e"
+    },
+    {
+      "mindroom.ai/worker-key": "v1:tenant-123:shared:code",
+      "mindroom.ai/state-subpath": "workers/v1_tenant-123_shared_code-f360bf3b80bdca4d",
+      "mindroom.ai/created-at": "10.0",
+      "mindroom.ai/last-used-at": "30.0",
+      "mindroom.ai/startup-count": "2",
+      "mindroom.ai/failure-count": "0",
+      "mindroom.ai/worker-status": "starting",
+      "mindroom.ai/last-started-at": "30.0",
+      "mindroom.ai/template-hash": "2a01dbae1d653c6f3f7afbbdda9e815c8e5db9c5cdc88746fde30acd0cdd7b9e",
+      "mindroom.ai/workspace-template-hash": "2a01dbae1d653c6f3f7afbbdda9e815c8e5db9c5cdc88746fde30acd0cdd7b9e"
+    },
+    {
+      "mindroom.ai/worker-key": "v1:tenant-123:shared:code",
+      "mindroom.ai/state-subpath": "workers/v1_tenant-123_shared_code-f360bf3b80bdca4d",
+      "mindroom.ai/created-at": "10.0",
+      "mindroom.ai/last-used-at": "30.0",
+      "mindroom.ai/startup-count": "2",
+      "mindroom.ai/failure-count": "0",
+      "mindroom.ai/worker-status": "ready",
+      "mindroom.ai/last-started-at": "30.0",
+      "mindroom.ai/template-hash": "2a01dbae1d653c6f3f7afbbdda9e815c8e5db9c5cdc88746fde30acd0cdd7b9e",
+      "mindroom.ai/workspace-template-hash": "2a01dbae1d653c6f3f7afbbdda9e815c8e5db9c5cdc88746fde30acd0cdd7b9e"
+    }
+  ],
+  "deleted": [
+    "mindroom-worker-f360bf3b80bdca4d709b81a5"
+  ]
+}

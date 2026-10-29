@@ -24,6 +24,7 @@ from mindroom.approval.tool_approval import ToolApprovalTransportError, schedule
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.entity_resolution import entity_identity_registry
@@ -66,7 +67,7 @@ from mindroom.scheduling.tasks import (
 from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
-from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
+from mindroom.tool_system.invocation import CallResult, ToolCallContext, run_tool_call
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -94,6 +95,7 @@ from tests.scripted_agent_helpers import registered_toolkit
 from tests.test_scheduler_tool import _bind_runtime_paths, _make_context
 from tests.test_tool_hooks import _plugin
 from tests.tool_approval_helpers import gated_functions, scheduled_call_approvals
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1029,6 +1031,7 @@ def _gated_config() -> Config:
     return _bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval=ToolApprovalConfig(
                 rules=[ApprovalRuleConfig(match="post_slack_message", action="require_approval")],
             ),
@@ -1094,6 +1097,13 @@ class _SlackTools(Toolkit):
         return self.outcome
 
 
+def _answer(result: CallResult) -> object:
+    """Return what a call answered with, raising the exception it raised, as these tests read a call's result."""
+    if result.error is not None:
+        raise result.error
+    return result.value
+
+
 @dataclass(frozen=True)
 class _LiveRun:
     """One agent run's tools as its build offers them, beside the scheduler, under the run's tool-call policy.
@@ -1117,7 +1127,7 @@ class _LiveRun:
         }
         policy = bind_live_tools(functions, self.middleware)
         context = ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None)
-        return await run_tool_call(functions[function_name], arguments, context, middleware=policy)
+        return _answer(await run_tool_call(functions[function_name], arguments, context, middleware=policy))
 
 
 _DEFAULT_OUTCOME = object()
@@ -1283,6 +1293,7 @@ async def test_schedule_tool_call_refuses_a_team() -> None:
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
             teams={"crew": TeamConfig(display_name="Crew", role="Ship things", agents=["general"])},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval=ToolApprovalConfig(
                 rules=[ApprovalRuleConfig(match="post_slack_message", action="require_approval")],
             ),
@@ -1382,7 +1393,12 @@ async def test_schedule_tool_call_rejects_what_it_cannot_store(
     config = (
         _gated_config()
         if gated
-        else _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
+        else _bind_runtime_paths(
+            Config(
+                agents={"general": AgentConfig(display_name="General Agent")},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
+            ),
+        )
     )
     context = _tool_context(config, thread_id=thread_id)
     request = AsyncMock(return_value=True)
@@ -1993,6 +2009,7 @@ def _code_config() -> Config:
     return _bind_runtime_paths(
         Config(
             agents={_AGENT: AgentConfig(display_name="Code Agent")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval=ToolApprovalConfig(
                 rules=[ApprovalRuleConfig(match="post_slack_message", action="require_approval")],
             ),
@@ -2185,7 +2202,7 @@ def _agent_build(config: Config, monkeypatch: pytest.MonkeyPatch, agent_name: st
         None,
         supports_native_tool_approval=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths_for(config), agent_name),
     )
 
 
@@ -2195,11 +2212,13 @@ async def _run_in_build(manager: ApprovalManager, build: AgentBuild, config: Con
         patch("mindroom.approval.manager.get_approval_store", return_value=manager),
         tool_runtime_context(_turn_context(config)),
     ):
-        return await run_tool_call(
-            build.spec.functions["run_scheduled_call"],
-            {"task_id": _TASK},
-            ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None),
-            middleware=agent_tool_middleware(build),
+        return _answer(
+            await run_tool_call(
+                build.spec.functions["run_scheduled_call"],
+                {"task_id": _TASK},
+                ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None),
+                middleware=agent_tool_middleware(build),
+            ),
         )
 
 
@@ -2229,7 +2248,7 @@ def test_only_a_build_offering_the_scheduler_binds_its_live_functions(
         None,
         supports_native_tool_approval=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths_for(config), _AGENT),
     )
 
     functions = build.spec.functions
@@ -2292,16 +2311,18 @@ async def test_scheduling_a_name_two_toolkits_share_stores_the_toolkit_the_run_o
         tool_runtime_context(context),
         _responders(config, "general"),
     ):
-        await run_tool_call(
-            build.spec.functions["schedule_tool_call"],
-            {
-                "tool_name": "post_slack_message",
-                "arguments_json": canonical_arguments(_ARGUMENTS),
-                "execute_at": "2030-01-02T09:00:00-05:00",
-                "description": "Morning DM",
-            },
-            ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None),
-            middleware=agent_tool_middleware(build),
+        _answer(
+            await run_tool_call(
+                build.spec.functions["schedule_tool_call"],
+                {
+                    "tool_name": "post_slack_message",
+                    "arguments_json": canonical_arguments(_ARGUMENTS),
+                    "execute_at": "2030-01-02T09:00:00-05:00",
+                    "description": "Morning DM",
+                },
+                ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None),
+                middleware=agent_tool_middleware(build),
+            ),
         )
 
     [binding] = request.await_args.args
@@ -2358,11 +2379,13 @@ async def test_a_stored_call_runs_only_the_function_the_run_offers_under_its_nam
 
         # The model's own call of the name runs the first configured toolkit's function.
         with tool_runtime_context(_turn_context(config)):
-            await run_tool_call(
-                build.spec.functions["post_slack_message"],
-                _OTHER_ARGUMENTS,
-                ToolCallContext(run_id="run", session_id="session", call_id="call-2", user_id=None),
-                middleware=agent_tool_middleware(build),
+            _answer(
+                await run_tool_call(
+                    build.spec.functions["post_slack_message"],
+                    _OTHER_ARGUMENTS,
+                    ToolCallContext(run_id="run", session_id="session", call_id="call-2", user_id=None),
+                    middleware=agent_tool_middleware(build),
+                ),
             )
 
         assert configured_slack_pair[configured[0]][-1] == _OTHER_ARGUMENTS
@@ -2746,28 +2769,24 @@ class _AsyncStreamingSlackTools(Toolkit):
     [_StreamingSlackTools, _AsyncStreamingSlackTools],
     ids=["generator", "async-generator"],
 )
-@pytest.mark.parametrize("workspace", [False, True], ids=["no-workspace", "workspace"])
 async def test_a_streaming_tool_runs_to_the_end_of_its_stream(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     toolkit_class: type[Toolkit],
-    workspace: bool,
 ) -> None:
     """A tool that streams its result runs as a scheduled call through the agent's build and returns the whole stream.
 
-    An agent with a workspace runs it behind the output-file wrapper, which hands the stream on undrained.
+    The agent runs it behind the output-file wrapper, which hands the stream on undrained.
     """
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     config = _code_config()
     config.agents[_AGENT].tools = [_TOOLKIT]
-    if workspace:
-        config.agents[_AGENT].memory_backend = "file"
     with registered_toolkit(_TOOLKIT, toolkit_class):
         build = _agent_build(config, monkeypatch)
         parameters = build.spec.functions["post_slack_message"].parameters
-        assert ("mindroom_output_path" in parameters["properties"]) is workspace
+        assert "mindroom_output_path" in parameters["properties"]
         try:
             await _armed(manager)
 

@@ -27,7 +27,7 @@ from mindroom.tool_system.invocation import execute_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError, validate_tool_arguments
 from mindroom.tool_system.tool_function import close_toolkits, connect_toolkits
-from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
+from mindroom.tool_system.tool_hooks import owned_sync_tool_completion
 from mindroom.tool_system.worker_routing import tool_execution_identity
 
 if TYPE_CHECKING:
@@ -455,35 +455,21 @@ async def _execute_agent_tool_call(
                     await wait_for_future_until_complete(asyncio.create_task(catalog._lock.acquire()))
 
             function = replace(function, entrypoint=pinned_leaf)
-        # A job's call has no time limit, so what it offloads must not hold a shared pool's thread.
-        tracker = SyncToolCompletionTracker(executor=JOB_CALL_EXECUTOR if job_owns_execution() else None)
-        try:
-            with catalog.execution_context(), track_sync_tool_completion(tracker), cli_dispatch_scope():
-                outcome = await execute_tool_call(
-                    function,
-                    arguments,
-                    catalog.run.call_context(call_id),
-                    middleware=catalog.middleware,
-                )
-        finally:
-            await _settle_call(binding, tracker)
+        # A job's call has no time limit, so what it offloads must not hold a shared pool's thread. A synchronous body
+        # the call started keeps the catalog until it finishes, so its thread never outlives the catalog.
+        with catalog.execution_context():
+            async with owned_sync_tool_completion(JOB_CALL_EXECUTOR if job_owns_execution() else None):
+                with cli_dispatch_scope():
+                    outcome = await execute_tool_call(
+                        function,
+                        arguments,
+                        catalog.run.call_context(call_id),
+                        middleware=catalog.middleware,
+                    )
         if outcome.images or outcome.audios or outcome.videos or outcome.files:
             yield AgentToolCallMedia(outcome)
         kind = "continuation_required" if outcome.stop_after_call else "completed"
         yield AgentToolCallStep(kind, binding.key, replace(call, result=outcome.content, is_error=outcome.is_error))
-
-
-async def _settle_call(binding: PreparedAgentToolBinding, tracker: SyncToolCompletionTracker) -> None:
-    """Wait for a synchronous leaf the call started, so its thread never outlives the catalog."""
-
-    async def settle() -> None:
-        with binding.catalog.execution_context():
-            pending = tracker.started_task()
-            if pending is not None:
-                # Its failure was already reported as this call's own; waiting must not raise it again.
-                await asyncio.gather(pending, return_exceptions=True)
-
-    await wait_for_future_until_complete(asyncio.create_task(settle(), name="agent-tool-call-cleanup"))
 
 
 __all__ = [

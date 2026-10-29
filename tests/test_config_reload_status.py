@@ -56,6 +56,7 @@ def _lifecycle(tmp_path: Path) -> ConfigReloadLifecycle:
         apply_update_plan=AsyncMock(return_value=True),
         response_admission_gate=ResponseAdmissionGate(),
         before_runtime_replacement=AsyncMock(),
+        finish_reload=AsyncMock(),
     )
 
 

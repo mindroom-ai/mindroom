@@ -24,6 +24,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.routing import ResponderSelection
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.budget_helpers import budget_monitor_with_spend
 from tests.conftest import completed_ai_response_mock, completing
 from tests.identity_helpers import persist_entity_accounts
@@ -44,6 +45,10 @@ class _ApiHarness:
     client: TestClient
     config: Config
     runtime_paths: RuntimePaths
+
+
+def _workspace(api: _ApiHarness, agent_name: str) -> Path:
+    return agent_workspace_root_path(api.runtime_paths.storage_root, agent_name)
 
 
 @pytest.fixture
@@ -116,7 +121,14 @@ def test_mapped_request_delegates_with_canonical_identity(api: _ApiHarness, stre
         assert execution_identity.requester_id == ctx.requester_id
         (identity,) = config_lifecycle.app_state(api.client.app).openai_responses
         assert (identity.responder, identity.requester_id) == ("leader", "@alice:example.org")
-        tool = DelegateTools("leader", ["specialist"], api.runtime_paths, api.config, execution_identity)
+        tool = DelegateTools(
+            "leader",
+            ["specialist"],
+            api.runtime_paths,
+            api.config,
+            _workspace(api, "leader"),
+            execution_identity,
+        )
         return await tool.run_subagent(agent_name="specialist", task="help")
 
     async def streaming(
@@ -171,7 +183,14 @@ def test_mapped_request_delegates_on_the_fallback_once_over_budget(api: _ApiHarn
         execution_identity: ToolExecutionIdentity,
         **_kwargs: object,
     ) -> str:
-        tool = DelegateTools("leader", ["specialist"], api.runtime_paths, api.config, execution_identity)
+        tool = DelegateTools(
+            "leader",
+            ["specialist"],
+            api.runtime_paths,
+            api.config,
+            _workspace(api, "leader"),
+            execution_identity,
+        )
         return await tool.run_subagent(agent_name="specialist", task="help")
 
     with (
@@ -198,7 +217,14 @@ def test_delegation_fails_closed(api: _ApiHarness, key: str, target: str) -> Non
         execution_identity: ToolExecutionIdentity,
         **_kwargs: object,
     ) -> str:
-        tool = DelegateTools("leader", [target], api.runtime_paths, api.config, execution_identity)
+        tool = DelegateTools(
+            "leader",
+            [target],
+            api.runtime_paths,
+            api.config,
+            _workspace(api, "leader"),
+            execution_identity,
+        )
         return await tool.run_subagent(agent_name=target, task="help")
 
     with (
@@ -273,7 +299,14 @@ def test_nested_delegation_retains_authority_and_denies_forbidden_target(api: _A
     api.config.agents["specialist"].delegate_to = ["forbidden"]
 
     async def parent(_ctx: ResponseTurnContext, *, execution_identity: ToolExecutionIdentity, **_kwargs: object) -> str:
-        tool = DelegateTools("leader", ["specialist"], api.runtime_paths, api.config, execution_identity)
+        tool = DelegateTools(
+            "leader",
+            ["specialist"],
+            api.runtime_paths,
+            api.config,
+            _workspace(api, "leader"),
+            execution_identity,
+        )
         return await tool.run_subagent(agent_name="specialist", task="help")
 
     async def child(ctx: ResponseTurnContext, *, execution_identity: ToolExecutionIdentity, **_kwargs: object) -> str:
@@ -284,6 +317,7 @@ def test_nested_delegation_retains_authority_and_denies_forbidden_target(api: _A
             ["forbidden"],
             api.runtime_paths,
             api.config,
+            _workspace(api, "specialist"),
             execution_identity,
             delegation_depth=1,
         )
@@ -317,7 +351,14 @@ def test_delegation_rechecks_current_authorization(api: _ApiHarness, policy: str
         snapshot.runtime_config = replacement
         if policy == "replace_runtime":
             snapshot.runtime_paths = resolve_runtime_paths(config_path=tmp_path / "replaced.yaml", process_env={})
-        tool = DelegateTools("leader", ["specialist"], api.runtime_paths, api.config, execution_identity)
+        tool = DelegateTools(
+            "leader",
+            ["specialist"],
+            api.runtime_paths,
+            api.config,
+            _workspace(api, "leader"),
+            execution_identity,
+        )
         return await tool.run_subagent(agent_name="specialist", task="help")
 
     with (
@@ -341,7 +382,14 @@ def test_delegation_rechecks_current_caller_allowlist(api: _ApiHarness) -> None:
         replacement = api.config.model_copy(deep=True)
         replacement.agents["leader"].delegate_to = []
         config_lifecycle.require_api_state(api.client.app).snapshot.runtime_config = replacement
-        tool = DelegateTools("leader", ["specialist"], api.runtime_paths, api.config, execution_identity)
+        tool = DelegateTools(
+            "leader",
+            ["specialist"],
+            api.runtime_paths,
+            api.config,
+            _workspace(api, "leader"),
+            execution_identity,
+        )
         return await tool.run_subagent(agent_name="specialist", task="help")
 
     with (

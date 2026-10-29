@@ -63,6 +63,7 @@ from tests.conftest import bind_runtime_paths, install_model_providers, seed_ses
 from tests.fakes.scripted_model import ScriptedModel, answer, usage
 from tests.history_helpers import _forced_compaction_context, _make_config, _reported, _session
 from tests.identity_helpers import persist_actual_entity_accounts, persist_entity_accounts
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -311,7 +312,14 @@ async def _dynamic_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     config, paths, owner, context = _conversation(tmp_path)
     _scripted(monkeypatch, "Sample helper output.")
     identity = build_execution_identity_from_runtime_context(context)
-    build = create_agent("test_agent", config, paths, identity, knowledge=None, active_model_name=None)
+    build = create_agent(
+        "test_agent",
+        config,
+        paths,
+        identity,
+        knowledge=None,
+        model=turn_model(config, paths, "test_agent"),
+    )
     with helper_usage_owner_context(owner):
         await _run_room_agent_turn(context, build, "Sample task.")
     return paths.storage_root
@@ -354,8 +362,9 @@ async def _compaction_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     _scripted(monkeypatch, "A summary of the conversation.")
     inputs = resolve_entity_preparation_inputs(
         config=config,
+        runtime_paths=paths,
         entity_name="test_agent",
-        history_settings=config.resolve_entity("test_agent").history_settings,
+        history_settings=config.resolve_scope("test_agent").history_settings,
         static_prompt_tokens=0,
         active_model_name=None,
         active_context_window=None,

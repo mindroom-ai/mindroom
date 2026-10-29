@@ -15,6 +15,12 @@ CONCRETE_ORCHESTRATOR_IMPORT_ALLOWLIST = {
 RUNTIME_PROTOCOLS_MODULE = Path("src/mindroom/runtime_protocols.py")
 CONFIG_MAIN_MODULE = Path("src/mindroom/config/main.py")
 CONFIG_MODELS_MODULE = Path("src/mindroom/config/models.py")
+CONFIG_SLACK_MODULE = Path("src/mindroom/config/slack.py")
+# The only `mindroom.matrix.identity` names each config module may import: validators of identity-shaped settings.
+CONFIG_IDENTITY_IMPORT_ALLOWLIST = {
+    CONFIG_MODELS_MODULE: {"valid_matrix_server_name"},
+    CONFIG_SLACK_MODULE: {"validate_email_to_matrix_mapping"},
+}
 APPROVAL_CONFIG_MODULE = Path("src/mindroom/config/approval.py")
 MATRIX_MESSAGE_TOOL_MODULE = Path("src/mindroom/custom_tools/matrix_message.py")
 RESPONSE_RUNNER_MODULE = Path("src/mindroom/response_runner.py")
@@ -50,17 +56,15 @@ def _is_matrix_runtime_module(module: str) -> bool:
 
 
 def test_config_modules_do_not_import_matrix_runtime_modules() -> None:
-    """Config models avoid Matrix runtime imports outside the server-name validation seam."""
+    """Config models avoid Matrix runtime imports outside the identity validation seam."""
     forbidden: list[str] = []
     for source_path in CONFIG_MODULES:
         tree = ast.parse(source_path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module and _is_matrix_runtime_module(node.module):
-                if (
-                    source_path == CONFIG_MODELS_MODULE
-                    and node.module == "mindroom.matrix.identity"
-                    and {alias.name for alias in node.names} == {"valid_matrix_server_name"}
-                ):
+                if node.module == "mindroom.matrix.identity" and {
+                    alias.name for alias in node.names
+                } == CONFIG_IDENTITY_IMPORT_ALLOWLIST.get(source_path):
                     continue
                 forbidden.append(f"{source_path}:{node.lineno}: from {node.module}")
             if isinstance(node, ast.Import):

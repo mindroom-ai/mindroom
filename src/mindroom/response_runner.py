@@ -14,14 +14,14 @@ from uuid import uuid4
 from mindroom import reply_lifecycle as rl
 from mindroom.agent_modes import resolve_agent_mode
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
-from mindroom.agents import show_tool_calls_for_agent
 from mindroom.ai import ResponseTurnContext, ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
 from mindroom.ai_runtime import bind_mid_turn_conversation_context
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_entity_replies_in_room
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
-from mindroom.budgets.monitor import budget_model
+from mindroom.config.resolution import cheap_model as agent_cheap_model
+from mindroom.config.resolution import entity_timezone, memory_backend, show_tool_calls
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     HOOK_SOURCE_RUN_METADATA_KEY,
@@ -111,7 +111,7 @@ from mindroom.streaming import (
     clean_partial_reply_text,
 )
 from mindroom.teams.envelope import team_response, team_response_stream
-from mindroom.teams.members import TeamTurnModelSelection, resolve_team_turn_models
+from mindroom.teams.members import requested_team_agent_names
 from mindroom.teams.presentation import strip_team_display
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_models import set_thread_model_override
@@ -119,7 +119,7 @@ from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_jobs.follow_ups import follow_up_envelope, follow_up_jobs, follow_up_key
 from mindroom.tool_jobs.runtime import get_background_runtime
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
+from mindroom.tool_system.agent_tools import room_turn_offers
 from mindroom.tool_system.events import strip_visible_tool_markers
 from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
@@ -129,6 +129,7 @@ from mindroom.tool_system.worker_routing import (
     run_with_tool_execution_identity,
     stream_with_tool_execution_identity,
 )
+from mindroom.turn_model import ModelScope, TurnBudget, TurnModel, resolve_team_turn_models, resolve_turn_model
 from mindroom.turn_origin import SenderKind, TurnIntent
 from mindroom.turn_record import RevisionSnapshotChangedError
 from mindroom.user_turn_time import prefix_user_turn_time
@@ -162,7 +163,7 @@ if TYPE_CHECKING:
 
     from mindroom.approval.continuation_runner import ApprovalContinuationRunner
     from mindroom.bot_runtime_view import BotRuntimeView
-    from mindroom.config.main import Config, ResolvedRuntimeModel
+    from mindroom.config.main import Config
     from mindroom.config.participation import ParticipationConfig
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
@@ -413,15 +414,6 @@ def reply_authorization_entity_names(
     if owner_entity_name in config.teams:
         return (owner_entity_name,)
     return tuple(dict.fromkeys((owner_entity_name, *team_member_names)))
-
-
-def _agent_has_matrix_messaging_tool(config: Config, agent_name: str) -> bool:
-    """Return whether one agent can issue Matrix message actions."""
-    try:
-        surface = visible_tool_surface(agent_name=agent_name, config=config)
-    except ValueError:
-        return False
-    return "matrix_message" in {entry.name for entry in surface.runtime_tool_configs}
 
 
 def _cached_room_display_name(runtime: BotRuntimeView, room_id: str) -> str | None:
@@ -1353,15 +1345,12 @@ class ResponseRunner:
             persist_response_event_id=persist_response_event_id,
         )
 
-    def _budgeted_model(self, request: ResponseRequest, model_name: str) -> str:
-        """Return the model this request's requester may use under their budget."""
+    def _turn_budget(self, request: ResponseRequest) -> TurnBudget:
+        """Return the budget this request's requester spends."""
         orchestrator = self.deps.runtime.orchestrator
-        return budget_model(
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-            orchestrator.budgets if orchestrator is not None else None,
-            request.response_envelope.requester_id,
-            model_name,
+        return TurnBudget(
+            monitor=orchestrator.budgets if orchestrator is not None else None,
+            requester_id=request.response_envelope.requester_id,
         )
 
     def response_finished_notifier(self, source_event_ids: Sequence[str]) -> Callable[[], None] | None:
@@ -1437,7 +1426,7 @@ class ResponseRunner:
 
     def _show_tool_calls(self) -> bool:
         """Return tool-call visibility for this agent."""
-        return show_tool_calls_for_agent(self.deps.runtime.config, self.deps.agent_name)
+        return show_tool_calls(self.deps.runtime.config, self.deps.agent_name)
 
     def thread_summary_message_count_hint(self, request: ResponseRequest) -> int:
         """Return a lower bound on the thread's size after this reply, counted from the request's visible history."""
@@ -1503,7 +1492,7 @@ class ResponseRunner:
             return None
         # A file-memory agent's conversation is saved by auto-flush from stored sessions; a team's goes to its shared
         # memory.
-        if isinstance(agent_name, str) and self.deps.runtime.config.resolve_entity(agent_name).memory_backend != "mem0":
+        if isinstance(agent_name, str) and memory_backend(self.deps.runtime.config, agent_name) != "mem0":
             return None
 
         def queue() -> None:
@@ -2382,10 +2371,7 @@ class ResponseRunner:
         """Build the per-turn identity context for one agent response."""
         matrix_target_item = _matrix_message_target_item(
             runtime.resolved_target,
-            matrix_message_available=_agent_has_matrix_messaging_tool(
-                self.deps.runtime.config,
-                self.deps.agent_name,
-            ),
+            matrix_message_available=room_turn_offers(self.deps.runtime.config, self.deps.agent_name, "matrix_message"),
             runtime=self.deps.runtime,
         )
         state_root = resolve_agent_storage(
@@ -3080,26 +3066,18 @@ class ResponseRunner:
             None
             if team_request.resolution_reason is not None
             else resolve_team_turn_models(
-                self.deps.agent_name,
-                agent_names,
-                request.room_id,
                 self.deps.runtime.config,
                 self.deps.runtime_paths,
-                thread_id=resolved_target.resolved_thread_id,
-                active_model_name=request.scheduled_model,
+                ModelScope(
+                    entity=self.deps.agent_name,
+                    room_id=request.room_id,
+                    thread_id=resolved_target.resolved_thread_id,
+                    explicit=request.scheduled_model,
+                ),
+                requested_team_agent_names(agent_names),
+                self._turn_budget(request),
             )
         )
-        if turn_models is not None:
-            budgeted = {
-                model_name: self._budgeted_model(request, model_name)
-                for model_name in {turn_models.team_model_name, *turn_models.member_model_names.values()}
-            }
-            turn_models = TeamTurnModelSelection(
-                team_model_name=budgeted[turn_models.team_model_name],
-                member_model_names={
-                    member: budgeted[model_name] for member, model_name in turn_models.member_model_names.items()
-                },
-            )
         request = await self._prepare_admitted_locked_turn(
             request,
             resolved_target=resolved_target,
@@ -3151,7 +3129,7 @@ class ResponseRunner:
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
             # A team turn is dated in the zone of the entity whose bot runs it, as its leader and prompt are.
-            timezone=self.deps.runtime.config.get_entity_timezone(self.deps.agent_name),
+            timezone=entity_timezone(self.deps.runtime.config, self.deps.agent_name),
             model_prompt=request.model_prompt,
         )
         assert turn_models is not None
@@ -3173,7 +3151,7 @@ class ResponseRunner:
         matrix_target_item = _matrix_message_target_item(
             resolved_target,
             matrix_message_available=any(
-                _agent_has_matrix_messaging_tool(self.deps.runtime.config, name) for name in agent_names
+                room_turn_offers(self.deps.runtime.config, name, "matrix_message") for name in agent_names
             ),
             runtime=self.deps.runtime,
         )
@@ -3624,15 +3602,17 @@ class ResponseRunner:
         media_inputs = request.media or MediaInputs()
         session_id = resolved_target.session_id
         resolved_model_prompt = request.model_prompt or request.prompt
-        if active_model_name is None:
-            active_model_name = self.deps.runtime.config.resolve_runtime_model(
-                entity_name=self.deps.agent_name,
-                active_model_name=request.scheduled_model,
+        active_model_name = resolve_turn_model(
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            ModelScope(
+                entity=self.deps.agent_name,
                 room_id=resolved_target.room_id,
                 thread_id=response_thread_id,
-                runtime_paths=self.deps.runtime_paths,
-            ).model_name
-        active_model_name = self._budgeted_model(request, active_model_name)
+                explicit=active_model_name if active_model_name is not None else request.scheduled_model,
+            ),
+            self._turn_budget(request),
+        ).model_name
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             resolved_target,
             user_id=request.user_id,
@@ -4192,14 +4172,14 @@ class ResponseRunner:
         self,
         request: ResponseRequest,
         *,
-        runtime_model: ResolvedRuntimeModel,
+        runtime_model: TurnModel,
         thread_id: str | None,
     ) -> str:
         """Let a judge move a thread whose prompt cache went cold to the agent's cheap model."""
         resolved_model = runtime_model.model_name
         config = self.deps.runtime.config
         agent = config.agents.get(self.deps.agent_name)
-        cheap_model = config.get_agent_cheap_model(self.deps.agent_name) if agent is not None else None
+        cheap_model = agent_cheap_model(config, self.deps.agent_name) if agent is not None else None
         if (
             agent is None
             or agent.cold_cache is None
@@ -4282,12 +4262,17 @@ class ResponseRunner:
         request = admitted_request
         _approve_continued_reply(participation, request)
         response_thread_id = _response_thread_id(request, resolved_target)
-        runtime_model = self.deps.runtime.config.resolve_runtime_model(
-            entity_name=self.deps.agent_name,
-            active_model_name=request.scheduled_model,
-            room_id=resolved_target.room_id,
-            thread_id=response_thread_id,
-            runtime_paths=self.deps.runtime_paths,
+        # The cold-cache judge sees the model before the budget, which the response runtime applies after it.
+        runtime_model = resolve_turn_model(
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            ModelScope(
+                entity=self.deps.agent_name,
+                room_id=resolved_target.room_id,
+                thread_id=response_thread_id,
+                explicit=request.scheduled_model,
+            ),
+            None,
         )
         prepared_request = await self._prepare_admitted_locked_turn(
             request,
@@ -4308,7 +4293,7 @@ class ResponseRunner:
                 request.thread_history,
                 config=self.deps.runtime.config,
                 runtime_paths=self.deps.runtime_paths,
-                timezone=self.deps.runtime.config.get_entity_timezone(self.deps.agent_name),
+                timezone=entity_timezone(self.deps.runtime.config, self.deps.agent_name),
                 model_prompt=request.model_prompt,
             )
         )

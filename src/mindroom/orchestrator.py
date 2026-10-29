@@ -6,7 +6,7 @@ import asyncio
 import signal
 import time
 from collections.abc import Awaitable, Callable
-from contextlib import nullcontext, suppress
+from contextlib import ExitStack, nullcontext, suppress
 from contextvars import Context
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -60,6 +60,7 @@ from mindroom.hooks import (
     build_hook_room_state_querier,
     emit,
 )
+from mindroom.integrations import bind_integrations, unbind_integrations
 from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
@@ -124,9 +125,9 @@ from mindroom.tool_system.plugins import (
     reload_plugins,
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
-from mindroom.workers.backends.docker_projection import publish_generated_agents
 from mindroom.workers.backends.legacy_state_root_mounts import retire_state_root_worker_mounts
 from mindroom.workers.runtime import (
+    bind_worker_launch_config_source,
     clear_worker_validation_snapshot_cache,
     lease_configured_primary_worker_manager,
     reset_primary_worker_manager,
@@ -525,7 +526,6 @@ class _MultiAgentOrchestrator:
             bot_provider=lambda agent_name: self.agent_bots.get(agent_name),
             worker_lease_provider=lambda required_backend_locator: lease_configured_primary_worker_manager(
                 self.runtime_paths,
-                runtime_config=self.config,
                 required_backend_locator=required_backend_locator,
             ),
             api_enabled=self.api_enabled,
@@ -539,6 +539,7 @@ class _MultiAgentOrchestrator:
             apply_update_plan=self._apply_config_update_plan,
             response_admission_gate=self._response_admission_gate,
             before_runtime_replacement=self._thread_export_runner.prepare_runtime_replacement,
+            finish_reload=self._script_runtime.finish_reload,
             config_update_lock=self._config_update_lock,
         )
         self._approval_transport = ApprovalMatrixTransport(
@@ -767,6 +768,23 @@ class _MultiAgentOrchestrator:
         )
         self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
         self._computer_runtime.bind_if_ready(self.config, self.agent_bots)
+        self._bind_integrations()
+
+    def _bind_integrations(self) -> None:
+        """Let integration events reach the live agent bots; `self.agent_bots` stays current, so one binding lasts."""
+        if not self.api_enabled:
+            return
+        from mindroom.api import main as api_main  # noqa: PLC0415
+
+        bind_integrations(api_main.app, self.agent_bots, self.agent_reply_memberships)
+
+    def _unbind_integrations(self) -> list[tuple[str, object]]:
+        """Refuse new integration events and return each unbound runtime by name, which owns its running deliveries."""
+        if not self.api_enabled:
+            return []
+        from mindroom.api import main as api_main  # noqa: PLC0415
+
+        return unbind_integrations(api_main.app)
 
     def _configure_approval_store_transport(self) -> None:
         """Bind approval transport hooks to the current shared runtime services."""
@@ -1186,11 +1204,6 @@ class _MultiAgentOrchestrator:
         except (DuplicateManagedEntityIdentityError, MissingManagedEntityAccountError) as exc:
             raise PermanentStartupError(str(exc)) from exc
 
-    def _commit_config(self, config: Config) -> None:
-        """Run on `config` from now on, and give Docker worker configs the generated agents it built."""
-        self.config = config
-        publish_generated_agents(self.runtime_paths, config.generated_agent_data())
-
     def _preflight_account_provisioning(
         self,
         config: Config,
@@ -1337,7 +1350,7 @@ class _MultiAgentOrchestrator:
                 )
                 return result
             finally:
-                await self._script_runtime.complete_worker_replacement()
+                await self._script_runtime.finish_reload()
 
     async def _apply_plugin_changes_for_config_update(
         self,
@@ -1359,7 +1372,7 @@ class _MultiAgentOrchestrator:
             new_config,
             changed_server_ids,
         )
-        self._commit_config(new_config)
+        self.config = new_config
         if reply_membership_policy_changed:
             self.invalidate_agent_reply_memberships(reason="config_reload")
         new_hook_registry = apply_prepared_plugin_reload(
@@ -1451,7 +1464,7 @@ class _MultiAgentOrchestrator:
         self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=True)
         await self._prepare_user_account(config, update_runtime_state=True)
         entity_users = await self._prepare_entity_accounts(config, entity_names)
-        self._commit_config(config)
+        self.config = config
         warn_about_config_risks(config, self.runtime_paths)
         self.agent_reply_memberships.invalidate(config, reason="initial_config")
         await self._bind_event_journal()
@@ -1792,7 +1805,7 @@ class _MultiAgentOrchestrator:
         )
         await self._prepare_user_account(new_config, update_runtime_state=not self.running)
         await self._prepare_entity_accounts(new_config, entity_names)
-        self._commit_config(new_config)
+        self.config = new_config
         warn_about_config_risks(new_config, self.runtime_paths)
         self.agent_reply_memberships.invalidate(new_config, reason="initial_config_reload")
         self._activate_hook_registry(hook_registry)
@@ -2153,13 +2166,13 @@ class _MultiAgentOrchestrator:
                     plan.changed_mcp_servers,
                 )
                 # Only apply the new config after validation and account checks succeed.
-                self._commit_config(new_config)
+                self.config = new_config
                 if reply_membership_policy_changed:
                     self.invalidate_agent_reply_memberships(reason="config_reload")
                 self.plugin_watch.sync_roots(new_config)
                 self._activate_hook_registry(self.hook_registry)
                 clear_worker_validation_snapshot_cache()
-            await self._script_runtime.complete_worker_replacement()
+            await self._script_runtime.reopen_script_calls()
             changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
             logger.info(
                 "updating_config_authorization",
@@ -2216,7 +2229,7 @@ class _MultiAgentOrchestrator:
             )
             return True
         finally:
-            await self._script_runtime.complete_worker_replacement()
+            await self._script_runtime.reopen_script_calls()
             if replay_startup_maintenance and self.running and self.config is not None:
                 self._startup_maintenance.restart_after_runtime_replacement(
                     config=self.config,
@@ -2500,6 +2513,8 @@ class _MultiAgentOrchestrator:
         """Stop all agent bots."""
         self.running = False
         self._runtime_ready_event.clear()
+        # First, so integration events that arrive from now on are refused instead of reaching stopping bots.
+        integration_runtimes = self._unbind_integrations()
         for bot in self.agent_bots.values():
             bot.begin_process_shutdown()
         self.agent_cli_registry.close()
@@ -2532,6 +2547,12 @@ class _MultiAgentOrchestrator:
                 shutdown_intent=ORDERLY_SHUTDOWN,
             ),
         )
+        for name, runtime in integration_runtimes:
+            # Acknowledged deliveries still retrying after this are cancelled: the documented accepted loss.
+            await _run_shutdown_step(
+                f"{name}_events",
+                wait_for_background_tasks(5.0, owner=runtime, shutdown_intent=ORDERLY_SHUTDOWN),
+            )
         await _run_shutdown_step("startup_maintenance", self._startup_maintenance.cancel())
         await _run_shutdown_step("todo_poke", self._todo_poke_runtime.stop())
         await _run_shutdown_step("thread_exports", self._thread_export_runner.stop())
@@ -3216,6 +3237,8 @@ async def _run_runtime(  # noqa: PLR0915
     shutdown_wait_task: asyncio.Task[bool] | None = None
     api_task: asyncio.Task[None] | None = None
     stall_detector: EventLoopStallDetector | None = None
+    # Holds the binding of the applied config as the one source dedicated workers launch from.
+    worker_launch_binding = ExitStack()
 
     try:
         # Drop any stale worker manager before startup work builds the active runtime.
@@ -3240,6 +3263,13 @@ async def _run_runtime(  # noqa: PLR0915
 
         logger.info("Starting orchestrator...")
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=api)
+        config_reload = orchestrator.config_reload
+        # Bound before the API and the bots start, and kept until the worker manager has shut down; a reload that
+        # is still applying, or failed partway, never reaches a worker launch. Until startup records its config as
+        # applied, workers launch from the config it loaded, which no older config precedes.
+        worker_launch_binding.enter_context(
+            bind_worker_launch_config_source(lambda: config_reload.fully_applied_config or orchestrator.config),
+        )
         set_runtime_starting()
         auxiliary_tasks.extend(
             _start_auxiliary_tasks(orchestrator, runtime_paths, shutdown_requested, journal_lost),
@@ -3313,10 +3343,13 @@ async def _run_runtime(  # noqa: PLR0915
             ),
             name="runtime_shutdown",
         )
-        await _wait_for_runtime_shutdown_cleanup(
-            cleanup_task,
-            shutdown_was_requested=shutdown_was_requested,
-        )
+        try:
+            await _wait_for_runtime_shutdown_cleanup(
+                cleanup_task,
+                shutdown_was_requested=shutdown_was_requested,
+            )
+        finally:
+            worker_launch_binding.close()
     if journal_lost.is_set():
         # Exiting with a failure lets a supervisor that restarts only on failure bring the runtime back.
         msg = "MindRoom stopped because it lost its event journal's lock session or one of its database connections"

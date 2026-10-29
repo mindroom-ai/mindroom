@@ -33,8 +33,6 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
 from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.background_tasks import wait_for_future_until_complete
-from mindroom.budgets.monitor import budget_model
-from mindroom.failure_text import failure_text
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context, record_helper_usage
 from mindroom.history.interrupted_replay import persist_interrupted_replay
 from mindroom.history.session_context import create_scope_session_storage, load_scope_session
@@ -52,14 +50,16 @@ from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.execution import agent_tool_middleware
+from mindroom.tool_system.agent_tools import room_turn_offers
 from mindroom.tool_system.agno_toolkits import AGNO_EMPTY_PARAMETERS
 from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
 )
-from mindroom.tool_system.invocation import ToolCallContext, client_tool_result, run_tool_call
+from mindroom.tool_system.invocation import CallResult, ToolCallContext, client_tool_result, run_tool_call
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import close_toolkits, connect_toolkits
+from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator, Sequence
@@ -437,7 +437,12 @@ class _CallAgentCache:
             hook_registry=self.context.hook_registry,
             knowledge=knowledge,
             history_storage=history_storage,
-            active_model_name=self.active_model_name,
+            model=resolve_turn_model(
+                self.config,
+                self.runtime_paths,
+                ModelScope(entity=self.agent_name, explicit=self.active_model_name),
+                None,
+            ),
             refresh_scheduler=refresh_scheduler,
             supports_native_tool_approval=True,
             eager_deferred_tools=True,
@@ -463,17 +468,8 @@ async def build_call_tools(
 ) -> CallAgentTooling:
     """Materialize the agent for the selected voice backend."""
     session_id = session_id or create_session_id(room_id, None)
-    runtime_model = await asyncio.to_thread(
-        functools.partial(
-            config.resolve_runtime_model,
-            entity_name=agent_name,
-            active_model_name=active_model_name,
-            room_id=room_id,
-            thread_id=None,
-            runtime_paths=runtime_paths,
-        ),
-    )
-    active_model_name = runtime_model.model_name
+    scope = ModelScope(entity=agent_name, room_id=room_id, explicit=active_model_name)
+    requested_model_name = (await asyncio.to_thread(resolve_turn_model, config, runtime_paths, scope, None)).model_name
     target = MessageTarget(
         room_id=room_id,
         source_thread_id=None,
@@ -485,20 +481,19 @@ async def build_call_tools(
         target,
         user_id=requester_id,
         agent_name=agent_name,
-        active_model_name=active_model_name,
+        active_model_name=requested_model_name,
     )
     if context is None:
         msg = f"Tool runtime context unavailable for voice agent {agent_name}"
         raise RuntimeError(msg)
-    requested_model_name = active_model_name
     # Realtime tools such as claude_agent also run on this model, so every backend applies the caller's budget.
-    active_model_name = budget_model(
+    turn_model = resolve_turn_model(
         config,
         runtime_paths,
-        context.budget_monitor,
-        requester_id,
-        active_model_name,
+        replace(scope, explicit=requested_model_name),
+        TurnBudget(monitor=context.budget_monitor, requester_id=requester_id),
     )
+    active_model_name = turn_model.model_name
     context = replace(
         context,
         active_model_name=active_model_name,
@@ -586,7 +581,7 @@ async def build_call_tools(
                 tool_function_filter=context.tool_function_filter,
                 refresh_scheduler=refresh_scheduler,
                 eager_deferred_tools=True,
-                active_model_name=active_model_name,
+                model=turn_model,
             ),
         ),
     )
@@ -730,7 +725,12 @@ async def _run_authorized_call_agent(
 
     if active_model_name is not None:
         # Spend can cross the cap during a call, so each reply checks the budget again.
-        active_model_name = budget_model(config, runtime_paths, context.budget_monitor, requester_id, active_model_name)
+        active_model_name = resolve_turn_model(
+            config,
+            runtime_paths,
+            ModelScope(entity=context.agent_name, room_id=room_id, explicit=active_model_name),
+            TurnBudget(monitor=context.budget_monitor, requester_id=requester_id),
+        ).model_name
         context = replace(context, active_model_name=active_model_name)
     recorder = TurnRecorder(user_message=transcript)
     fallback_run_id = f"{session_id}:turn:{uuid4().hex}"
@@ -913,7 +913,7 @@ def _refuse_text_chat_functions(build: AgentBuild, config: Config) -> AgentBuild
 
 def matrix_message_available_during_call(config: Config, agent_name: str) -> bool:
     """Return whether the call agent can send Matrix messages; tools that may need approval are unavailable in calls."""
-    return "matrix_message" in config.resolve_entity(agent_name).available_tools and not tool_may_require_approval(
+    return room_turn_offers(config, agent_name, "matrix_message") and not tool_may_require_approval(
         config,
         "matrix_message",
     )
@@ -982,8 +982,10 @@ def _wrap_tool_function(
                 with tool_runtime_context(context), helper_usage_owner_context(usage_owner):
                     result = await run_tool_call(function, raw_arguments, call_context, middleware=middleware)
             except Exception as error:
-                logger.warning("call_tool_failed", tool=function.name, agent=agent_name, error=str(error))
-                return f"Tool {function.name} failed: {failure_text(error)}"
-        return _normalize_tool_result(client_tool_result(result))
+                result = CallResult("failed", error=error)
+            if result.error is not None:
+                logger.warning("call_tool_failed", tool=function.name, agent=agent_name, error=str(result.error))
+                return f"Tool {function.name} failed: {result.failure_text}"
+        return _normalize_tool_result(client_tool_result(result.value))
 
     return llm.function_tool(_handler, raw_schema=raw_schema)

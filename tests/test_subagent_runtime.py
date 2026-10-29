@@ -66,6 +66,7 @@ from tests.tool_job_helpers import (
     wait_for_status,
     write_saved_job,
 )
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -575,7 +576,7 @@ async def test_expanded_tool_authority_retains_exact_construction(
                 execution_identity=owner,
                 persist_runtime_state=False,
                 knowledge=None,
-                active_model_name=None,
+                model=turn_model(config, coordinator.runtime_paths, "lead"),
             )
             assert build.tool_jobs is not None
             tool = build.tool_jobs.tools[function_name]
@@ -637,11 +638,11 @@ async def test_factory_replaced_during_constructor_cannot_relabel_old_tool(
 
     monkeypatch.setitem(TOOL_REGISTRY, "calculator", original_factory)
     if wrapped:
-        monkeypatch.setattr(metadata_module, "maybe_wrap_toolkit_for_sandbox_proxy", wrap)
+        monkeypatch.setattr(metadata_module, "wrap_toolkit_for_sandbox_proxy", wrap)
     toolkit = get_tool_by_name(
         "calculator",
         coordinator.runtime_paths,
-        disable_sandbox_proxy=not wrapped,
+        runs_in_worker=wrapped,
         worker_target=None,
     )
     tool = toolkit_job_tools(toolkit, authored_name="calculator", snapshot=authority_snapshot(config, "lead"))["add"]

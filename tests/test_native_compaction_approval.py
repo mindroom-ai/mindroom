@@ -33,6 +33,7 @@ from tests.history_helpers import _team_session, record_native_checkpoint
 from tests.identity_helpers import entity_ids
 from tests.providers.openai_family_support import responses_adapter
 from tests.team_turn_helpers import SESSION_ID, delegate, member_approval, squad_turn
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -180,7 +181,7 @@ async def _resume(
         identity,
         history_storage=store,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, paths, "general"),
     )
     session = new_scope_session(session_id="session-1", scope_id="general", is_team=False)
     for run in (*history, paused):

@@ -39,6 +39,7 @@ from tests.conftest import (
     write_config_yaml,
 )
 from tests.identity_helpers import persist_entity_accounts
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -92,7 +93,7 @@ def _create_agent_for_test(agent_name: str, config: Config) -> AgentBuild:
         runtime_paths=_runtime_paths_for(config),
         execution_identity=None,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, _runtime_paths_for(config), agent_name),
     )
 
 
@@ -427,7 +428,7 @@ class TestUpdateOwnConfig:
 
             reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].tool_names == ["openclaw_compat", "python"]
-            effective = reloaded.resolve_entity("coder").available_tools
+            effective = reloaded.resolve_agent("coder").tools.tool_names
             assert effective[0] == "openclaw_compat"
             assert "shell" in effective
             assert "matrix_message" in effective
@@ -804,7 +805,7 @@ class TestUpdateOwnConfigAuthorization:
             execution_identity=None,
             supports_native_tool_approval=True,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, _runtime_paths_for(config), "writer"),
         )
         update = offered_function(agent, "update_own_config")
         assert update.requires_confirmation is True

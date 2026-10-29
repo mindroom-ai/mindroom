@@ -36,10 +36,11 @@ def no_shared_directory_roots() -> tuple[SharedDirectoryRoot, ...]:
 
 def _no_workspace_error(raw_path: object, *, has_shares: bool) -> str:
     # A path argument left at its default names the working directory.
-    remedy = "Without one, only the agent's shared directories are reachable; give it" if has_shares else "Give it"
+    reachable = ", so only its shared directories are reachable" if has_shares else ""
     return (
         f"Error: Path '{raw_path or '.'}' requires an agent workspace; file_access is 'workspace'. "
-        f"{remedy} a workspace with memory_backend: file or a private configuration."
+        f"This toolkit was built without an agent or a base_dir{reachable}; "
+        "use it as an agent's tool or build it with a base_dir."
     )
 
 

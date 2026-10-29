@@ -100,8 +100,7 @@ def _review_log_context(scope: _ReviewScope, correlation_id: str) -> dict[str, s
 def _skills_root(config: Config, runtime_paths: RuntimePaths, scope: _ReviewScope) -> Path:
     """Return the workspace skills directory that this conversation's reviews maintain."""
     runtime = resolve_agent_runtime(scope.agent, config, runtime_paths, execution_identity=scope.identity)
-    workspace_root = runtime.workspace.root if runtime.workspace is not None else None
-    return agent_workspace_skills_root(runtime_paths, scope.agent, workspace_root=workspace_root)
+    return agent_workspace_skills_root(runtime.workspace.root)
 
 
 @dataclass

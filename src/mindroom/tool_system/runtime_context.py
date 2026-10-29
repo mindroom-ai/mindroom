@@ -21,7 +21,7 @@ from mindroom.hooks import (
     validate_event_name,
 )
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
-from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
+from mindroom.tool_system.worker_routing import build_tool_execution_identity
 
 if TYPE_CHECKING:
     import asyncio
@@ -151,6 +151,9 @@ class ToolRuntimeContext:
     source_kind: str | None = None
     config_provider: Callable[[], Config] | None = None
     cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None = None
+    # What posted this turn's message when a hook did; a resumed approval turn restores it.
+    # Keep `hook_source` last: plugins construct this context positionally.
+    hook_source: str | None = None
 
     @property
     def current_config(self) -> Config:
@@ -261,22 +264,15 @@ class ToolRuntimeContext:
                 "Team and router dispatches have no single agent execution scope."
             )
             raise ValueError(msg)
-        return build_agent_toolkit_worker_target(
-            self.config.resolve_entity(self.agent_name).execution_scope,
+        # why-lazy: runtime resolution loads the config and credential modules, which slim tool authoring must not.
+        from mindroom.runtime_resolution import resolve_agent_execution  # noqa: PLC0415
+
+        return resolve_agent_execution(
             self.agent_name,
-            is_private=self.config.get_agent(self.agent_name).private is not None,
+            self.config,
+            self.runtime_paths,
             execution_identity=build_execution_identity_from_runtime_context(self),
-            runtime_paths=self.runtime_paths,
-        )
-
-
-@dataclass(frozen=True)
-class WorkerRuntimeContext:
-    """Explicit worker configuration for dispatch without a live chat context."""
-
-    runtime_paths: RuntimePaths
-    config: Config
-    storage_path: Path | None = None
+        ).worker_target
 
 
 @dataclass(frozen=True)
@@ -391,6 +387,7 @@ class ToolRuntimeSupport:
             membership=self.membership,
             membership_turn_id=source_envelope.source_event_id if source_envelope is not None else None,
             source_kind=source_envelope.source_kind if source_envelope is not None else None,
+            hook_source=source_envelope.hook_source if source_envelope is not None else None,
             agent_reply_memberships=self.runtime.agent_reply_memberships,
             config_provider=lambda: self.runtime.config,
         )
@@ -468,7 +465,6 @@ _TOOL_RUNTIME_CONTEXT: ContextVar[ToolRuntimeContext | None] = ContextVar(
     "tool_runtime_context",
     default=None,
 )
-_WORKER_RUNTIME_CONTEXT: ContextVar[WorkerRuntimeContext | None] = ContextVar("worker_runtime_context", default=None)
 _WORKER_PROGRESS_PUMP: ContextVar[WorkerProgressPump | None] = ContextVar(
     "worker_progress_pump",
     default=None,
@@ -478,21 +474,6 @@ _WORKER_PROGRESS_PUMP: ContextVar[WorkerProgressPump | None] = ContextVar(
 def get_tool_runtime_context() -> ToolRuntimeContext | None:
     """Get the current shared tool runtime context."""
     return _TOOL_RUNTIME_CONTEXT.get()
-
-
-def get_worker_runtime_context() -> WorkerRuntimeContext | None:
-    """Return the explicit worker snapshot bound to this operation."""
-    return _WORKER_RUNTIME_CONTEXT.get()
-
-
-@contextmanager
-def worker_runtime_context(context: WorkerRuntimeContext) -> Iterator[None]:
-    """Keep detached worker configuration scoped across async and thread calls."""
-    token = _WORKER_RUNTIME_CONTEXT.set(context)
-    try:
-        yield
-    finally:
-        _WORKER_RUNTIME_CONTEXT.reset(token)
 
 
 def get_worker_progress_pump() -> WorkerProgressPump | None:

@@ -13,6 +13,7 @@ from mindroom import ai_runtime
 from mindroom.agent_loop.tools import PreparedTools
 from mindroom.attachments.storage import attachment_records_for_visible_message, format_attachment_annotation
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
+from mindroom.config.resolution import entity_timezone
 from mindroom.constants import (
     COMPACTION_NOTICE_CONTENT_KEY,
     ORIGINAL_SENDER_KEY,
@@ -63,13 +64,14 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.attachments.storage import AttachmentRecord
-    from mindroom.config.main import Config, ResolvedRuntimeModel
+    from mindroom.config.main import Config
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.types import CompactionLifecycle, PreparedHistoryState, ResolvedHistorySettings
     from mindroom.llm.provider import ModelProvider, ToolSpec
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.timing import DispatchPipelineTiming
+    from mindroom.turn_model import TurnModel
 
 logger = get_logger(__name__)
 
@@ -829,7 +831,7 @@ async def prepare_agent_execution_context(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     runtime_paths: RuntimePaths,
     config: Config,
-    resolved_runtime_model: ResolvedRuntimeModel,
+    resolved_runtime_model: TurnModel,
     compaction_lifecycle: CompactionLifecycle | None,
     current_sender_id: str | None,
     current_timestamp_ms: float | None,
@@ -860,6 +862,7 @@ async def prepare_agent_execution_context(
     ) -> PreparedScopeHistory:
         resolved_inputs = resolve_entity_preparation_inputs(
             config=config,
+            runtime_paths=runtime_paths,
             entity_name=agent_name,
             history_settings=build.history_settings,
             active_model_name=resolved_runtime_model.model_name,
@@ -891,7 +894,7 @@ async def prepare_agent_execution_context(
         current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
         config=config,
-        timezone=config.get_entity_timezone(agent_name),
+        timezone=entity_timezone(config, agent_name),
         prepare_scope_history_fn=_prepare_agent_scope_history,
         estimate_static_tokens_fn=static_token_estimator.estimate,
         fallback_static_token_budget=_fallback_static_token_budget(

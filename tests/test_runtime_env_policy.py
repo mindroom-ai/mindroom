@@ -11,7 +11,7 @@ import pytest
 
 from mindroom import constants, runtime_env_policy
 from mindroom.api import sandbox_exec
-from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
+from mindroom.workers.backends.dedicated_launch import DedicatedWorkerLayout, dedicated_worker_startup_runtime_paths
 from mindroom.workers.backends.docker_config import docker_backend_config_signature
 from mindroom.workers.backends.kubernetes_config import kubernetes_backend_config_signature
 
@@ -575,19 +575,18 @@ def test_worker_computer_flag_survives_dedicated_startup_and_changes_backend_ide
         storage_path=tmp_path,
         process_env={**env, flag: "true"},
     )
-    for backend in ("docker", "kubernetes"):
-        worker = build_dedicated_worker_runtime_paths(
-            runtime_paths=enabled,
-            backend_name=backend,
-            worker_key="worker",
-            config_path=tmp_path / "worker-config.yaml",
-            dedicated_root=tmp_path / "worker",
+    worker = dedicated_worker_startup_runtime_paths(
+        DedicatedWorkerLayout(
+            dedicated_root=str(tmp_path / "worker"),
+            config_path=str(tmp_path / "worker-config.yaml"),
             worker_port=8766,
-            shared_storage_root=str(tmp_path / "shared"),
-            extra_env={},
-        )
-        assert worker.env_flag(flag)
-        assert runtime_env_policy.sandbox_runner_runtime_state_env(dict(worker.process_env))[flag] == "true"
+        ),
+        worker_key="worker",
+        process_env=enabled.process_env,
+        env_file_values=enabled.env_file_values,
+    )
+    assert worker.env_flag(flag)
+    assert runtime_env_policy.sandbox_runner_runtime_state_env(dict(worker.process_env))[flag] == "true"
     for signature in (docker_backend_config_signature, kubernetes_backend_config_signature):
         assert signature(disabled, auth_token=None) != signature(enabled, auth_token=None)
 

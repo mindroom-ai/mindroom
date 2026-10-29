@@ -25,6 +25,7 @@ from mindroom.providers.anthropic.prompt_cache import _count_cache_markers, prep
 from tests.conftest import test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 from tests.providers.bare_adapter import bare_adapter
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -72,7 +73,7 @@ def _agent_request(
             runtime_paths,
             execution_identity=None,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, runtime_paths, "writer"),
         )
     system = prompt_for_turn(build, system_enrichment)
     messages = [

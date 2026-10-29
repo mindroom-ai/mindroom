@@ -58,7 +58,7 @@ def test_exploration_requires_the_knowledge_graph() -> None:
 def test_inherited_exploration_is_skipped_without_the_graph() -> None:
     """A default entry applies only to agents that build a graph."""
     config = _config(knowledge_graph=False, defaults=[{"name": "exploration"}])
-    assert config.resolve_entity("mind").automations == []
+    assert config.resolve_agent("mind").automations == ()
 
 
 def test_a_shared_agents_exploration_needs_a_room() -> None:

@@ -8,7 +8,6 @@ Authorization header when a redirect leaves Graph, so the token never reaches an
 from __future__ import annotations
 
 import base64
-import os
 import re
 import unicodedata
 from contextlib import ExitStack, contextmanager
@@ -22,7 +21,7 @@ import httpx
 
 from mindroom.atomic_file import atomic_write_file_at
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
-from mindroom.file_access import AuthorizedFile, resolve_agent_file
+from mindroom.file_access import UploadSourceError, open_upload_source
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import active_oauth_credential_context
 from mindroom.oauth.credential_lifecycle import (
@@ -51,9 +50,9 @@ if TYPE_CHECKING:
     from typing import BinaryIO
 
     from mindroom.config.main import Config
-    from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
+    from mindroom.file_access import AuthorizedFile
     from mindroom.oauth.credential_lifecycle import OAuthCredentialContext
     from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
@@ -304,56 +303,13 @@ def _unsafe_filename(name: str) -> bool:
     return bool(windows_name.drive or windows_name.root)
 
 
-def checked_upload_source(
-    local_path: str,
-    *,
-    workspace_root: Path | None,
-    file_access: FileAccess,
-    max_bytes: int,
-    field_name: str = "local_path",
-) -> AuthorizedFile:
-    """Return the authorized workspace file to upload, refusing it before any request when it is too large."""
+@contextmanager
+def graph_upload_errors() -> Iterator[None]:
+    """Raise a refused upload file as the Graph error the Microsoft tools render, with its code and message."""
     try:
-        source = resolve_agent_file(
-            local_path,
-            workspace_root=workspace_root,
-            file_access=file_access,
-            field_name=field_name,
-        )
-    except ValueError as exc:
-        raise MicrosoftGraphError(code="invalid_local_path", message=str(exc)) from None
-    try:
-        with source.open() as handle:
-            size = os.fstat(handle.fileno()).st_size
-    except OSError as exc:
-        raise _unreadable(source, exc) from None
-    _check_upload_size(source, size, max_bytes)
-    return source
-
-
-def read_upload_source(source: AuthorizedFile, max_bytes: int) -> bytes:
-    """Return a checked workspace file's bytes, refusing it when it became unreadable or grew past `max_bytes`."""
-    try:
-        with source.open() as handle:
-            content = handle.read(max_bytes + 1)
-    except OSError as exc:
-        raise _unreadable(source, exc) from None
-    if len(content) > max_bytes:
-        msg = f"{source.display_path} grew past the {max_bytes}-byte limit."
-        raise MicrosoftGraphError(code="too_large", message=msg)
-    return content
-
-
-def _unreadable(source: AuthorizedFile, exc: OSError) -> MicrosoftGraphError:
-    # A file or workspace replaced by a link after the check is refused here, without following it.
-    reason = exc.strerror or type(exc).__name__
-    return MicrosoftGraphError(code="invalid_local_path", message=f"{source.display_path} cannot be read: {reason}.")
-
-
-def _check_upload_size(source: AuthorizedFile, size: int, max_bytes: int) -> None:
-    if size > max_bytes:
-        msg = f"{source.display_path} is {size} bytes; the limit is {max_bytes} bytes."
-        raise MicrosoftGraphError(code="too_large", message=msg)
+        yield
+    except UploadSourceError as exc:
+        raise MicrosoftGraphError(code=exc.code, message=str(exc)) from None
 
 
 def _unwritable(directory: str, exc: OSError) -> MicrosoftGraphError:
@@ -506,13 +462,9 @@ class GraphSession:
     ) -> dict[str, Any]:
         """Stream one workspace file as the request body and return Graph's JSON answer."""
         with ExitStack() as stack:
-            try:
-                handle = stack.enter_context(source.open())
-            except OSError as exc:
-                raise _unreadable(source, exc) from None
-            # Measure the open file itself, which the body streams; an explicit length avoids chunked encoding.
-            size = os.fstat(handle.fileno()).st_size
-            _check_upload_size(source, size, max_bytes)
+            with graph_upload_errors():
+                handle, size = stack.enter_context(open_upload_source(source, max_bytes))
+            # An explicit length avoids chunked encoding.
             return self.json(
                 method,
                 path,

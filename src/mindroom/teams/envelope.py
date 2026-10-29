@@ -19,6 +19,7 @@ from uuid import uuid4
 from mindroom import ai_runtime
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content
+from mindroom.config.resolution import entity_timezone
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, is_silent_schedule_no_report_response
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
@@ -67,7 +68,6 @@ from mindroom.teams.members import (
     build_team_spec,
     materialized_team_label,
     requested_team_agent_names,
-    resolve_team_member_model_names,
     resolve_team_members,
 )
 from mindroom.teams.presentation import (
@@ -81,11 +81,12 @@ from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import StructuredStreamChunk
+from mindroom.turn_model import ModelScope, TurnModel, resolve_team_turn_models, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 
-    from mindroom.config.main import Config, ResolvedRuntimeModel
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.request_messages import TurnMessages
     from mindroom.history.session_context import ScopeSessionContext
@@ -155,7 +156,7 @@ async def prepare_materialized_team_execution(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     config: Config,
     runtime_paths: RuntimePaths,
-    runtime_model: ResolvedRuntimeModel,
+    runtime_model: TurnModel,
     response_sender_id: str | None,
     current_sender_id: str | None,
     configured_team_name: str | None,
@@ -446,12 +447,16 @@ class _TeamTurn:
         members = self.members_for_attempt(continuation_state)
         config = self.config
         # Resolve the runtime model once here and hand it down so the team spec and the run metadata cannot disagree.
-        runtime_model = config.resolve_runtime_model(
-            entity_name=self.configured_team_name,
-            active_model_name=continuation_state.active_model_name or self.model_name,
-            room_id=self.ctx.room_id,
-            thread_id=self.ctx.thread_id,
-            runtime_paths=self.runtime_paths,
+        runtime_model = resolve_turn_model(
+            config,
+            self.runtime_paths,
+            ModelScope(
+                entity=self.configured_team_name,
+                room_id=self.ctx.room_id,
+                thread_id=self.ctx.thread_id,
+                explicit=continuation_state.active_model_name or self.model_name,
+            ),
+            None,
         )
         built = build_team_spec(
             members=members,
@@ -785,13 +790,13 @@ def _team_turn(
     active_member_model_names = (
         dict(member_model_names)
         if member_model_names is not None
-        else resolve_team_member_model_names(
-            requested_agent_names,
-            ctx.room_id,
+        else resolve_team_turn_models(
             config,
             orchestrator.runtime_paths,
-            thread_id=ctx.thread_id,
-        )
+            ModelScope(entity=configured_team_name, room_id=ctx.room_id, thread_id=ctx.thread_id),
+            requested_team_agent_names(requested_agent_names),
+            None,
+        ).member_model_names
     )
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     try:
@@ -835,7 +840,7 @@ def _team_turn(
         turn_recorder=turn_recorder,
         holder=_TeamTurnHolder(members=team_members),
         # ``ctx`` still names the entity whose bot runs the turn; the turn's own context took the team's label above.
-        timezone=config.get_entity_timezone(ctx.entity_label),
+        timezone=entity_timezone(config, ctx.entity_label),
     )
 
 

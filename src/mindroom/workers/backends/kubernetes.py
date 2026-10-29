@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.credentials.manager import get_runtime_credentials_manager, sync_shared_credentials_to_worker
-from mindroom.credentials.policy import credential_service_policy
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.worker_routing import (
     resolved_worker_key_scope,
@@ -24,6 +23,7 @@ from mindroom.workers.backend import (
     WorkerBackendError,
     effective_idle_status,
     filter_and_sort_worker_handles,
+    mirrored_credential_services,
 )
 from mindroom.workers.backends._dedicated_worker_common import (
     ScopedWorkspaceMount,
@@ -31,11 +31,19 @@ from mindroom.workers.backends._dedicated_worker_common import (
     plan_scoped_workspace_mounts,
     resolve_state_scope_worker_key,
 )
-from mindroom.workers.backends._lifecycle import mark_worker_failed, mark_worker_idle, touch_worker_lifecycle
-from mindroom.workers.compatibility import worker_health_compatibility_error
+from mindroom.workers.backends._lifecycle import (
+    initial_worker_lifecycle_state,
+    mark_worker_failed,
+    mark_worker_idle,
+    mark_worker_ready,
+    prepare_worker_ensure_lifecycle,
+    touch_worker_lifecycle,
+)
+from mindroom.workers.compatibility import ready_worker_protocol_mismatch
 from mindroom.workers.models import (
     ProgressSink,
     WorkerHandle,
+    WorkerLaunchConfig,
     WorkerMaintenanceResult,
     WorkerReadyPhase,
     WorkerReadyProgress,
@@ -91,6 +99,8 @@ class _ProgressReporterState:
 @dataclass(frozen=True, slots=True)
 class _ReadyWorkerCacheEntry:
     spec: WorkerSpec
+    # The applied launch the worker was provisioned from; another one means the worker must be re-applied.
+    launch_digest: str
     handle: WorkerHandle
     validated_at: float
     workspace_mounts: tuple[ScopedWorkspaceMount, ...]
@@ -108,9 +118,6 @@ def standalone_resource_manager(runtime_paths: RuntimePaths) -> resources.Kubern
         config=KubernetesWorkerBackendConfig.from_runtime(runtime_paths),
         auth_token=None,
         storage_root=runtime_paths.storage_root,
-        tool_validation_snapshot={},
-        config_snapshot={},
-        worker_grantable_credentials=frozenset(),
     )
 
 
@@ -366,7 +373,6 @@ class KubernetesWorkerBackend:
             "owner": self.cleanup_locator,
             "auth_token": self.auth_token,
             "storage_root": str(self.storage_root),
-            "grantable_credentials": sorted(self.worker_grantable_credentials),
         }
 
     def __init__(
@@ -376,37 +382,19 @@ class KubernetesWorkerBackend:
         config: KubernetesWorkerBackendConfig,
         auth_token: str | None,
         storage_root: Path,
-        tool_validation_snapshot: dict[str, dict[str, object]],
-        config_snapshot: dict[str, object],
-        worker_grantable_credentials: frozenset[str],
+        current_launch: Callable[[], WorkerLaunchConfig],
     ) -> None:
-        unsupported_services = sorted(
-            {
-                service
-                for service in worker_grantable_credentials
-                if not credential_service_policy(service, None).worker_grantable_supported
-            },
-        )
-        if unsupported_services:
-            msg = (
-                "Dedicated workers do not support "
-                f"{', '.join(unsupported_services)}. Keep these credentials in the primary runtime."
-            )
-            raise WorkerBackendError(msg)
         self.runtime_paths = runtime_paths
+        self._current_launch = current_launch
         self.config = config
         self.auth_token = auth_token
         self.storage_root = storage_root.expanduser().resolve()
-        self.worker_grantable_credentials = worker_grantable_credentials
         self.idle_timeout_seconds = config.idle_timeout_seconds
         self._resources = resources.KubernetesResourceManager(
             runtime_paths=runtime_paths,
             config=config,
             auth_token=auth_token,
             storage_root=self.storage_root,
-            tool_validation_snapshot=tool_validation_snapshot,
-            config_snapshot=config_snapshot,
-            worker_grantable_credentials=worker_grantable_credentials,
         )
         self._worker_locks: dict[str, threading.Lock] = {}
         self._worker_locks_lock = threading.Lock()
@@ -423,9 +411,7 @@ class KubernetesWorkerBackend:
         *,
         auth_token: str | None,
         storage_root: Path,
-        tool_validation_snapshot: dict[str, dict[str, object]],
-        config_snapshot: dict[str, object],
-        worker_grantable_credentials: frozenset[str],
+        current_launch: Callable[[], WorkerLaunchConfig],
     ) -> KubernetesWorkerBackend:
         """Construct a backend instance from one explicit runtime context."""
         return cls(
@@ -433,9 +419,7 @@ class KubernetesWorkerBackend:
             config=KubernetesWorkerBackendConfig.from_runtime(runtime_paths),
             auth_token=auth_token,
             storage_root=storage_root,
-            tool_validation_snapshot=tool_validation_snapshot,
-            config_snapshot=config_snapshot,
-            worker_grantable_credentials=worker_grantable_credentials,
+            current_launch=current_launch,
         )
 
     def shutdown(self) -> None:
@@ -479,22 +463,29 @@ class KubernetesWorkerBackend:
         now: float | None = None,
         progress_sink: ProgressSink | None = None,
     ) -> WorkerHandle:
-        """Resolve or start the worker backing the given worker key."""
+        """Resolve or start the worker backing the given worker key, from the launch applied when its lock is held."""
         worker_key = spec.worker_key
         if progress_sink is not None:
             self._register_progress_sink(worker_key, progress_sink)
         try:
             with self._worker_lock(worker_key):
+                launch = self._current_launch()
                 timestamp = time.time() if now is None else now
-                cached_handle = self._reuse_cached_ready_worker(spec, now=timestamp)
+                cached_handle = self._reuse_cached_ready_worker(spec, launch, now=timestamp)
                 if cached_handle is not None:
                     return cached_handle
-                return self._provision_worker_locked(spec, timestamp=timestamp)
+                return self._provision_worker_locked(spec, launch, timestamp=timestamp)
         finally:
             if progress_sink is not None:
                 self._unregister_progress_sink(worker_key, progress_sink)
 
-    def _provision_worker_locked(self, spec: WorkerSpec, *, timestamp: float) -> WorkerHandle:  # noqa: PLR0915
+    def _provision_worker_locked(  # noqa: PLR0915
+        self,
+        spec: WorkerSpec,
+        launch: WorkerLaunchConfig,
+        *,
+        timestamp: float,
+    ) -> WorkerHandle:
         """Apply the worker's resources and wait until it is ready and speaks this runtime's protocol."""
         worker_key = spec.worker_key
         worker_id = self._worker_id(worker_key)
@@ -502,25 +493,18 @@ class KubernetesWorkerBackend:
         existing = self._resources.read_deployment(worker_id)
         current_handle = self._handle_from_deployment(existing, now=timestamp) if existing is not None else None
         should_restart = current_handle is None or current_handle.status in {"idle", "failed"}
-        startup_count = (current_handle.startup_count if current_handle is not None else 0) + int(
-            should_restart,
+        lifecycle = prepare_worker_ensure_lifecycle(
+            initial_worker_lifecycle_state(now=timestamp)
+            if existing is None
+            else resources.lifecycle_from_annotations(dict(existing.metadata.annotations or {}), now=timestamp),
+            now=timestamp,
+            should_restart=should_restart,
+            reapplying=True,
         )
-        created_at = current_handle.created_at if current_handle is not None else timestamp
-        if should_restart:
-            last_started_at = timestamp
-        else:
-            assert current_handle is not None
-            last_started_at = current_handle.last_started_at
         annotations = resources.metadata_annotations(
             worker_key=worker_key,
             state_subpath=state_subpath,
-            created_at=created_at,
-            last_used_at=timestamp,
-            last_started_at=last_started_at,
-            startup_count=startup_count,
-            failure_count=current_handle.failure_count if current_handle is not None else 0,
-            failure_reason=None,
-            status="starting",
+            state=lifecycle,
         )
         should_report_progress = should_restart or existing is None or not self._deployment_ready(existing)
         poll_reporter: Callable[[float], None] | None = None
@@ -539,8 +523,8 @@ class KubernetesWorkerBackend:
             get_runtime_credentials_manager(self.runtime_paths).for_worker(worker_key)
             # kubelet creates missing subPath sources as root, so shared workspaces exist first;
             # the cache keeps these mounts to notice a workspace that appears after planning.
-            workspace_mounts = self._plan_workspace_mounts(spec, create_shared=True)
-            shared_directory_mounts = self._plan_shared_directory_mounts(spec)
+            workspace_mounts = self._plan_workspace_mounts(spec, launch, create_shared=True)
+            shared_directory_mounts = self._plan_shared_directory_mounts(spec, launch)
             self._resources.apply_auth_secret(worker_key=worker_key, worker_id=worker_id)
             auth_secret_applied = True
             replacing_stale_worker = False
@@ -551,6 +535,7 @@ class KubernetesWorkerBackend:
                     state_subpath=state_subpath,
                     annotations=annotations,
                     replicas=1,
+                    launch=launch,
                     private_agent_names=spec.private_agent_names,
                     state_scope_worker_key=spec.state_scope_worker_key,
                     resource_profile=spec.resource_profile,
@@ -566,23 +551,14 @@ class KubernetesWorkerBackend:
                     )
                     should_report_progress = True
                 if deployment_apply.recreated and (replacing_stale_worker or not should_restart):
-                    startup_count += 1
+                    lifecycle = prepare_worker_ensure_lifecycle(lifecycle, now=timestamp, should_restart=True)
                     annotations = resources.metadata_annotations(
                         worker_key=worker_key,
                         state_subpath=state_subpath,
-                        created_at=created_at,
-                        last_used_at=timestamp,
-                        last_started_at=timestamp,
-                        startup_count=startup_count,
-                        failure_count=current_handle.failure_count if current_handle is not None else 0,
-                        failure_reason=None,
-                        status="starting",
+                        state=lifecycle,
                     )
                     self._resources.patch_deployment(worker_id, annotations=annotations)
-                self._sync_shared_credentials(
-                    worker_key,
-                    mirrored_credential_services=spec.mirrored_credential_services,
-                )
+                self._sync_shared_credentials(spec, launch)
                 self._resources.apply_service(worker_id)
                 deployment = self._resources.wait_for_ready(
                     worker_id,
@@ -596,8 +572,11 @@ class KubernetesWorkerBackend:
                 # the template is unchanged, so only a new pod pulls the tag again under `Always`.
                 replacing_stale_worker = True
             destructive_failure_allowed = False
-            final_annotations = dict(annotations)
-            final_annotations[resources.ANNOTATION_WORKER_STATUS] = "ready"
+            final_annotations = resources.metadata_annotations(
+                worker_key=worker_key,
+                state_subpath=state_subpath,
+                state=mark_worker_ready(lifecycle, now=timestamp),
+            )
             self._resources.patch_deployment(worker_id, annotations=final_annotations)
         except Exception as exc:
             failure_reason = str(exc)
@@ -626,26 +605,30 @@ class KubernetesWorkerBackend:
             annotations_override=final_deployment_annotations,
         )
         self._store_ready_worker(
-            spec,
-            handle,
-            validated_at=timestamp,
-            workspace_mounts=workspace_mounts,
-            shared_directory_mounts=shared_directory_mounts,
+            _ReadyWorkerCacheEntry(
+                spec=spec,
+                launch_digest=launch.digest,
+                handle=handle,
+                validated_at=timestamp,
+                workspace_mounts=workspace_mounts,
+                shared_directory_mounts=shared_directory_mounts,
+            ),
         )
         return handle
 
     def _ready_worker_needs_replacement(self, worker_id: str, *, is_replacement: bool) -> bool:
         """Return whether the ready worker speaks another protocol, refusing a replacement that still does."""
-        compatibility_error = worker_health_compatibility_error(
+        mismatch = ready_worker_protocol_mismatch(
             self._resources.read_worker_health(worker_id, timeout_seconds=self.config.ready_timeout_seconds),
             worker=f"Kubernetes worker image '{self.config.image}'",
             # Under `Always` kubelet resolves the tag on every start, so no node can serve an older cached copy.
             older_worker_hint=None if self.config.image_pull_policy == "Always" else _CACHED_IMAGE_HINT,
             newer_worker_hint=_RESTART_RUNTIME_HINT,
         )
-        if compatibility_error is not None and is_replacement:
-            raise WorkerBackendError(compatibility_error)
-        return compatibility_error is not None
+        if mismatch is not None and is_replacement:
+            # A worker is replaced once; a replacement that still mismatches fails the request.
+            raise WorkerBackendError(mismatch.error)
+        return mismatch is not None
 
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Refresh last-used metadata for one existing worker."""
@@ -780,16 +763,18 @@ class KubernetesWorkerBackend:
         self,
         deployments: list[resources.KubernetesDeployment],
         *,
+        launch: WorkerLaunchConfig,
         now: float,
         scaled_down_worker_ids: frozenset[str],
     ) -> list[WorkerHandle]:
-        """Reconcile drifted workers from one already-loaded Deployment snapshot."""
+        """Reconcile drifted workers from one already-loaded Deployment snapshot against one launch."""
         reconciled: list[WorkerHandle] = []
         for deployment in deployments:
             handle = self._handle_from_deployment(deployment, now=now)
             if not self._is_reconcile_candidate(
                 deployment,
                 handle=handle,
+                launch=launch,
                 scaled_down=handle.worker_id in scaled_down_worker_ids,
             ):
                 continue
@@ -805,26 +790,38 @@ class KubernetesWorkerBackend:
         return reconciled
 
     def maintain_workers(self, *, now: float | None = None) -> WorkerMaintenanceResult:
-        """Clean and reconcile workers using one lightweight Deployment list."""
+        """Clean and reconcile workers using one lightweight Deployment list.
+
+        Reconciliation renders from the applied launch, so it waits until a config has been applied.
+        """
         timestamp = time.time() if now is None else now
         deployments = self._resources.list_deployments()
         cleaned = self._cleanup_idle_deployments(deployments, now=timestamp)
+        launch = self._applied_launch_or_none() if self.config.reconcile_pod_templates else None
         reconciled = (
             self._reconcile_drifted_deployments(
                 deployments,
+                launch=launch,
                 now=timestamp,
                 scaled_down_worker_ids=frozenset(worker.worker_id for worker in cleaned),
             )
-            if self.config.reconcile_pod_templates
+            if launch is not None
             else []
         )
         return WorkerMaintenanceResult(cleaned=tuple(cleaned), reconciled=tuple(reconciled))
+
+    def _applied_launch_or_none(self) -> WorkerLaunchConfig | None:
+        try:
+            return self._current_launch()
+        except WorkerBackendError:
+            return None
 
     def _is_reconcile_candidate(
         self,
         deployment: resources.KubernetesDeployment,
         *,
         handle: WorkerHandle,
+        launch: WorkerLaunchConfig,
         scaled_down: bool,
     ) -> bool:
         """Return whether one Deployment is a scaled-down worker with a drifted pod template.
@@ -852,6 +849,7 @@ class KubernetesWorkerBackend:
                 worker_key=handle.worker_key,
                 worker_id=handle.worker_id,
                 state_subpath=self._state_subpath(handle.worker_key),
+                launch=launch,
                 private_agent_names=private_agent_names,
                 state_scope_worker_key=state_scope_worker_key,
                 resource_profile=resource_profile,
@@ -865,16 +863,19 @@ class KubernetesWorkerBackend:
             return False
 
     def _reconcile_worker_deployment(self, handle: WorkerHandle, *, now: float) -> WorkerHandle | None:
-        """Recreate one nominated worker after re-validating a fresh read under its lock.
+        """Recreate one nominated worker after re-validating a fresh read and the applied launch under its lock.
 
         The list snapshot can be stale: a worker provisioned between the snapshot
-        and the lock acquisition must not be scaled back down.
+        and the lock acquisition must not be scaled back down, nor rendered from a launch older than its own.
         """
+        launch = self._applied_launch_or_none()
+        if launch is None:
+            return None
         live = self._resources.read_deployment(handle.worker_id)
         if live is None:
             return None
         live_handle = self._handle_from_deployment(live, now=now)
-        if not self._is_reconcile_candidate(live, handle=live_handle, scaled_down=False):
+        if not self._is_reconcile_candidate(live, handle=live_handle, launch=launch, scaled_down=False):
             return None
         annotations = dict(live.metadata.annotations or {})
         try:
@@ -884,6 +885,7 @@ class KubernetesWorkerBackend:
                 state_subpath=self._state_subpath(live_handle.worker_key),
                 annotations=annotations,
                 replicas=0,
+                launch=launch,
                 private_agent_names=resources.parse_private_agent_names_annotation(annotations),
                 state_scope_worker_key=resources.parse_state_scope_worker_key_annotation(annotations),
                 resource_profile=resources.parse_resource_profile_annotation(annotations),
@@ -961,60 +963,69 @@ class KubernetesWorkerBackend:
             replicas_override=0,
         )
 
-    def _sync_shared_credentials(
-        self,
-        worker_key: str,
-        *,
-        mirrored_credential_services: frozenset[str] | None,
-    ) -> None:
+    def _sync_shared_credentials(self, spec: WorkerSpec, launch: WorkerLaunchConfig) -> None:
         sync_shared_credentials_to_worker(
-            worker_key,
-            allowed_services=(
-                self.worker_grantable_credentials
-                if mirrored_credential_services is None
-                else mirrored_credential_services
-            ),
+            spec.worker_key,
+            allowed_services=mirrored_credential_services(spec, launch),
             credentials_manager=get_runtime_credentials_manager(self.runtime_paths),
         )
 
-    def _plan_workspace_mounts(self, spec: WorkerSpec, *, create_shared: bool) -> tuple[ScopedWorkspaceMount, ...]:
+    def _plan_workspace_mounts(
+        self,
+        spec: WorkerSpec,
+        launch: WorkerLaunchConfig,
+        *,
+        create_shared: bool,
+    ) -> tuple[ScopedWorkspaceMount, ...]:
         return plan_scoped_workspace_mounts(
             worker_key=resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key),
             local_shared_storage_root=self._resources.storage_root,
             worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
             private_agent_names=spec.private_agent_names,
-            resolved_agent_policies=self._resources.resolved_agent_policies,
+            resolved_agent_policies=launch.agent_policies,
             create_shared=create_shared,
         )
 
-    def _plan_shared_directory_mounts(self, spec: WorkerSpec) -> tuple[SharedDirectoryMount, ...]:
+    def _plan_shared_directory_mounts(
+        self,
+        spec: WorkerSpec,
+        launch: WorkerLaunchConfig,
+    ) -> tuple[SharedDirectoryMount, ...]:
         return self._resources.plan_shared_directory_mounts(
             spec.worker_key,
             state_scope_worker_key=spec.state_scope_worker_key,
+            agent_policies=launch.agent_policies,
         )
 
-    def _reuse_cached_ready_worker(self, spec: WorkerSpec, *, now: float) -> WorkerHandle | None:
-        entry = self._cached_ready_worker(spec.worker_key, spec=spec, now=now)
+    def _reuse_cached_ready_worker(
+        self,
+        spec: WorkerSpec,
+        launch: WorkerLaunchConfig,
+        *,
+        now: float,
+    ) -> WorkerHandle | None:
+        entry = self._cached_ready_worker(spec.worker_key, spec=spec, launch=launch, now=now)
         if entry is None:
             return None
         # Only user workers and workers whose plan mounted nothing can gain a workspace while running.
         state_scope_worker_key = resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key)
         may_gain_workspace = not entry.workspace_mounts or resolved_worker_key_scope(state_scope_worker_key) == "user"
-        if may_gain_workspace and entry.workspace_mounts != self._plan_workspace_mounts(spec, create_shared=False):
+        if may_gain_workspace and entry.workspace_mounts != self._plan_workspace_mounts(
+            spec,
+            launch,
+            create_shared=False,
+        ):
             self._invalidate_ready_worker(spec.worker_key)
             return None
         # Shared directories change at runtime, so the Deployment is re-applied whenever their mounts differ.
-        if entry.shared_directory_mounts != self._plan_shared_directory_mounts(spec):
+        if entry.shared_directory_mounts != self._plan_shared_directory_mounts(spec, launch):
             self._invalidate_ready_worker(spec.worker_key)
             return None
         try:
             handle = self._patch_cached_worker_usage(entry, now=now)
             if handle is None:
                 return None
-            self._sync_shared_credentials(
-                spec.worker_key,
-                mirrored_credential_services=spec.mirrored_credential_services,
-            )
+            self._sync_shared_credentials(spec, launch)
         except WorkerBackendError:
             self._invalidate_ready_worker(spec.worker_key)
             raise
@@ -1023,24 +1034,9 @@ class KubernetesWorkerBackend:
             raise WorkerBackendError(str(exc)) from exc
         return handle
 
-    def _store_ready_worker(
-        self,
-        spec: WorkerSpec,
-        handle: WorkerHandle,
-        *,
-        validated_at: float,
-        workspace_mounts: tuple[ScopedWorkspaceMount, ...],
-        shared_directory_mounts: tuple[SharedDirectoryMount, ...],
-    ) -> None:
-        entry = _ReadyWorkerCacheEntry(
-            spec=spec,
-            handle=handle,
-            validated_at=validated_at,
-            workspace_mounts=workspace_mounts,
-            shared_directory_mounts=shared_directory_mounts,
-        )
+    def _store_ready_worker(self, entry: _ReadyWorkerCacheEntry) -> None:
         with self._ready_workers_lock:
-            self._ready_workers[spec.worker_key] = entry
+            self._ready_workers[entry.spec.worker_key] = entry
 
     def _invalidate_ready_worker(self, worker_key: str) -> None:
         with self._ready_workers_lock:
@@ -1051,6 +1047,7 @@ class KubernetesWorkerBackend:
         worker_key: str,
         *,
         spec: WorkerSpec | None = None,
+        launch: WorkerLaunchConfig | None = None,
         now: float,
     ) -> _ReadyWorkerCacheEntry | None:
         with self._ready_workers_lock:
@@ -1059,6 +1056,7 @@ class KubernetesWorkerBackend:
                 return None
             cache_invalid = (
                 (spec is not None and entry.spec != spec)
+                or (launch is not None and entry.launch_digest != launch.digest)
                 or now - entry.validated_at >= _READY_WORKER_REVALIDATE_SECONDS
                 or now - entry.handle.last_used_at >= self.idle_timeout_seconds
             )
@@ -1074,6 +1072,7 @@ class KubernetesWorkerBackend:
         return self._patch_cached_worker_usage(entry, now=now)
 
     def _patch_cached_worker_usage(self, entry: _ReadyWorkerCacheEntry, *, now: float) -> WorkerHandle | None:
+        # A cached worker was ready when cached, so its touch writes it as ready without reading its Deployment.
         handle = replace(entry.handle, last_used_at=now, status="ready", failure_reason=None)
         exists = self._resources.patch_deployment_annotations(
             handle.worker_id,
@@ -1086,13 +1085,7 @@ class KubernetesWorkerBackend:
         if not exists:
             self._invalidate_ready_worker(entry.spec.worker_key)
             return None
-        self._store_ready_worker(
-            entry.spec,
-            handle,
-            validated_at=entry.validated_at,
-            workspace_mounts=entry.workspace_mounts,
-            shared_directory_mounts=entry.shared_directory_mounts,
-        )
+        self._store_ready_worker(replace(entry, handle=handle))
         return handle
 
     def _record_startup_failure_or_cleanup_secret(

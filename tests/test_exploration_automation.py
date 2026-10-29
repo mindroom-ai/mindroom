@@ -48,7 +48,7 @@ def _config(*, graph_edits: bool = False, **entry: object) -> Config:
 
 
 def _context(config: Config, paths: RuntimePaths, tmp_path: Path) -> AutomationContext:
-    (entry,) = config.resolve_entity("mind").automations
+    (entry,) = config.resolve_agent("mind").automations
     return AutomationContext(
         agent_name="mind",
         config=config,

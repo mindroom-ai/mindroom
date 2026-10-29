@@ -272,6 +272,25 @@ def test_launch_grants_exclude_claude_agent(tmp_path: Path) -> None:
     assert all(grant.toolkit_name != "claude_agent" for grant in grants)
 
 
+def test_launch_grants_exclude_slack(tmp_path: Path) -> None:
+    """A script's calls rebuild the tool context without the turn's hook source, so Slack writes stay in chat."""
+    context = _context_for_config(
+        tmp_path,
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["calculator", "slack"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+        ),
+    )
+
+    grants = resolve_script_launch_grants(context)
+
+    assert ScriptToolGrant("calculator", "add") in grants
+    assert all(grant.toolkit_name != "slack" for grant in grants)
+    assert "slack" not in resolve_script_launch_toolkit_names(context)
+    assert resolve_current_script_tool(context, ScriptToolGrant("slack", "slack_post")) is None
+
+
 def test_requested_toolkit_is_revoked_when_the_agent_is_removed(tmp_path: Path) -> None:
     """Hot reload removals revoke grants without consulting the launch config again."""
     context = _context_for_config(

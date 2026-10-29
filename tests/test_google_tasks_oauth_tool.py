@@ -505,7 +505,7 @@ def test_google_tasks_agent_config_accepts_inline_operation_flags() -> None:
     )
 
     tasks_config = next(
-        entry for entry in config.resolve_entity("planner").tool_configs if entry.name == "google_tasks"
+        entry for entry in config.resolve_agent("planner").tools.authored if entry.name == "google_tasks"
     )
 
     assert tasks_config.tool_config_overrides == {"read_tasks": True, "manage_tasks": False}

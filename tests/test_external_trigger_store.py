@@ -12,13 +12,14 @@ from pydantic import ValidationError
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
+from mindroom.delivery_replay import DeliveryEventClaim
 from mindroom.external_triggers.auth import mint_trigger_capability
-from mindroom.external_triggers.replay_store import ExternalTriggerEventClaim, ExternalTriggerReplayStore
 from mindroom.external_triggers.store import (
     ExternalTriggerRecord,
     ExternalTriggerStore,
     ExternalTriggerStoreError,
     ExternalTriggerTarget,
+    external_trigger_replay_store,
     public_key_fingerprint,
 )
 from mindroom.matrix.identity import managed_account_key
@@ -160,18 +161,18 @@ def test_consumed_single_use_trigger_keeps_its_delivered_event_record(tmp_path: 
     runtime_paths = _runtime_paths(tmp_path)
     assert runtime_paths.control_state_root is not None
     store = ExternalTriggerStore(runtime_paths)
-    replay_store = ExternalTriggerReplayStore(runtime_paths.control_state_root)
+    replay_store = external_trigger_replay_store(runtime_paths.control_state_root)
     record, _token = _create_capability(store, config)
     snapshot = store.delivery_snapshot(record.trigger_id, config=config, config_generation=1)
     assert snapshot is not None
 
     claim = replay_store.claim_event_id(snapshot.replay_scope, record.uid, now=1_000, ttl_seconds=300)
-    assert claim is ExternalTriggerEventClaim.FRESH
+    assert claim is DeliveryEventClaim.FRESH
     replay_store.mark_event_delivered(snapshot.replay_scope, record.uid, now=1_000, ttl_seconds=300)
     store.consume_single_use(record.trigger_id, expected_uid=record.uid)
 
     duplicate_claim = replay_store.claim_event_id(snapshot.replay_scope, record.uid, now=1_001, ttl_seconds=300)
-    assert duplicate_claim is ExternalTriggerEventClaim.DELIVERED
+    assert duplicate_claim is DeliveryEventClaim.DELIVERED
 
 
 def test_capability_trigger_cannot_rotate_signing_key(tmp_path: Path) -> None:
@@ -233,7 +234,7 @@ def test_rotate_and_delete_drop_replay_records_of_scopes_that_can_no_longer_auth
     runtime_paths = _runtime_paths(tmp_path)
     assert runtime_paths.control_state_root is not None
     store = ExternalTriggerStore(runtime_paths)
-    replay_store = ExternalTriggerReplayStore(runtime_paths.control_state_root)
+    replay_store = external_trigger_replay_store(runtime_paths.control_state_root)
     replay_dir = runtime_paths.control_state_root / "external_triggers" / "replay"
     rotating = _create(store, config, trigger_id="rotating")
     kept = _create(store, config, trigger_id="kept")
@@ -485,7 +486,7 @@ def test_replay_cleanup_oserror_fails_closed(tmp_path: Path, monkeypatch: pytest
     assert runtime_paths.control_state_root is not None
     store = ExternalTriggerStore(runtime_paths)
     record = _create(store, config)
-    replay_store = ExternalTriggerReplayStore(runtime_paths.control_state_root)
+    replay_store = external_trigger_replay_store(runtime_paths.control_state_root)
     assert replay_store.claim_nonce(f"{record.uid}:1", "nonce-1", now=1_000, ttl_seconds=300)
     replay_dir = runtime_paths.control_state_root / "external_triggers" / "replay"
     original_unlink = type(replay_dir).unlink

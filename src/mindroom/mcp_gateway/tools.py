@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import inspect
 import json
-from contextlib import suppress
 from dataclasses import replace
 from functools import wraps
 from typing import TYPE_CHECKING, Any
@@ -29,19 +28,19 @@ from mindroom.mcp_gateway.types import (
     ToolSchemaResult,
 )
 from mindroom.oauth.providers import OAuthConnectionRequired
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
-from mindroom.tool_system.invocation import DETACHED_SESSION_ID, ToolCallContext, client_tool_result, run_tool_call
-from mindroom.tool_system.plugins import load_plugins
-from mindroom.tool_system.runtime_context import (
-    ToolDispatchContext,
-    WorkerRuntimeContext,
-    tool_runtime_context,
-    worker_runtime_context,
+from mindroom.tool_system.invocation import (
+    DETACHED_SESSION_ID,
+    CallResult,
+    ToolCallContext,
+    client_tool_result,
+    run_tool_call,
 )
+from mindroom.tool_system.plugins import load_plugins
+from mindroom.tool_system.runtime_context import ToolDispatchContext, tool_runtime_context
 from mindroom.tool_system.tool_access import search_tool_metadata, validate_tool_arguments
-from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
@@ -62,6 +61,7 @@ _MESSAGES: dict[GatewayErrorCode, str] = {
     GatewayErrorCode.APPROVAL_REQUIRED: "This tool requires approval and cannot run through this gateway.",
     GatewayErrorCode.TOOL_UNAVAILABLE: "This tool is currently unavailable.",
     GatewayErrorCode.TOOL_DECLINED: "A MindRoom plugin declined this call, so it did not run.",
+    GatewayErrorCode.TOOL_FAILED: "The tool reported that this call failed.",
     GatewayErrorCode.INVALID_ARGUMENTS: "Tool arguments are invalid or exceed the allowed size.",
     GatewayErrorCode.RESULT_TOO_LARGE: "The tool result exceeds the allowed size.",
     GatewayErrorCode.SCHEMA_TOO_LARGE: "The tool schema exceeds the allowed size.",
@@ -86,14 +86,11 @@ def _handle(value: object) -> bool:
 
 def _entries(context: AgentToolContext) -> dict[str, EffectiveToolConfig]:
     ensure_tool_registry_loaded(context.runtime_paths, context.config)
-    entity = context.config.resolve_entity(context.agent_name)
-    authored = {entry.name for entry in entity.authored_tool_configs}
+    agent_tools = resolve_agent_tools(context.config, context.agent_name)
+    authored = {entry.name for entry in agent_tools.facts.authored}
     return {
         entry.name: entry
-        for entry in visible_tool_surface(
-            agent_name=context.agent_name,
-            config=context.config,
-        ).runtime_tool_configs
+        for entry in agent_tools.candidates()
         if entry.authored_name in authored
         and ((metadata := TOOL_METADATA.get(entry.name)) is None or metadata.mcp_available)
     }
@@ -159,10 +156,7 @@ async def _selected_operation[T](
             await run_gateway_sync(require_current_access)
         return await run_toolkit_operation(context, entry, manager, authorized, require_current_access)
 
-    with (
-        tool_runtime_context(None),
-        worker_runtime_context(WorkerRuntimeContext(runtime_paths=context.runtime_paths, config=context.config)),
-    ):
+    with tool_runtime_context(None):
         return await run_with_tool_execution_identity(
             context.execution_identity,
             operation=selected,
@@ -294,13 +288,17 @@ async def get_tool(
     return await _guard(context, _selected_operation(context, toolkit, manager, selected, require_current_access))
 
 
-def _connection_required(result: object) -> bool:
-    if isinstance(result, str):
-        with suppress(ValueError, TypeError):
-            result = json.loads(result)
-    return isinstance(result, dict) and any(
-        key == "oauth_connection_required" and value is True for key, value in result.items()
-    )
+def _invocation_response(outcome: CallResult) -> InvocationResponse:
+    """Return the gateway's answer for what one call came to, raising the error a client reads for a failed one."""
+    if outcome.error is not None:
+        raise GatewayError(code=GatewayErrorCode.TOOL_UNAVAILABLE) from outcome.error
+    if outcome.status == "declined":
+        raise GatewayError(code=GatewayErrorCode.TOOL_DECLINED, message=outcome.failure_text)
+    if outcome.status in {"failed", "denied"}:
+        raise GatewayError(code=GatewayErrorCode.TOOL_FAILED, message=outcome.failure_text)
+    if outcome.status == "connection_required":
+        raise GatewayError(code=GatewayErrorCode.CONNECTION_REQUIRED)
+    return {"result": to_json_compatible(client_tool_result(outcome.value))}
 
 
 def _guard_dispatch(function: ToolFunction, require_current_config: Callable[[], None]) -> ToolFunction:
@@ -359,20 +357,11 @@ async def invoke_tool(
             session_id=DETACHED_SESSION_ID,
             user_id=context.requester_id,
         )
-        try:
-            value = await run_with_tool_execution_identity(
-                context.execution_identity,
-                operation=lambda: run_tool_call(target, arguments, call_context, middleware=(policy,)),
-            )
-        except Exception as exc:
-            raise GatewayError(code=GatewayErrorCode.TOOL_UNAVAILABLE) from exc
-        if isinstance(value, ToolOutcome) and value.is_error:
-            # The policy answers a call a plugin hook declined with a failed outcome, whose text says why.
-            raise GatewayError(code=GatewayErrorCode.TOOL_DECLINED, message=value.content)
-        result = to_json_compatible(client_tool_result(value))
-        if _connection_required(result):
-            raise GatewayError(code=GatewayErrorCode.CONNECTION_REQUIRED)
-        payload: InvocationResponse = {"result": result}
+        outcome = await run_with_tool_execution_identity(
+            context.execution_identity,
+            operation=lambda: run_tool_call(target, arguments, call_context, middleware=(policy,)),
+        )
+        payload = _invocation_response(outcome)
         if _json_size(payload) > 65536:
             raise GatewayError(code=GatewayErrorCode.RESULT_TOO_LARGE)
         return payload

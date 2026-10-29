@@ -93,7 +93,7 @@ They do not appear in the dashboard Skills page or the skills API, because those
 Hidden entries such as `.usage.json`, `.history/`, and `.archive/` are never loaded as skills.
 
 Agents never need write access to a global skill root to create skills, so the bundled, plugin, and user roots can stay read-only, for example in container or Kubernetes deployments.
-An agent with a workspace and workspace-rooted file or shell tools can write a skill to `<workspace>/skills/<skill-name>/SKILL.md`, which its file tools address as `skills/<skill-name>/SKILL.md`.
+An agent with workspace-rooted file or shell tools can write a skill to `<workspace>/skills/<skill-name>/SKILL.md`, which its file tools address as `skills/<skill-name>/SKILL.md`.
 Such agents are told how in their system prompt through the `WORKSPACE_SKILL_AUTHORING_PROMPT` built-in prompt, which you can change through [Built-In Prompt Overrides](configuration/index.md#built-in-prompt-overrides).
 A new or edited workspace skill is picked up on the agent's next run without a config change.
 

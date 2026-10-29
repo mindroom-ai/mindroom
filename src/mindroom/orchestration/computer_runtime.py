@@ -83,17 +83,11 @@ def _computer_browser_provider(agent_name: str, config: Config, runtime_paths: R
         raise ComputerError(409, "Computer requires exactly one browser provider and explicit user_agent worker scope.")
     provider = providers[0]
 
-    # Match normal toolkit materialization without adding heavy tool imports to API startup.
-    from mindroom.agents import resolve_runtime_worker_tools  # noqa: PLC0415
-    from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool  # noqa: PLC0415
+    # Match normal toolkit placement without adding heavy tool imports to API startup.
+    from mindroom.tool_system.agent_tools import resolve_agent_tools  # noqa: PLC0415
+    from mindroom.tool_system.sandbox_proxy import tool_placement  # noqa: PLC0415
 
-    worker_tools = resolve_runtime_worker_tools(
-        agent_name,
-        config,
-        runtime_paths,
-        list(config.resolve_entity(agent_name).available_tools),
-    )
-    if not sandbox_proxy_enabled_for_tool(provider, runtime_paths=runtime_paths, worker_tools_override=worker_tools):
+    if not resolve_agent_tools(config, agent_name).runs_in_worker(provider, tool_placement(runtime_paths)):
         raise ComputerError(503, "Computer requires browser tools routed to the worker.")
     return provider
 
@@ -136,7 +130,7 @@ def _resolve_target(
     )
     if target.worker_key is None:
         raise ComputerError(503, "Could not resolve an isolated computer worker.")
-    manager_identity = configured_primary_worker_manager_identity(runtime_paths, runtime_config=config)
+    manager_identity = configured_primary_worker_manager_identity(runtime_paths)
     fingerprint = hashlib.sha256((config.model_dump_json() + repr(manager_identity)).encode()).hexdigest()
     return ComputerTarget(
         requester_id,

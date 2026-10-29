@@ -1,0 +1,86 @@
+{
+  "run": {
+    "image": "sha256:image-v1",
+    "command": [
+      "/app/run-sandbox-runner.sh"
+    ],
+    "name": "<CONTAINER_NAME>",
+    "detach": true,
+    "environment": {
+      "DO_NOT_TRACK": "0",
+      "EXTRA_ENV": "present",
+      "HOME": "/app/worker/agents/code/workspace",
+      "MINDROOM_CONFIG_PATH": "/app/config-host/config.yaml",
+      "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "v1:tenant-123:shared:code",
+      "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": "/app/worker",
+      "MINDROOM_SANDBOX_PROXY_TOKEN": "<WORKER_TOKEN>",
+      "MINDROOM_SANDBOX_PROXY_URL": "http://operator-proxy.example.test",
+      "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "forkserver",
+      "MINDROOM_SANDBOX_RUNNER_MODE": "true",
+      "MINDROOM_SANDBOX_RUNNER_PORT": "8766",
+      "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "45",
+      "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH": "/app/worker/.runtime/startup_manifest.json",
+      "MINDROOM_SHARED_CREDENTIALS_PATH": "/app/worker/.shared_credentials",
+      "MINDROOM_STORAGE_PATH": "/app/worker",
+      "OPENAI_BASE_URL": "https://extra-llm.example.test/v1"
+    },
+    "volumes": [
+      "<TMP>/storage/workers/v1_tenant-123_shared_code-f360bf3b80bdca4d:/app/worker:rw",
+      "<TMP>/storage/workers/v1_tenant-123_shared_code-f360bf3b80bdca4d/.shared_credentials:/app/worker/.shared_credentials:ro",
+      "<TMP>/storage/workers/v1_tenant-123_shared_code-f360bf3b80bdca4d/.runtime:/app/worker/.runtime:ro",
+      "<TMP>/storage/agents/code/workspace:/app/worker/agents/code/workspace:rw",
+      "<TMP>/storage/workers/.mindroom-worker-config-projections/v1_tenant-123_shared_code-f360bf3b80bdca4d/config-projection-<DIGEST>:/app/config-host:ro"
+    ],
+    "ports": {
+      "8766/tcp": [
+        "127.0.0.1",
+        null
+      ]
+    },
+    "labels": {
+      "mindroom.ai/component": "worker",
+      "app.mindroom.ai/managed-by": "mindroom",
+      "app.mindroom.ai/name": "mindroom-docker-worker",
+      "mindroom.ai/worker-id": "<CONTAINER_NAME>",
+      "mindroom.ai/launch-config-hash": "<LAUNCH_CONFIG_HASH>",
+      "mindroom.ai/runtime-namespace": "<RUNTIME_NAMESPACE>",
+      "mindroom.ai/storage-layout": "workspaces",
+      "mindroom.ai/tenant": "test"
+    },
+    "user": "1000:1000",
+    "read_only": true,
+    "tmpfs": {
+      "/tmp": "rw,nosuid,nodev,mode=1777,size=1g"
+    },
+    "extra_hosts": {
+      "host.docker.internal": "host-gateway"
+    },
+    "runtime": null
+  },
+  "manifest": {
+    "runtime_paths": {
+      "config_path": "/app/config-host/config.yaml",
+      "env_file_values": {},
+      "process_env": {
+        "BROWSER_EXECUTABLE_PATH": "/usr/bin/chromium",
+        "CUSTOMER_ID": "customer-1",
+        "DO_NOT_TRACK": "0",
+        "GOOGLE_CLOUD_PROJECT": "golden-project",
+        "MATRIX_HOMESERVER": "https://matrix.example.test",
+        "MINDROOM_CONFIG_PATH": "/app/config-host/config.yaml",
+        "MINDROOM_LOG_LEVEL": "INFO",
+        "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "v1:tenant-123:shared:code",
+        "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": "/app/worker",
+        "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "forkserver",
+        "MINDROOM_SANDBOX_RUNNER_MODE": "true",
+        "MINDROOM_SANDBOX_RUNNER_PORT": "8766",
+        "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "45",
+        "MINDROOM_SHARED_CREDENTIALS_PATH": "/app/worker/.shared_credentials",
+        "MINDROOM_STORAGE_PATH": "/app/worker",
+        "OPENAI_BASE_URL": "https://extra-llm.example.test/v1"
+      },
+      "storage_root": "/app/worker"
+    },
+    "tool_validation_snapshot": {}
+  }
+}

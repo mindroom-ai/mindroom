@@ -23,10 +23,12 @@ from mindroom.tool_jobs.authorization import (
     toolkit_authority,
 )
 from mindroom.tool_jobs.provenance import function_provenance
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import Function, Toolkit
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction, tool_config_signature
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry_state import TOOL_REGISTRY
+from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.tool_job_helpers import toolkit_job_tools
 
@@ -46,12 +48,10 @@ def test_direct_toolkit_retains_authored_configuration_grant(tmp_path: Path) -> 
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
     toolkit = build_agent_toolkit(
         entry.name,
-        agent_name="lead",
-        config=config,
+        agent_tools=resolve_agent_tools(config, "lead"),
+        placement=tool_placement(paths),
         runtime_paths=paths,
-        worker_tools=[],
-        runtime_overrides=None,
-        tool_config_overrides=config.resolve_entity("lead").authored_tool_configs[0].tool_config_overrides,
+        tool_config_overrides=config.resolve_agent("lead").tools.authored[0].tool_config_overrides,
         execution_identity=_OWNER,
     )
     assert toolkit is not None
@@ -85,12 +85,10 @@ def test_changed_file_access_revokes_retained_work(tmp_path: Path, changed: str)
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
     toolkit = build_agent_toolkit(
         entry.name,
-        agent_name="lead",
-        config=config,
+        agent_tools=resolve_agent_tools(config, "lead"),
+        placement=tool_placement(paths),
         runtime_paths=paths,
-        worker_tools=[],
-        runtime_overrides=None,
-        tool_config_overrides=config.resolve_entity("lead").authored_tool_configs[0].tool_config_overrides,
+        tool_config_overrides=config.resolve_agent("lead").tools.authored[0].tool_config_overrides,
         execution_identity=_OWNER,
     )
     assert toolkit is not None
@@ -126,11 +124,9 @@ def test_disabling_graph_edits_revokes_a_retained_graph_edit(tmp_path: Path) -> 
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
     toolkit = build_agent_toolkit(
         "knowledge_graph",
-        agent_name="lead",
-        config=config,
+        agent_tools=resolve_agent_tools(config, "lead"),
+        placement=tool_placement(paths),
         runtime_paths=paths,
-        worker_tools=[],
-        runtime_overrides=None,
         tool_config_overrides={},
         execution_identity=_OWNER,
     )
@@ -209,12 +205,12 @@ def test_authored_include_policy_matches_real_toolkit_surface(
             ),
         },
     )
-    effective = config.resolve_entity("lead").authored_deferred_tool_configs[0]
+    effective = next(entry for entry in resolve_agent_tools(config, "lead").facts.authored if entry.defer)
     toolkit = get_tool_by_name(
         "calculator",
         resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage"),
         tool_config_overrides=effective.tool_config_overrides,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
     )
 
@@ -246,12 +242,12 @@ def test_nullable_authored_exclusion_matches_inherited_toolkit_surface(
             ),
         },
     )
-    effective = config.resolve_entity("lead").authored_deferred_tool_configs[0]
+    effective = next(entry for entry in resolve_agent_tools(config, "lead").facts.authored if entry.defer)
     toolkit = get_tool_by_name(
         "calculator",
         resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage"),
         tool_config_overrides=effective.tool_config_overrides,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
     )
 
@@ -298,7 +294,6 @@ def test_mcp_server_and_authored_include_conventions_remain_distinct(
     assert (
         _configured_tool_allowed(
             config,
-            _OWNER,
             entry,
             "read",
             {"mcp_server_id": "demo", "mcp_tool_name": "read"},
@@ -387,7 +382,6 @@ async def test_mcp_cross_owner_exclusion_wins_for_construction_and_retained_auth
     assert "demo_read" not in toolkit.async_functions
     assert not _configured_tool_allowed(
         config,
-        _OWNER,
         entry,
         "read",
         {"mcp_server_id": "demo", "mcp_tool_name": "read"},
@@ -437,7 +431,6 @@ def test_mcp_oauth_helpers_bypass_remote_tool_filters(monkeypatch: pytest.Monkey
     assert "demo_connection_status" in toolkit.async_functions
     assert _configured_tool_allowed(
         config,
-        _OWNER,
         entry,
         "demo_connection_status",
         {"mcp_server_id": "demo"},

@@ -68,6 +68,7 @@ from mindroom.oauth.providers import (
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.identity_helpers import persist_entity_accounts
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -356,6 +357,7 @@ def _cross_server_collision_config(runtime_paths: RuntimePaths, *, include_other
         {
             "defaults": {"tools": []},
             "mcp_servers": servers,
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "code": {
                     "display_name": "Code",
@@ -380,6 +382,7 @@ def _oauth_non_oauth_collision_config(runtime_paths: RuntimePaths) -> Config:
                     "tool_prefix": "shared",
                 },
             },
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "code": {
                     "display_name": "Code",
@@ -2270,6 +2273,7 @@ async def test_mcp_manager_allows_same_oauth_typed_tools_for_multiple_requesters
             "mcp_servers": {
                 "demo": _oauth_mcp_config().model_dump(exclude_none=True),
             },
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "code": {
                     "display_name": "Code",
@@ -2401,6 +2405,7 @@ async def test_oauth_mcp_collision_failure_does_not_cross_distinct_raw_agent_sco
         {
             "defaults": {"tools": []},
             "mcp_servers": {"demo": _oauth_mcp_config().model_dump(exclude_none=True)},
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "foo": {
                     "display_name": "Foo",
@@ -2637,6 +2642,7 @@ async def test_mcp_manager_scopes_catalog_collision_failure_to_one_requester(
     config = Config.validate_with_runtime(
         {
             "mcp_servers": {"demo": _oauth_mcp_config().model_dump(exclude_none=True)},
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "code": {
                     "display_name": "Code",
@@ -3719,6 +3725,7 @@ async def test_mcp_config_reload_retires_unreachable_oauth_scope(
         {
             "defaults": {"tools": []},
             "mcp_servers": {"demo": server_config.model_dump(exclude_none=True)},
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "code": {
                     "display_name": "Code",
@@ -3761,6 +3768,7 @@ async def test_mcp_config_reload_retires_unreachable_oauth_scope(
         {
             "defaults": {"tools": []},
             "mcp_servers": {"demo": server_config.model_dump(exclude_none=True)},
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": reloaded_agents,
         },
         runtime_paths,
@@ -3805,6 +3813,7 @@ async def test_mcp_config_reload_keeps_user_scope_reachable_from_another_agent(
             {
                 "defaults": {"tools": []},
                 "mcp_servers": {"demo": server_config.model_dump(exclude_none=True)},
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "agents": {
                     agent_name: {
                         "display_name": agent_name.title(),
@@ -4711,6 +4720,7 @@ async def test_mcp_manager_marks_oauth_bridge_function_name_collisions_as_failed
                 "demo": oauth_server.model_dump(exclude_none=True),
                 "other": oauth_server.model_dump(exclude_none=True),
             },
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "code": {
                     "display_name": "Code",
@@ -4777,7 +4787,7 @@ async def test_agent_creation_hides_catalogless_oauth_bridge_collisions(tmp_path
             execution_identity=worker_target.execution_identity,
             include_interactive_questions=False,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, runtime_paths, "code"),
         )
     finally:
         await manager.shutdown()
@@ -4809,6 +4819,7 @@ async def test_mcp_manager_marks_oauth_bridge_local_function_name_collisions_as_
             "mcp_servers": {
                 "demo": _oauth_mcp_config().model_dump(exclude_none=True),
             },
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "code": {
                     "display_name": "Code",
@@ -4867,6 +4878,7 @@ async def test_mcp_manager_marks_local_function_name_collisions_as_failed(
                     "tool_prefix": "run",
                 },
             },
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "code": {
                     "display_name": "Code",
@@ -4915,6 +4927,7 @@ async def test_mcp_manager_warns_when_recovery_transitions_from_transport_failur
                     "tool_prefix": "run",
                 },
             },
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "code": {
                     "display_name": "Code",
@@ -4966,6 +4979,7 @@ async def test_mcp_manager_marks_direct_builtin_function_name_collisions_as_fail
                     "tool_prefix": "add",
                 },
             },
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "code": {
                     "display_name": "Code",
@@ -5008,6 +5022,7 @@ async def test_mcp_manager_reserves_matrix_runtime_invite_router_function(
                     "tool_prefix": "invite",
                 },
             },
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "code": {
                     "display_name": "Code",
@@ -5048,6 +5063,7 @@ async def test_mcp_manager_allows_memory_mcp_function_when_memory_backend_none(
                     "tool_prefix": "add",
                 },
             },
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "code": {
                     "display_name": "Code",
@@ -5085,6 +5101,7 @@ async def test_mcp_manager_marks_compact_context_function_name_collisions_as_fai
                     "tool_prefix": "compact",
                 },
             },
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "code": {
                     "display_name": "Code",
@@ -5125,6 +5142,7 @@ async def test_mcp_manager_ignores_deferred_unloaded_local_function_collisions_a
                     "tool_prefix": "run",
                 },
             },
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "code": {
                     "display_name": "Code",
@@ -5198,7 +5216,7 @@ async def test_oauth_mcp_catalog_projection_hides_function_colliding_with_deferr
             execution_identity=worker_target.execution_identity,
             include_interactive_questions=False,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, runtime_paths, "code"),
         )
     finally:
         await manager.shutdown()
@@ -5260,7 +5278,7 @@ async def test_failed_deferred_non_oauth_mcp_server_is_left_out_of_agent_constru
         execution_identity=None,
         include_interactive_questions=False,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "code"),
     )
     tool_names = [toolkit.name for toolkit in agent.spec.toolkits]
     assert "mcp_demo" not in tool_names
@@ -5320,7 +5338,7 @@ async def test_agent_creation_omits_tools_of_failed_optional_mcp_server(
             execution_identity=None,
             include_interactive_questions=False,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, runtime_paths, "code"),
         )
     finally:
         await manager.shutdown()
@@ -5354,6 +5372,7 @@ async def test_mcp_manager_marks_oauth_typed_function_name_collisions_as_failed(
             "mcp_servers": {
                 "demo": _oauth_mcp_config().model_dump(exclude_none=True),
             },
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "code": {
                     "display_name": "Code",
@@ -5398,6 +5417,7 @@ async def test_mcp_manager_marks_oauth_typed_bridge_function_name_collisions_as_
             "mcp_servers": {
                 "demo": _oauth_mcp_config().model_dump(exclude_none=True),
             },
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "code": {
                     "display_name": "Code",
@@ -5443,6 +5463,7 @@ async def test_mcp_manager_allows_local_function_name_collisions_on_other_agents
                     "tool_prefix": "run",
                 },
             },
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "shell_only": {
                     "display_name": "Shell Only",
@@ -5526,6 +5547,7 @@ async def test_oauth_catalog_ignores_unreachable_local_collisions(
             "mcp_servers": {
                 "demo": _oauth_mcp_config().model_dump(exclude_none=True),
             },
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "code": {
                     "display_name": "Code",

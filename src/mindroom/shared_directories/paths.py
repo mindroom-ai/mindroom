@@ -16,7 +16,7 @@ from mindroom.shared_directories.store import (
     shared_directory_relative_path,
 )
 from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
-from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config, sandbox_proxy_enabled_for_tool
+from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config, tool_placement
 from mindroom.tool_system.worker_routing import SHARED_DIRECTORIES_DIRNAME
 from mindroom.workers.runtime import primary_worker_backend_is_dedicated, worker_visible_storage_root
 
@@ -34,10 +34,15 @@ def agent_reads_shares_in_worker(config: Config, runtime_paths: RuntimePaths, ag
     """Return whether the agent's file-reading tools run in a dedicated worker that mounts its shares."""
     if agent_name not in config.agents or worker_visible_storage_root(runtime_paths) is None:
         return False
-    worker_tools = config.get_agent_worker_tools(agent_name)
+    # Imported here: tool construction reads shared directory roots, and agent tool resolution reaches tool construction.
+    from mindroom.tool_system.agent_tools import resolve_agent_tools  # noqa: PLC0415
+
+    agent_tools = resolve_agent_tools(config, agent_name)
+    placement = tool_placement(runtime_paths)
     return any(
-        sandbox_proxy_enabled_for_tool(tool_name, runtime_paths=runtime_paths, worker_tools_override=worker_tools)
-        for tool_name in _SHARE_READING_TOOLS
+        agent_tools.runs_in_worker(tool_name, placement)
+        for tool_name in agent_tools.tool_names
+        if tool_name in _SHARE_READING_TOOLS
     )
 
 
@@ -109,7 +114,7 @@ def _mounted_roots(root: Path) -> tuple[SharedDirectoryRoot, ...]:
     return tuple(roots)
 
 
-def primary_tools_reach_shared_directories(runtime_paths: RuntimePaths) -> bool:
+def _primary_tools_reach_shared_directories(runtime_paths: RuntimePaths) -> bool:
     """Return whether path tools in the primary process may use shared directories in this runtime."""
     # Workers write shared directories, and file and coding list and search by path after checking it, so worker
     # code could swap an entry for a link that a primary-process search would follow into primary-only storage.
@@ -124,7 +129,7 @@ def shared_directory_roots(
     """Return the shared directories one agent's path tools may use in this runtime."""
     if runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]):
         return _mounted_roots(runner_storage_root(runtime_paths) / SHARED_DIRECTORIES_DIRNAME)
-    if config is None or agent_name is None or not primary_tools_reach_shared_directories(runtime_paths):
+    if config is None or agent_name is None or not _primary_tools_reach_shared_directories(runtime_paths):
         return ()
     return tuple(
         SharedDirectoryRoot(path=view.path, writable=view.writable)

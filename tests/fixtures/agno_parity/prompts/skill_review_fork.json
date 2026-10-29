@@ -54,7 +54,7 @@
       },
       "messages": [
         {
-          "content": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom.\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Assistant and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `scheduler`, `skill_manage`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (this agent has no workspace, so path tools in the primary runtime reach only attachments).\n\nAnswer questions about the team handbook.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n\nWhen using skills, access them via the skill tools:\n- get_skill_instructions(...)\n- get_skill_reference(...)\n- get_skill_script(...)\nDo not open a global skill's SKILL.md directly with file tools; creating or editing your own workspace skills with file tools is fine.\n\nWhen you need the user to choose between options, create an interactive question by including this JSON in your response with the following format:\n\nIMPORTANT: This is just an example. You can customize the question and options as needed.\n\n```interactive\n{\n    \"question\": \"How would you like me to proceed?\",\n    \"options\": [\n        {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n        {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n    ]\n}\n```\n\nIMPORTANT:\n- You must write ```interactive on the SAME LINE (no space or newline between the backticks and the word \"interactive\").\n- The JSON block will be automatically replaced with a formatted question showing the options with emojis.\n- Don't write things like \"here are the options:\" before the JSON block - the formatted question will appear instead.\n- Write your response as if the formatted question will be shown directly to the user.\n- Only a SINGLE JSON block will be converted to an interactive question. DO NOT INCLUDE MULTIPLE BLOCKS!\n\nThe JSON block above will be automatically converted to this formatted display:\n\nHow would you like me to proceed?\n\n1. 🚀 Fast and automated\n2. 🐢 Careful and manual\n\nReact with an emoji or type the number to respond.\n\nThe user can respond by:\n- Clicking the emoji reaction\n- Typing the number (1, 2, etc.)\n\nKeep it simple: max 5 options with clear, concise labels.\n\n<skills_system>\n\n## What are Skills?\nSkills are packages of domain expertise that extend your capabilities. Each skill contains:\n- **Instructions**: Detailed guidance on when and how to apply the skill\n- **Scripts**: Executable code templates you can use or adapt\n- **References**: Supporting documentation (guides, cheatsheets, examples)\n\n## IMPORTANT: How to Use Skills\n**Skill names are NOT callable functions.** You cannot call a skill directly by its name.\nInstead, you MUST use the provided skill access tools:\n\n1. `get_skill_instructions(skill_name)` - Load the full instructions for a skill\n2. `get_skill_reference(skill_name, reference_path)` - Access specific documentation\n3. `get_skill_script(skill_name, script_path)` - Read scripts\n\n## Progressive Discovery Workflow\n1. **Browse**: Review the skill summaries below to understand what's available\n2. **Load**: When a task matches a skill, call `get_skill_instructions(skill_name)` first\n3. **Reference**: Use `get_skill_reference` to access specific documentation as needed\n4. **Scripts**: Use `get_skill_script` to read scripts from a skill; it never runs them\n\n**IMPORTANT**: References are documentation files (NOT executable). Only use `get_skill_script` when `<scripts>` lists actual script files. If `<scripts>none</scripts>`, do NOT call `get_skill_script`.\n\nThis approach ensures you only load detailed instructions when actually needed.\n\n## Available Skills\n<skill>\n  <name>expense-report</name>\n  <description>File an expense report from receipts.</description>\n  <scripts>none</scripts>\n</skill>\n\n</skills_system>",
+          "content": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom.\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Assistant and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `scheduler`, `skill_manage`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n\nAnswer questions about the team handbook.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n\nWhen using skills, access them via the skill tools:\n- get_skill_instructions(...)\n- get_skill_reference(...)\n- get_skill_script(...)\nDo not open a global skill's SKILL.md directly with file tools; creating or editing your own workspace skills with file tools is fine.\n\n- To save a tool's full supported output to a file in your workspace instead of returning it, pass `mindroom_output_path: <relative-path>` and then inspect the saved file with file, coding, python, or shell tools. In shell tools, `$MINDROOM_AGENT_WORKSPACE` points at that workspace; in worker-routed shell and python tools, `~` and `$HOME` point there too.\n\nIf you have file or shell tools, you can create new skills for yourself by writing files inside your own workspace; you never need write access to a global skills directory.\nA skill is a folder `skills/<skill-name>/` in your workspace containing a `SKILL.md` file, plus optional `scripts/` and `references/` subfolders.\n`SKILL.md` starts with YAML frontmatter declaring `name` and `description`, followed by the markdown instructions:\n\n---\nname: my-skill\ndescription: One-line summary of when to use this skill\n---\n\n# My Skill\nStep-by-step instructions...\n\nDo not write to the bundled, plugin, or user skill directories (for example `~/.mindroom/skills`); they may be read-only, and workspace skills take precedence over them anyway.\nA workspace skill you create or edit becomes available on your next run, without any config change.\n\nWhen you need the user to choose between options, create an interactive question by including this JSON in your response with the following format:\n\nIMPORTANT: This is just an example. You can customize the question and options as needed.\n\n```interactive\n{\n    \"question\": \"How would you like me to proceed?\",\n    \"options\": [\n        {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n        {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n    ]\n}\n```\n\nIMPORTANT:\n- You must write ```interactive on the SAME LINE (no space or newline between the backticks and the word \"interactive\").\n- The JSON block will be automatically replaced with a formatted question showing the options with emojis.\n- Don't write things like \"here are the options:\" before the JSON block - the formatted question will appear instead.\n- Write your response as if the formatted question will be shown directly to the user.\n- Only a SINGLE JSON block will be converted to an interactive question. DO NOT INCLUDE MULTIPLE BLOCKS!\n\nThe JSON block above will be automatically converted to this formatted display:\n\nHow would you like me to proceed?\n\n1. 🚀 Fast and automated\n2. 🐢 Careful and manual\n\nReact with an emoji or type the number to respond.\n\nThe user can respond by:\n- Clicking the emoji reaction\n- Typing the number (1, 2, etc.)\n\nKeep it simple: max 5 options with clear, concise labels.\n\n<skills_system>\n\n## What are Skills?\nSkills are packages of domain expertise that extend your capabilities. Each skill contains:\n- **Instructions**: Detailed guidance on when and how to apply the skill\n- **Scripts**: Executable code templates you can use or adapt\n- **References**: Supporting documentation (guides, cheatsheets, examples)\n\n## IMPORTANT: How to Use Skills\n**Skill names are NOT callable functions.** You cannot call a skill directly by its name.\nInstead, you MUST use the provided skill access tools:\n\n1. `get_skill_instructions(skill_name)` - Load the full instructions for a skill\n2. `get_skill_reference(skill_name, reference_path)` - Access specific documentation\n3. `get_skill_script(skill_name, script_path)` - Read scripts\n\n## Progressive Discovery Workflow\n1. **Browse**: Review the skill summaries below to understand what's available\n2. **Load**: When a task matches a skill, call `get_skill_instructions(skill_name)` first\n3. **Reference**: Use `get_skill_reference` to access specific documentation as needed\n4. **Scripts**: Use `get_skill_script` to read scripts from a skill; it never runs them\n\n**IMPORTANT**: References are documentation files (NOT executable). Only use `get_skill_script` when `<scripts>` lists actual script files. If `<scripts>none</scripts>`, do NOT call `get_skill_script`.\n\nThis approach ensures you only load detailed instructions when actually needed.\n\n## Available Skills\n<skill>\n  <name>expense-report</name>\n  <description>File an expense report from receipts.</description>\n  <scripts>none</scripts>\n</skill>\n\n</skills_system>",
           "role": "system"
         },
         {
@@ -84,6 +84,18 @@
               "b": {
                 "type": "number",
                 "description": "(float) Second number."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -101,6 +113,18 @@
               "task_id": {
                 "type": "string",
                 "description": "The ID of the task to cancel (from list_schedules)."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -121,6 +145,18 @@
               "b": {
                 "type": "number",
                 "description": "(float) Denominator."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -175,6 +211,18 @@
                   }
                 ],
                 "description": "Configured model alias for each run, including team members.\nLeave unset to preserve the existing choice. Use an empty string\nto restore normal agent, room, and thread model selection."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -196,6 +244,18 @@
               "b": {
                 "type": "number",
                 "description": "(float) Exponent."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -213,6 +273,18 @@
               "n": {
                 "type": "integer",
                 "description": "(int) Number to calculate the factorial of, at most 1558."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -229,6 +301,18 @@
               "skill_name": {
                 "type": "string",
                 "description": "The name of the skill to get instructions for."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -256,6 +340,18 @@
                   }
                 ],
                 "description": "The filename of the reference document."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -283,6 +379,18 @@
                   }
                 ],
                 "description": "The filename of the script."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -295,7 +403,20 @@
           "description": "Invite router to current Matrix room.",
           "parameters": {
             "type": "object",
-            "properties": {},
+            "properties": {
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+              }
+            },
             "required": []
           }
         },
@@ -308,6 +429,18 @@
               "n": {
                 "type": "integer",
                 "description": "(int) Number to check if prime, at most 10**12."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -320,7 +453,20 @@
           "description": "List all pending scheduled tasks in the current room/thread.",
           "parameters": {
             "type": "object",
-            "properties": {},
+            "properties": {
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+              }
+            },
             "required": []
           }
         },
@@ -337,6 +483,18 @@
               "b": {
                 "type": "number",
                 "description": "(float) Second number."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -365,6 +523,18 @@
                   }
                 ],
                 "description": "Optional replacement arguments as a JSON object string,\nonly when the requester approved any arguments."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -418,6 +588,18 @@
                   }
                 ],
                 "description": "Configured model alias for each scheduled run (including team\nmembers), e.g. \"cheap\". Leave unset to use normal agent, room, and\nthread model selection. This does not change the conversation model."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -447,6 +629,18 @@
               "description": {
                 "type": "string",
                 "description": "Short description of the scheduled action; if the requester\napproves any arguments, it tells you what the call should do when it runs."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -553,6 +747,18 @@
               "n": {
                 "type": "number",
                 "description": "(float) Number to calculate the square root of."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -573,6 +779,18 @@
               "b": {
                 "type": "number",
                 "description": "(float) Second number."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -593,7 +811,7 @@
       },
       "messages": [
         {
-          "content": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom.\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Assistant and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `scheduler`, `skill_manage`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (this agent has no workspace, so path tools in the primary runtime reach only attachments).\n\nAnswer questions about the team handbook.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n\nWhen using skills, access them via the skill tools:\n- get_skill_instructions(...)\n- get_skill_reference(...)\n- get_skill_script(...)\nDo not open a global skill's SKILL.md directly with file tools; creating or editing your own workspace skills with file tools is fine.\n\nWhen you need the user to choose between options, create an interactive question by including this JSON in your response with the following format:\n\nIMPORTANT: This is just an example. You can customize the question and options as needed.\n\n```interactive\n{\n    \"question\": \"How would you like me to proceed?\",\n    \"options\": [\n        {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n        {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n    ]\n}\n```\n\nIMPORTANT:\n- You must write ```interactive on the SAME LINE (no space or newline between the backticks and the word \"interactive\").\n- The JSON block will be automatically replaced with a formatted question showing the options with emojis.\n- Don't write things like \"here are the options:\" before the JSON block - the formatted question will appear instead.\n- Write your response as if the formatted question will be shown directly to the user.\n- Only a SINGLE JSON block will be converted to an interactive question. DO NOT INCLUDE MULTIPLE BLOCKS!\n\nThe JSON block above will be automatically converted to this formatted display:\n\nHow would you like me to proceed?\n\n1. 🚀 Fast and automated\n2. 🐢 Careful and manual\n\nReact with an emoji or type the number to respond.\n\nThe user can respond by:\n- Clicking the emoji reaction\n- Typing the number (1, 2, etc.)\n\nKeep it simple: max 5 options with clear, concise labels.\n\n<skills_system>\n\n## What are Skills?\nSkills are packages of domain expertise that extend your capabilities. Each skill contains:\n- **Instructions**: Detailed guidance on when and how to apply the skill\n- **Scripts**: Executable code templates you can use or adapt\n- **References**: Supporting documentation (guides, cheatsheets, examples)\n\n## IMPORTANT: How to Use Skills\n**Skill names are NOT callable functions.** You cannot call a skill directly by its name.\nInstead, you MUST use the provided skill access tools:\n\n1. `get_skill_instructions(skill_name)` - Load the full instructions for a skill\n2. `get_skill_reference(skill_name, reference_path)` - Access specific documentation\n3. `get_skill_script(skill_name, script_path)` - Read scripts\n\n## Progressive Discovery Workflow\n1. **Browse**: Review the skill summaries below to understand what's available\n2. **Load**: When a task matches a skill, call `get_skill_instructions(skill_name)` first\n3. **Reference**: Use `get_skill_reference` to access specific documentation as needed\n4. **Scripts**: Use `get_skill_script` to read scripts from a skill; it never runs them\n\n**IMPORTANT**: References are documentation files (NOT executable). Only use `get_skill_script` when `<scripts>` lists actual script files. If `<scripts>none</scripts>`, do NOT call `get_skill_script`.\n\nThis approach ensures you only load detailed instructions when actually needed.\n\n## Available Skills\n<skill>\n  <name>expense-report</name>\n  <description>File an expense report from receipts.</description>\n  <scripts>none</scripts>\n</skill>\n\n</skills_system>",
+          "content": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom.\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Assistant and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `scheduler`, `skill_manage`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n\nAnswer questions about the team handbook.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n\nWhen using skills, access them via the skill tools:\n- get_skill_instructions(...)\n- get_skill_reference(...)\n- get_skill_script(...)\nDo not open a global skill's SKILL.md directly with file tools; creating or editing your own workspace skills with file tools is fine.\n\n- To save a tool's full supported output to a file in your workspace instead of returning it, pass `mindroom_output_path: <relative-path>` and then inspect the saved file with file, coding, python, or shell tools. In shell tools, `$MINDROOM_AGENT_WORKSPACE` points at that workspace; in worker-routed shell and python tools, `~` and `$HOME` point there too.\n\nIf you have file or shell tools, you can create new skills for yourself by writing files inside your own workspace; you never need write access to a global skills directory.\nA skill is a folder `skills/<skill-name>/` in your workspace containing a `SKILL.md` file, plus optional `scripts/` and `references/` subfolders.\n`SKILL.md` starts with YAML frontmatter declaring `name` and `description`, followed by the markdown instructions:\n\n---\nname: my-skill\ndescription: One-line summary of when to use this skill\n---\n\n# My Skill\nStep-by-step instructions...\n\nDo not write to the bundled, plugin, or user skill directories (for example `~/.mindroom/skills`); they may be read-only, and workspace skills take precedence over them anyway.\nA workspace skill you create or edit becomes available on your next run, without any config change.\n\nWhen you need the user to choose between options, create an interactive question by including this JSON in your response with the following format:\n\nIMPORTANT: This is just an example. You can customize the question and options as needed.\n\n```interactive\n{\n    \"question\": \"How would you like me to proceed?\",\n    \"options\": [\n        {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n        {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n    ]\n}\n```\n\nIMPORTANT:\n- You must write ```interactive on the SAME LINE (no space or newline between the backticks and the word \"interactive\").\n- The JSON block will be automatically replaced with a formatted question showing the options with emojis.\n- Don't write things like \"here are the options:\" before the JSON block - the formatted question will appear instead.\n- Write your response as if the formatted question will be shown directly to the user.\n- Only a SINGLE JSON block will be converted to an interactive question. DO NOT INCLUDE MULTIPLE BLOCKS!\n\nThe JSON block above will be automatically converted to this formatted display:\n\nHow would you like me to proceed?\n\n1. 🚀 Fast and automated\n2. 🐢 Careful and manual\n\nReact with an emoji or type the number to respond.\n\nThe user can respond by:\n- Clicking the emoji reaction\n- Typing the number (1, 2, etc.)\n\nKeep it simple: max 5 options with clear, concise labels.\n\n<skills_system>\n\n## What are Skills?\nSkills are packages of domain expertise that extend your capabilities. Each skill contains:\n- **Instructions**: Detailed guidance on when and how to apply the skill\n- **Scripts**: Executable code templates you can use or adapt\n- **References**: Supporting documentation (guides, cheatsheets, examples)\n\n## IMPORTANT: How to Use Skills\n**Skill names are NOT callable functions.** You cannot call a skill directly by its name.\nInstead, you MUST use the provided skill access tools:\n\n1. `get_skill_instructions(skill_name)` - Load the full instructions for a skill\n2. `get_skill_reference(skill_name, reference_path)` - Access specific documentation\n3. `get_skill_script(skill_name, script_path)` - Read scripts\n\n## Progressive Discovery Workflow\n1. **Browse**: Review the skill summaries below to understand what's available\n2. **Load**: When a task matches a skill, call `get_skill_instructions(skill_name)` first\n3. **Reference**: Use `get_skill_reference` to access specific documentation as needed\n4. **Scripts**: Use `get_skill_script` to read scripts from a skill; it never runs them\n\n**IMPORTANT**: References are documentation files (NOT executable). Only use `get_skill_script` when `<scripts>` lists actual script files. If `<scripts>none</scripts>`, do NOT call `get_skill_script`.\n\nThis approach ensures you only load detailed instructions when actually needed.\n\n## Available Skills\n<skill>\n  <name>expense-report</name>\n  <description>File an expense report from receipts.</description>\n  <scripts>none</scripts>\n</skill>\n\n</skills_system>",
           "role": "system"
         },
         {
@@ -637,6 +855,18 @@
               "b": {
                 "type": "number",
                 "description": "(float) Second number."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -654,6 +884,18 @@
               "task_id": {
                 "type": "string",
                 "description": "The ID of the task to cancel (from list_schedules)."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -674,6 +916,18 @@
               "b": {
                 "type": "number",
                 "description": "(float) Denominator."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -728,6 +982,18 @@
                   }
                 ],
                 "description": "Configured model alias for each run, including team members.\nLeave unset to preserve the existing choice. Use an empty string\nto restore normal agent, room, and thread model selection."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -749,6 +1015,18 @@
               "b": {
                 "type": "number",
                 "description": "(float) Exponent."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -766,6 +1044,18 @@
               "n": {
                 "type": "integer",
                 "description": "(int) Number to calculate the factorial of, at most 1558."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -782,6 +1072,18 @@
               "skill_name": {
                 "type": "string",
                 "description": "The name of the skill to get instructions for."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -809,6 +1111,18 @@
                   }
                 ],
                 "description": "The filename of the reference document."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -836,6 +1150,18 @@
                   }
                 ],
                 "description": "The filename of the script."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -848,7 +1174,20 @@
           "description": "Invite router to current Matrix room.",
           "parameters": {
             "type": "object",
-            "properties": {},
+            "properties": {
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+              }
+            },
             "required": []
           }
         },
@@ -861,6 +1200,18 @@
               "n": {
                 "type": "integer",
                 "description": "(int) Number to check if prime, at most 10**12."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -873,7 +1224,20 @@
           "description": "List all pending scheduled tasks in the current room/thread.",
           "parameters": {
             "type": "object",
-            "properties": {},
+            "properties": {
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+              }
+            },
             "required": []
           }
         },
@@ -890,6 +1254,18 @@
               "b": {
                 "type": "number",
                 "description": "(float) Second number."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -918,6 +1294,18 @@
                   }
                 ],
                 "description": "Optional replacement arguments as a JSON object string,\nonly when the requester approved any arguments."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -971,6 +1359,18 @@
                   }
                 ],
                 "description": "Configured model alias for each scheduled run (including team\nmembers), e.g. \"cheap\". Leave unset to use normal agent, room, and\nthread model selection. This does not change the conversation model."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -1000,6 +1400,18 @@
               "description": {
                 "type": "string",
                 "description": "Short description of the scheduled action; if the requester\napproves any arguments, it tells you what the call should do when it runs."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -1106,6 +1518,18 @@
               "n": {
                 "type": "number",
                 "description": "(float) Number to calculate the square root of."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [
@@ -1126,6 +1550,18 @@
               "b": {
                 "type": "number",
                 "description": "(float) Second number."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
               }
             },
             "required": [

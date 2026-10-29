@@ -108,7 +108,7 @@ def _setup(
     )
     config = Config(agents={"mind": agent}, router=RouterConfig(model="default"))
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    root = resolve_agent_runtime("mind", config, paths, None, create=True).file_memory_root
+    root = resolve_agent_runtime("mind", config, paths, None, create=True).workspace.file_memory_path
     if root is not None:
         root.mkdir(parents=True, exist_ok=True)
         (root / "MEMORY.md").write_text(memory, encoding="utf-8")
@@ -239,7 +239,7 @@ async def test_a_run_outside_the_bounds_gets_one_recheck_the_agent_answers(tmp_p
     await _tick(runner, NOON)
     with patch("mindroom.automations.runner.mindroom_user_id", return_value="@mindroom_user:example.test"):
         await _tick(runner, DAY_LATER)
-        root = resolve_agent_runtime("mind", config, paths, None).file_memory_root
+        root = resolve_agent_runtime("mind", config, paths, None).workspace.file_memory_path
         assert root is not None
         (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
         runner.response_finished(["$event1"])
@@ -263,7 +263,7 @@ async def _finish_run(runner: AutomationRunner, config: Config, paths: RuntimePa
     await _tick(runner, NOON)
     await _tick(runner, DAY_LATER)
     if memory is not None:
-        root = resolve_agent_runtime("mind", config, paths, None).file_memory_root
+        root = resolve_agent_runtime("mind", config, paths, None).workspace.file_memory_path
         assert root is not None
         (root / "memory").mkdir(exist_ok=True)
         moved = MEMORY.split("## Topic 7\n")[1]
@@ -325,7 +325,7 @@ async def test_a_configured_model_runs_the_prompt_and_its_recheck(tmp_path: Path
     config.agents["mind"].automations = [PromptCurationAutomation(trigger_tokens=1_000, model="large")]
     await _tick(runner, NOON)
     await _tick(runner, DAY_LATER)
-    root = resolve_agent_runtime("mind", config, paths, None).file_memory_root
+    root = resolve_agent_runtime("mind", config, paths, None).workspace.file_memory_path
     assert root is not None
     (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
     runner.response_finished(["$event1"])
@@ -571,7 +571,7 @@ async def test_dreaming_runs_its_dream_and_review_through_the_runner(tmp_path: P
     )
     config = Config(agents={"mind": agent}, router=RouterConfig(model="default"))
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    root = resolve_agent_runtime("mind", config, paths, None, create=True).file_memory_root
+    root = resolve_agent_runtime("mind", config, paths, None, create=True).workspace.file_memory_path
     assert root is not None
     (root / "memory").mkdir(parents=True)
     (root / "memory" / "people.md").write_text("- Sam lives in Delft.\n", encoding="utf-8")
@@ -621,7 +621,7 @@ async def test_one_agents_automations_never_overlap(tmp_path: Path) -> None:
         DreamingAutomation(cron="0 4 * * *"),
         PromptCurationAutomation(trigger_tokens=1_000),
     ]
-    root = resolve_agent_runtime("mind", config, paths, None).file_memory_root
+    root = resolve_agent_runtime("mind", config, paths, None).workspace.file_memory_path
     assert root is not None
     (root / "thread_exports" / "room").mkdir(parents=True)
     (root / "thread_exports" / "room" / "thread.yaml").write_text("messages: [hello]\n", encoding="utf-8")
@@ -796,7 +796,7 @@ def _private_setup(
     roots: dict[str, Path] = {}
     for requester, memory in memories.items():
         identity = build_requester_execution_identity(agent_name="mind", runtime_paths=paths, requester_id=requester)
-        root = resolve_agent_runtime("mind", config, paths, identity, create=True).file_memory_root
+        root = resolve_agent_runtime("mind", config, paths, identity, create=True).workspace.file_memory_path
         assert root is not None
         (root / "MEMORY.md").write_text(memory, encoding="utf-8")
         roots[requester] = root

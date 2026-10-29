@@ -48,7 +48,7 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.cold_cache import ColdCacheConfig
-from mindroom.config.main import ResolvedRuntimeModel
+from mindroom.config.main import Config
 from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
@@ -161,8 +161,10 @@ from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import follow_up_envelope
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
+from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import ToolDispatchContext, build_execution_identity_from_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.turn_model import TurnModel
 from mindroom.turn_policy import PreparedDispatch
 from tests.approval_card_helpers import resolve_card_event
 from tests.approval_continuation_helpers import (
@@ -226,6 +228,7 @@ if TYPE_CHECKING:
     from mindroom.reply_scope import SpanHandle
     from mindroom.response_lifecycle import _QueuedMessageState
     from mindroom.streaming import ProgressPublisher
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 def _preparation(target: MessageTarget, envelope: MessageEnvelope) -> ResponsePayloadPreparation:
@@ -4761,6 +4764,26 @@ async def test_approval_request_restores_exact_hook_envelope_after_store_reload(
     assert restored.response_envelope.message_received_depth == 3
 
 
+def test_resumed_approval_tool_context_keeps_the_turns_hook_source(tmp_path: Path) -> None:
+    """Tools of a resumed turn see the hook that started it, as they did before the approval."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    target = _target(thread_id="$thread", reply_to_event_id="$source")
+
+    def tool_context(hook_source: str | None) -> ToolRuntimeContext:
+        continuation = approval_continuation(approval_id="approval-hook-source", hook_source=hook_source)
+        request = runner._approvals._approval_response_request(continuation, target=target)
+        context = runner.deps.tool_runtime.build_context(
+            target,
+            user_id=continuation.requester_id,
+            source_envelope=request.response_envelope,
+        )
+        assert context is not None
+        return context
+
+    assert tool_context("slack-watch/w-1").hook_source == "slack-watch/w-1"
+    assert tool_context(None).hook_source is None
+
+
 @pytest.mark.asyncio
 async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_path: Path) -> None:
     """Resumed tool hooks and runtime events stay correlated with the originating Matrix turn."""
@@ -7838,7 +7861,12 @@ async def test_cold_cache_skipped_for_edit_regeneration(tmp_path: Path, edit_reg
     ):
         chosen = await coordinator._cold_cache_model(
             request,
-            runtime_model=ResolvedRuntimeModel(model_name="default", context_window=None),
+            runtime_model=TurnModel(
+                model_name="default",
+                requested_model_name="default",
+                context_window=None,
+                overridden=False,
+            ),
             thread_id="$event",
         )
     assert (chosen, select.await_count) == (("default", 0) if edit_regeneration else ("cheap", 1))
@@ -8272,6 +8300,7 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
                     ),
                     catalog=catalog,
                     authorize=AsyncMock(),
+                    output_file_policy=ToolOutputFilePolicy(tmp_path / "owner" / "workspace"),
                 )
                 registry = TurnToolRegistry()
                 lifetime.register(owner, registry)
@@ -9111,7 +9140,9 @@ async def test_only_a_completed_response_counts_toward_its_skill_review(succeede
 def test_an_automation_turn_is_not_queued_for_memory(hook_source: str | None, flushed: bool) -> None:
     """A maintenance turn, such as an unreviewed memory proposal, never reaches Mem0; other turns do."""
     runner = ResponseRunner(deps=MagicMock())
-    runner.deps.runtime.config.resolve_entity.return_value.memory_backend = "mem0"
+    runner.deps.runtime.config = Config(
+        agents={"mind": AgentConfig(display_name="Mind", memory_backend="mem0")},
+    )
 
     queue = runner.memory_persistence(
         agent_name="mind",

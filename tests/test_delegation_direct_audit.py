@@ -32,6 +32,7 @@ from mindroom.tool_system.progress import tool_progress_reporter
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
+    agent_workspace_root_path,
     get_tool_execution_identity,
     tool_execution_identity,
 )
@@ -76,6 +77,7 @@ def _tools(tmp_path: Path) -> tuple[DelegateTools, object, object]:
             ["child"],
             runtime_paths,
             config,
+            agent_workspace_root_path(runtime_paths.storage_root, "leader"),
             execution_identity=identity,
         ),
         config,
@@ -279,7 +281,7 @@ async def _deny_in_the_callers_task(tools: DelegateTools) -> None:
         ),
         middleware=(_deny_call,),
     )
-    assert result == "denied before delegation"
+    assert result.value == "denied before delegation"
 
 
 @pytest.mark.asyncio
