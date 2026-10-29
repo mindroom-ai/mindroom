@@ -19,8 +19,13 @@ from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.custom_tools.callback_manager import CallbackManagerTools
 from mindroom.external_triggers.store import ExternalTriggerStore
 from mindroom.message_target import MessageTarget
+from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.runtime_state import reset_runtime_state, set_api_server_address
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    ToolRuntimeContext,
+    build_execution_identity_from_runtime_context,
+    tool_runtime_context,
+)
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -110,6 +115,29 @@ def test_mint_callback_writes_one_bound_script(tmp_path: Path) -> None:
     assert f"CALLBACK_URL=http://127.0.0.1:8765/api/triggers/{callback_id}" in script_text
     assert "CALLBACK_TOKEN=mrt_" in script_text
     assert "mrt_" not in store.store_path.read_text(encoding="utf-8")
+
+
+def test_a_private_agent_writes_its_callback_script_into_the_requester_workspace(tmp_path: Path) -> None:
+    """A private agent's script lands in its requester's workspace, which that requester's worker mounts."""
+    context = _context(tmp_path)
+    data = context.config.model_dump(mode="json", exclude_unset=True)
+    data["agents"]["coder"]["private"] = {"per": "user"}
+    context = replace(context, config=Config.model_validate(data))
+
+    with tool_runtime_context(context):
+        payload = _payload(CallbackManagerTools().mint_callback("issue-042 implementer"))
+
+    assert payload["status"] == "ok"
+    workspace = resolve_agent_runtime(
+        "coder",
+        context.config,
+        context.runtime_paths,
+        execution_identity=build_execution_identity_from_runtime_context(context),
+    ).workspace.root
+    script_path = Path(payload["script_path"])
+    assert script_path.parent == workspace / ".mindroom" / "callbacks"
+    assert not script_path.is_relative_to(_workspace(tmp_path))
+    assert script_path.is_file()
 
 
 def test_mint_callback_needs_no_hard_links(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

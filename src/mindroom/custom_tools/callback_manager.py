@@ -25,8 +25,9 @@ from mindroom.external_triggers.store import (
     ExternalTriggerStoreError,
     ExternalTriggerTarget,
 )
+from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.runtime_state import get_api_server_address
-from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 
 if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -96,8 +97,16 @@ class CallbackManagerTools(Toolkit):
                 config=context.config,
             )
             callback_url = f"{_callback_base_url(context)}/api/triggers/{record.trigger_id}"
+            # The agent's own workspace: a private agent's is its requester's, which only that requester's worker mounts.
+            workspace_root = resolve_agent_runtime(
+                context.agent_name,
+                context.config,
+                context.runtime_paths,
+                execution_identity=build_execution_identity_from_runtime_context(context),
+                create=True,
+            ).workspace.root
             script_path = write_callback_script(
-                agent_workspace_root_path(context.runtime_paths.storage_root, context.agent_name),
+                workspace_root,
                 _CALLBACKS_DIR,
                 callback_id=record.trigger_id,
                 script_text=build_callback_script(
