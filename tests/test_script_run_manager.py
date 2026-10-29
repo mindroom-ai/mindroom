@@ -39,6 +39,7 @@ from mindroom.script_runs.worker_client import (
     WorkerScriptStatus,
 )
 from mindroom.shell.execution import ShellRunResult
+from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from mindroom.tool_system.sandbox_proxy import runner_config_snapshot
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, worker_root_path
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
@@ -55,8 +56,6 @@ from tests.conftest import (
 if TYPE_CHECKING:
     import os
     from collections.abc import Iterator
-
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 def _runtime_paths(
@@ -2678,7 +2677,8 @@ async def test_local_snapshot_workspace_resolution_does_not_block_the_event_loop
         workspace.mkdir(parents=True)
         (workspace / path).write_text("print('ok')\n", encoding="utf-8")
 
-    def blocking_workspace(_context: ToolRuntimeContext) -> Path:
+    def blocking_workspace(_context: ToolRuntimeContext, *, create: bool = False) -> Path:
+        del create
         nonlocal workspace_resolutions
         workspace_resolutions += 1
         loop.call_soon_threadsafe(loop_processed_workspace_callback.set)
@@ -2705,7 +2705,7 @@ async def test_local_snapshot_workspace_resolution_does_not_block_the_event_loop
         assert handle is not None
         return ShellRunResult(message="Started background process", handle=handle)
 
-    monkeypatch.setattr(manager_module, "_agent_workspace", blocking_workspace)
+    monkeypatch.setattr(ToolRuntimeContext, "agent_workspace_root", blocking_workspace)
     monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
     monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
 

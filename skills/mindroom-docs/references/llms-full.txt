@@ -13209,7 +13209,7 @@ With `room`, the agent answers Slack:
 
 Who can wake the agent:
 
-- The author's Slack email must be in `slack.email_domain`, and its localpart maps to a Matrix account through `slack.matrix_user_id_template`.
+- The author's Slack email must be confirmed and in `slack.email_domain`, and its localpart maps to a Matrix account through `slack.matrix_user_id_template`.
 - Guests, bots and other apps, deactivated accounts, and people from other workspaces never wake an agent.
 - The mapped account must also pass the agent's [`access`](https://docs.mindroom.chat/authorization/#responder-access) check in `room`.
 - Anyone else sees a message in Slack that only they can see, `MindRoom can't answer you here.`, at most once a day per thread, and nothing reaches Matrix.
@@ -18191,6 +18191,8 @@ Callbacks follow `external_trigger_policy` and count toward `max_triggers_per_ow
 When finished, run: bash /path/to/callback_1234.sh "<short result summary>"
 ```
 
+The script lives in the agent's workspace, and the path is where the agent's shell finds it in MindRoom, in a dedicated worker, or in a `static_runner` sandbox that mounts the agent workspaces, as the Kubernetes sidecar does.
+The [Docker Compose `static_runner` sandbox](https://docs.mindroom.chat/deployment/sandbox-proxy/#sandbox-proxy-isolation_1) cannot see agent workspaces, so a background task started from a shell there cannot run the script.
 The script needs only Bash and curl.
 It posts the summary to the room and thread where the callback was minted, which wakes the agent.
 After a successful delivery the callback is used up and the script deletes itself; if delivery fails, the script remains so it can be run again.

@@ -266,10 +266,14 @@ class DeliveryReplayStore:
     @contextmanager
     def _scope_lock(self, replay_scope: str) -> Iterator[Path]:
         """Hold one scope's lock and yield its file, so no call reads another scope's records."""
-        self._split_legacy_store()
-        path = self._scope_path(replay_scope)
-        with advisory_file_lock(path.with_name(f"{path.name}.lock")):
-            yield path
+        try:
+            self._split_legacy_store()
+            path = self._scope_path(replay_scope)
+            with advisory_file_lock(path.with_name(f"{path.name}.lock")):
+                yield path
+        except OSError as exc:
+            msg = "delivery replay store is unavailable"
+            raise DeliveryReplayStoreError(msg) from exc
 
     def _scope_path(self, replay_scope: str) -> Path:
         # Hashing makes every scope one fixed-length name that is valid on every filesystem.

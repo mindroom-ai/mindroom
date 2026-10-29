@@ -22,7 +22,7 @@ from mindroom.config.main import Config
 from mindroom.constants import HOOK_SOURCE_KEY, ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SOURCE_KIND_KEY
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.delivery_replay import DeliveryEventClaim, DeliveryReplayStore
+from mindroom.delivery_replay import DeliveryEventClaim, DeliveryReplayStore, DeliveryReplayStoreError
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.logging_config import get_logger
@@ -190,6 +190,24 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
 
 def _dm(text: str = "are you free at 3?", *, ts: str = ROOT_TS) -> dict[str, Any]:
     return event_payload("message", author="dana", text=text, ts=ts, channel=DM, channel_type="im")
+
+
+@pytest.mark.asyncio
+async def test_a_store_error_after_the_post_still_counts_as_delivered(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once the Matrix post went out, a replay-store fault must not make Slack resend and the agent answer twice."""
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        msg = "delivery replay store is unavailable"
+        raise DeliveryReplayStoreError(msg)
+
+    monkeypatch.setattr(DeliveryReplayStore, "bind_thread_root", fail)
+
+    assert await harness.deliver(event_payload()) == "delivered"
+    await harness.settle()
+    assert len(harness.matrix.sent) == 1
 
 
 @pytest.mark.asyncio

@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+import errno
 from typing import TYPE_CHECKING
 
-from mindroom.delivery_replay import DeliveryEventClaim, DeliveryReplayStore, DeliveryThreadKeyClaim
+import pytest
+
+from mindroom import delivery_replay
+from mindroom.delivery_replay import (
+    DeliveryEventClaim,
+    DeliveryReplayStore,
+    DeliveryReplayStoreError,
+    DeliveryThreadKeyClaim,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -84,3 +93,15 @@ def test_bound_thread_root_reads_only_live_bindings(tmp_path: Path) -> None:
     assert store.bound_thread_root("scope", "thread", now=601) == ("!room:localhost", "$root")
     assert store.bound_thread_root("scope", "thread", now=602) is None
     assert store.bound_thread_root("scope", "other", now=1) is None
+
+
+def test_a_lock_error_is_a_store_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A lock that cannot be taken is reported like any other store failure, never as a raw OSError."""
+
+    def no_lock(_path: Path) -> None:
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(delivery_replay, "advisory_file_lock", no_lock)
+
+    with pytest.raises(DeliveryReplayStoreError, match="unavailable"):
+        DeliveryReplayStore(root=tmp_path / "replay").mark_event_delivered("scope", "Ev1", now=0, ttl_seconds=60)
