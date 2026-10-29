@@ -16,17 +16,20 @@ Conversation history, compaction summaries, session state, pending tool approval
 ### Before upgrading to one owner per database
 
 Make sure each disk that holds conversation databases has free space of about twice the total size of their `.db` files.
-A database whose directory lacks that space is not converted: startup logs `conversation_conversion_skipped_store` for it, and every use of it fails with an error naming the database and the bytes it needs until you free the space.
+A database still in the Agno layout, which the [conversation storage v2](#upgrading-to-conversation-storage-v2) upgrade never converted, converts straight to this layout and needs the free space that section gives instead.
+A database whose directory lacks the space it needs is not converted: startup logs `conversation_conversion_skipped_store` for it, and every use of it fails with an error naming the database and the bytes it needs until you free the space.
 A deploy that rolls back on its own, such as `helm upgrade --atomic`, starts the older release on converted databases, which then moves them aside (see the next section).
 
 ### Going back to an older release
 
-Before converting a database, MindRoom copies it byte for byte to `<name>.db.pre-storage-v4` beside it and never deletes that copy; a crash or restart during the upgrade leaves the database being converted unchanged, and the next start converts it.
-The only way back is to stop MindRoom, replace each `<name>.db` with its `<name>.db.pre-storage-v4` backup, delete any `<name>.db-journal` beside it, and start the older release.
+Before converting a database, MindRoom copies it byte for byte beside it and never deletes that copy: to `<name>.db.pre-storage-v4` for a database the conversation storage v2 upgrade already converted, and to `<name>.db.pre-storage-v2` for one still in the Agno layout.
+A crash or restart during the upgrade leaves the database being converted unchanged, and the next start converts it.
+The only way back is to stop MindRoom, replace each `<name>.db` with the copy this upgrade made of it, delete any `<name>.db-journal` beside it, and start the older release.
+When a database has both backups, the copy this upgrade made is the newer file.
 Everything written since the upgrade is lost: replies, summaries, session state, approvals requested since then, and usage records for that period.
 An older release started on converted databases without restoring the backups archives each agent's or team's `sessions/` directory, backups included, as [Incompatible session databases](storage.md#incompatible-session-databases) describes; move the backups back out of that archive and restore them as above.
-Going back below conversation storage v2 restores the `.pre-storage-v2` backups instead, as [Downgrading](#downgrading) describes.
-Once you are sure you will not downgrade, delete the `.pre-storage-v4` backups.
+Going back below conversation storage v2 from a database that has both restores its `.pre-storage-v2` backup instead, as [Downgrading](#downgrading) describes.
+Once you are sure you will not downgrade, delete these backups.
 
 ## Upgrading to checked model references and per-agent workspaces
 
