@@ -39,7 +39,6 @@ from mindroom.providers.gemini.wire import (
     read_chunk,
     reply_provider_data,
     stop_reason,
-    tool_config,
     without_tool_selection,
 )
 from mindroom.providers.google_adc import with_runtime_application_credentials
@@ -222,17 +221,13 @@ class GeminiProvider:
         """
         chosen: dict[str, Any] = {}
         declarations = function_declarations(request.tools)
-        search_beside_tools = self._sends_search_beside_tools(request)
-        if search_beside_tools:
+        if self._sends_search_beside_tools(request):
             chosen["tools"] = [{"google_search": {}}, declarations]
+            chosen["tool_config"] = {**(authored_tool_config or {}), "include_server_side_tool_invocations": True}
         elif self.settings.search:
             chosen["tools"] = [{"google_search": {}}]
         elif declarations is not None:
             chosen["tools"] = [declarations]
-        if (function_calling := tool_config(request.tool_choice)) is not None:
-            chosen["tool_config"] = function_calling
-        elif search_beside_tools:
-            chosen["tool_config"] = {**(authored_tool_config or {}), "include_server_side_tool_invocations": True}
         return chosen
 
     def _decision_config(self, config: dict[str, Any]) -> dict[str, Any] | GenerateContentConfig:

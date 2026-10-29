@@ -889,14 +889,6 @@ async def test_gemini_replays_server_side_search_parts_only_to_a_request_that_as
     assert all(parts == [function_call] for name, parts in sent.items() if name != "combined")
 
 
-def test_gemini_tool_choice_none_turns_function_calling_off() -> None:
-    """The wire helper maps a ``"none"`` tool choice to Gemini's function-calling mode NONE.
-
-    No production request reaches it with that choice outside a decision request.
-    """
-    assert gemini_wire.tool_config("none") == {"function_calling_config": {"mode": "NONE"}}
-
-
 @pytest.mark.asyncio
 async def test_gemini_parses_reasoning_tool_calls_and_usage(tmp_path: Path) -> None:
     """Thoughts become reasoning, a call without an id gets one, and thinking counts as output."""

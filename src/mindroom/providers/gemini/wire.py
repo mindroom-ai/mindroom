@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 
     from mindroom.llm.media import Audio, File, Image, Video
     from mindroom.llm.messages import Message, ToolResultView
-    from mindroom.llm.provider import StopReason, StreamEvent, ToolChoice, ToolSpec
+    from mindroom.llm.provider import StopReason, StreamEvent, ToolSpec
 
 _ROLE_MAP = {"assistant": "model", "tool": "user"}
 # Gemini rejects requests above 20 MB, so larger local media goes through the Files API, which Vertex AI lacks.
@@ -428,11 +428,6 @@ def without_tool_selection(config: Mapping[str, Any], *, vertexai: bool) -> Gene
     )
 
 
-def tool_config(tool_choice: ToolChoice | None) -> dict[str, Any] | None:
-    """Return the function-calling config for ``tool_choice``; ``"none"`` turns function calling off."""
-    return None if tool_choice is None else {"function_calling_config": {"mode": "NONE"}}
-
-
 # ---------------------------------------------------------------------------
 # Streamed replies
 # ---------------------------------------------------------------------------
@@ -600,6 +595,5 @@ __all__ = [
     "read_chunk",
     "reply_provider_data",
     "stop_reason",
-    "tool_config",
     "without_tool_selection",
 ]
