@@ -114,8 +114,59 @@
       "tools": [
         {
           "googleSearch": {}
+        },
+        {
+          "functionDeclarations": [
+            {
+              "description": "Return the forecast for one city.",
+              "name": "get_weather",
+              "parameters_json_schema": {
+                "properties": {
+                  "city": {
+                    "description": "City name.",
+                    "type": "string"
+                  },
+                  "unit": {
+                    "description": "Temperature unit.",
+                    "enum": [
+                      "celsius",
+                      "fahrenheit"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "city"
+                ],
+                "type": "object"
+              }
+            },
+            {
+              "description": "Search the user's travel notes.",
+              "name": "search_notes",
+              "parameters_json_schema": {
+                "properties": {
+                  "limit": {
+                    "description": "Maximum results.",
+                    "type": "integer"
+                  },
+                  "query": {
+                    "description": "Search text.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "query"
+                ],
+                "type": "object"
+              }
+            }
+          ]
         }
       ],
+      "toolConfig": {
+        "includeServerSideToolInvocations": true
+      },
       "generationConfig": {}
     },
     "headers": {

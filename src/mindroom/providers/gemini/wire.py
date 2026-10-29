@@ -51,6 +51,8 @@ _ROLE_MAP = {"assistant": "model", "tool": "user"}
 _INLINE_MEDIA_LIMIT_BYTES = 20 * 1024 * 1024
 # ``Message.provider_data`` key of a Gemini reply's parts in arrival order (``reply_provider_data``).
 _GEMINI_PARTS_KEY = "gemini_parts"
+# The part fields of a server-side tool's call and result, such as a Google Search the model ran.
+_SERVER_TOOL_FIELDS = frozenset({"tool_call", "tool_response"})
 _FORMAT_TO_MIME = {
     "png": "image/png",
     "jpeg": "image/jpeg",
@@ -121,12 +123,16 @@ class MediaRoute:
 async def format_contents(
     messages: Sequence[Message],
     route: MediaRoute,
+    *,
+    server_tool_parts: bool,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Return the request contents and the system instruction for ``messages``, their system prompt as one text.
 
     Local media is read off the event loop; a file or video URL goes for Gemini to fetch, and the pipeline downloaded
     every other URL (``Capabilities.url_media``). Media that cannot be sent raises ``InvalidRequest``, so the media
-    fallback replaces it with its note instead of the model never seeing it.
+    fallback replaces it with its note instead of the model never seeing it. ``server_tool_parts`` says whether the
+    request asks for the server-side tool parts (``include_server_side_tool_invocations``), the only request that
+    takes stored ones back.
     """
     contents: list[dict[str, Any]] = []
     # LEGACY_COMPAT: Tool results stored without their tool's name.
@@ -148,7 +154,7 @@ async def format_contents(
         if message.role == "tool" and message.tool_name is None and message.tool_call_id in call_names:
             message = replace(message, tool_name=call_names[message.tool_call_id])  # noqa: PLW2901
         role = _ROLE_MAP.get(message.role, message.role)
-        parts = _message_parts(message, role)
+        parts = _message_parts(message, role, server_tool_parts=server_tool_parts)
         if role == "user" and message.tool_calls is None and not _is_tool_result(message):
             parts = await _with_media(message, parts, route)
         # Gemini rejects consecutive contents with the same role.
@@ -167,16 +173,16 @@ def _is_tool_result(message: Message) -> bool:
     return message.role == "tool" and message.tool_name is not None
 
 
-def _message_parts(message: Message, role: str) -> list[dict[str, Any]]:
+def _message_parts(message: Message, role: str, *, server_tool_parts: bool) -> list[dict[str, Any]]:
     """Return the text, function call, and function response parts of one message.
 
     A model message that stored its parts (``reply_provider_data``) replays them in their order, each text part with
-    its own signature.
+    its own signature, and its server-side tool parts when ``server_tool_parts`` is set.
     """
     content = message.content
     stored = (message.provider_data or {}).get(_GEMINI_PARTS_KEY) if role == "model" else None
     if isinstance(stored, list):
-        return _stored_parts(stored, message.tool_calls or [])
+        return _stored_parts(stored, message.tool_calls or [], server_tool_parts=server_tool_parts)
     if role == "model" and message.tool_calls:
         parts = [] if content is None else [_text_part(str(content), message.provider_data)]
         parts.extend(_function_call_part(call) for call in message.tool_calls)
@@ -201,8 +207,17 @@ async def _with_media(message: Message, parts: list[dict[str, Any]], route: Medi
     return [*parts, *images, *audio, *videos, *files]
 
 
-def _stored_parts(stored: list[Any], tool_calls: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Return a stored reply's parts in order; a call the parts do not name follows them."""
+def _stored_parts(
+    stored: list[Any],
+    tool_calls: Sequence[Mapping[str, Any]],
+    *,
+    server_tool_parts: bool,
+) -> list[dict[str, Any]]:
+    """Return a stored reply's parts in order; a call the parts do not name follows them.
+
+    Server-side tool parts go back only to a request that asks for them: Gemini requires each one back as given there
+    (https://ai.google.dev/gemini-api/docs/generate-content/tool-combination), and Vertex AI rejects them.
+    """
     calls = {call.get("id"): call for call in tool_calls}
     parts: list[dict[str, Any]] = []
     for entry in stored:
@@ -210,6 +225,8 @@ def _stored_parts(stored: list[Any], tool_calls: Sequence[Mapping[str, Any]]) ->
             parts.append(_text_part(entry["text"], entry))
         elif isinstance(entry, dict) and (call := calls.pop(entry.get("function_call_id"), None)) is not None:
             parts.append(_function_call_part(call))
+        elif isinstance(entry, dict) and server_tool_parts and entry.keys() & _SERVER_TOOL_FIELDS:
+            parts.append(_server_tool_part(entry))
     return [*parts, *(_function_call_part(call) for call in calls.values())]
 
 
@@ -223,6 +240,13 @@ def _text_part(text: str, provider_data: Mapping[str, Any] | None) -> dict[str, 
     part: dict[str, Any] = {"text": text}
     if provider_data and "thought_signature" in provider_data:
         part["thought_signature"] = base64.b64decode(provider_data["thought_signature"])
+    return part
+
+
+def _server_tool_part(entry: Mapping[str, Any]) -> dict[str, Any]:
+    part = {key: value for key, value in entry.items() if key in _SERVER_TOOL_FIELDS}
+    if "thought_signature" in entry:
+        part["thought_signature"] = base64.b64decode(entry["thought_signature"])
     return part
 
 
@@ -418,16 +442,18 @@ def tool_config(tool_choice: ToolChoice | None) -> dict[str, Any] | None:
 class GeminiReply:
     """What one streamed Gemini reply produced so far.
 
-    ``parts`` holds the reply's text and function calls in the order they arrived: a text part as ``{"text"}`` with
-    the ``thought_signature`` Gemini signed it with, a function call as ``{"function_call_id"}``. Unsigned streamed
-    text joins the open unsigned text part; a signed part, even one with empty text, stays its own part, because
-    Google requires each signature back in the part it came in, never merged with another part.
+    ``parts`` holds the reply's text, function calls, and server-side tool parts in the order they arrived: a text
+    part as ``{"text"}`` with the ``thought_signature`` Gemini signed it with, a function call as
+    ``{"function_call_id"}``, and a server-side tool's call or result as its ``tool_call`` or ``tool_response`` field
+    with its signature. Unsigned streamed text joins the open unsigned text part; a signed part, even one with empty
+    text, stays its own part, because Google requires each signature back in the part it came in, never merged with
+    another part.
     """
 
     content: str = ""
     reasoning: str = ""
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
-    parts: list[dict[str, str]] = field(default_factory=list)
+    parts: list[dict[str, Any]] = field(default_factory=list)
     usage: MessageMetrics | None = None
     finish_reason: str | None = None
     prompt_blocked: bool = False
@@ -512,6 +538,8 @@ def _read_part(reply: GeminiReply, part: Part) -> list[StreamEvent]:
         reply.tool_calls.append(call)
         reply.parts.append({"function_call_id": call["id"]})
         events.append(ToolCallReady(call))
+    if server_tool := part.model_dump(mode="json", include=set(_SERVER_TOOL_FIELDS), exclude_none=True):
+        reply.parts.append(server_tool if signature is None else {**server_tool, "thought_signature": signature})
     return events
 
 
@@ -525,11 +553,11 @@ def _add_text(reply: GeminiReply, text: str, signature: str | None) -> None:
 
 
 def reply_provider_data(reply: GeminiReply) -> dict[str, Any]:
-    """Return the replay state a finished reply stores: its parts, when their order or signatures matter.
+    """Return the replay state a finished reply stores: its parts, when their order, signatures, or kinds matter.
 
     A reply that is only unsigned text replays the same from its content, so it stores none.
     """
-    if reply.tool_calls or any("thought_signature" in part for part in reply.parts):
+    if any(part.keys() != {"text"} for part in reply.parts):
         return {_GEMINI_PARTS_KEY: reply.parts}
     return {}
 

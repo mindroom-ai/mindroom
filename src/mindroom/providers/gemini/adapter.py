@@ -96,7 +96,12 @@ class GeminiProvider:
         # The client, which ``client_params`` can switch to Vertex AI, names the route; Vertex AI has no Files API.
         upload = None if client.vertexai else partial(uploaded_file_uri, client, provider=provider)
         try:
-            contents, system_instruction = await format_contents(request.messages, MediaRoute(provider, upload))
+            contents, system_instruction = await format_contents(
+                request.messages,
+                MediaRoute(provider, upload),
+                # A decision request asks for no server-side tool parts (``without_tool_selection``).
+                server_tool_parts=self._sends_search_beside_tools(request) and not disables_tools(request.tool_choice),
+            )
             config = self._request_config(request, system_instruction)
             # The request dicts use google-genai's field names; the SDK validates them into its types.
             call = {"model": self.identity.id, "contents": cast("Any", contents), "config": cast("Any", config or None)}
@@ -174,12 +179,7 @@ class GeminiProvider:
         # it off.
         if thinking := {key: value for key, value in thinking.items() if value is not None}:
             config["thinking_config"] = thinking
-        if settings.search:
-            config["tools"] = [{"google_search": {}}]
-        elif (declarations := function_declarations(request.tools)) is not None:
-            config["tools"] = [declarations]
-        if (function_calling := tool_config(request.tool_choice)) is not None:
-            config["tool_config"] = function_calling
+        config.update(self._tool_settings(request))
         config = {key: value for key, value in config.items() if value is not None}
         if self.capabilities.provider_default_sampling:
             config = {key: value for key, value in config.items() if key not in _SAMPLING_CONTROL_NAMES}
@@ -189,6 +189,34 @@ class GeminiProvider:
         if disables_tools(request.tool_choice):
             return self._decision_config(config)
         return config
+
+    def _sends_search_beside_tools(self, request: ModelRequest) -> bool:
+        """Return whether ``request`` sends Google Search beside its function tools, which only the Gemini API takes.
+
+        Such a request asks for the server-side search parts, as the Gemini API requires for that combination on
+        Gemini 3 and later models (https://ai.google.dev/gemini-api/docs/generate-content/tool-combination). Vertex AI
+        takes no search tool beside function calling
+        (https://docs.cloud.google.com/vertex-ai/generative-ai/docs/grounding/grounding-with-google-search), so there
+        search replaces the function tools.
+        """
+        return self.settings.search and bool(request.tools) and not self._sdk_client().vertexai
+
+    def _tool_settings(self, request: ModelRequest) -> dict[str, Any]:
+        """Return the request's ``tools`` and ``tool_config``; one it leaves out keeps the authored generation config's."""
+        chosen: dict[str, Any] = {}
+        declarations = function_declarations(request.tools)
+        search_beside_tools = self._sends_search_beside_tools(request)
+        if search_beside_tools:
+            chosen["tools"] = [{"google_search": {}}, declarations]
+        elif self.settings.search:
+            chosen["tools"] = [{"google_search": {}}]
+        elif declarations is not None:
+            chosen["tools"] = [declarations]
+        if (function_calling := tool_config(request.tool_choice)) is not None:
+            chosen["tool_config"] = function_calling
+        elif search_beside_tools:
+            chosen["tool_config"] = {"include_server_side_tool_invocations": True}
+        return chosen
 
     def _decision_config(self, config: dict[str, Any]) -> dict[str, Any] | GenerateContentConfig:
         """Keep function schemas but disable function calling and native tools for a decision request."""

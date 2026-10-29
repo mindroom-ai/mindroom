@@ -693,12 +693,62 @@ async def test_gemini_decision_requests_fail_on_client_body_overrides(tmp_path: 
     assert sent == []
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("config", [GEMINI, GEMINI_VERTEX], ids=["gemini", "vertexai"])
-async def test_gemini_decision_requests_with_search_send_no_tools(config: dict[str, Any], tmp_path: Path) -> None:
-    """Search replaces the function tools and a decision drops native tools, so nothing is left to call.
+_WEATHER_DECLARATIONS = {
+    "functionDeclarations": [
+        {"name": "get_weather", "description": "Return the forecast.", "parameters_json_schema": WEATHER.parameters},
+    ],
+}
 
-    The Agno path sent the same body: no tools, no function-calling config, and JSON output on both routes.
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("config", "tools", "sent_tools", "sent_tool_config"),
+    [
+        (GEMINI, [WEATHER], [{"googleSearch": {}}, _WEATHER_DECLARATIONS], {"includeServerSideToolInvocations": True}),
+        (GEMINI, [], [{"googleSearch": {}}], None),
+        (GEMINI_VERTEX, [WEATHER], [{"googleSearch": {}}], None),
+    ],
+    ids=["gemini-with-tools", "gemini-without-tools", "vertexai-with-tools"],
+)
+async def test_gemini_search_goes_beside_the_function_tools_where_the_route_combines_them(
+    config: dict[str, Any],
+    tools: list[ToolSpec],
+    sent_tools: list[dict[str, Any]],
+    sent_tool_config: dict[str, Any] | None,
+    tmp_path: Path,
+) -> None:
+    """The Gemini API takes Google Search beside function tools when the request asks for the server-side search parts.
+
+    Vertex AI takes no search tool beside function calling, so there search replaces the function tools.
+    """
+    request, _ = await run_adapter(
+        _config(config, search=True),
+        _request(tools=tools),
+        tmp_path,
+        gemini_sse(_gemini_chunk({"text": "ok"})),
+    )
+
+    body = request["body"]
+    assert body["tools"] == sent_tools
+    assert body.get("toolConfig") == sent_tool_config
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("config", "sent_tools", "json_output"),
+    [(GEMINI, [_WEATHER_DECLARATIONS], True), (GEMINI_VERTEX, None, True)],
+    ids=["gemini", "vertexai"],
+)
+async def test_gemini_decision_requests_with_search_drop_the_search(
+    config: dict[str, Any],
+    sent_tools: list[dict[str, Any]] | None,
+    *,
+    json_output: bool,
+    tmp_path: Path,
+) -> None:
+    """A decision drops Google Search and keeps whatever function schemas the route sends beside it, uncallable.
+
+    Vertex AI sends search in place of the function tools, so its decision is left with no tools at all.
     """
     request, _ = await run_adapter(
         _config(config, search=True),
@@ -708,9 +758,85 @@ async def test_gemini_decision_requests_with_search_send_no_tools(config: dict[s
     )
 
     body = request["body"]
-    assert "tools" not in body
-    assert "toolConfig" not in body
-    assert body["generationConfig"] == {"responseMimeType": "application/json"}
+    assert body.get("tools") == sent_tools
+    assert body.get("toolConfig") == (None if sent_tools is None else {"functionCallingConfig": {"mode": "NONE"}})
+    assert ("responseMimeType" in body["generationConfig"]) is json_output
+
+
+# A server-side Google Search call and its result as the Gemini API streams them, and as the reply stores them, in
+# google-genai's field names, which the SDK sends back as they are, as it sends a reply's own parts.
+_SEARCH_CALL = {"id": "search-1", "toolType": "GOOGLE_SEARCH_WEB", "args": {"queries": ["Paris weather"]}}
+_SEARCH_RESULT = {"id": "search-1", "toolType": "GOOGLE_SEARCH_WEB", "response": {"results": ["Rain."]}}
+_STORED_SEARCH_CALL = {"id": "search-1", "tool_type": "GOOGLE_SEARCH_WEB", "args": {"queries": ["Paris weather"]}}
+_STORED_SEARCH_RESULT = {"id": "search-1", "tool_type": "GOOGLE_SEARCH_WEB", "response": {"results": ["Rain."]}}
+
+
+@pytest.mark.asyncio
+async def test_gemini_stores_server_side_search_parts_even_unsigned(tmp_path: Path) -> None:
+    """Only a reply of nothing but unsigned text replays from its content alone."""
+    response = gemini_sse(
+        _gemini_chunk({"toolCall": _SEARCH_CALL}, finish=None, usage=False),
+        _gemini_chunk({"toolResponse": _SEARCH_RESULT}, finish=None, usage=False),
+        _gemini_chunk({"text": "Pack a raincoat."}),
+    )
+
+    _, events = await run_adapter(_config(GEMINI, search=True), _request(tools=[WEATHER]), tmp_path, response)
+
+    reply = _completed(events).message
+    assert reply.provider_data is not None
+    assert reply.provider_data["gemini_parts"] == [
+        {"tool_call": _STORED_SEARCH_CALL},
+        {"tool_response": _STORED_SEARCH_RESULT},
+        {"text": "Pack a raincoat."},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gemini_replays_server_side_search_parts_only_to_a_request_that_asks_for_them(tmp_path: Path) -> None:
+    """The search calls and results a reply returns go back as given, signatures included, beside the function tools.
+
+    A request without search beside its function tools asked for no such parts, and Vertex AI rejects them, so those
+    requests leave them out and keep the reply's own call.
+    """
+    call = {"id": "call-1", "name": "get_weather", "args": {"city": "Paris"}}
+    response = gemini_sse(
+        _gemini_chunk({"toolCall": _SEARCH_CALL, "thoughtSignature": "c2lnMQ=="}, finish=None, usage=False),
+        _gemini_chunk({"toolResponse": _SEARCH_RESULT, "thoughtSignature": "c2lnMg=="}, finish=None, usage=False),
+        _gemini_chunk({"functionCall": call, "thoughtSignature": "c2lnMw=="}),
+    )
+    combined = _config(GEMINI, search=True)
+    _, events = await run_adapter(combined, _request(tools=[WEATHER]), tmp_path, response)
+    reply = _completed(events).message
+    assert reply.provider_data is not None
+    assert reply.provider_data["gemini_parts"] == [
+        {"tool_call": _STORED_SEARCH_CALL, "thought_signature": "c2lnMQ=="},
+        {"tool_response": _STORED_SEARCH_RESULT, "thought_signature": "c2lnMg=="},
+        {"function_call_id": "call-1"},
+    ]
+
+    messages = (
+        Message(role="user", content="Weather?"),
+        reply,
+        Message(role="tool", tool_call_id="call-1", tool_name="get_weather", content="Rain."),
+    )
+    replays = {
+        "combined": (combined, _request(*messages, tools=[WEATHER])),
+        "decision": (combined, _request(*messages, tools=[WEATHER], tool_choice="none")),
+        "without-search": (GEMINI, _request(*messages, tools=[WEATHER])),
+        "vertexai": (_config(GEMINI_VERTEX, search=True), _request(*messages, tools=[WEATHER])),
+    }
+    sent = {}
+    for name, (config, request) in replays.items():
+        body, _ = await run_adapter(config, request, tmp_path, gemini_sse(_gemini_chunk({"text": "ok"})))
+        sent[name] = body["body"]["contents"][1]["parts"]
+
+    function_call = {"functionCall": call, "thoughtSignature": "c2lnMw=="}
+    assert sent["combined"] == [
+        {"toolCall": _STORED_SEARCH_CALL, "thoughtSignature": "c2lnMQ=="},
+        {"toolResponse": _STORED_SEARCH_RESULT, "thoughtSignature": "c2lnMg=="},
+        function_call,
+    ]
+    assert sent["decision"] == sent["without-search"] == sent["vertexai"] == [function_call]
 
 
 def test_gemini_tool_choice_none_turns_function_calling_off() -> None:
