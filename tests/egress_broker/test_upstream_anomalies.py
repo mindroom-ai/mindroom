@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 import h11
 import pytest
 
+from mindroom.egress_broker import _relay
 from mindroom.egress_broker._relay import Peer
 from tests.egress_broker.conftest import assert_audited, single_rule_config
 from tests.egress_broker.raw_http import (
@@ -28,9 +29,11 @@ from tests.egress_broker.raw_http import (
 )
 
 if TYPE_CHECKING:
+    import ssl
     from pathlib import Path
 
     from mindroom.egress_broker.audit import AuditLog
+    from mindroom.egress_broker.dial import DialPolicy
     from tests.egress_broker.conftest import BrokerFactory, ServeFactory, UpstreamCA
     from tests.egress_broker.raw_http import Action, Script, UpstreamFactory
 
@@ -211,19 +214,41 @@ async def test_upstream_answering_an_upload_from_its_head(
     upstream_ca: UpstreamCA,
     audit: AuditLog,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     answer: bytes,
     status: int,
     tunnel: bool,
 ) -> None:
     """An upstream that answers a large upload from its head and closes has that answer relayed; silence is a 502."""
-    answered = asyncio.Event()
+    broker_read = asyncio.Event()
+    dial = _relay.open_upstream
+
+    async def dial_telling_reads(
+        host: str,
+        port: int,
+        *,
+        policy: DialPolicy,
+        ssl_context: ssl.SSLContext | None,
+        lookup_slots: asyncio.Semaphore,
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        reader, writer = await dial(host, port, policy=policy, ssl_context=ssl_context, lookup_slots=lookup_slots)
+        read = reader.read
+
+        async def read_and_tell(n: int = -1) -> bytes:
+            data = await read(n)
+            broker_read.set()
+            return data
+
+        reader.read = read_and_tell
+        return reader, writer
+
+    monkeypatch.setattr(_relay, "open_upstream", dial_telling_reads)
 
     async def answer_head(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await reader.readuntil(b"\r\n\r\n")
         writer.write(answer)
         await writer.drain()
         writer.close()
-        answered.set()
 
     port = await serve(answer_head, ssl_context=upstream_ca.server_context(tmp_path) if tunnel else None)
     await broker(single_rule_config(), secrets={"svc": SECRET})
@@ -231,9 +256,11 @@ async def test_upstream_answering_an_upload_from_its_head(
     try:
         head = f"POST {{t}}/upload HTTP/1.1\r\nHost: {{h}}\r\n{{a}}Content-Length: {_UPLOAD_BYTES}\r\n\r\n"
         client.send(target.render(head))
-        # The body follows the upstream's answer and close, so the broker reads the answer before a body write fails.
-        # An answer still unread when a write fails is lost, because asyncio closes the socket on the failed write.
-        await answered.wait()
+        # The body follows the broker's first upstream read, which holds the answer or the close, so a body write
+        # fails only after the broker read it. An answer still unread when a write fails is lost, because asyncio
+        # closes the socket on the failed write.
+        async with asyncio.timeout(5):
+            await broker_read.wait()
         # Below the broker's body limit; buffered at once, so the client reads while its transport sends.
         client.send(b"x" * _UPLOAD_BYTES)
         reply = await client.reply()
