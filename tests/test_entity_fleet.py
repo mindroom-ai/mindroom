@@ -270,6 +270,8 @@ async def test_only_a_restart_marks_its_sync_cancellation_and_other_entities_kee
     assert restarted.sync_cancel_args == (SYNC_RESTART_CANCEL_MSG,)
     assert removed.sync_cancel_args == ()
     assert kept.sync_cancel_args is None
+    assert kept.running
+    assert not [event for event in harness.order if event.startswith(("prepare:kept:", "stop:kept:"))]
     assert harness.fleet.names == {"kept"}
 
 
@@ -292,9 +294,12 @@ async def test_restart_stop_quiesces_every_source_concurrently() -> None:
         bot._quiesce_matrix_ingestion = hold_quiesce
 
     stopping = asyncio.create_task(harness.fleet.stop({"agent1", "agent2"}))
-    await asyncio.wait_for(both_entered.wait(), timeout=2.0)
-    release.set()
-    await asyncio.wait_for(stopping, timeout=2.0)
+    try:
+        await asyncio.wait_for(both_entered.wait(), timeout=2.0)
+    finally:
+        # Released either way, so a sequential quiesce fails here instead of hanging the event loop teardown.
+        release.set()
+        await asyncio.wait_for(stopping, timeout=2.0)
 
     assert not harness.fleet.bots
 

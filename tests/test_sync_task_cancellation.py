@@ -53,7 +53,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration import entity_fleet
 from mindroom.orchestration import runtime as runtime_helpers
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
-from mindroom.orchestration.entity_fleet import EntityStartResults
+from mindroom.orchestration.entity_fleet import EntityFleet, EntityFleetHooks, EntityStartResults
 from mindroom.orchestration.runtime import (
     _MatrixSyncStalledError,
     _SyncIteration,
@@ -567,6 +567,47 @@ async def test_repeated_watchdog_restarts_keep_one_sync_loop_and_response_owner(
     assert bot.live_sync_count == 0
     assert bot.response_completions == 2
     assert bot.response_cancel_sources == []
+
+
+@pytest.mark.asyncio
+async def test_fleet_restart_stop_completes_with_real_supervisor_task(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A restart stop finishes promptly when it cancels the real sync supervisor the fleet started."""
+    bot = _FakeBot()
+    bot.agent_name = "agent1"
+    bot.stop = AsyncMock(side_effect=lambda **_kwargs: setattr(bot, "running", False))
+    sync_started = asyncio.Event()
+
+    async def blocking_sync() -> None:
+        sync_started.set()
+        await _FakeBot.sync_forever(bot)
+
+    bot.sync_forever = blocking_sync
+    monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+    fleet = EntityFleet(
+        EntityFleetHooks(
+            create_bots=AsyncMock(return_value={}),
+            start_blocked=lambda _entity_names: set(),
+            entities_changing=AsyncMock(),
+            entities_started=AsyncMock(),
+            setup_rooms_after_retry=AsyncMock(),
+            reconcile_removed=AsyncMock(return_value=set()),
+            end_replies=AsyncMock(),
+        ),
+    )
+    fleet.add("agent1", cast("AgentBot", bot))
+    fleet.start_sync([cast("AgentBot", bot)])
+    await asyncio.wait_for(sync_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+
+    started_at = time.monotonic()
+    # A measured window, not a hang bound: the test checks that stopping is prompt.
+    await asyncio.wait_for(fleet.stop({"agent1"}), timeout=2.0)
+
+    assert time.monotonic() - started_at <= 2.0
+    assert bot.first_call_cancelled
+    assert not fleet.names
+    assert bot.prepare_for_sync_shutdown_calls == 1
+    assert bot.prepare_for_sync_shutdown_cancel_messages == ["sync_restart"]
+    bot.stop.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
 
 
 @pytest.mark.asyncio
