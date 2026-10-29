@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -33,20 +32,18 @@ from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
 from tests.history_helpers import replay_settings
 from tests.llm.agno_dict_helpers import stored_run_record
+from tests.session_storage.goldens import LEGACY_AGNO3, loaded_sessions
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.session_storage.store import ConversationStore
 
-_LEGACY = Path(__file__).parent / "fixtures" / "legacy_agno3"
-_LOADED_SESSIONS: dict[str, dict[str, dict[str, Any]]] = json.loads(
-    (_LEGACY / "storage" / "loaded_sessions.json").read_text(),
-)
+_HISTORY = LEGACY_AGNO3 / "history"
 _SCOPED_SELECTIONS: dict[str, dict[str, dict[str, Any]]] = json.loads(
-    (_LEGACY / "history" / "scoped_selections.json").read_text(),
+    (_HISTORY / "scoped_selections.json").read_text(),
 )
-_HISTORY_GOLDENS = sorted(
-    path for path in (_LEGACY / "history").glob("*.json") if path.name != "scoped_selections.json"
-)
+_HISTORY_GOLDENS = sorted(path for path in _HISTORY.glob("*.json") if path.name != "scoped_selections.json")
 _SETTINGS = replay_settings()
 _AGENT = HistoryScope(kind="agent", scope_id="code")
 _TEAM = HistoryScope(kind="team", scope_id="squad")
@@ -58,11 +55,11 @@ _SUMMARY_FOLLOWS = {"mindroom_compaction_summary_follows": True}
 
 
 def _golden(name: str) -> dict[str, Any]:
-    return json.loads((_LEGACY / "history" / name).read_text())
+    return json.loads((_HISTORY / name).read_text())
 
 
 def _session(golden: dict[str, Any]) -> dict[str, Any]:
-    return _LOADED_SESSIONS[golden["store"]][golden["session_id"]]
+    return loaded_sessions()[golden["store"]][golden["session_id"]]
 
 
 def _stored_runs(golden: dict[str, Any]) -> list[AnyRunRecord]:
@@ -145,7 +142,7 @@ def test_scoped_selection_matches_the_scoped_selection_golden(session_key: str, 
         if "team_id" in params
         else HistoryScope(kind="agent", scope_id=params["agent_id"])
     )
-    runs = [stored_run_record(run) for run in _LOADED_SESSIONS[store][session_id]["runs"] or []]
+    runs = [stored_run_record(run) for run in loaded_sessions()[store][session_id]["runs"] or []]
 
     history = scope_history_messages(
         runs,

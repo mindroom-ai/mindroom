@@ -12,7 +12,6 @@ import asyncio
 import json
 import time
 from dataclasses import replace
-from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -35,6 +34,7 @@ from mindroom.tool_system.context_bound_streams import closing_async_stream
 from tests.agent_loop.helpers import add, boom, collect, context, echo, external, gated, spec, toolkit
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
 from tests.run_record_helpers import PRODUCT, approved_call, denied_call, result, resumed, settled, waiting_call
+from tests.session_storage.goldens import loaded_sessions
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -42,8 +42,6 @@ if TYPE_CHECKING:
     from agno.run import RunContext as AgnoRunContext
 
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolkitClose
-
-LOADED_SESSIONS = Path(__file__).resolve().parents[1] / "fixtures" / "legacy_agno3" / "storage" / "loaded_sessions.json"
 
 
 def _prompt() -> list[Message]:
@@ -531,8 +529,7 @@ async def test_a_run_without_a_system_message_sends_only_its_input() -> None:
 
 
 def _golden_run(store: str, session_id: str, run_id: str) -> dict[str, Any]:
-    sessions = json.loads(LOADED_SESSIONS.read_text(encoding="utf-8"))[store]
-    [run] = [run for run in sessions[session_id]["runs"] if run["run_id"] == run_id]
+    [run] = [run for run in loaded_sessions()[store][session_id]["runs"] if run["run_id"] == run_id]
     return run
 
 

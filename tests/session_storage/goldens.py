@@ -17,7 +17,9 @@ if TYPE_CHECKING:
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import SessionKind
 
-STORAGE = Path(__file__).resolve().parents[1] / "fixtures" / "legacy_agno3" / "storage"
+# The data Agno 3.0.9 wrote, kept read-only; "Legacy inputs" in ``tests/fixtures/agno_parity/README.md`` lists it.
+LEGACY_AGNO3 = Path(__file__).resolve().parents[1] / "fixtures" / "legacy_agno3"
+STORAGE = LEGACY_AGNO3 / "storage"
 
 
 @dataclass(frozen=True)
@@ -68,14 +70,14 @@ def golden_sessions() -> list[tuple[GoldenStore, str]]:
 
 
 @cache
-def _loaded_sessions() -> dict[str, dict[str, dict[str, Any]]]:
-    """Read the sessions Agno loaded once, as the dump is large and every test of a session asks for its own."""
+def loaded_sessions() -> dict[str, dict[str, dict[str, Any]]]:
+    """Read the sessions Agno loaded, by dump label and session id, once, as the dump is large; never change them."""
     return json.loads((STORAGE / "loaded_sessions.json").read_text(encoding="utf-8"))
 
 
 def agno_loaded_session(store: GoldenStore, session_id: str) -> dict[str, Any]:
     """Return ``AgentSession.to_dict()`` or ``TeamSession.to_dict()`` of a golden session as Agno loaded it."""
-    return deepcopy(_loaded_sessions()[store.label][session_id])
+    return deepcopy(loaded_sessions()[store.label][session_id])
 
 
 def stored_rows(db_file: Path, table: str, session_id: str) -> list[dict[str, Any]]:
