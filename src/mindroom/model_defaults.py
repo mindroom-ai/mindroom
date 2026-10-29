@@ -221,7 +221,7 @@ OPENROUTER_OPENAI_LUNA = f"openai/{OPENAI_GPT_LUNA}"
 # Not the ":free" variant: guardrail/data-policy restricted keys (such as
 # platform-provisioned hosted keys) have no endpoints for free models.
 _OPENROUTER_NEMOTRON = "nvidia/nemotron-3.5-super-vl"
-_OPENROUTER_DEEPSEEK = "deepseek/deepseek-v4.1-flash"
+_OPENROUTER_DEEPSEEK = "deepseek/deepseek-v4.1-flash-1017"
 _OPENROUTER_GLM = "z-ai/glm-5.3"
 _OPENROUTER_KIMI = "moonshotai/kimi-k3.1-pro"
 _OPENROUTER_TENCENT_HY4 = "tencent/hy4-preview"

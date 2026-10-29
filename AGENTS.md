@@ -227,7 +227,7 @@ Coding model training data often lags recent releases, so never trust memorized 
 | OpenAI Codex ChatGPT login | Frontier via Codex CLI | GPT-6 Astra | `gpt-6-astra` |
 | OpenAI Codex ChatGPT login | Fast via Codex CLI | GPT-6.1 Terra | `gpt-6.1-terra` |
 | OpenAI Codex ChatGPT login | Cheap / high-volume via Codex CLI | GPT-6 Luna | `gpt-6-luna` |
-| DeepSeek (OpenRouter) | Fast / cheap | DeepSeek V4.1 Flash | `deepseek/deepseek-v4.1-flash` |
+| DeepSeek (OpenRouter) | Fast / cheap | DeepSeek V4.1 Flash | `deepseek/deepseek-v4.1-flash-1017` |
 | Z.ai (OpenRouter) | Flagship | GLM-5.3 | `z-ai/glm-5.3` |
 | OpenAI | Image generation / editing | GPT Image 2.5 Sunburst | `gpt-image-2.5-sunburst` |
 | OpenAI | File transcription | GPT Transcribe | `gpt-transcribe` |

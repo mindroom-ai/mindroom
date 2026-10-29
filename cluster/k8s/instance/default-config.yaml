@@ -43,7 +43,7 @@ models:
     context_window: 1048576
   deepseek:
     provider: openrouter
-    id: deepseek/deepseek-v4.1-flash
+    id: deepseek/deepseek-v4.1-flash-1017
     context_window: 1048576
   glm:
     provider: openrouter
