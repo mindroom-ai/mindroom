@@ -4964,7 +4964,7 @@ class ExactReplyOracle:
         self.observed_markers_for = _ModelHandler.observed_markers_for
         self.full_request_markers_for = _ModelHandler.full_request_markers_for
         self.pending_edit_markers: Mapping[str, Mapping[str, str]] = {}
-        # Sources whose pending edits MindRoom settled without anything to regenerate.
+        # Sources whose pending edits MindRoom settled without a completed regeneration, so nothing more changes.
         self.declined_edit_sources: frozenset[str] = frozenset()
         # Admission state of every event MindRoom's agent principal journaled.
         self.journal_event_states: Mapping[str, str] = {}
@@ -8660,7 +8660,7 @@ class LiveFuzzRunner:
     def _reconcile_edit_debts(self) -> None:
         """Only exact visible terminal consumption can discharge or supersede live edit debt."""
         for source_id, pending in tuple(self._pending_edit_markers.items()):
-            # An edit of a redacted source, or one MindRoom declined, can change no reply.
+            # An edit of a redacted source, or one MindRoom declined, can change nothing more.
             if self.oracle.source_tombstoned(source_id) or source_id in self.oracle.declined_edit_sources:
                 del self._pending_edit_markers[source_id]
                 continue
