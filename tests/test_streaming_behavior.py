@@ -3420,7 +3420,20 @@ class TestStreamingBehavior:
         assert shutdown_attempts == 2
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("flush_succeeds", [False, True], ids=["failure", "success"])
+    @pytest.mark.parametrize(
+        "flush_succeeds",
+        [
+            pytest.param(
+                False,
+                marks=pytest.mark.xfail(
+                    strict=True,
+                    reason="a pause that cannot show its presentation raises a plain delivery error",
+                ),
+            ),
+            True,
+        ],
+        ids=["failure", "success"],
+    )
     async def test_suspension_flush_controls_approval_handoff(self, flush_succeeds: bool) -> None:
         """Only an acknowledged latest ordered presentation may escape to approval."""
         mock_client = _make_matrix_client_mock()
@@ -3500,6 +3513,7 @@ class TestStreamingBehavior:
             else:
                 with pytest.raises(StreamingDeliveryError) as raised_delivery:
                     await run_stream()
+                assert type(raised_delivery.value).__name__ == "PausePresentationError"
                 assert "suspension" in str(raised_delivery.value.error).lower()
                 assert pause.presentation is None
 

@@ -31,6 +31,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
 )
+from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.matrix import message_builder
@@ -69,7 +70,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
     from contextlib import AbstractAsyncContextManager
 
-    from mindroom.final_delivery import StreamTransportOutcome
     from mindroom.streaming import ProgressPublisher
     from tests.streaming_helpers import ReplyStreamHooks
 
@@ -189,8 +189,9 @@ async def test_lifecycle_suspension_escapes_stream_delivery_unchanged(config: Co
 
 
 @pytest.mark.asyncio
-async def test_a_refused_flush_before_an_approval_pause_fails_under_its_stable_reason(config: Config) -> None:
-    """A pause whose unsent progress Matrix refuses fails the stream under the reason the reply's hooks report."""
+@pytest.mark.xfail(strict=True, reason="a pause that cannot show its presentation raises a plain delivery error")
+async def test_a_refused_flush_before_an_approval_pause_cannot_show_the_pause(config: Config) -> None:
+    """A pause whose unsent progress Matrix refuses fails the stream as a pause that could not be shown."""
     suspension = StreamingLifecycleSuspensionError("paused")
     gateway = _FakeGateway()
 
@@ -209,7 +210,44 @@ async def test_a_refused_flush_before_an_approval_pause_fails_under_its_stable_r
     ):
         await _run_stream(config, suspended_stream(), hooks=gateway.hooks())
 
-    assert raised.value.failure_reason == "suspension_presentation_delivery_failed"
+    assert type(raised.value).__name__ == "PausePresentationError"
+    assert suspension.presentation is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+@pytest.mark.xfail(strict=True, reason="a pause that cannot show its presentation raises a plain delivery error")
+async def test_a_progress_edit_that_fails_as_the_stream_pauses_cannot_show_the_pause(config: Config) -> None:
+    """A progress edit that fails while a pausing stream stops its delivery leaves a pause that could not be shown."""
+    suspension = StreamingLifecycleSuspensionError("paused")
+    gateway = _FakeGateway()
+    edit_started = asyncio.Event()
+
+    async def refuse_once_the_stream_stops(*_args: object, **_kwargs: object) -> None:
+        edit_started.set()
+        pump = get_worker_progress_pump()
+        assert pump is not None
+        # Stopping the stream sets the pump's shutdown first, so the edit fails while the stream stops its delivery.
+        # That shutdown is a threading event, which cannot be awaited.
+        while not pump.shutdown.is_set():  # noqa: ASYNC110
+            await asyncio.sleep(0)
+
+    async def suspended_stream() -> AsyncIterator[object]:
+        yield TextDelta("I checked the input.")
+        await gateway.wait_for_ops(1)
+        yield TextDelta(" Then more.")
+        await edit_started.wait()
+        raise suspension
+
+    with (
+        patch("mindroom.streaming.edit_message_result", new=refuse_once_the_stream_stops),
+        pytest.raises(StreamingDeliveryError) as raised,
+    ):
+        await _run_stream(config, suspended_stream(), hooks=gateway.hooks())
+
+    assert type(raised.value).__name__ == "PausePresentationError"
+    assert "Failed to edit streaming message" in str(raised.value.error)
+    assert suspension.presentation is None
 
 
 def test_a_stream_failure_without_text_still_names_its_reason() -> None:
@@ -1156,6 +1194,80 @@ async def test_progress_shutdown_outlasts_a_delivery_that_ignores_its_drain_dead
 
     assert blocking.finished.is_set()
     assert blocking.landed == ["progress"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+@pytest.mark.parametrize("ending", ["finished", "failed", "paused", "cancelled"])
+@pytest.mark.xfail(strict=True, reason="a stream stops waiting for a progress edit after a fixed cancel timeout")
+async def test_a_stream_ends_only_after_a_progress_edit_past_the_drain_deadline_ended(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+) -> None:
+    """However a stream ends, a progress edit in flight past the drain deadline ends before the stream does.
+
+    The reply's next write, its terminal update or its span exit's note, can then never be overtaken by the edit.
+    """
+    monkeypatch.setattr(streaming_mod, "_STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(
+        streaming_mod._shutdown_stream_delivery,
+        "__kwdefaults__",
+        {"drain_timeout_seconds": 0, "cancel_timeout_seconds": 0},
+    )
+    blocking = _BlockingEdit(ignore_first_cancel=True)
+    gateway = _FakeGateway()
+    suspension = StreamingLifecycleSuspensionError("paused")
+
+    async def terminal_edit(
+        client: object,
+        room_id: str,
+        event_id: str,
+        new_content: dict[str, Any],
+        new_text: str,
+    ) -> DeliveredMatrixEvent:
+        blocking.landed.append("terminal")
+        return await gateway.edit(client, room_id, event_id, new_content, new_text)
+
+    async def stream() -> AsyncIterator[object]:
+        yield TextDelta("Before.")
+        await gateway.wait_for_ops(1)
+        yield TextDelta(" More.")
+        await blocking.started.wait()
+        if ending == "failed":
+            msg = "model backend disconnected"
+            raise RuntimeError(msg)
+        if ending == "paused":
+            raise suspension
+        if ending == "cancelled":
+            await asyncio.Event().wait()
+
+    hooks = FakeReplyRecords(send=gateway.send, edit=terminal_edit).hooks()
+    with patch("mindroom.streaming.edit_message_result", new=blocking.edit):
+        stream_task = asyncio.create_task(_run_stream(config, stream(), hooks=hooks))
+        await blocking.started.wait()
+        if ending == "cancelled":
+            stream_task.cancel()
+        # The deadline passed and the stop cancelled the edit, which is still in flight.
+        await blocking.cancel_seen.wait()
+        for _ in range(50):
+            await asyncio.sleep(0)
+        assert not stream_task.done()
+        assert blocking.landed == []
+        blocking.release.set()
+        [outcome] = await asyncio.gather(stream_task, return_exceptions=True)
+
+    assert blocking.landed == (["progress", "terminal"] if ending == "finished" else ["progress"])
+    expected = {
+        "finished": StreamTransportOutcome,
+        "failed": StreamingDeliveryError,
+        "paused": StreamingLifecycleSuspensionError,
+        "cancelled": asyncio.CancelledError,
+    }[ending]
+    assert isinstance(outcome, expected)
+    if ending == "paused":
+        assert suspension.presentation is not None
+        assert suspension.presentation.response_text == "Before. More."
 
 
 @pytest.mark.asyncio
