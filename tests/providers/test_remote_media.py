@@ -44,6 +44,7 @@ _PNG = bytes.fromhex(
     "1f15c4890000000d49444154789c636001000000050001a5f645400000000049454e44ae426082",
 )
 _PDF = b"%PDF-1.4\n%%EOF\n"
+_PDF_HEADERS = {"content-type": "application/pdf"}
 _NOTE = f"{FALLBACK_MARKER}\n{INLINE_MEDIA_FALLBACK_PROMPT}"
 
 
@@ -183,12 +184,13 @@ async def test_chat_fetches_image_urls_and_receives_downloaded_files_and_audio(
     """Chat Completions sends an image URL for the provider to fetch; file and audio URLs are downloaded.
 
     A downloaded file is typed as its server declared, else by its URL's name, which also names a file without one.
+    Chat reads only PDF files, so both are PDFs.
     """
     downloaded = _media_server(
         monkeypatch,
         {
-            "https://media.test/notes": httpx.Response(200, content=b"notes", headers={"content-type": "text/plain"}),
-            "https://media.test/table.csv": httpx.Response(200, content=b"a,b"),
+            "https://media.test/report": httpx.Response(200, content=b"%PDF-report", headers=_PDF_HEADERS),
+            "https://media.test/table.pdf": httpx.Response(200, content=b"%PDF-table"),
             "https://media.test/speech": httpx.Response(200, content=b"RIFF-speech"),
         },
     )
@@ -198,19 +200,20 @@ async def test_chat_fetches_image_urls_and_receives_downloaded_files_and_audio(
         content="Use these",
         images=[Image(url="https://media.test/photo.png")],
         audio=[Audio(url="https://media.test/speech", format="wav")],
-        files=[File(url="https://media.test/notes", filename="notes.txt"), File(url="https://media.test/table.csv")],
+        files=[File(url="https://media.test/report", filename="report"), File(url="https://media.test/table.pdf")],
     )
 
     await complete(_provider("openai_chat", tmp_path, wire), ModelRequest(messages=[message]))
 
+    pdf = "data:application/pdf;base64,"
     assert wire.body()["messages"][-1]["content"] == [
-        {"type": "file", "file": {"filename": "table.csv", "file_data": f"data:text/csv;base64,{_b64(b'a,b')}"}},
-        {"type": "file", "file": {"filename": "notes.txt", "file_data": f"data:text/plain;base64,{_b64(b'notes')}"}},
+        {"type": "file", "file": {"filename": "table.pdf", "file_data": f"{pdf}{_b64(b'%PDF-table')}"}},
+        {"type": "file", "file": {"filename": "report", "file_data": f"{pdf}{_b64(b'%PDF-report')}"}},
         {"type": "text", "text": "Use these"},
         {"type": "image_url", "image_url": {"url": "https://media.test/photo.png"}},
         {"type": "input_audio", "input_audio": {"data": _b64(b"RIFF-speech"), "format": "wav"}},
     ]
-    assert downloaded == ["https://media.test/speech", "https://media.test/notes", "https://media.test/table.csv"]
+    assert downloaded == ["https://media.test/speech", "https://media.test/report", "https://media.test/table.pdf"]
 
 
 @pytest.mark.asyncio

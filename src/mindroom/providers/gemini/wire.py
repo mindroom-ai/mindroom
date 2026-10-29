@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import mimetypes
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
@@ -26,12 +25,12 @@ from google.genai.types import (
 )
 
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, InvalidRequest, ProviderError
-from mindroom.llm.media import canonical_mime_type, image_mime_type
+from mindroom.llm.media import image_mime_type
 from mindroom.llm.messages import system_text, tool_result_view
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported, hosted_tool_started
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.providers.media_files import read_media_file
+from mindroom.providers.media_files import file_mime_type, is_text_mime_type, read_media_file, unreadable_file_note
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -70,17 +69,6 @@ _FORMAT_TO_MIME = {
     "webm": "video/webm",
     "pdf": "application/pdf",
 }
-# Text types outside ``text/``, which Gemini reads as plain text.
-_TEXT_FILE_MIME_TYPES = frozenset(
-    {
-        "application/json",
-        "application/xml",
-        "application/yaml",
-        "application/x-yaml",
-        "application/x-javascript",
-        "application/x-python",
-    },
-)
 # The finish reason of a candidate whose tool call the model malformed.
 _MALFORMED_FUNCTION_CALL = "MALFORMED_FUNCTION_CALL"
 _FILTERED_FINISH_REASONS = frozenset(
@@ -302,43 +290,42 @@ async def _video_part(video: Video, route: MediaRoute) -> dict[str, Any] | None:
     return _inline(video.content, mime_type) if video.content else None
 
 
-def _file_mime_type(file: File, name: str) -> str:
-    """Return the file's own MIME type, else its name's, else PDF."""
-    return file.mime_type or mimetypes.guess_type(name)[0] or "application/pdf"
-
-
 def _sent_file_type(mime_type: str) -> str | None:
     """Return the type a file of ``mime_type`` is sent as: plain text for any text type, None for a type Gemini rejects.
 
     Gemini reads PDFs, text, images, audio, and video; it rejects other types, such as ``application/octet-stream``.
     """
-    canonical = canonical_mime_type(mime_type) or ""
-    if canonical.startswith("text/") or canonical in _TEXT_FILE_MIME_TYPES:
+    if is_text_mime_type(mime_type):
         return "text/plain"
-    if canonical == "application/pdf" or canonical.startswith(("image/", "audio/", "video/")):
-        return canonical
+    if mime_type == "application/pdf" or mime_type.startswith(("image/", "audio/", "video/")):
+        return mime_type
     return None
 
 
 def _omitted_file(file: File, mime_type: str) -> dict[str, Any]:
-    return {"text": f"[Attachment omitted: {file.filename or 'file'} ({mime_type}) is a file type Gemini cannot read]"}
+    return {"text": unreadable_file_note(file, mime_type)}
 
 
-def _typed_file_part(file: File, mime_type: str, part: Callable[[str], dict[str, Any]]) -> dict[str, Any]:
+def _typed_file_part(file: File, part: Callable[[str], dict[str, Any]]) -> dict[str, Any]:
     """Return ``part`` built for the type the file is sent as, or the note naming a file Gemini cannot read."""
+    mime_type = file_mime_type(file)
     sent_type = _sent_file_type(mime_type)
     return _omitted_file(file, mime_type) if sent_type is None else part(sent_type)
 
 
 async def _file_part(file: File, route: MediaRoute) -> dict[str, Any] | None:
+    """Return a file's part in the type Gemini reads it as, the note naming a file of another type, or None.
+
+    None is for a file without a source; a file noted is never read or fetched.
+    """
     if file.content:
         data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content
-        return _typed_file_part(file, _file_mime_type(file, file.filename or ""), partial(_inline, data))
+        return _typed_file_part(file, partial(_inline, data))
     if (url := file.url) is not None:
-        return _typed_file_part(file, _file_mime_type(file, url), partial(_file_uri, url))
+        return _typed_file_part(file, partial(_file_uri, url))
     if file.filepath is None:
         return None
-    mime_type = _file_mime_type(file, file.filepath)
+    mime_type = file_mime_type(file)
     if (sent_type := _sent_file_type(mime_type)) is None:
         return _omitted_file(file, mime_type)
     return await _local_part(file.filepath, "file", route, lambda _: sent_type)

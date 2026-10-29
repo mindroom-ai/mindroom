@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.providers.openai.media import chat_file_part
+from mindroom.providers.openai.media import responses_file_part
 from mindroom.tool_system.agno_toolkits import read_tool_value
 from mindroom.tools.file_generation import file_generation_tools
 
@@ -52,12 +52,12 @@ def test_saved_file_reaches_the_model_as_the_bytes_the_tool_returned(tmp_path: P
     value = read_tool_value(result)
     assert value is not None
     file = value.files[0]
-    part = chat_file_part(file, provider="OpenAI Chat")
+    part = responses_file_part(file, provider="OpenAI Responses")
 
     assert file.filepath is None
     assert part is not None
-    assert part["file"]["filename"] == "notes.txt"
-    assert base64.b64decode(part["file"]["file_data"].split(",", 1)[1]) == b"generated\n"
+    assert part["filename"] == "notes.txt"
+    assert base64.b64decode(part["file_data"].split(",", 1)[1]) == b"generated\n"
 
 
 @pytest.mark.parametrize("output_directory", ["/etc", "../outside"])

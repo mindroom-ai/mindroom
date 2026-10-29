@@ -17,7 +17,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.media import Audio as OwnedAudio
 from mindroom.llm.messages import Message
 from mindroom.providers.gemini import wire as gemini_wire
-from mindroom.providers.openai.media import chat_audio_part, chat_file_part, responses_file_part
+from mindroom.providers.openai.media import chat_audio_part, responses_file_part
 from mindroom.tool_system import media_transport
 from mindroom.tool_system.agno_toolkits import read_tool_value
 from mindroom.tool_system.media_transport import decode_media_result
@@ -144,10 +144,10 @@ def test_document_name_and_type_survive_inlining(
     assert document.url is None
     assert document.filename == ("chosen.csv" if explicit else "report one.txt")
     assert document.mime_type == ("text/csv" if explicit else "text/plain")
-    payload = chat_file_part(decoded.files[0], provider="OpenAI Chat")
+    payload = responses_file_part(decoded.files[0], provider="OpenAI Responses")
     assert payload is not None
-    assert payload["file"]["filename"] == document.filename
-    assert payload["file"]["file_data"].startswith(f"data:{document.mime_type};base64,")
+    assert payload["filename"] == document.filename
+    assert payload["file_data"].startswith(f"data:{document.mime_type};base64,")
 
 
 @pytest.mark.parametrize("source", ["file", "url"])
