@@ -247,7 +247,9 @@ Matrix sync callback
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
 | `tool_system/atlassian_connections.py` | Additional Atlassian Cloud connection providers and prefixed tool registration |
 | `scheduling/tasks.py` | Cron and natural-language task scheduling |
-| `scheduling/runtime.py` | The one owner of scheduled-task runners: each task's owner bot, restore on join, fencing an owner's stop, failing a removed owner's tasks |
+| `scheduling/runtime.py` | The one owner of scheduled-task runners: runners borrow their stored owner's live bot, restore on join, fence an owner's stop, and fail a removed owner's tasks |
+| `scheduling/ownership.py` | Which bot runs a scheduled task, decided once at save time from the room's full state |
+| `scheduling/legacy_task_owner.py` | Owner of tasks saved before owners were stored: the same rule applied to their latest writer |
 | `scheduling/scheduled_tool_calls.py` | Resolving a scheduled call on the agent's own live tools and running it once by task ID with its approval |
 | `scheduling/executor.py` | Fire one scheduled task: hook emission, visible or silent Matrix delivery, and failure notices |
 | `scheduling/scheduled_run_records.py` | Agent-workspace JSON receipts for silent scheduled runs |

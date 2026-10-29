@@ -298,6 +298,28 @@ async def test_background_retry_waits_before_its_first_attempt_and_stops_on_canc
 
 
 @pytest.mark.asyncio
+async def test_cancelling_retries_survives_an_entity_added_while_one_retry_stops(fake_sync: list[str]) -> None:
+    """Process shutdown cancels every retry even when another task changes the fleet during a cancellation."""
+    del fake_sync
+    harness = _Harness()
+    harness.add("flaky", start_errors=[RuntimeError("down"), RuntimeError("still down")])
+    harness.add("other", start_errors=[RuntimeError("down"), RuntimeError("still down")])
+    await harness.fleet.start({"flaky", "other"})
+
+    async def add_late_entity() -> None:
+        await asyncio.sleep(0)
+        harness.add("late")
+
+    late = asyncio.create_task(add_late_entity())
+    await harness.fleet.cancel_retries()
+    await late
+
+    assert harness.order.count("start:flaky") == 1
+    assert harness.order.count("start:other") == 1
+    assert "late" in harness.fleet.bots
+
+
+@pytest.mark.asyncio
 async def test_replace_rebuilds_and_starts_entities_on_the_new_config(fake_sync: list[str]) -> None:
     """Replacement stops the old generation, builds a new bot, and starts it."""
     del fake_sync

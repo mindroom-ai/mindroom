@@ -327,7 +327,8 @@ class EntityFleet:
 
     async def cancel_retries(self) -> None:
         """Cancel every background start retry."""
-        for slot in self._slots.values():
+        # Each cancellation yields, and another replacement may add or remove a slot meanwhile.
+        for slot in list(self._slots.values()):
             await cancel_task(slot.retry_task)
             slot.retry_task = None
 
