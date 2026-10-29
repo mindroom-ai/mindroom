@@ -16,7 +16,7 @@ import json
 import threading
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 from unittest.mock import AsyncMock, patch
 
 import nio
@@ -61,10 +61,14 @@ from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.call_record import recording_tool_calls
+from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolManagedInitArg
 from mindroom.tool_system.events import StructuredStreamChunk
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
+from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_function import ToolFunction
+from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, get_tool_execution_identity
 from tests.ai_user_id_helpers import _install_inert_post_response_effects
 from tests.approval_continuation_helpers import (
     carries_approval_receipt,
@@ -625,6 +629,62 @@ async def test_a_member_s_tool_hooks_run_as_the_member_with_the_turn_s_live_bind
 
     assert ProbeToolkit.calls == ["a"]
     assert seen == [("writer", "writer", True)]
+
+
+class _IdentityProbe(Toolkit):
+    """Records whom a member's toolkit was built for and whom each of its calls acts for."""
+
+    built_for: ClassVar[list[str | None]] = []
+    called_for: ClassVar[list[tuple[str, str] | None]] = []
+
+    def __init__(self, worker_target: ResolvedWorkerTarget | None = None) -> None:
+        identity = worker_target.execution_identity if worker_target is not None else None
+        type(self).built_for.append(identity.agent_name if identity is not None else None)
+        super().__init__(name="identity_probe", tools=[self.who])
+
+    async def who(self) -> str:
+        """Record whom the running call acts for."""
+        identity = get_tool_execution_identity()
+        type(self).called_for.append((identity.agent_name, identity.recipient) if identity is not None else None)
+        return "recorded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(strict=True, reason="member toolkits are built under the team identity")
+async def test_a_member_s_tools_are_built_for_and_called_as_the_member(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member's toolkit is built for the member, and its calls act as the member answering through the team."""
+    _IdentityProbe.built_for.clear()
+    _IdentityProbe.called_for.clear()
+    snapshot = capture_tool_registry_snapshot()
+
+    @register_tool_with_metadata(
+        name="identity_probe",
+        file_access=ToolFileAccess.NONE,
+        display_name="identity_probe",
+        description="Records call identities.",
+        category=ToolCategory.DEVELOPMENT,
+        managed_init_args=(ToolManagedInitArg.WORKER_TARGET,),
+    )
+    def identity_probe() -> type[Toolkit]:
+        return _IdentityProbe
+
+    try:
+        team = squad_turn(
+            tmp_path,
+            monkeypatch,
+            leader=[delegate("call-team", "writer", "Who?"), answer("Asked.", usage(50, 5))],
+            writer=[calls(tool_call("who", "call-who"), metrics=usage(10, 1)), answer("Done.")],
+        )
+        team.config.agents["writer"].tools = ["identity_probe"]
+        await team.stream()
+    finally:
+        restore_tool_registry_snapshot(snapshot)
+
+    assert set(_IdentityProbe.built_for) == {"writer"}
+    assert _IdentityProbe.called_for == [("writer", "squad")]
 
 
 @pytest.mark.asyncio
