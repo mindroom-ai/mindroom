@@ -9,13 +9,12 @@ so the file costs no rejected request and hides none of the message's other atta
 
 from __future__ import annotations
 
-import mimetypes
 import os
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from mindroom.llm.errors import InvalidRequest
-from mindroom.llm.media import IMAGE_HEADER_BYTES, canonical_mime_type, url_file_name
+from mindroom.llm.media import IMAGE_HEADER_BYTES, canonical_mime_type, named_mime_type, url_file_name
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -33,13 +32,6 @@ __all__ = [
 logger = get_logger(__name__)
 
 _OCTET_STREAM = "application/octet-stream"
-# Python's MIME database lacks or misnames these document formats; host /etc/mime.types must not decide.
-_NAMED_FILE_TYPES = {
-    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ".sh": "text/x-sh",
-}
 # Text types outside ``text/``.
 _TEXT_MIME_TYPES = frozenset(
     {
@@ -88,13 +80,6 @@ def read_media_bytes(path: str | Path, *, kind: str, provider: str) -> bytes | N
     return None if read is None else read[1]
 
 
-def _named_type(name: str) -> str | None:
-    """Return the type a file name names; a compressed name, such as ``report.csv.gz``, names none."""
-    guessed, encoding = mimetypes.guess_type(name)
-    guessed = _NAMED_FILE_TYPES.get(PurePosixPath(name).suffix.lower(), guessed)
-    return guessed if encoding is None else None
-
-
 def file_mime_type(file: File) -> str:
     """Return a file's type: its declared one, else the one its original filename names, then its stored path or URL.
 
@@ -106,7 +91,7 @@ def file_mime_type(file: File) -> str:
     if declared is not None and declared != _OCTET_STREAM:
         return declared
     names = (file.filename or file.name, file.filepath, url_file_name(file.url) if file.url else None)
-    return next((named for name in names if name and (named := _named_type(name)) is not None), _OCTET_STREAM)
+    return next((named for name in names if name and (named := named_mime_type(name)) is not None), _OCTET_STREAM)
 
 
 def is_text_mime_type(mime_type: str) -> bool:

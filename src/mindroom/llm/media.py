@@ -340,9 +340,19 @@ class File:
 MEDIA_MIME_FAMILIES: dict[type[Image | Audio | Video], str] = {Image: "image/", Audio: "audio/", Video: "video/"}
 
 
-def _named_type(name: str) -> str | None:
+# Python's MIME database lacks or misnames these document formats; host /etc/mime.types must not decide.
+_NAMED_FILE_TYPES = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".sh": "text/x-sh",
+}
+
+
+def named_mime_type(name: str) -> str | None:
     """Return the type a file name names; a compressed name, such as ``report.csv.gz``, names none."""
     named, encoding = mimetypes.guess_type(name)
+    named = _NAMED_FILE_TYPES.get(PurePosixPath(name).suffix.lower(), named)
     return named if encoding is None else None
 
 
@@ -362,11 +372,11 @@ def named_by_resource[T: Image | Audio | Video | File](
     """
     if isinstance(media, File):
         filename = media.filename or media.name or resource_name or None
-        candidates = (declared_mime, _named_type(filename or ""), _named_type(resource_name))
+        candidates = (declared_mime, named_mime_type(filename or ""), named_mime_type(resource_name))
         mime_type = media.mime_type or next((value for value in candidates if value in DOCUMENT_MIME_TYPES), None)
         return replace(media, filename=filename, mime_type=mime_type)
     mime_type, media_format = media.mime_type, media.format
-    named_type = _named_type(resource_name)
+    named_type = named_mime_type(resource_name)
     if mime_type is None and media_format is None:
         family = MEDIA_MIME_FAMILIES[type(media)]
         candidates = (declared_mime, named_type if isinstance(media, Image) else None)
@@ -395,5 +405,6 @@ __all__ = [
     "image_format",
     "image_mime_type",
     "named_by_resource",
+    "named_mime_type",
     "url_file_name",
 ]
