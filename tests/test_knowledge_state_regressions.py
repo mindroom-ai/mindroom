@@ -1,0 +1,209 @@
+"""Regressions for knowledge index state that had more than one owner.
+
+A reverted publication, a refresh limit each scheduler applied alone, and an unchanged refresh that built the
+local embedder to test that a file exists.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import TYPE_CHECKING
+
+import pytest
+
+import mindroom.knowledge.index_metadata as knowledge_index_metadata
+import mindroom.knowledge.manager as knowledge_manager_module
+import mindroom.knowledge.registry as knowledge_registry
+from mindroom.config.agent import AgentConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig
+from mindroom.config.main import Config
+from mindroom.config.memory import MemorySearchConfig
+from mindroom.knowledge.manager import KnowledgeManager, _PreparedFile
+from mindroom.knowledge.refresh_runner import _refresh_knowledge_binding as refresh_knowledge_binding
+from mindroom.knowledge.registry import (
+    get_published_index,
+    mark_knowledge_source_changed_async,
+    published_index_storage_path,
+    resolve_published_index_key,
+)
+from mindroom.knowledge.vector_store import KnowledgeCollection
+from mindroom.memory._semantic_file_search import schedule_semantic_file_memory_refresh
+from mindroom.orchestrator import _MultiAgentOrchestrator
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from pathlib import Path
+
+
+class _Embedder:
+    sends_batches = False
+
+    def embed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
+        del purpose
+        return [[float(len(text)), 1.0] for text in texts]
+
+    async def aembed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
+        return self.embed(texts, purpose=purpose)
+
+
+@pytest.fixture
+def embedder_builds(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Count every configured-embedder construction, wherever knowledge code builds one."""
+    builds: list[str] = []
+    embedder = _Embedder()
+
+    def _build(*_args: object, **_kwargs: object) -> _Embedder:
+        builds.append("built")
+        return embedder
+
+    monkeypatch.setattr(knowledge_manager_module, "create_configured_embedder", _build)
+    monkeypatch.setattr(knowledge_registry, "create_configured_embedder", _build)
+    knowledge_registry._published_indexes.clear()
+    return builds
+
+
+def _config(tmp_path: Path, bases: Sequence[str] = ("docs",)) -> Config:
+    for base_id in bases:
+        (tmp_path / base_id).mkdir(exist_ok=True)
+    return bind_runtime_paths(
+        Config(
+            agents={"helper": AgentConfig(display_name="Helper", knowledge_bases=list(bases))},
+            knowledge_bases={base_id: KnowledgeBaseConfig(path=str(tmp_path / base_id)) for base_id in bases},
+        ),
+        test_runtime_paths(tmp_path),
+    )
+
+
+@pytest.mark.xfail(strict=True, reason="the watcher's stale mark rewrites the publication it read before")
+@pytest.mark.asyncio
+async def test_a_source_change_marked_during_a_publication_never_reverts_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    embedder_builds: list[str],
+) -> None:
+    """A watcher that reads the index state before a publication and writes after it leaves the new publication live.
+
+    The first publication is of a resumed candidate, so the publication that follows retires nothing it keeps: a
+    reverted pointer then names a collection that no longer exists.
+    """
+    del embedder_builds
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    docs = tmp_path / "docs"
+    (docs / "a.md").write_text("alpha one", encoding="utf-8")
+    (docs / "b.md").write_text("bravo one", encoding="utf-8")
+    original_index = KnowledgeManager._index_file_locked
+
+    async def _fail_b(self: KnowledgeManager, prepared: _PreparedFile, **kwargs: object) -> bool:
+        if prepared.path.name == "b.md":
+            return False
+        return await original_index(self, prepared, **kwargs)
+
+    monkeypatch.setattr(KnowledgeManager, "_index_file_locked", _fail_b)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    monkeypatch.setattr(KnowledgeManager, "_index_file_locked", original_index)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    first = get_published_index("docs", config=config, runtime_paths=runtime_paths)
+    assert first.state is not None
+    first_collection = first.state.collection
+
+    (docs / "a.md").write_text("alpha two", encoding="utf-8")
+    loop = asyncio.get_running_loop()
+    original_write = knowledge_index_metadata.write_json_atomic
+    published_meanwhile: list[bool] = []
+
+    def _publish_before_the_mark_writes(path: Path, payload: object) -> None:
+        if not published_meanwhile:
+            published_meanwhile.append(True)
+            asyncio.run_coroutine_threadsafe(
+                refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths),
+                loop,
+            ).result()
+        original_write(path, payload)
+
+    monkeypatch.setattr(knowledge_index_metadata, "write_json_atomic", _publish_before_the_mark_writes)
+    await mark_knowledge_source_changed_async("docs", config=config, runtime_paths=runtime_paths, reason="watch")
+    monkeypatch.setattr(knowledge_index_metadata, "write_json_atomic", original_write)
+
+    assert published_meanwhile
+    resolution = get_published_index("docs", config=config, runtime_paths=runtime_paths)
+    assert resolution.state is not None
+    assert resolution.state.collection != first_collection
+    assert resolution.index is not None
+    storage = published_index_storage_path(
+        resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths),
+    )
+    assert KnowledgeCollection(path=storage, name=resolution.state.collection).exists()
+    hits = await resolution.index.reader.asearch("alpha", limit=5)
+    assert [hit.content for hit in hits if "alpha" in hit.content] == ["alpha two"]
+
+
+@pytest.mark.xfail(strict=True, reason="each scheduler applies the limit alone and refresh_now bypasses it")
+@pytest.mark.asyncio
+async def test_one_refresh_child_runs_at_a_time_across_the_runtime_api_and_file_memory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the default limit of 1, a scheduled refresh, an API reindex, and a file-memory refresh run one by one."""
+    config = _config(tmp_path, bases=("docs", "api"))
+    runtime_paths = runtime_paths_for(config)
+    memory_root = tmp_path / "memory_root"
+    (memory_root / "memory").mkdir(parents=True)
+    started: list[str] = []
+    active = 0
+    most_active = 0
+    first_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _refresh(base_id: str, **_kwargs: object) -> object:
+        nonlocal active, most_active
+        started.append(base_id)
+        active += 1
+        most_active = max(most_active, active)
+        first_started.set()
+        try:
+            await release.wait()
+        finally:
+            active -= 1
+        return object()
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _refresh)
+    scheduler = _MultiAgentOrchestrator(runtime_paths=runtime_paths).knowledge_refresh_scheduler
+    scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    reindex = asyncio.create_task(
+        scheduler.refresh_now("api", config=config, runtime_paths=runtime_paths, force_reindex=True),
+    )
+    assert schedule_semantic_file_memory_refresh(
+        scope_user_id="alice",
+        root=memory_root,
+        config=config,
+        runtime_paths=runtime_paths,
+        search_config=MemorySearchConfig(mode="semantic"),
+    )
+    await first_started.wait()
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+    try:
+        assert most_active == 1
+    finally:
+        release.set()
+        await reindex
+        await scheduler.shutdown()
+
+
+@pytest.mark.xfail(strict=True, reason="the unchanged refresh builds a reader, and with it the embedder")
+@pytest.mark.asyncio
+async def test_an_unchanged_refresh_builds_no_embedder(tmp_path: Path, embedder_builds: list[str]) -> None:
+    """A refresh that finds the corpus unchanged republishes without constructing the embedder."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    (tmp_path / "docs" / "a.md").write_text("alpha one", encoding="utf-8")
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    embedder_builds.clear()
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published
+    assert embedder_builds == []
