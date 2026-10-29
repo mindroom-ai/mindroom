@@ -233,19 +233,16 @@ _BILLING_STOP_WORDING = ("prepayment credits are depleted", "exceeded its monthl
 def _provider_error(error: Exception, *, provider: str) -> ProviderError:
     """Return the normalized error for one failed request; any other exception propagates as it is.
 
-    Vertex AI mints its Google access token inside the request, so its failures arrive here too. A failure Google
-    answered with its error object, ``{"error": {"code": ..., "message": ..., "status": ...}}``, keeps Google's message
-    as its text, so a reply shows what Google said rather than the SDK's status line and body; any other body keeps
-    the SDK's text. A request the account's billing stops is a final error.
+    Vertex AI mints its Google access token inside the request, so its failures arrive here too. A request the
+    account's billing stops is a final error that keeps Google's message alone, which says what to change.
     """
     if (failure := provider_failure(error, provider=provider)) is not None:
         return failure
     if isinstance(error, APIError):
-        google_error = isinstance(error.details, dict) and isinstance(error.details.get("error"), dict)
-        message = (error.message if google_error else None) or str(error)
+        message = error.message or ""
         if any(wording in message.casefold() for wording in _BILLING_STOP_WORDING):
             return ProviderError(message, provider=provider, status_code=error.code, code=QUOTA_EXHAUSTED)
-        return classify_provider_error(message, provider=provider, status_code=error.code)
+        return classify_provider_error(str(error), provider=provider, status_code=error.code)
     if isinstance(error, ValidationError):
         # The SDK rejected an authored generation setting; the same request cannot succeed.
         return InvalidRequest(str(error), provider=provider)

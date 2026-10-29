@@ -1192,16 +1192,13 @@ _GEMINI_CASES = [
         UNAVAILABLE,
         _PIPELINE,
     ),
-    # A final error's reply shows Google's message, not the SDK's status line and body, unless the body is not
-    # Google's error object.
     _Case(
         "http_400",
         _gemini_status(400, "Invalid JSON payload received.", "INVALID_ARGUMENT"),
         InvalidRequest,
-        f"{ERROR}Invalid JSON payload received.",
+        ERROR,
         1,
     ),
-    _Case("http_400_plain_text", _json(400, "Bad Request"), InvalidRequest, f"{ERROR}400 Bad Request. ", 1),
     _Case(
         "http_400_context_window",
         _gemini_status(
@@ -1224,16 +1221,10 @@ _GEMINI_CASES = [
         "http_403",
         _gemini_status(403, "Permission denied on resource project p.", "PERMISSION_DENIED"),
         ProviderError,
-        f"{ERROR}Permission denied on resource project p.",
+        ERROR,
         1,
     ),
-    _Case(
-        "http_404",
-        _gemini_status(404, "models/gemini-x is not found.", "NOT_FOUND"),
-        InvalidRequest,
-        f"{ERROR}models/gemini-x is not found.",
-        1,
-    ),
+    _Case("http_404", _gemini_status(404, "models/gemini-x is not found.", "NOT_FOUND"), InvalidRequest, ERROR, 1),
     # Google's own wording: "generateContent" holds "rate", which no longer reads as a rate limit.
     _Case(
         "http_404_unsupported_method",
