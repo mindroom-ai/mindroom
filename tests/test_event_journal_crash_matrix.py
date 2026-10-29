@@ -35,11 +35,17 @@ from mindroom.event_journal import (
     EventJournalStore,
     EventKind,
 )
-from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker, TurnHandoff
+from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
 from mindroom.event_journal.store import _DEFAULT_UNACKNOWLEDGED_LIMIT as _UNACKNOWLEDGED_BATCH
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.pending_event_worker import PendingEventWorker
-from tests.conftest import CrashError, DiesAfterAcknowledgement, DiesAfterNextWriteCommit, ignore_delivered_projection
+from tests.conftest import (
+    CrashError,
+    DiesAfterAcknowledgement,
+    DiesAfterNextWriteCommit,
+    ignore_delivered_projection,
+    ignore_final_delivery_handoff,
+)
 from tests.journal_membership_helpers import admit_room_membership
 
 if TYPE_CHECKING:
@@ -127,11 +133,6 @@ class FakeHomeserver:
         return len(self.room_events)
 
 
-# A turn here answers exactly one source, and hands over exactly that one: with no stored turn, its FINAL
-# settles only the delivery's own source.
-_SETTLE_THE_SOURCE = TurnHandoff(released=lambda _event_ids: None)
-
-
 @dataclass
 class TurnRuntime:
     """Everything that would be rebuilt by a restart."""
@@ -197,7 +198,9 @@ class TurnRuntime:
             observe_delivered=ignore_delivered_projection,
             sending_device_id=self.homeserver.device_id,
             resolve_delivered=self.homeserver.find_delivered,
-            handoff=_SETTLE_THE_SOURCE,
+            # A turn here answers exactly one source, and hands over exactly that one: with no stored turn, its
+            # FINAL settles only the delivery's own source.
+            handoff=ignore_final_delivery_handoff,
         ).deliver(
             delivery_id=event.event_id,
             stage=DeliveryStage.FINAL,

@@ -143,6 +143,9 @@ class TestAgentBot(AgentBotTestBase):
             message="[Attached image]",
             requester_user_id="@user:localhost",
             extra_content={"com.mindroom.original_sender": "@user:localhost"},
+            media_events=None,
+            handled_turn=None,
+            scheduled_prompt=None,
         )
 
     @pytest.mark.asyncio

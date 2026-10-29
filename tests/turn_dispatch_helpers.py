@@ -8,21 +8,16 @@ from typing import TYPE_CHECKING
 import nio
 
 from mindroom.coalescing.batch import PendingEvent, PreparedTurn, build_prepared_turn, requester_coalescing_key
-from mindroom.dispatch_handoff import (
-    DispatchIngressMetadata,
-    DispatchPayloadMetadata,
-    PreparedIngress,
-    payload_metadata_from_source,
-)
+from mindroom.dispatch_handoff import DispatchPayloadMetadata, PreparedIngress, payload_metadata_from_source
 from mindroom.matrix.event_info import EventInfo
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import TurnClaim
-from mindroom.turns.facts import PrecheckedEvent
 from tests.conftest import make_ingress_facts
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from mindroom.coalescing.batch import CoalescingKey
     from mindroom.dispatch_handoff import MediaDispatchEvent
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.turns.dispatch import TurnDispatcher
@@ -35,17 +30,15 @@ def nothing_else_queued(_requester_user_id: str) -> bool:
 
 
 def _prepared_ingress(
-    event: PreparedIngress | nio.RoomMessageFormatted | PrecheckedEvent,
+    event: PreparedIngress | nio.RoomMessageFormatted,
     requester_user_id: str | None,
+    facts: IngressFacts | None,
 ) -> tuple[PreparedIngress, IngressFacts]:
-    """Return the prepared event and its facts: a prechecked event's own, else a plain message from its sender."""
-    if isinstance(event, PrecheckedEvent):
-        facts = event.facts
-        event = event.event
-    elif requester_user_id is None:
-        msg = "requester_user_id is required when dispatching a raw test event"
-        raise TypeError(msg)
-    else:
+    """Return the prepared event and its facts: those given, else a plain message from its sender."""
+    if facts is None:
+        if requester_user_id is None:
+            msg = "requester_user_id or facts is required when dispatching a test event"
+            raise TypeError(msg)
         facts = make_ingress_facts(event.sender, requester_user_id=requester_user_id)
     if isinstance(event, PreparedIngress):
         return event, facts
@@ -66,13 +59,13 @@ def _prepared_ingress(
 
 def make_test_turn(
     room: nio.MatrixRoom,
-    event: PreparedIngress | nio.RoomMessageFormatted | PrecheckedEvent,
+    event: PreparedIngress | nio.RoomMessageFormatted,
     requester_user_id: str | None = None,
     *,
     media_events: list[MediaDispatchEvent] | None = None,
     handled_turn: TurnRecord | None = None,
     queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
-    ingress_metadata: DispatchIngressMetadata | None = None,
+    coalescing_key: CoalescingKey | None = None,
     payload_metadata: DispatchPayloadMetadata | None = None,
     current_prompt_is_structured: bool = False,
     claim: TurnClaim | None = None,
@@ -82,19 +75,13 @@ def make_test_turn(
 
     Without ``facts`` the event is a plain message its sender wrote as ``requester_user_id``.
     """
-    prepared, default_facts = _prepared_ingress(event, requester_user_id)
-    facts = facts or default_facts
-    event_info = EventInfo.from_event(prepared.source)
+    prepared, facts = _prepared_ingress(event, requester_user_id, facts)
     key = (
-        ingress_metadata.coalescing_key
-        if ingress_metadata is not None and ingress_metadata.coalescing_key is not None
-        else requester_coalescing_key(room.room_id, event_info.thread_id, facts.lane_requester_id)
+        requester_coalescing_key(room.room_id, EventInfo.from_event(prepared.source).thread_id, facts.lane_requester_id)
+        if coalescing_key is None
+        else coalescing_key
     )
-    prepared = replace(
-        prepared,
-        active_follow_up=ingress_metadata is not None and ingress_metadata.active_follow_up,
-        payload_trusted=facts.sender_is_managed,
-    )
+    prepared = replace(prepared, payload_trusted=facts.sender_is_managed)
     turn = build_prepared_turn(
         key,
         [PendingEvent(event=prepared, room=room, facts=facts, claim=claim, notice=queued_notice_reservation)],
@@ -103,7 +90,6 @@ def make_test_turn(
     return replace(
         turn,
         handled_turn=handled_turn or turn.handled_turn,
-        ingress=replace(ingress_metadata, coalescing_key=key) if ingress_metadata is not None else turn.ingress,
         payload=(
             payload_metadata
             if payload_metadata is not None
@@ -117,7 +103,7 @@ def make_test_turn(
 async def dispatch_test_turn(
     dispatcher: TurnDispatcher,
     room: nio.MatrixRoom,
-    event: PreparedIngress | nio.RoomMessageFormatted | PrecheckedEvent,
+    event: PreparedIngress | nio.RoomMessageFormatted,
     requester_user_id: str | None = None,
     **kwargs: object,
 ) -> None:
@@ -150,7 +136,7 @@ def prepared_turn_recorder(callback: Callable[..., Awaitable[None]]) -> Callable
             turn.facts.run_requester_id,
             media_events=list(turn.media_events) or None,
             handled_turn=turn.handled_turn,
-            ingress_metadata=turn.ingress,
+            coalescing_key=turn.coalescing_key,
             payload_metadata=turn.payload,
             current_prompt_is_structured=turn.current_prompt_is_structured,
         )

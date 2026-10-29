@@ -48,7 +48,6 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import (
     DispatchEvent,
-    DispatchIngressMetadata,
     DispatchPayloadMetadata,
     PreparedIngress,
     prepare_media_ingress,
@@ -97,8 +96,6 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch
 from mindroom.turn_record import SourceEventMetadata, TurnRecord
 from mindroom.turns.dispatch import TurnDispatcher
-from mindroom.turns.facts import PrecheckedEvent
-from mindroom.turns.ingress import _IngressAdmissionOutcome
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -133,7 +130,6 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-    from mindroom.turns.facts import IngressFacts
 
 
 def _coalescing_gate_is_idle(gate: CoalescingGate) -> bool:
@@ -269,7 +265,7 @@ async def _enqueue_for_dispatch(
     message_received_depth: int = 0,
     coalescing_key: CoalescingKey | None = None,
     payload_trusted: bool = False,
-) -> _IngressAdmissionOutcome:
+) -> None:
     """Test helper for the reserved Matrix-ingress enqueue path, classified as ingress classifies it."""
     if isinstance(event, nio.RoomMessageText):
         event = PreparedIngress(
@@ -297,7 +293,7 @@ async def _enqueue_for_dispatch(
     try:
         # Ingress claims a source before it reaches the gate.
         assert await ticket.claim_turn(TurnRecord.create([event.event_id], completed=False)) is None
-        return await bot._turn_ingress._enqueue_for_dispatch(
+        await bot._turn_ingress._enqueue_for_dispatch(
             event,
             room,
             facts=facts,
@@ -322,7 +318,6 @@ async def _admit_ready(
     await gate.admit(
         key,
         source_event_id=pending_event.event.event_id,
-        source_kind=pending_event.facts.source_kind,
         ready_result=ReadyPendingEvent(pending_event=pending_event),
     )
 
@@ -907,10 +902,9 @@ async def test_room_root_image_and_thread_caption_coalesce_into_single_thread_di
         _requester_user_id: str,
         *,
         handled_turn: TurnRecord | None = None,
-        ingress_metadata: DispatchIngressMetadata | None = None,
+        coalescing_key: CoalescingKey | None = None,
         **_metadata: object,
     ) -> None:
-        coalescing_key = ingress_metadata.coalescing_key if ingress_metadata is not None else None
         calls.append(
             (
                 _handled_turn_source_event_ids(handled_turn),
@@ -1645,7 +1639,7 @@ async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: P
         idle.set()
         await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in calls] == [["$a"], ["$b"]])
 
-    assert all(batch.ingress.active_follow_up for batch in calls)
+    assert all(batch.active_follow_up for batch in calls)
     assert [(batch.facts.run_requester_id, batch.handled_turn.requester_id) for batch in calls] == [
         ("@alice:localhost", "@alice:localhost"),
         ("@bob:localhost", "@bob:localhost"),
@@ -2145,16 +2139,11 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
     payload_requests = []
     registered_media_event_ids = []
 
-    async def fake_prepare_dispatch(
-        _room: nio.MatrixRoom,
-        event: DispatchEvent,
-        facts: IngressFacts,
-        **_kwargs: object,
-    ) -> object:
+    async def fake_prepare_dispatch(turn: PreparedTurn) -> object:
         dispatch = _prepared_dispatch(
-            event_id=event.event_id,
-            requester_user_id=facts.run_requester_id,
-            body=event.body,
+            event_id=turn.event.event_id,
+            requester_user_id=turn.facts.run_requester_id,
+            body=turn.event.body,
             thread_id="$thread",
             dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         )
@@ -2308,7 +2297,6 @@ async def test_room_scope_text_then_pending_voice_waits_for_voice_class_admissio
         voice_slot,
         key=key,
         source_event_id="$voice",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(ready_voice()),
     )
     await asyncio.sleep(0.07)
@@ -2354,7 +2342,6 @@ async def test_flush_waiting_on_a_lane_that_never_settles_reports_the_stall(
             text_slot,
             key=key,
             source_event_id="$text",
-            source_kind="message",
             ready_result=ReadyPendingEvent(
                 pending_event=make_pending_event(text, room, source_kind="message"),
             ),
@@ -2417,7 +2404,6 @@ async def test_voice_ready_release_combines_same_thread_backlog_in_receipt_order
         ready_result=ReadyPendingEvent(pending_event=make_pending_event(first, room, source_kind="message")),
         receipt_time=start,
         source_event_id="$typed1",
-        source_kind="message",
     )
     voice_slot = gate.enter_lane(
         ReceiptLaneKey(room_id=room.room_id, sender_id="@user:localhost"),
@@ -2427,7 +2413,6 @@ async def test_voice_ready_release_combines_same_thread_backlog_in_receipt_order
         voice_slot,
         key=text_key,
         source_event_id="$voice",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(ready_voice()),
     )
     await gate.admit(
@@ -2435,7 +2420,6 @@ async def test_voice_ready_release_combines_same_thread_backlog_in_receipt_order
         ready_result=ReadyPendingEvent(pending_event=make_pending_event(second, room, source_kind="message")),
         receipt_time=start + 0.5,
         source_event_id="$typed2",
-        source_kind="message",
     )
     await asyncio.sleep(0.05)
 
@@ -2511,7 +2495,6 @@ async def test_interrupted_claimed_admission_is_retried_on_next_drain() -> None:
         second_slot,
         key=key,
         source_event_id="$second",
-        source_kind="message",
         ready_task=asyncio.create_task(ready_second()),
     )
     [gate_entry] = gate._gates.values()
@@ -2573,7 +2556,6 @@ async def test_voice_handoff_buffers_same_thread_followups_while_in_flight() -> 
         voice_slot,
         key=resolved_key,
         source_event_id="$voice",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(ready_voice()),
     )
     await asyncio.wait_for(entered_voice_dispatch.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
@@ -2614,7 +2596,7 @@ async def test_voice_before_text_uses_stable_admission_key() -> None:
         )
 
     async def dispatch_batch(batch: PreparedTurn) -> None:
-        calls.append((batch.ingress.coalescing_key, list(batch.handled_turn.source_event_ids)))
+        calls.append((batch.coalescing_key, list(batch.handled_turn.source_event_ids)))
 
     gate = CoalescingGate(
         dispatch_turn=dispatch_batch,
@@ -2627,7 +2609,6 @@ async def test_voice_before_text_uses_stable_admission_key() -> None:
         voice_slot,
         key=resolved_key,
         source_event_id="$voice",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(ready_voice()),
     )
     await asyncio.sleep(0.005)
@@ -2667,7 +2648,7 @@ async def test_text_before_voice_uses_stable_admission_key() -> None:
         )
 
     async def dispatch_batch(batch: PreparedTurn) -> None:
-        calls.append((batch.ingress.coalescing_key, list(batch.handled_turn.source_event_ids)))
+        calls.append((batch.coalescing_key, list(batch.handled_turn.source_event_ids)))
 
     gate = CoalescingGate(
         dispatch_turn=dispatch_batch,
@@ -2681,7 +2662,6 @@ async def test_text_before_voice_uses_stable_admission_key() -> None:
         voice_slot,
         key=resolved_key,
         source_event_id="$voice",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(ready_voice()),
     )
     await asyncio.sleep(0.06)
@@ -2732,7 +2712,6 @@ async def test_plain_reply_voice_resolution_batches_related_text() -> None:
         voice_slot,
         key=root_key,
         source_event_id="$voice",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(ready_voice()),
     )
     await _admit_ready(gate, root_key, make_pending_event(typed, room, source_kind="message"))
@@ -2785,7 +2764,6 @@ async def test_text_first_waits_for_plain_reply_voice_ready_during_debounce() ->
         voice_slot,
         key=root_key,
         source_event_id="$voice",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(ready_voice()),
     )
 
@@ -2846,7 +2824,6 @@ async def test_later_different_thread_voice_does_not_hold_earlier_text() -> None
         voice_slot,
         key=voice_root_key,
         source_event_id="$voice",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(ready_voice()),
     )
     await asyncio.sleep(0.06)
@@ -2885,7 +2862,6 @@ async def test_failed_room_voice_does_not_coalesce_surviving_room_roots() -> Non
         voice_slot,
         key=key,
         source_event_id="$voice",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(failed_voice()),
     )
     await _admit_ready(gate, key, make_pending_event(second, room, source_kind="message"))
@@ -2924,7 +2900,7 @@ async def test_voice_admissions_resolving_to_different_threads_do_not_coalesce()
         )
 
     async def dispatch_batch(batch: PreparedTurn) -> None:
-        calls.append((batch.ingress.coalescing_key, list(batch.handled_turn.source_event_ids)))
+        calls.append((batch.coalescing_key, list(batch.handled_turn.source_event_ids)))
 
     gate = CoalescingGate(
         dispatch_turn=dispatch_batch,
@@ -2938,14 +2914,12 @@ async def test_voice_admissions_resolving_to_different_threads_do_not_coalesce()
         first_slot,
         key=first_key,
         source_event_id="$voice1",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(ready_voice(first_voice)),
     )
     gate.submit_lane_slot(
         second_slot,
         key=second_key,
         source_event_id="$voice2",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(ready_voice(second_voice)),
     )
 
@@ -2987,7 +2961,7 @@ async def test_pending_thread_voice_does_not_capture_unrelated_thread_text() -> 
         )
 
     async def dispatch_batch(batch: PreparedTurn) -> None:
-        calls.append((batch.ingress.coalescing_key, list(batch.handled_turn.source_event_ids)))
+        calls.append((batch.coalescing_key, list(batch.handled_turn.source_event_ids)))
 
     gate = CoalescingGate(
         dispatch_turn=dispatch_batch,
@@ -3000,7 +2974,6 @@ async def test_pending_thread_voice_does_not_capture_unrelated_thread_text() -> 
         voice_slot,
         key=voice_key,
         source_event_id="$voice",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(ready_voice()),
     )
     await _admit_ready(
@@ -3084,7 +3057,7 @@ async def test_deferred_room_scope_voice_burst_stays_one_turn_under_null_thread_
         )
 
     async def dispatch_batch(batch: PreparedTurn) -> None:
-        calls.append((batch.ingress.coalescing_key, list(batch.handled_turn.source_event_ids)))
+        calls.append((batch.coalescing_key, list(batch.handled_turn.source_event_ids)))
 
     gate = CoalescingGate(
         dispatch_turn=dispatch_batch,
@@ -3098,14 +3071,12 @@ async def test_deferred_room_scope_voice_burst_stays_one_turn_under_null_thread_
         first_slot,
         key=key,
         source_event_id="$voice1",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(ready_voice(first_voice)),
     )
     gate.submit_lane_slot(
         second_slot,
         key=key,
         source_event_id="$voice2",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(ready_voice(second_voice)),
     )
     await gate.drain_all()
@@ -3264,7 +3235,7 @@ async def test_pending_dispatch_policy_preserves_active_followup_without_bypassi
     await gate.drain_all()
 
     assert calls[0].facts.source_kind == "voice"
-    assert calls[0].ingress.active_follow_up
+    assert calls[0].active_follow_up
     assert calls[0].event.payload_trusted
 
 
@@ -3964,10 +3935,10 @@ async def test_handle_prepared_turn_uses_batch_key_for_text_primary(tmp_path: Pa
         await bot._turn_dispatcher.handle_prepared_turn(batch)
 
     dispatched_event = mock_dispatch.await_args.args[0].event
-    ingress = mock_dispatch.await_args.args[0].ingress
+    coalescing_key = mock_dispatch.await_args.args[0].coalescing_key
     assert isinstance(dispatched_event, PreparedIngress)
-    assert ingress.coalescing_key == batch.ingress.coalescing_key
-    assert ingress.coalescing_key.thread_id == "$voice_thread"
+    assert coalescing_key == batch.coalescing_key
+    assert coalescing_key.thread_id == "$voice_thread"
     assert "m.relates_to" not in dispatched_event.source["content"]
 
 
@@ -3997,7 +3968,7 @@ def test_room_resolved_voice_turn_keeps_target_separate_from_physical_relation()
         queues_other_run=nothing_else_queued,
     )
 
-    assert batch.ingress.coalescing_key.thread_id is None
+    assert batch.coalescing_key.thread_id is None
     assert batch.event.source["content"]["m.relates_to"] == {
         "rel_type": "m.thread",
         "event_id": "$voice",
@@ -4039,7 +4010,7 @@ def test_room_level_turn_preserves_mentions_without_rewriting_physical_relation(
         queues_other_run=nothing_else_queued,
     )
 
-    assert batch.ingress.coalescing_key.thread_id is None
+    assert batch.coalescing_key.thread_id is None
     assert batch.payload.mentioned_user_ids == ("@agent:localhost",)
     assert batch.event.source["content"]["m.relates_to"]["event_id"] == "$stale-thread"
 
@@ -4114,7 +4085,7 @@ def test_single_mentioned_followup_turn_uses_canonical_key_without_rewriting_sou
         queues_other_run=nothing_else_queued,
     )
 
-    assert batch.ingress.coalescing_key.thread_id == "$new-thread"
+    assert batch.coalescing_key.thread_id == "$new-thread"
     assert batch.event.source["content"]["m.relates_to"]["event_id"] == "$old-thread"
     assert batch.payload.mentioned_user_ids == ("@agent:localhost",)
 
@@ -4136,7 +4107,7 @@ def test_single_followup_batch_uses_coalescing_thread_relation() -> None:
         queues_other_run=nothing_else_queued,
     )
 
-    assert batch.ingress.coalescing_key.thread_id == "$post-stt-thread"
+    assert batch.coalescing_key.thread_id == "$post-stt-thread"
     assert batch.event.source["content"]["m.relates_to"]["event_id"] == "$voice"
 
 
@@ -6059,7 +6030,7 @@ def test_single_prepared_turn_preserves_source_kind() -> None:
         queues_other_run=nothing_else_queued,
     )
     assert batch.facts.source_kind == "message"
-    assert batch.ingress.active_follow_up
+    assert batch.active_follow_up
 
 
 def test_single_text_turn_preserves_dispatch_policy_source_kind() -> None:
@@ -6085,7 +6056,7 @@ def test_single_text_turn_preserves_dispatch_policy_source_kind() -> None:
         queues_other_run=nothing_else_queued,
     )
     assert batch.facts.source_kind == "message"
-    assert batch.ingress.active_follow_up
+    assert batch.active_follow_up
     assert batch.event.event_id == pending.event.event_id
     assert batch.event.source is pending.event.source
 
@@ -6562,7 +6533,7 @@ async def test_normal_text_command_still_dispatches_as_command(tmp_path: Path) -
         await dispatch_test_turn(bot._turn_dispatcher, room, command_event, "@user:localhost")
 
     # A command reads only the conversation it can without waiting on thread history.
-    assert prepare_dispatch_mock.await_args.kwargs["use_command_context"] is True
+    assert prepare_dispatch_mock.await_args.args[0].command is not None
     handle_cmd_mock.assert_awaited_once()
 
 
@@ -6616,7 +6587,7 @@ async def test_active_voice_follow_up_preserves_voice_command_policy(tmp_path: P
         )
 
     prepare_dispatch_mock.assert_awaited_once()
-    assert prepare_dispatch_mock.await_args.kwargs["use_command_context"] is False
+    assert prepare_dispatch_mock.await_args.args[0].command is None
     execute_command_mock.assert_not_awaited()
     plan_mock.assert_awaited_once()
     execute_response_mock.assert_awaited_once()
@@ -7559,17 +7530,15 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
         ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
         handled = await bot._turn_ingress._dispatch_file_sidecar_text_preview(
             room,
-            PrecheckedEvent(
-                event=sidecar_event,
-                facts=make_ingress_facts(sidecar_event.sender, requester_user_id="@user:localhost"),
-            ),
+            sidecar_event,
+            make_ingress_facts(sidecar_event.sender, requester_user_id="@user:localhost"),
             ticket=ticket,
             coalescing_thread_id="$thread",
         )
         ticket.close()
         await bot._coalescing_gate.drain_all()
 
-    assert handled is _IngressAdmissionOutcome.DEFERRED
+    assert handled is TurnDispatchOutcome.DEFERRED
     assert captured_envelopes[0].source_kind == "message"
     assert captured_envelopes[0].mentioned_agents == ("test_agent",)
     assert captured_envelopes[0].requester_id == "@user:localhost"
@@ -7725,13 +7694,14 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
         ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, sidecar.sender)
         outcome = await bot._turn_ingress._dispatch_file_sidecar_text_preview(
             room,
-            PrecheckedEvent(event=sidecar, facts=make_ingress_facts(sidecar.sender, requester_user_id=sidecar.sender)),
+            sidecar,
+            make_ingress_facts(sidecar.sender, requester_user_id=sidecar.sender),
             ticket=ticket,
             coalescing_thread_id=None,
         )
         drain_result = await bot._coalescing_gate.drain_all()
 
-    assert outcome is _IngressAdmissionOutcome.DEFERRED
+    assert outcome is TurnDispatchOutcome.DEFERRED
     assert drain_result.dispatch_failure_count == 1
     retry_pending_source.assert_called_once_with(room.room_id, (sidecar.event_id,))
 
@@ -7866,7 +7836,7 @@ async def test_first_router_turn_refreshes_lazy_members_before_mention_routing(t
     with patch.object(
         bot._turn_ingress,
         "_dispatch_prepared_text_like_ingress",
-        new=AsyncMock(return_value=_IngressAdmissionOutcome.DEFERRED),
+        new=AsyncMock(return_value=TurnDispatchOutcome.DEFERRED),
     ):
         outcome = await bot._turn_ingress.handle_text_event(room, event)
 

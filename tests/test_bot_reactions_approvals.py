@@ -256,16 +256,13 @@ async def _start_selection_response(
     selection, _target = _claimed_test_selection(bot, room_id=target.room_id)
     await selections._start_interactive_selection(
         nio.MatrixRoom(target.room_id, bot.matrix_id.full_id),
-        InteractiveSelectionDispatch(
-            selection=selection,
-            response_target=target,
-            source_event_id="$reaction",
-            facts=make_ingress_facts(
-                "@user:localhost",
-                source_kind=INTERACTIVE_SELECTION_SOURCE_KIND,
-                requester_user_id="@user:localhost",
-            ),
+        InteractiveSelectionDispatch(selection=selection, response_target=target),
+        facts=make_ingress_facts(
+            "@user:localhost",
+            source_kind=INTERACTIVE_SELECTION_SOURCE_KIND,
+            requester_user_id="@user:localhost",
         ),
+        source_event_id="$reaction",
     )
 
 
@@ -821,7 +818,7 @@ class TestAgentBot(AgentBotTestBase):
         assert admission is AdmissionResult.ADMITTED
 
         execute = AsyncMock(side_effect=(OSError("pending write failed"), None))
-        with patch.object(bot._interactive_selections, "_execute_interactive_selection", new=execute):
+        with patch.object(bot._interactive_selections, "_execute_admitted_interactive_selection", new=execute):
             await _dispatch_reaction(bot, room, event)
             await bot._response_runner.drain_inbox_responses()
             assert event.event_id in await bot._journal_dispatcher.unsettled_event_ids()
@@ -876,7 +873,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with patch.object(
             bot._interactive_selections,
-            "_execute_interactive_selection",
+            "_execute_admitted_interactive_selection",
             new=AsyncMock(side_effect=OSError("pending write failed")),
         ):
             await _dispatch_reaction(bot, room, event)
@@ -1010,7 +1007,7 @@ class TestAgentBot(AgentBotTestBase):
                 return
             await original_dispatch(turn)
 
-        async def start_selection(*_args: object) -> None:
+        async def start_selection(*_args: object, **_kwargs: object) -> None:
             execution_order.append("reaction")
 
         monkeypatch.setattr(bot._coalescing_gate, "_dispatch_turn", dispatch_turn)
@@ -1286,7 +1283,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch.object(
                 bot._interactive_selections,
-                "_execute_interactive_selection",
+                "_execute_admitted_interactive_selection",
                 new=AsyncMock(side_effect=asyncio.CancelledError("restart")),
             ),
             pytest.raises(asyncio.CancelledError, match="restart"),
@@ -1331,7 +1328,11 @@ class TestAgentBot(AgentBotTestBase):
         selection, target = _claimed_test_selection(bot)
         room = nio.MatrixRoom(target.room_id, bot.matrix_id.full_id)
 
-        with patch.object(bot._interactive_selections, "_execute_interactive_selection", new=execute_selection):
+        with patch.object(
+            bot._interactive_selections,
+            "_execute_admitted_interactive_selection",
+            new=execute_selection,
+        ):
             response = asyncio.create_task(
                 bot._interactive_selections._handle_interactive_selection(
                     room,

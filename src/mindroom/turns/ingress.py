@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, replace
-from enum import Enum
 from functools import partial
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -27,7 +26,6 @@ from mindroom.constants import (
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import (
     DispatchEvent,
-    MediaDispatchEvent,
     PreparedIngress,
     dispatch_prompt_for_event,
     prepare_media_ingress,
@@ -77,7 +75,7 @@ from mindroom.timing import (
 )
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
-from mindroom.turns.facts import PrecheckedEvent, command_for, is_router_voice_echo
+from mindroom.turns.facts import command_for, is_router_voice_echo
 from mindroom.turns.queued_notice import mark_waiting_for_approval, queued_notice_reservation_if_busy
 
 if TYPE_CHECKING:
@@ -94,6 +92,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import MessageEnvelope
     from mindroom.ingress_validation import IngressValidator
     from mindroom.matrix.identity import MatrixID
+    from mindroom.message_target import MessageTarget
     from mindroom.response_runner import ResponseRunner
     from mindroom.turn_policy import TurnPolicy
     from mindroom.turn_store import TurnStore
@@ -117,9 +116,6 @@ class _EditRegenerator(Protocol):
         """Regenerate an edit and report any durable source handoff."""
 
 
-type _PrecheckedInboundMediaEvent = PrecheckedEvent[MatrixMediaEvent]
-
-
 def _media_source_kind(event: MatrixMediaEvent) -> str | None:
     """Return the source kind a media event's transport fixes; a long text sent as a file is text."""
     if is_audio_message_event(event):
@@ -127,12 +123,6 @@ def _media_source_kind(event: MatrixMediaEvent) -> str | None:
     if is_v2_sidecar_text_preview(event.source):
         return None
     return IMAGE_SOURCE_KIND if is_image_message_event(event) else MEDIA_SOURCE_KIND
-
-
-class _IngressAdmissionOutcome(Enum):
-    DEFERRED = "deferred"
-    CONSUMED = "consumed"
-    IGNORED = "ignored"
 
 
 @dataclass(frozen=True)
@@ -217,22 +207,20 @@ class TurnIngress:
             log_context["matrix_event_receive_lag_ms"] = round(receive_timestamp_ms - float(origin_server_ts), 1)
         self.deps.logger.info("matrix_event_callback_started", **log_context)
 
-    async def _precheck_dispatch_event[T: DispatchEvent | MatrixMediaEvent](
+    async def _precheck_dispatch_event(
         self,
         room: nio.MatrixRoom,
-        event: T,
+        event: DispatchEvent | MatrixMediaEvent,
         facts: IngressFacts,
         *,
         is_edit: bool = False,
-    ) -> PrecheckedEvent[T] | None:
-        """Run the shared prechecks on the event's one classification."""
+    ) -> bool:
+        """Run the shared prechecks on the event's one classification; return whether the event goes on."""
         async with admitted_response_decision(
             self.deps.runtime.response_admission_gate,
             self.deps.response_runner.wait_for_admission_or_shutdown,
         ):
-            if not await self.deps.ingress.precheck_event(room, event, facts, is_edit=is_edit):
-                return None
-        return PrecheckedEvent(event=event, facts=facts)
+            return await self.deps.ingress.precheck_event(room, event, facts, is_edit=is_edit)
 
     def _event_allows_queued_notice(
         self,
@@ -259,57 +247,24 @@ class TurnIngress:
             room=room,
         )
 
-    async def _enqueue_prepared_text_for_dispatch(
+    async def _enqueue_prepared_ingress(
         self,
-        *,
         room: nio.MatrixRoom,
-        prepared_event: PreparedIngress,
+        event: PreparedIngress,
+        *,
         facts: IngressFacts,
+        target: MessageTarget,
         envelope: MessageEnvelope,
         coalescing_thread_id: str | None,
         ticket: IngressTicket,
-    ) -> _IngressAdmissionOutcome:
-        """Queue one normalized text event; the gate decides busy-conversation routing."""
-        target = self.deps.resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id=coalescing_thread_id,
-            reply_to_event_id=prepared_event.event_id,
-            event_source=prepared_event.source,
-        )
-        if self._event_allows_queued_notice(room, prepared_event, envelope):
+    ) -> None:
+        """Queue one prepared text or media event; the gate decides busy-conversation routing."""
+        if self._event_allows_queued_notice(room, event, envelope):
             ticket.notice = queued_notice_reservation_if_busy(
                 self.deps.response_runner,
                 target=target,
                 envelope=envelope,
             )
-        await self._enqueue_for_dispatch(
-            prepared_event,
-            room,
-            facts=facts,
-            ticket=ticket,
-            coalescing_key=requester_coalescing_key(room.room_id, coalescing_thread_id, facts.lane_requester_id),
-        )
-        mark_waiting_for_approval(self.deps, room, prepared_event.source, target, envelope)
-        return _IngressAdmissionOutcome.DEFERRED
-
-    async def _enqueue_media_for_dispatch(
-        self,
-        *,
-        room: nio.MatrixRoom,
-        event: MediaDispatchEvent,
-        facts: IngressFacts,
-        coalescing_thread_id: str | None,
-        ticket: IngressTicket,
-    ) -> _IngressAdmissionOutcome:
-        """Queue one media event; the gate decides busy-conversation routing."""
-        target = self.deps.resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id=coalescing_thread_id,
-            reply_to_event_id=event.event_id,
-            event_source=event.source,
-        )
-        envelope = self.deps.resolver.build_envelope(event=event, facts=facts, target=target)
-        ticket.notice = queued_notice_reservation_if_busy(self.deps.response_runner, target=target, envelope=envelope)
         await self._enqueue_for_dispatch(
             event,
             room,
@@ -318,7 +273,6 @@ class TurnIngress:
             coalescing_key=requester_coalescing_key(room.room_id, coalescing_thread_id, facts.lane_requester_id),
         )
         mark_waiting_for_approval(self.deps, room, event.source, target, envelope)
-        return _IngressAdmissionOutcome.DEFERRED
 
     async def _should_skip_router_before_shared_ingress_work(
         self,
@@ -389,24 +343,22 @@ class TurnIngress:
             sender_id=requester_user_id,
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
-            membership_index=self.deps.turn_policy.deps.agent_reply_memberships,
+            membership_index=self.deps.runtime.agent_reply_memberships,
             available_responders_in_room=available_responders,
         )
 
-    async def _resolve_text_event_with_ingress_timing(
-        self,
-        event: nio.RoomMessageFormatted,
-        *,
+    @staticmethod
+    async def _normalize_with_ingress_timing(
+        normalize: Awaitable[PreparedIngress | None],
         dispatch_timing: DispatchPipelineTiming | None,
     ) -> PreparedIngress:
-        """Normalize one inbound text event while recording ingress timing boundaries."""
+        """Await one text-like normalization while recording ingress timing boundaries."""
         if dispatch_timing is not None:
             dispatch_timing.mark("ingress_normalize_start")
-        prepared_event = await self.deps.normalizer.resolve_text_event(
-            TextNormalizationRequest(event=event),
-        )
+        prepared_event = await normalize
         if dispatch_timing is not None:
             dispatch_timing.mark("ingress_normalize_ready")
+        assert prepared_event is not None
         attach_dispatch_pipeline_timing(prepared_event.source, dispatch_timing)
         return prepared_event
 
@@ -418,7 +370,7 @@ class TurnIngress:
         facts: IngressFacts,
         ticket: IngressTicket,
         coalescing_thread_id: str | None,
-    ) -> _IngressAdmissionOutcome:
+    ) -> TurnDispatchOutcome:
         """Run shared ingress dispatch for text events and sidecar text previews."""
         target = self.deps.resolver.build_message_target(
             room_id=room.room_id,
@@ -428,7 +380,7 @@ class TurnIngress:
         )
         content = prepared_event.source.get("content") if isinstance(prepared_event.source, dict) else None
         if facts.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND and is_router_voice_echo(facts, content):
-            return _IngressAdmissionOutcome.CONSUMED
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         envelope = self.deps.resolver.build_envelope(event=prepared_event, facts=facts, target=target)
         if not hook_ingress_policy(envelope).allow_full_dispatch:
             # A hook relay bypasses coalescing, so its turn would dispatch with exactly these facts: this is where
@@ -440,7 +392,7 @@ class TurnIngress:
                 hook_source=envelope.hook_source,
                 message_received_depth=envelope.message_received_depth,
             )
-            return _IngressAdmissionOutcome.CONSUMED
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         message_text = prepared_event.body.strip()
         if envelope.origin.may_answer_interactive_prompt and message_text.isdigit() and len(message_text) == 1:
             selection = await self.deps.interactive_questions.claim_interactive_text(
@@ -458,7 +410,7 @@ class TurnIngress:
                     facts=facts,
                     source_event_id=prepared_event.event_id,
                 )
-                return _IngressAdmissionOutcome.DEFERRED
+                return TurnDispatchOutcome.DEFERRED
         if command_for(facts, dispatch_prompt_for_event(prepared_event)) is not None:
             return await self._dispatch_command_control_input(
                 room=room,
@@ -467,14 +419,16 @@ class TurnIngress:
                 coalescing_thread_id=coalescing_thread_id,
                 ticket=ticket,
             )
-        return await self._enqueue_prepared_text_for_dispatch(
-            room=room,
-            prepared_event=prepared_event,
+        await self._enqueue_prepared_ingress(
+            room,
+            prepared_event,
             facts=facts,
+            target=target,
             envelope=envelope,
             coalescing_thread_id=coalescing_thread_id,
             ticket=ticket,
         )
+        return TurnDispatchOutcome.DEFERRED
 
     def _mentioned_entity_final_reply(
         self,
@@ -497,30 +451,26 @@ class TurnIngress:
     async def _handle_edit_event(
         self,
         room: nio.MatrixRoom,
-        prechecked_event: PrecheckedEvent[nio.RoomMessageFormatted],
+        event: nio.RoomMessageFormatted,
+        facts: IngressFacts,
     ) -> bool | None:
         """Apply a person's edit to their message still waiting in a queue, or hand it to the edit regenerator.
 
         An entity's edit changes neither, so a queued message from an entity answers the text it was queued with.
         """
-        if prechecked_event.facts.sender_is_managed:
+        if facts.sender_is_managed:
             return None
-        event_info = EventInfo.from_event(prechecked_event.event.source)
+        event_info = EventInfo.from_event(event.source)
         async with self.deps.ingress.admitted_reply_decision(
-            prechecked_event.facts.lane_requester_id,
+            facts.lane_requester_id,
             room.room_id,
-            unanswered=(prechecked_event.event.event_id,),
+            unanswered=(event.event_id,),
         ) as allowed:
             if not allowed:
                 return None
-            if await self._edit_queued_message(room, prechecked_event.event, event_info):
+            if await self._edit_queued_message(room, event, event_info):
                 return None
-            return await self.deps.edit_regenerator.handle_message_edit(
-                room,
-                prechecked_event.event,
-                event_info,
-                prechecked_event.facts,
-            )
+            return await self.deps.edit_regenerator.handle_message_edit(room, event, event_info, facts)
 
     async def _edit_queued_message(
         self,
@@ -627,7 +577,7 @@ class TurnIngress:
         facts: IngressFacts,
         coalescing_thread_id: str | None,
         ticket: IngressTicket,
-    ) -> _IngressAdmissionOutcome:
+    ) -> TurnDispatchOutcome:
         """Dispatch one command as a control input without entering the coalescing gate, under its ingress claim."""
         # A command an entity wrote for a human runs with that human's authority, as its conversation would;
         # handle_command refuses the commands only the human may send.
@@ -643,12 +593,12 @@ class TurnIngress:
             queues_other_run=partial(self.deps.coalescing_gate.queues_other_run, key),
         )
         if await self.deps.dispatcher.dispatch_turn(replace(turn, claims=(ticket.take_claim(),))):
-            return _IngressAdmissionOutcome.CONSUMED
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         # Its claim was refused as a fresh claim of this turn would be now, so the callback ends as that refusal does:
         # a retry would only reach the same refusal.
         if await ticket.refusal_defers(turn.handled_turn):
-            return _IngressAdmissionOutcome.DEFERRED
-        return _IngressAdmissionOutcome.CONSUMED
+            return TurnDispatchOutcome.DEFERRED
+        return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
     async def _adaptive_text_debounce_seconds(
         self,
@@ -679,30 +629,20 @@ class TurnIngress:
 
     async def _enqueue_for_dispatch(
         self,
-        event: DispatchEvent,
+        event: PreparedIngress,
         room: nio.MatrixRoom,
         *,
         facts: IngressFacts,
         ticket: IngressTicket,
         coalescing_key: CoalescingKey,
-    ) -> _IngressAdmissionOutcome:
-        """Route one inbound event through the live coalescing gate."""
+    ) -> None:
+        """Route one prepared inbound event through the live coalescing gate."""
         dispatch_timing = get_dispatch_pipeline_timing(event.source)
         if dispatch_timing is not None:
             dispatch_timing.mark("gate_enter")
         enqueue_start = time.monotonic()
-        timing_scope = event_timing_scope(event.event_id)
-        source_kind = facts.source_kind
-        gate_enqueue_start = time.monotonic()
-        if isinstance(event, PreparedIngress):
-            prepared_event = event
-        elif is_matrix_media_dispatch_event(event):
-            prepared_event = prepare_media_ingress(event)
-        else:
-            msg = f"Unsupported dispatch event: {type(event).__name__}"
-            raise TypeError(msg)
         text_debounce_seconds = await self._adaptive_text_debounce_seconds(
-            prepared_event,
+            event,
             room,
             facts=facts,
             key=coalescing_key,
@@ -711,27 +651,20 @@ class TurnIngress:
         pending_event = PendingEvent(
             text_debounce_seconds=text_debounce_seconds,
             event=replace(
-                prepared_event,
+                event,
                 turn_dispatch_recovery=turn_dispatch_recovery_active(),
-                for_another_participant=self._mentions_another_participant(room, prepared_event.source),
+                for_another_participant=self._mentions_another_participant(room, event.source),
             ),
             room=room,
             facts=facts,
         )
         ticket.admit(coalescing_key, pending_event)
         emit_elapsed_timing(
-            "ingress_handoff.enqueue_for_dispatch.coalescing_gate",
-            gate_enqueue_start,
-            source_kind=source_kind,
-            timing_scope=timing_scope,
-        )
-        emit_elapsed_timing(
             "ingress_handoff.enqueue_for_dispatch",
             enqueue_start,
-            source_kind=source_kind,
-            timing_scope=timing_scope,
+            source_kind=facts.source_kind,
+            timing_scope=event_timing_scope(event.event_id),
         )
-        return _IngressAdmissionOutcome.DEFERRED
 
     async def handle_text_event(self, room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
         """Handle one inbound text event from its journal callback.
@@ -819,14 +752,9 @@ class TurnIngress:
         if not isinstance(event.body, str) or is_nonterminal_stream:
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         event = turn_event
-        prechecked_event = await self._precheck_dispatch_event(room, event, facts, is_edit=is_edit)
-        if prechecked_event is None:
+        if not await self._precheck_dispatch_event(room, event, facts, is_edit=is_edit):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-        await ensure_room_membership_synced(
-            self._client(),
-            room,
-            sender_id=prechecked_event.facts.lane_requester_id,
-        )
+        await ensure_room_membership_synced(self._client(), room, sender_id=facts.lane_requester_id)
 
         dispatch_timing = create_dispatch_pipeline_timing(
             event_id=event.event_id,
@@ -834,17 +762,13 @@ class TurnIngress:
         )
         attach_dispatch_pipeline_timing(event.source, dispatch_timing)
         if ticket is None:
-            ticket = self.reserve_prompt_ingress_order(
-                room,
-                prechecked_event.facts.lane_requester_id,
-                receipt_time=receipt_time,
-            )
+            ticket = self.reserve_prompt_ingress_order(room, facts.lane_requester_id, receipt_time=receipt_time)
         try:
             if is_edit:
                 ticket.close()
-                handed_off = await self._handle_edit_event(room, prechecked_event)
+                handed_off = await self._handle_edit_event(room, event, facts)
                 return TurnDispatchOutcome.DEFERRED if handed_off is True else TurnDispatchOutcome.INTENTIONALLY_IGNORED
-            discovery_alias = prechecked_event.facts.discovery_event_id
+            discovery_alias = facts.discovery_event_id
             claimed = await ticket.claim_turn(
                 TurnRecord.create(
                     [event.event_id],
@@ -854,16 +778,12 @@ class TurnIngress:
             )
             if claimed is not None:
                 return claimed
-            outcome = await self._ingest_live_text_event(
+            return await self._ingest_live_text_event(
                 room,
-                prechecked_event,
+                event,
+                facts,
                 dispatch_timing=dispatch_timing,
                 ticket=ticket,
-            )
-            return (
-                TurnDispatchOutcome.DEFERRED
-                if outcome is _IngressAdmissionOutcome.DEFERRED
-                else TurnDispatchOutcome.INTENTIONALLY_IGNORED
             )
         finally:
             ticket.close()
@@ -871,22 +791,21 @@ class TurnIngress:
     async def _ingest_live_text_event(
         self,
         room: nio.MatrixRoom,
-        prechecked_event: PrecheckedEvent[nio.RoomMessageFormatted],
+        event: nio.RoomMessageFormatted,
+        facts: IngressFacts,
         *,
         dispatch_timing: DispatchPipelineTiming | None,
         ticket: IngressTicket,
-    ) -> _IngressAdmissionOutcome:
+    ) -> TurnDispatchOutcome:
         """Resolve, normalize, and admit one live (non-edit) text event."""
-        event = prechecked_event.event
-        facts = prechecked_event.facts
         try:
             ingress_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
         except ThreadMembershipLookupError as exc:
             if await self._notify_command_target_not_ready(room, event, facts=facts):
-                return _IngressAdmissionOutcome.CONSUMED
+                return TurnDispatchOutcome.INTENTIONALLY_IGNORED
             if isinstance(exc, RelatedEventUnavailableError):
                 self._log_unplaceable_event(room, event)
-                return _IngressAdmissionOutcome.IGNORED
+                return TurnDispatchOutcome.INTENTIONALLY_IGNORED
             raise
         if await self._should_skip_router_before_shared_ingress_work(
             room,
@@ -900,7 +819,7 @@ class TurnIngress:
                 room_id=room.room_id,
                 thread_id=ingress_thread_id,
             )
-            return _IngressAdmissionOutcome.CONSUMED
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
         self.deps.logger.info(
             "Received message",
@@ -909,9 +828,9 @@ class TurnIngress:
             sender=event.sender,
             thread_id=ingress_thread_id,
         )
-        prepared_event = await self._resolve_text_event_with_ingress_timing(
-            event,
-            dispatch_timing=dispatch_timing,
+        prepared_event = await self._normalize_with_ingress_timing(
+            self.deps.normalizer.resolve_text_event(TextNormalizationRequest(event=event)),
+            dispatch_timing,
         )
         return await self._dispatch_prepared_text_like_ingress(
             room=room,
@@ -936,125 +855,94 @@ class TurnIngress:
         receipt_time: float,
     ) -> TurnDispatchOutcome:
         """Handle one media event inside the per-turn conversation lookup scope."""
-        prechecked_event = await self._precheck_dispatch_event(
-            room,
-            event,
-            self.deps.ingress.classify(event, source_kind=_media_source_kind(event)),
-        )
-        if prechecked_event is None:
+        facts = self.deps.ingress.classify(event, source_kind=_media_source_kind(event))
+        if not await self._precheck_dispatch_event(room, event, facts):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         dispatch_timing = create_dispatch_pipeline_timing(
-            event_id=prechecked_event.event.event_id,
+            event_id=event.event_id,
             room_id=room.room_id,
         )
-        attach_dispatch_pipeline_timing(prechecked_event.event.source, dispatch_timing)
-        if is_audio_message_event(prechecked_event.event) and prechecked_event.facts.sender_is_managed:
+        attach_dispatch_pipeline_timing(event.source, dispatch_timing)
+        if is_audio_message_event(event) and facts.sender_is_managed:
             self.deps.logger.debug(
                 "Ignoring agent audio event for voice transcription",
-                event_id=prechecked_event.event.event_id,
-                sender=prechecked_event.event.sender,
+                event_id=event.event_id,
+                sender=event.sender,
             )
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-        await ensure_room_membership_synced(
-            self._client(),
-            room,
-            sender_id=prechecked_event.facts.lane_requester_id,
-        )
-        ticket = self.reserve_prompt_ingress_order(
-            room,
-            prechecked_event.facts.lane_requester_id,
-            receipt_time=receipt_time,
-        )
+        await ensure_room_membership_synced(self._client(), room, sender_id=facts.lane_requester_id)
+        ticket = self.reserve_prompt_ingress_order(room, facts.lane_requester_id, receipt_time=receipt_time)
         try:
-            claimed = await ticket.claim_turn(TurnRecord.create([prechecked_event.event.event_id], completed=False))
+            claimed = await ticket.claim_turn(TurnRecord.create([event.event_id], completed=False))
             if claimed is not None:
                 return claimed
-            if is_audio_message_event(prechecked_event.event):
+            if is_audio_message_event(event):
                 try:
                     dispatch_outcome = await self.deps.voice.admit(
                         room,
-                        PrecheckedEvent(event=prechecked_event.event, facts=prechecked_event.facts),
+                        event,
+                        facts,
                         dispatch_timing=dispatch_timing,
                         ticket=ticket,
                     )
                 except RelatedEventUnavailableError:
-                    self._log_unplaceable_event(room, prechecked_event.event)
+                    self._log_unplaceable_event(room, event)
                     return TurnDispatchOutcome.INTENTIONALLY_IGNORED
             else:
                 try:
-                    coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prechecked_event.event)
+                    coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
                 except RelatedEventUnavailableError:
-                    self._log_unplaceable_event(room, prechecked_event.event)
+                    self._log_unplaceable_event(room, event)
                     return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-                admission_outcome = await self._dispatch_special_media_as_text(
-                    room,
-                    prechecked_event,
-                    ticket=ticket,
-                    coalescing_thread_id=coalescing_thread_id,
-                )
-                if admission_outcome is _IngressAdmissionOutcome.DEFERRED:
-                    dispatch_outcome = TurnDispatchOutcome.DEFERRED
-                elif admission_outcome is _IngressAdmissionOutcome.CONSUMED or not is_matrix_media_dispatch_event(
-                    prechecked_event.event,
-                ):
-                    dispatch_outcome = TurnDispatchOutcome.INTENTIONALLY_IGNORED
-                else:
-                    await self._enqueue_media_for_dispatch(
-                        room=room,
-                        event=prechecked_event.event,
-                        facts=prechecked_event.facts,
+                if is_file_message_event(event) and is_v2_sidecar_text_preview(event.source):
+                    dispatch_outcome = await self._dispatch_file_sidecar_text_preview(
+                        room,
+                        event,
+                        facts,
+                        ticket=ticket,
+                        coalescing_thread_id=coalescing_thread_id,
+                    )
+                elif is_matrix_media_dispatch_event(event):
+                    target = self.deps.resolver.build_message_target(
+                        room_id=room.room_id,
+                        thread_id=coalescing_thread_id,
+                        reply_to_event_id=event.event_id,
+                        event_source=event.source,
+                    )
+                    await self._enqueue_prepared_ingress(
+                        room,
+                        prepare_media_ingress(event),
+                        facts=facts,
+                        target=target,
+                        envelope=self.deps.resolver.build_envelope(event=event, facts=facts, target=target),
                         coalescing_thread_id=coalescing_thread_id,
                         ticket=ticket,
                     )
                     dispatch_outcome = TurnDispatchOutcome.DEFERRED
+                else:
+                    dispatch_outcome = TurnDispatchOutcome.INTENTIONALLY_IGNORED
         finally:
             ticket.close()
         return dispatch_outcome
 
-    async def _dispatch_special_media_as_text(
-        self,
-        room: nio.MatrixRoom,
-        prechecked_event: _PrecheckedInboundMediaEvent,
-        *,
-        ticket: IngressTicket,
-        coalescing_thread_id: str | None,
-    ) -> _IngressAdmissionOutcome:
-        """Handle media events that normalize into the text dispatch pipeline."""
-        event = prechecked_event.event
-        if is_file_message_event(event):
-            return await self._dispatch_file_sidecar_text_preview(
-                room,
-                PrecheckedEvent(event=event, facts=prechecked_event.facts),
-                ticket=ticket,
-                coalescing_thread_id=coalescing_thread_id,
-            )
-        return _IngressAdmissionOutcome.IGNORED
-
     async def _dispatch_file_sidecar_text_preview(
         self,
         room: nio.MatrixRoom,
-        prechecked_event: PrecheckedEvent[FileMessageEvent],
+        event: FileMessageEvent,
+        facts: IngressFacts,
         *,
         ticket: IngressTicket,
         coalescing_thread_id: str | None,
-    ) -> _IngressAdmissionOutcome:
+    ) -> TurnDispatchOutcome:
         """Dispatch one sidecar-backed file preview through the normal text pipeline."""
-        event = prechecked_event.event
-        if not is_v2_sidecar_text_preview(event.source):
-            return _IngressAdmissionOutcome.IGNORED
-
-        dispatch_timing = get_dispatch_pipeline_timing(event.source)
-        if dispatch_timing is not None:
-            dispatch_timing.mark("ingress_normalize_start")
-        prepared_text_event = await self.deps.normalizer.prepare_file_sidecar_text_event(event)
-        if dispatch_timing is not None:
-            dispatch_timing.mark("ingress_normalize_ready")
-        assert prepared_text_event is not None
-        attach_dispatch_pipeline_timing(prepared_text_event.source, dispatch_timing)
+        prepared_text_event = await self._normalize_with_ingress_timing(
+            self.deps.normalizer.prepare_file_sidecar_text_event(event),
+            get_dispatch_pipeline_timing(event.source),
+        )
         return await self._dispatch_prepared_text_like_ingress(
             room=room,
             prepared_event=prepared_text_event,
-            facts=prechecked_event.facts,
+            facts=facts,
             ticket=ticket,
             coalescing_thread_id=coalescing_thread_id,
         )

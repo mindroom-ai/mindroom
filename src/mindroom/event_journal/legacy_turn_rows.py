@@ -72,17 +72,13 @@ class _Decoded:
     # Sources and aliases the blob recorded redacted, and the revisions it flagged redacted.
     redacted: tuple[str, ...]
     redacted_revisions: frozenset[str]
+    # The redacted events and the sources their redaction deleted, as warm-up reconciliation read them.
+    deleted: frozenset[str]
     # Revisions a pre-v2026.9.43 summary consumed through their source: revision to source.
     summary_revisions: Mapping[str, str]
     echo: str | None
     echo_is_fallback: bool | None
     timestamp: float
-
-    @property
-    def replay_source_event_ids(self) -> tuple[str, ...]:
-        """Return the sources the blob still treated as live, as its reader did."""
-        redacted = {self.record.prompt_source_event_id(event_id) for event_id in self.redacted}
-        return tuple(event_id for event_id in self.record.source_event_ids if event_id not in redacted)
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,8 +123,8 @@ def _mapping(value: object) -> Mapping[str, Any] | None:
 # Last legacy release: v2026.7.252; replacement: v2026.7.253 added optional source-level summaries.
 # Handling: Accept absent summaries without inventing revision identity that the old writer never persisted.
 # Coverage: tests/test_turn_rows_conversion.py::test_an_interrupted_import_into_a_populated_store_keeps_its_owners.
-def _decode(event_id: str, raw: object) -> _Decoded | None:
-    """Read one stored record the way the handled-turn codec did, or None when the codec rejected it for this index.
+def _decode(raw: object) -> _Decoded | None:
+    """Read one stored record the way the handled-turn codec did, or None when the codec rejected it.
 
     Every field is read by name, so a key an older writer emitted is dropped
     rather than rejected. A redacted source keeps no prompt, selection,
@@ -160,8 +156,6 @@ def _decode(event_id: str, raw: object) -> _Decoded | None:
     if not sources:
         return None
     aliases = tuple(event_id for event_id in canonical_source_event_ids(raw_aliases) if event_id not in sources)
-    if event_id not in (*sources, *aliases):
-        return None
     redacted = tuple(
         event_id for event_id in canonical_source_event_ids(raw_redacted) if event_id in (*sources, *aliases)
     )
@@ -221,6 +215,7 @@ def _decode(event_id: str, raw: object) -> _Decoded | None:
         record=record,
         redacted=redacted,
         redacted_revisions=redacted_revisions,
+        deleted=frozenset(redacted) | redacted_sources,
         summary_revisions=MappingProxyType(dict(summary_revisions)),
         echo=echo,
         echo_is_fallback=echo_is_fallback if isinstance(echo_is_fallback, bool) and echo is not None else None,
@@ -333,8 +328,9 @@ def _apply_redaction(transaction: Transaction, agent_name: str, room_id: str, ev
 def _groups(entries: Iterable[tuple[str, str, str]]) -> list[_Group]:
     """Group index entries by the exact blob they hold, decoding each blob once.
 
-    An entry the codec rejects for its own index belongs to no group, so the
-    event reads as having no row, as the warm-up that dropped it read it.
+    An entry whose blob the codec rejects, or does not declare its event,
+    belongs to no group, so the event reads as having no row, as the warm-up
+    that dropped it read it.
     """
     indexes: dict[tuple[str, str], list[str]] = {}
     for index_event_id, anchor_event_id, record_json in entries:
@@ -342,15 +338,14 @@ def _groups(entries: Iterable[tuple[str, str, str]]) -> list[_Group]:
     groups: list[_Group] = []
     for (_anchor, record_json), index_event_ids in indexes.items():
         try:
-            raw = json.loads(record_json)
-            decoded = {index: _decode(index, raw) for index in index_event_ids}
+            decoded = _decode(json.loads(record_json))
         except (TypeError, ValueError):
             continue
-        owned = [index for index, blob in decoded.items() if blob is not None]
+        if decoded is None:
+            continue
+        owned = frozenset(index for index in index_event_ids if index in decoded.record.indexed_event_ids)
         if owned:
-            blob = decoded[owned[0]]
-            assert blob is not None
-            groups.append(_Group(blob, frozenset(owned)))
+            groups.append(_Group(decoded, owned))
     return groups
 
 
@@ -423,7 +418,7 @@ def _convert(
 # tests/test_turn_rows_conversion.py::test_a_deleted_original_ends_the_paused_reply_to_its_relay.
 def _extract_redactions(transaction: Transaction, agent_name: str, groups: Sequence[_Group]) -> list[tuple[str, str]]:
     """Record the redactions these blobs hold for their agent, returning (room, event) for each to apply."""
-    tombstoned = {index for group in groups for index in group.rows if _tombstones(group.decoded, index)}
+    tombstoned = {index for group in groups for index in group.rows if index in group.decoded.deleted}
     redactions: list[tuple[str, str]] = []
     for group in groups:
         record = group.record
@@ -442,13 +437,6 @@ def _extract_redactions(transaction: Transaction, agent_name: str, groups: Seque
             redactions.append((room_id, event_id))
         _record_summary_provenance(transaction, agent_name, room_id, group.decoded)
     return redactions
-
-
-def _tombstones(decoded: _Decoded, index_event_id: str) -> bool:
-    """Return whether the record an event indexes marks that event deleted, as warm-up reconciliation read it."""
-    return index_event_id in decoded.redacted or (
-        index_event_id in decoded.record.source_event_ids and index_event_id not in decoded.replay_source_event_ids
-    )
 
 
 # LEGACY_COMPAT: Revisions consumed only through a pre-v2026.9.43 source summary.
@@ -655,7 +643,7 @@ def _bind_outstanding_delivery(
         turn_rows.bind_final_delivery(transaction, agent_name, delivery_id=anchor, room_id=room_id, turn_key=turn_key)
 
 
-def import_legacy_ledger_rows(transaction: Transaction, agent_name: str, raw_ledger: object) -> int:
+def _import_legacy_ledger_rows(transaction: Transaction, agent_name: str, raw_ledger: object) -> int:
     """Convert one agent's pre-journal ledger into turn rows; return how many turns were written.
 
     An event the row store already indexes keeps its owner, so an interrupted
@@ -687,11 +675,7 @@ def import_legacy_ledger_rows(transaction: Transaction, agent_name: str, raw_led
         if isinstance(raw_record, Mapping)
     ]
     groups = _groups(entries)
-    candidates = {
-        event_id
-        for group in groups
-        for event_id in (*group.rows, *group.record.source_event_ids, *group.record.discovery_event_ids)
-    }
+    candidates = {event_id for group in groups for event_id in group.record.indexed_event_ids}
     occupied = frozenset(
         event_id for event_id in candidates if turn_rows.get_turn_record(transaction, agent_name, event_id) is not None
     )
@@ -709,7 +693,7 @@ async def import_legacy_ledger_file(records: turn_rows.TurnRecordStore, *, path:
     if path is None or not path.exists():
         return 0
     raw = json.loads(path.read_text())
-    imported = await records.write(import_legacy_ledger_rows, raw)
+    imported = await records.write(_import_legacy_ledger_rows, raw)
     path.replace(path.with_suffix(f"{path.suffix}.imported"))
     logger.info("handled_turn_ledger_imported", agent=records.agent_name, imported_turn_count=imported)
     return imported
@@ -717,7 +701,6 @@ async def import_legacy_ledger_file(records: turn_rows.TurnRecordStore, *, path:
 
 __all__ = [
     "import_legacy_ledger_file",
-    "import_legacy_ledger_rows",
     "legacy_responses_file_path",
     "legacy_summary_sources",
     "upgrade_turn_records_to_rows",

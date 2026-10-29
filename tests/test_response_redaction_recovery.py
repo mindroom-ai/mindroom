@@ -223,7 +223,6 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
         preparation = await reopened.prepare_pending_response_source(
             target=target,
             source_event_ids=("$survivor",),
-            terminal_source_event_ids=(),
         )
         assert preparation.invalid == ()
         recovered_storage = storage_factory()
@@ -263,7 +262,6 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
     preparation = await reopened.prepare_pending_response_source(
         target=target,
         source_event_ids=("$next",),
-        terminal_source_event_ids=(),
     )
     assert preparation.invalid == ()
     storage = storage_factory()
@@ -387,7 +385,6 @@ async def test_a_redaction_is_read_for_its_room_by_every_login_of_the_agent(
     preparation = await store.prepare_pending_response_source(
         target=target,
         source_event_ids=("$later",),
-        terminal_source_event_ids=(),
     )
     assert preparation.invalid == ()
     assert await store.redacted_event_ids(ROOM, (deleted_id,)) == expected

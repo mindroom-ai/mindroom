@@ -36,6 +36,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.response_admission import admitted_response_decision
 from mindroom.router_relay import execute_router_relay
 from mindroom.routing import ResponderSelection, suggest_responder_for_message
 from mindroom.teams.formation import TeamOutcome, TeamResolution
@@ -280,6 +281,16 @@ def _router_relay(router_bot: AgentBot, room: nio.MatrixRoom, event_id: str) -> 
         [],
         requester_user_id="@user:localhost",
     )
+
+
+async def _admitted_router_relay(router_bot: AgentBot, room: nio.MatrixRoom, event_id: str) -> None:
+    """Relay as route dispatch does, holding response admission through the router's selection and delivery."""
+    deps = router_bot._turn_dispatcher.deps
+    async with admitted_response_decision(
+        deps.runtime.response_admission_gate,
+        deps.response_runner.wait_for_admission_or_shutdown,
+    ):
+        await _router_relay(router_bot, room, event_id)
 
 
 @pytest.mark.asyncio
@@ -619,9 +630,7 @@ class TestRoutingRegression:
         release_send = asyncio.Event()
 
         def admitted_relay(event_id: str) -> Awaitable[None]:
-            return router_bot._turn_dispatcher._run_admitted_router_relay(
-                lambda: _router_relay(router_bot, room, event_id),
-            )
+            return _admitted_router_relay(router_bot, room, event_id)
 
         async def blocking_room_send(**_: object) -> nio.RoomSendResponse:
             send_started.set()
@@ -707,11 +716,7 @@ class TestRoutingRegression:
             return nio.RoomSendResponse.from_dict({"event_id": "$router-response"}, room_id=room.room_id)
 
         router_bot.client.room_send.side_effect = blocking_room_send
-        relay_task = asyncio.create_task(
-            router_bot._turn_dispatcher._run_admitted_router_relay(
-                lambda: _router_relay(router_bot, room, "$mcp-restart"),
-            ),
-        )
+        relay_task = asyncio.create_task(_admitted_router_relay(router_bot, room, "$mcp-restart"))
         await send_started.wait()
         assert router_bot.admission_gate.in_flight_response_count == 1
 

@@ -20,7 +20,6 @@ from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VISIBLE_ROU
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import (
-    MEDIA_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
@@ -66,7 +65,6 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.coalescing.batch import PreparedTurn
     from mindroom.event_journal import EventJournalStore
-    from mindroom.turns.facts import IngressFacts
 
 
 def _room(room_id: str = "!room:localhost") -> nio.MatrixRoom:
@@ -160,7 +158,6 @@ async def test_unready_lane_slot_does_not_delay_other_senders_or_rooms() -> None
         voice_slot,
         key=CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@alice:localhost")),
         source_event_id="$voice",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(never_ready()),
     )
 
@@ -169,7 +166,6 @@ async def test_unready_lane_slot_does_not_delay_other_senders_or_rooms() -> None
         bob_slot,
         key=CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@bob:localhost")),
         source_event_id="$bob",
-        source_kind="message",
         ready_result=_ready(_plain_event("$bob", "from bob", 1_000_100)),
     )
     other_room_slot = gate.enter_lane(ReceiptLaneKey(room_id="!other:localhost", sender_id="@alice:localhost"))
@@ -177,7 +173,6 @@ async def test_unready_lane_slot_does_not_delay_other_senders_or_rooms() -> None
         other_room_slot,
         key=CoalescingKey("!other:localhost", "$elsewhere", RequesterCoalescingOwner("@alice:localhost")),
         source_event_id="$elsewhere",
-        source_kind="message",
         ready_result=_ready(
             _plain_event("$elsewhere", "other room", 1_000_200, room_id="!other:localhost"),
             room_id="!other:localhost",
@@ -214,14 +209,12 @@ async def test_thread_batch_dispatches_while_root_dispatch_is_in_flight() -> Non
         root_key,
         ready_result=_ready(_plain_event("$root", "root", 1_000_000)),
         source_event_id="$root",
-        source_kind="message",
     )
     await entered_root.wait()
     await gate.admit(
         thread_key,
         ready_result=_ready(_plain_event("$reply", "reply", 1_000_100)),
         source_event_id="$reply",
-        source_kind="message",
     )
 
     await _wait_for(lambda: ["$reply"] in [list(batch.handled_turn.source_event_ids) for batch in batches])
@@ -240,13 +233,11 @@ async def test_room_mode_text_burst_coalesces_into_one_turn() -> None:
         key,
         ready_result=_ready(_plain_event("$m1", "first", 1_000_000)),
         source_event_id="$m1",
-        source_kind="message",
     )
     await gate.admit(
         key,
         ready_result=_ready(_plain_event("$m2", "second", 1_000_100)),
         source_event_id="$m2",
-        source_kind="message",
     )
 
     await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in batches] == [["$m1", "$m2"]])
@@ -270,7 +261,6 @@ async def test_straggler_follow_up_logs_missed_combined_turn() -> None:
         slot,
         key=key,
         source_event_id="$late",
-        source_kind="message",
         ready_task=asyncio.create_task(slow_ready()),
     )
 
@@ -287,7 +277,7 @@ async def test_straggler_follow_up_logs_missed_combined_turn() -> None:
     )
     await gate.drain_all()
     assert [list(batch.handled_turn.source_event_ids) for batch in batches] == [["$late"]]
-    assert batches[0].ingress.active_follow_up is False
+    assert batches[0].active_follow_up is False
 
 
 @pytest.mark.asyncio
@@ -312,7 +302,6 @@ async def test_follow_up_delivered_while_still_busy_is_not_logged_as_missed() ->
             slot,
             key=key,
             source_event_id="$queued",
-            source_kind="message",
             ready_result=_ready(_plain_event("$queued", "queued follow-up", 1_000_000)),
         )
         await _wait_for(lambda: slot.settled.is_set())
@@ -323,7 +312,7 @@ async def test_follow_up_delivered_while_still_busy_is_not_logged_as_missed() ->
     busy["value"] = False
     idle.set()
     await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in batches] == [["$queued"]])
-    assert batches[0].ingress.active_follow_up is True
+    assert batches[0].active_follow_up is True
     await gate.drain_all()
 
 
@@ -346,13 +335,11 @@ async def test_busy_conversation_queues_any_sender_into_one_combined_follow_up()
         CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@alice:localhost")),
         ready_result=_ready(_plain_event("$a", "from alice", 1_000_000)),
         source_event_id="$a",
-        source_kind="message",
     )
     await gate.admit(
         CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@bob:localhost")),
         ready_result=_ready(_plain_event("$b", "from bob", 1_000_100)),
         source_event_id="$b",
-        source_kind="message",
     )
     await asyncio.sleep(0.01)
     assert batches == []
@@ -360,7 +347,7 @@ async def test_busy_conversation_queues_any_sender_into_one_combined_follow_up()
     busy["value"] = False
     idle.set()
     await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in batches] == [["$a", "$b"]])
-    assert batches[0].ingress.active_follow_up is True
+    assert batches[0].active_follow_up is True
     await gate.drain_all()
 
 
@@ -383,7 +370,6 @@ async def test_machine_fire_queues_while_conversation_busy() -> None:
         CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@scheduler:localhost")),
         ready_result=_ready(_plain_event("$fire2", "scheduled check-in", 1_000_000), source_kind="scheduled"),
         source_event_id="$fire2",
-        source_kind="scheduled",
     )
     await asyncio.sleep(0.01)
     assert batches == []
@@ -391,7 +377,7 @@ async def test_machine_fire_queues_while_conversation_busy() -> None:
     busy["value"] = False
     idle.set()
     await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in batches] == [["$fire2"]])
-    assert batches[0].ingress.active_follow_up is False
+    assert batches[0].active_follow_up is False
     await gate.drain_all()
 
 
@@ -411,7 +397,6 @@ async def test_enter_lane_during_bounded_drain_returns_closed_slot() -> None:
         key,
         ready_result=_ready(_plain_event("$m1", "first", 1_000_000)),
         source_event_id="$m1",
-        source_kind="message",
     )
     await entered_dispatch.wait()
 
@@ -424,7 +409,6 @@ async def test_enter_lane_during_bounded_drain_returns_closed_slot() -> None:
             slot,
             key=key,
             source_event_id="$m2",
-            source_kind="message",
             ready_result=_ready(_plain_event("$m2", "second", 1_000_100)),
         )
 
@@ -701,7 +685,6 @@ async def test_failed_lane_readiness_does_not_block_later_same_sender_work() -> 
         failed_slot,
         key=key,
         source_event_id="$voice",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(failing_ready()),
     )
     text_slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost"))
@@ -709,7 +692,6 @@ async def test_failed_lane_readiness_does_not_block_later_same_sender_work() -> 
         text_slot,
         key=key,
         source_event_id="$text",
-        source_kind="message",
         ready_result=_ready(_plain_event("$text", "typed", 1_000_100)),
     )
 
@@ -743,7 +725,6 @@ async def test_ignored_source_remains_owned_during_durable_settlement(
         slot,
         key=CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
         source_event_id=source_event_id,
-        source_kind=MEDIA_SOURCE_KIND,
         ready_task=asyncio.create_task(ignored_ready()),
     )
     await settlement_started.wait()
@@ -809,7 +790,6 @@ async def test_failed_ignored_source_settlement_returns_source_to_retry_owner() 
         slot,
         key=CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
         source_event_id="$ignored-media",
-        source_kind=MEDIA_SOURCE_KIND,
         ready_task=asyncio.create_task(ignored_ready()),
     )
 
@@ -839,17 +819,12 @@ async def test_long_running_turn_never_delays_other_ingress_from_same_sender(tmp
             first_locked.set()
             await release_first_response.wait()
 
-    async def fake_prepare_dispatch(
-        _room: object,
-        event: object,
-        facts: IngressFacts,
-        **_kwargs: object,
-    ) -> object:
-        thread_id = "$other" if event.event_id == "$m3" else f"{event.event_id}-thread"
+    async def fake_prepare_dispatch(turn: PreparedTurn) -> object:
+        thread_id = "$other" if turn.event.event_id == "$m3" else f"{turn.event.event_id}-thread"
         dispatch = _prepared_dispatch(
-            event_id=event.event_id,
-            requester_user_id=facts.run_requester_id,
-            body=event.body,
+            event_id=turn.event.event_id,
+            requester_user_id=turn.facts.run_requester_id,
+            body=turn.event.body,
             thread_id=thread_id,
         )
         return prepared_dispatch_result(dispatch)
@@ -1045,17 +1020,12 @@ async def test_voice_echo_and_follow_up_slots_never_hold_another_conversation(tm
             first_locked.set()
             await release_first_response.wait()
 
-    async def fake_prepare_dispatch(
-        _room: object,
-        event: object,
-        facts: IngressFacts,
-        **_kwargs: object,
-    ) -> object:
-        thread_id = "$threadB" if event.event_id == "$b1" else "$threadA"
+    async def fake_prepare_dispatch(turn: PreparedTurn) -> object:
+        thread_id = "$threadB" if turn.event.event_id == "$b1" else "$threadA"
         dispatch = _prepared_dispatch(
-            event_id=event.event_id,
-            requester_user_id=facts.run_requester_id,
-            body=event.body,
+            event_id=turn.event.event_id,
+            requester_user_id=turn.facts.run_requester_id,
+            body=turn.event.body,
             thread_id=thread_id,
         )
         return prepared_dispatch_result(dispatch)
@@ -1133,17 +1103,12 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
         await record_turn_answered(bot, request)
         return f"{source_event_id}-response"
 
-    async def fake_prepare_dispatch(
-        _room: object,
-        event: object,
-        facts: IngressFacts,
-        **_kwargs: object,
-    ) -> object:
-        thread_id = "$threadB" if event.event_id == "$b1" else "$threadA"
+    async def fake_prepare_dispatch(turn: PreparedTurn) -> object:
+        thread_id = "$threadB" if turn.event.event_id == "$b1" else "$threadA"
         dispatch = _prepared_dispatch(
-            event_id=event.event_id,
-            requester_user_id=facts.run_requester_id,
-            body=event.body,
+            event_id=turn.event.event_id,
+            requester_user_id=turn.facts.run_requester_id,
+            body=turn.event.body,
             thread_id=thread_id,
         )
         return prepared_dispatch_result(dispatch)
@@ -1314,7 +1279,6 @@ async def test_lane_worker_failure_at_wait_phase_does_not_poison_lane() -> None:
             poisoned_slot,
             key=CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
             source_event_id="$poisoned",
-            source_kind="message",
             ready_result=_ready(_plain_event("$poisoned", "lost", 1_000_000)),
         )
 
@@ -1323,7 +1287,6 @@ async def test_lane_worker_failure_at_wait_phase_does_not_poison_lane() -> None:
         next_slot,
         key=CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
         source_event_id="$next",
-        source_kind="message",
         ready_result=_ready(_plain_event("$next", "still works", 1_000_100)),
     )
 
@@ -1355,16 +1318,11 @@ async def test_response_failure_drains_follow_up_queue(tmp_path: Path) -> None:
             msg = "response generation failed"
             raise RuntimeError(msg)
 
-    async def fake_prepare_dispatch(
-        _room: object,
-        event: object,
-        facts: IngressFacts,
-        **_kwargs: object,
-    ) -> object:
+    async def fake_prepare_dispatch(turn: PreparedTurn) -> object:
         dispatch = _prepared_dispatch(
-            event_id=event.event_id,
-            requester_user_id=facts.run_requester_id,
-            body=event.body,
+            event_id=turn.event.event_id,
+            requester_user_id=turn.facts.run_requester_id,
+            body=turn.event.body,
             thread_id="$m1-thread",
         )
         return prepared_dispatch_result(dispatch)
@@ -1455,7 +1413,7 @@ async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> N
 
         await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in calls] == [["$f1"], ["$f2"]])
     assert [batch.facts.run_requester_id for batch in calls] == ["@alice:localhost", "@bob:localhost"]
-    assert all(batch.ingress.active_follow_up is True for batch in calls)
+    assert all(batch.active_follow_up is True for batch in calls)
 
 
 @pytest.mark.asyncio
@@ -1477,13 +1435,11 @@ async def test_machine_and_human_follow_ups_split_solo_batch() -> None:
         CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
         ready_result=_ready(_plain_event("$human", "human follow-up", 1_000_000)),
         source_event_id="$human",
-        source_kind="message",
     )
     await gate.admit(
         CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@scheduler:localhost")),
         ready_result=_ready(_plain_event("$fire", "scheduled check-in", 1_000_100), source_kind="scheduled"),
         source_event_id="$fire",
-        source_kind="scheduled",
     )
     await asyncio.sleep(0.01)
     assert batches == []
@@ -1491,8 +1447,8 @@ async def test_machine_and_human_follow_ups_split_solo_batch() -> None:
     busy["value"] = False
     idle.set()
     await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in batches] == [["$human"], ["$fire"]])
-    assert batches[0].ingress.active_follow_up is True
-    assert batches[1].ingress.active_follow_up is False
+    assert batches[0].active_follow_up is True
+    assert batches[1].active_follow_up is False
     await gate.drain_all()
 
 
@@ -1512,7 +1468,6 @@ async def test_cancelled_lane_worker_settles_remaining_slots() -> None:
         first_slot,
         key=CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
         source_event_id="$blocked",
-        source_kind="message",
         ready_task=asyncio.create_task(never_ready()),
     )
 
@@ -1529,7 +1484,6 @@ async def test_cancelled_lane_worker_settles_remaining_slots() -> None:
             second_slot,
             key=CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
             source_event_id="$late",
-            source_kind="message",
             ready_result=_ready(_plain_event("$late", "late", 1_000_100)),
         )
     blocked.set()
@@ -1561,7 +1515,6 @@ async def test_abandoned_slot_does_not_deliver_after_late_readiness() -> None:
         slot,
         key=CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
         source_event_id="$late",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(stubborn_ready()),
         claim=(source_claim := live_turn_claim("$late")),
     )
@@ -1610,7 +1563,6 @@ async def test_abandoned_voice_readiness_keeps_its_source_claimed_until_readines
         slot,
         key=CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
         source_event_id="$voice",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=ready_task,
         claim=claim,
     )
@@ -1659,7 +1611,6 @@ async def test_readiness_that_delivers_nothing_releases_its_claim_before_the_sou
         slot,
         key=_VOICE_KEY,
         source_event_id="$voice",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(ready()),
         claim=claim,
     )
@@ -1686,7 +1637,6 @@ async def test_abandoned_voice_slot_behind_an_undelivered_one_releases_its_claim
         behind,
         key=_VOICE_KEY,
         source_event_id="$voice",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(ready()),
         claim=claim,
     )
@@ -1722,7 +1672,6 @@ async def test_a_dead_lane_worker_releases_its_slots_claims_once_their_readiness
         head,
         key=_VOICE_KEY,
         source_event_id="$head",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=head_task,
         claim=head_claim,
     )
@@ -1730,7 +1679,6 @@ async def test_a_dead_lane_worker_releases_its_slots_claims_once_their_readiness
         behind,
         key=_VOICE_KEY,
         source_event_id="$behind",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=behind_task,
         claim=behind_claim,
     )
@@ -1740,7 +1688,6 @@ async def test_a_dead_lane_worker_releases_its_slots_claims_once_their_readiness
         queued,
         key=_VOICE_KEY,
         source_event_id="$queued",
-        source_kind="message",
         ready_result=queued_event,
     )
     await asyncio.sleep(0)
@@ -1787,7 +1734,6 @@ async def test_bounded_drain_shares_one_deadline_across_cancellation_resistant_l
             slot,
             key=CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner(sender_id)),
             source_event_id=f"$stubborn{index}",
-            source_kind=VOICE_SOURCE_KIND,
             ready_task=ready_task,
         )
 

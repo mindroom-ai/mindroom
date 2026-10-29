@@ -248,7 +248,6 @@ _.get_latest_agent_message_snapshot  # hook plugins call this public method (src
 _openclaw_compat_tools  # unused function (src/mindroom/tools/__init__.py)
 _reset_credentials_manager_cache  # unused function (src/mindroom/credentials/manager.py)
 _reset_primary_worker_manager  # unused function (src/mindroom/workers/runtime.py)
-_reset_turn_claim_registries  # unused function (src/mindroom/turn_store.py)
 _reset_visible_voice_echo_barriers  # unused function (src/mindroom/voice/visible_voice_echo.py)
 _.read_file_chunk  # unused method (src/mindroom/tools/file.py)
 _.download_file  # unused method (src/mindroom/custom_tools/google_drive.py)

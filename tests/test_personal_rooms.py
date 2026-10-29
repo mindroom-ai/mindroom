@@ -58,6 +58,7 @@ from tests.journal_helpers import admit_dispatch_event
 from tests.test_personal_agents_config import BASE as PERSONAL_AGENTS_BASE
 from tests.test_personal_agents_config import _entry as personal_agent_entry
 from tests.test_room_member_hooks import _dispatch_member, _room_member_event
+from tests.turn_dispatch_helpers import make_test_turn
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
@@ -2843,11 +2844,7 @@ async def test_dispatched_welcome_selects_target_through_real_turn_policy(
     assert await target._ingress_validator.precheck_event(room, event, facts)
     assert facts.lane_requester_id == "@alice:localhost"
     prepared = await target._turn_dispatcher._prepare_dispatch(
-        room,
-        event,
-        facts,
-        event_label="message",
-        handled_turn=TurnRecord.create([event.event_id]),
+        make_test_turn(room, event, facts=facts, handled_turn=TurnRecord.create([event.event_id])),
     )
     assert prepared is not None
     dispatch = prepared.dispatch

@@ -67,20 +67,17 @@ class _EchoTurnStore:
 
     visible_event_ids: dict[str, str] = field(default_factory=dict)
 
-    async def visible_echo_for_source(self, source_event_id: str) -> str | None:
-        return self.visible_event_ids.get(source_event_id)
+    async def visible_echo(self, source_event_id: str) -> SourceVisibleEcho | None:
+        event_id = self.visible_event_ids.get(source_event_id)
+        return None if event_id is None else SourceVisibleEcho(event_id)
 
     async def read(self, operation: object, source_event_id: str) -> SourceVisibleEcho | None:
         """Answer the router's own turn rows, as ``TurnRecordStore.read`` of ``turn_rows.visible_echo`` does."""
         assert operation is turn_rows.visible_echo
-        event_id = self.visible_event_ids.get(source_event_id)
-        return None if event_id is None else SourceVisibleEcho(event_id)
+        return await self.visible_echo(source_event_id)
 
     async def record_visible_echo(self, room_id: str, source_event_id: str, echo_event_id: str) -> None:  # noqa: ARG002
         self.visible_event_ids[source_event_id] = echo_event_id
-
-    async def finalized_visible_echo(self, source_event_id: str) -> None:  # noqa: ARG002
-        return None
 
     async def record_finalized_visible_echo(
         self,
@@ -286,7 +283,7 @@ async def test_recovery_adopts_untracked_marked_echo_before_sending(tmp_path: Pa
     send_text.assert_not_awaited()
     edit_text.assert_awaited_once()
     assert edit_text.await_args.args[0].event_id == "$orphaned-echo"
-    assert await harness.router.deps.turn_store.visible_echo_for_source(source_event_id) == "$orphaned-echo"
+    assert await harness.router.deps.turn_store.visible_echo(source_event_id) == SourceVisibleEcho("$orphaned-echo")
     response_filter = find_echo.await_args.kwargs["response_source_filter"]
     assert response_filter({"content": {VISIBLE_ROUTER_VOICE_ECHO_KEY: True}})
     assert not response_filter({"content": {}})

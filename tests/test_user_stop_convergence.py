@@ -42,7 +42,6 @@ class _NoReplyGateway:
 async def _store(journal_store: EventJournalStore) -> TurnStore:
     store = TurnStore(
         TurnStoreDeps(
-            agent_name="agent",
             turn_records=journal_store.turn_records("agent"),
             legacy_responses_file=None,
             state_writer=MagicMock(),

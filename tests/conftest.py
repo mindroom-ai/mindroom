@@ -108,12 +108,10 @@ from mindroom.event_journal import (
     PrincipalStore,
     ProjectedEvent,
     RelationView,
-    TerminalTurnWrite,
     VisibleMessage,
     turn_rows,
 )
 from mindroom.event_journal import reads as journal_reads
-from mindroom.event_journal.matrix_delivery import TurnHandoff
 from mindroom.event_journal.outbox import matrix_delivery_payload
 from mindroom.execution_preparation import _build_unseen_context_messages
 from mindroom.final_delivery import FinalDeliveryOutcome
@@ -178,7 +176,7 @@ from mindroom.session_storage.store import _session_state, _write_session_state,
 from mindroom.thread_utils import decide_agent_response
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
-from mindroom.turn_store import TurnClaim, TurnStore, _ClaimRegistry, _reset_turn_claim_registries
+from mindroom.turn_store import _CLAIM_REGISTRIES, TurnClaim, TurnStore, _ClaimRegistry
 from mindroom.turns.dispatch import TurnDispatcher, _DispatchPreparation, _ReplayGuardContext
 from mindroom.turns.facts import IngressFacts
 from mindroom.turns.ingress import TurnIngress
@@ -1689,9 +1687,6 @@ class FakeOutbox:
 
     def __init__(self) -> None:
         self.rows: dict[tuple[str, str], MatrixDelivery] = {}
-        # What each acknowledgement carried alongside it, so a test can
-        # assert the terminal record and the acknowledgement are one write.
-        self.acknowledged_terminal_turns: list[tuple[str, TerminalTurnWrite | None]] = []
         self.acknowledged_projections: list[tuple[ProjectedEvent, ...]] = []
         self.attempted: set[tuple[str, str]] = set()
         # Turns whose membership has ended, as the journal would report it.
@@ -1935,14 +1930,9 @@ class FakeOutbox:
         stage: DeliveryStage,
         event_id: str,
         delivered_projections: tuple[ProjectedEvent, ...],
-        terminal_turn: TerminalTurnWrite | None = None,
+        terminal_response_event_id: str | None = None,  # noqa: ARG002 - this fake keeps no turns
     ) -> DeliveryAcknowledgement:
-        """Record the Matrix event one claimed delivery produced, and the turn it completes.
-
-        The terminal record is kept rather than discarded so a test can assert
-        it travelled *with* the acknowledgement. Dropping it here would let the
-        two drift apart again without anything noticing.
-        """
+        """Record the Matrix event one claimed delivery produced."""
         key = (delivery_id, stage.value)
         already = self.rows[key].acknowledged_event_id
         if already is not None:
@@ -1955,7 +1945,6 @@ class FakeOutbox:
             acknowledged_event_id=event_id,
             permanent_failure_reason=None,
         )
-        self.acknowledged_terminal_turns.append((delivery_id, terminal_turn))
         self.acknowledged_projections.append(delivered_projections)
         return DeliveryAcknowledgement(settled_event_id=event_id)
 
@@ -2181,7 +2170,7 @@ class DiesAfterAcknowledgement:
         stage: DeliveryStage,
         event_id: str,
         delivered_projections: tuple[ProjectedEvent, ...],
-        terminal_turn: TerminalTurnWrite | None = None,
+        terminal_response_event_id: str | None = None,
     ) -> DeliveryAcknowledgement:
         """Record the Matrix outcome, then die before anything else can run."""
         await self.inner.acknowledge_matrix_delivery(
@@ -2189,7 +2178,7 @@ class DiesAfterAcknowledgement:
             stage=stage,
             event_id=event_id,
             delivered_projections=delivered_projections,
-            terminal_turn=terminal_turn,
+            terminal_response_event_id=terminal_response_event_id,
         )
         msg = "crashed the instant the outcome was recorded"
         raise CrashError(msg)
@@ -2209,11 +2198,13 @@ class DiesAfterAcknowledgement:
         )
 
 
-# Drops the outbox-enqueue journal handoff, for tests that are not about it. Named
-# rather than a bare lambda so a reader can see that the handoff was
-# deliberately stubbed here, not forgotten. Tests that care what the handoff
-# settles use a real journal store instead.
-ignore_final_delivery_handoff = TurnHandoff(released=lambda _event_ids: None)
+def ignore_final_delivery_handoff(_event_ids: tuple[str, ...]) -> None:
+    """Drop the outbox-enqueue journal handoff, for tests that are not about it.
+
+    Named so a reader can see that the handoff was deliberately stubbed here,
+    not forgotten. Tests that care what the handoff settles use a real journal
+    store instead.
+    """
 
 
 async def ignore_delivered_projection(
@@ -3819,9 +3810,9 @@ def _reset_oversized_nonterminal_streaming_edit_rate_limit() -> Generator[None, 
 @pytest.fixture(autouse=True)
 def _reset_turn_claims() -> Generator[None, None, None]:
     """Give every test an empty claim registry: it is process-global, shared by every turn store of an agent."""
-    _reset_turn_claim_registries()
+    _CLAIM_REGISTRIES.clear()
     yield
-    _reset_turn_claim_registries()
+    _CLAIM_REGISTRIES.clear()
 
 
 @pytest.fixture(autouse=True)

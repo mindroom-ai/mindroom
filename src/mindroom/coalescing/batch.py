@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from mindroom.attachments.ids import merge_attachment_ids
 from mindroom.dispatch_handoff import (
-    DispatchIngressMetadata,
     DispatchPayloadMetadata,
     MediaDispatchEvent,
     PreparedIngress,
@@ -122,7 +121,10 @@ class PreparedTurn:
     # The command the turn's text runs as; a turn of several sources has none.
     command: Command | None
     handled_turn: TurnRecord
-    ingress: DispatchIngressMetadata
+    # The gate's batching scope; a key without a thread is a room-level conversation.
+    coalescing_key: CoalescingKey
+    # Whether any of the batch's events queued behind its conversation's running response.
+    active_follow_up: bool
     payload: DispatchPayloadMetadata
     current_prompt_is_structured: bool
     media_events: tuple[MediaDispatchEvent, ...]
@@ -178,7 +180,9 @@ def _tagged_pending_message(
     member_display_names: Mapping[str, str],
 ) -> str:
     event = pending_event.event
-    sender = _source_sender(pending_event.facts)
+    facts = pending_event.facts
+    # Whom the source speaks as: its author when an entity wrote it for the requester, else the requester.
+    sender = facts.physical_sender if facts.acts_for_requester else facts.run_requester_id
     return render_msg_tag(
         sender=sender,
         body=dispatch_prompt_for_event(event),
@@ -342,11 +346,6 @@ _SOURCE_KIND_PRIORITY: dict[str, int] = {
 }
 
 
-def _source_sender(facts: IngressFacts) -> str:
-    """Return whom one source speaks as: its author when an entity wrote it for the requester, else the requester."""
-    return facts.physical_sender if facts.acts_for_requester else facts.run_requester_id
-
-
 def pending_event_run_identity(pending_event: PendingEvent) -> tuple[str, str | None]:
     """Return who one queued event runs as, plus its author when an entity wrote it for that requester.
 
@@ -457,7 +456,8 @@ def build_prepared_turn(
             ),
             requester_id=facts.run_requester_id,
         ),
-        ingress=DispatchIngressMetadata(coalescing_key=key, active_follow_up=active_follow_up),
+        coalescing_key=key,
+        active_follow_up=active_follow_up,
         payload=_batch_payload_metadata(ordered_pending_events),
         current_prompt_is_structured=prompt_rendering.is_structured,
         media_events=tuple(

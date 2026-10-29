@@ -139,15 +139,16 @@ class TestReshape:
         )
         # Another message's edit consumed only as context is this turn's provenance too.
         await write(store, turn_rows.record_revisions, turn_key=first.turn_key, revisions=[("$ex", "$x", 15)])
-        answered = await write(
+        await write(
             store,
             turn_rows.record_responded_turn,
             turn(["$a"], prompts={"$a": "edited"}, revisions={"$a": (20, "$e1")}, response="$r1"),
             room_id=ROOM,
         )
-        assert isinstance(answered, Accepted)
-        assert answered.record.revision_replay is not None
-        assert answered.record.revision_replay["$e1"].response_event_id == "$r1"
+        answered = await lookup(store, "$a")
+        assert answered is not None
+        assert answered.revision_replay is not None
+        assert answered.revision_replay["$e1"].response_event_id == "$r1"
         # A completed owner cannot be absorbed: a batch naming its source is refused.
         assert await pending(store, turn(["$a", "$b"])) == Refused()
 
@@ -223,7 +224,7 @@ class TestReshape:
         await write(store, turn_rows.record_prepared_voice, room_id=ROOM, source_event_id="$m2", prepared=VOICE)
 
         batch = await accepted(store, turn(["$m1", "$m2"]))
-        assert await write(
+        await write(
             store,
             turn_rows.record_finalized_visible_echo,
             source_event_id="$m1",
@@ -251,7 +252,7 @@ class TestReshape:
         # A bound turn is frozen: its own tuple is answered without a context change.
         frozen = await pending(store, turn(["$bound"], target=MessageTarget.resolve(ROOM, None, None)))
         assert isinstance(frozen, Answered)
-        assert frozen.record.conversation_target == TARGET
+        assert (await read(store, turn_rows.load_turn, bound.turn_key)).conversation_target == TARGET
         assert await lookup(store, "$fresh") is None
 
     async def test_attribution_is_proven_per_source(self, store: EventJournalStore) -> None:
@@ -476,7 +477,7 @@ class TestRedactionGuard:
         store = journal_database()
         stored = await accepted(store, turn(["$s"]))
         key = stored.turn_key
-        assert await write(
+        await write(
             store,
             turn_rows.record_edit,
             turn_key=key,
@@ -484,12 +485,13 @@ class TestRedactionGuard:
             prompt="E1 text",
             revision=(10, "$e1"),
         )
+        assert (await read(store, turn_rows.load_turn, key)).source_event_prompts == {"$s": "E1 text"}
 
         await redact(store, "$e1")
         # Nothing newer is selected now, so only the redaction refuses a late write carrying E1.
         late = turn(["$s"], prompts={"$s": "E1 text"}, revisions={"$s": (10, "$e1")})
         assert isinstance(await pending(store, late), Accepted)
-        assert not await write(
+        await write(
             store,
             turn_rows.record_edit,
             turn_key=key,
@@ -500,7 +502,7 @@ class TestRedactionGuard:
         refused = await read(store, turn_rows.load_turn, key)
         assert refused is not None
         assert refused.source_event_prompts is None
-        assert await write(
+        await write(
             store,
             turn_rows.record_edit,
             turn_key=key,
@@ -509,7 +511,7 @@ class TestRedactionGuard:
             revision=(20, "$e2"),
         )
         assert isinstance(await pending(store, late), Accepted)
-        assert not await write(
+        await write(
             store,
             turn_rows.record_edit,
             turn_key=key,
@@ -578,16 +580,17 @@ class TestCompletion:
         """A responded turn keeps the newest response and proves only the revisions its record selected."""
         await accepted(store, turn(["$s"], prompts={"$s": "e1"}, revisions={"$s": (10, "$e1")}))
         await write(store, turn_rows.record_responded_turn, turn(["$s"], response="$r1"), room_id=ROOM)
-        second = await write(
+        await write(
             store,
             turn_rows.record_responded_turn,
             turn(["$s"], response="$r2", revisions={"$s": (10, "$e1")}),
             room_id=ROOM,
         )
 
-        assert isinstance(second, Accepted)
-        assert second.record.response_event_id == "$r2"
-        assert second.record.revision_replay == {"$e1": RevisionReplay("$s", 10, response_event_id="$r2")}
+        second = await lookup(store, "$s")
+        assert second is not None
+        assert second.response_event_id == "$r2"
+        assert second.revision_replay == {"$e1": RevisionReplay("$s", 10, response_event_id="$r2")}
 
     async def test_echo_publication_never_becomes_the_turns_answer(self, store: EventJournalStore) -> None:
         """Echo publication never becomes the turns answer."""
@@ -613,14 +616,14 @@ class TestCompletion:
     async def test_a_transcript_is_never_overwritten_by_a_fallback(self, store: EventJournalStore) -> None:
         """A transcript is never overwritten by a fallback."""
         await write(store, turn_rows.record_visible_echo, room_id=ROOM, source_event_id="$v", echo_event_id="$e")
-        assert await write(
+        await write(
             store,
             turn_rows.record_finalized_visible_echo,
             source_event_id="$v",
             echo_event_id="$e",
             is_fallback=False,
         )
-        assert not await write(
+        await write(
             store,
             turn_rows.record_finalized_visible_echo,
             source_event_id="$v",
@@ -634,8 +637,8 @@ class TestCompletion:
         """Command checkpoints only grow."""
         stored = await accepted(store, turn(["$cmd"]))
         await write(store, turn_rows.record_command_started, turn_key=stored.turn_key)
-        assert await write(store, turn_rows.record_command_result, turn_key=stored.turn_key, text="first")
-        assert not await write(store, turn_rows.record_command_result, turn_key=stored.turn_key, text="second")
+        await write(store, turn_rows.record_command_result, turn_key=stored.turn_key, text="first")
+        await write(store, turn_rows.record_command_result, turn_key=stored.turn_key, text="second")
         await accepted(store, turn(["$cmd"]))
 
         found = await lookup(store, "$cmd")
@@ -666,10 +669,12 @@ class TestFinalDelivery:
         again = await write(store, turn_rows.complete_bound_delivery, delivery_id="$b", response_event_id="$late")
 
         assert sources == ("$a", "$b", "$alias")
-        assert completed is not None
-        assert completed.completed
-        assert completed.response_event_id == "$placeholder"
-        assert again is None
+        assert completed
+        assert not again
+        found = await lookup(store, "$b")
+        assert found is not None
+        assert found.completed
+        assert found.response_event_id == "$placeholder"
 
     async def test_a_reshape_before_binding_leaves_a_stale_delivery_unbound(self, store: EventJournalStore) -> None:
         """A reshape before binding leaves a stale delivery unbound."""
@@ -687,7 +692,7 @@ class TestFinalDelivery:
             )
             is None
         )
-        assert await write(store, turn_rows.complete_bound_delivery, delivery_id="$b", response_event_id="$ack") is None
+        assert not await write(store, turn_rows.complete_bound_delivery, delivery_id="$b", response_event_id="$ack")
         found = await lookup(store, "$b")
         assert found is not None
         assert not found.completed
@@ -698,7 +703,7 @@ class TestFinalDelivery:
         await write(store, turn_rows.bind_final_delivery, delivery_id="$a", room_id=ROOM, turn_key=bound.turn_key)
 
         assert await pending(store, turn(["$a", "$b"])) == Refused()
-        assert await write(store, turn_rows.record_turn, TurnRecord.create(["$b", "$a"]), room_id=ROOM) == Refused()
+        assert await write(store, turn_rows.record_turn, TurnRecord.create(["$b", "$a"]), room_id=ROOM) is None
         assert await read(store, turn_rows.load_turn, bound.turn_key) is not None
 
 
@@ -735,7 +740,7 @@ class TestRetention:
         await write(store, turn_rows.record_turn, TurnRecord.create(["$old-done"]), room_id=ROOM)
         await write(store, turn_rows.record_turn, TurnRecord.create(["$unsettled-done"]), room_id=ROOM)
         revised = await write(store, turn_rows.record_turn, TurnRecord.create(["$revised"]), room_id=ROOM)
-        await write(store, turn_rows.record_revisions, turn_key=revised.record.turn_key, revisions=[("$rev", "$x", 1)])
+        await write(store, turn_rows.record_revisions, turn_key=revised, revisions=[("$rev", "$x", 1)])
         await accepted(store, turn(["$pending"]))
         await write(
             store,

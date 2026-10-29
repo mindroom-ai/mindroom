@@ -60,8 +60,6 @@ from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
 from mindroom.turn_record import TurnRecord
 from mindroom.turns.dispatch import TurnDispatcher
-from mindroom.turns.facts import PrecheckedEvent
-from mindroom.turns.ingress import _IngressAdmissionOutcome
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -82,7 +80,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
-from tests.turn_dispatch_helpers import dispatch_test_turn
+from tests.turn_dispatch_helpers import dispatch_test_turn, make_test_turn
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -646,11 +644,12 @@ async def test_prepare_dispatch_skips_hook_reemission_but_keeps_hook_dispatch(tm
     turn_store.record_turn = AsyncMock()
 
     dispatch = await bot._turn_dispatcher._prepare_dispatch(
-        room,
-        event,
-        bot._ingress_validator.classify(event),
-        event_label="message",
-        handled_turn=TurnRecord.create([event.event_id]),
+        make_test_turn(
+            room,
+            event,
+            facts=bot._ingress_validator.classify(event),
+            handled_turn=TurnRecord.create([event.event_id]),
+        ),
     )
 
     assert dispatch is not None
@@ -706,11 +705,12 @@ async def test_prepare_dispatch_builds_target_via_conversation_resolver(tmp_path
         return_value=expected_target,
     ) as mock_build_message_target:
         dispatch = await bot._turn_dispatcher._prepare_dispatch(
-            room,
-            event,
-            bot._ingress_validator.classify(event),
-            event_label="message",
-            handled_turn=TurnRecord.create([event.event_id]),
+            make_test_turn(
+                room,
+                event,
+                facts=bot._ingress_validator.classify(event),
+                handled_turn=TurnRecord.create([event.event_id]),
+            ),
         )
 
     assert dispatch is not None
@@ -761,13 +761,13 @@ async def test_prepare_dispatch_uses_trusted_router_context_for_router_relays(tm
     )
     bot._conversation_resolver.extract_dispatch_context = AsyncMock()
 
-    dispatch = await bot._turn_dispatcher._prepare_dispatch(
+    turn = make_test_turn(
         room,
         event,
-        replace(bot._ingress_validator.classify(event), source_kind="trusted_internal_relay"),
-        event_label="message",
+        facts=replace(bot._ingress_validator.classify(event), source_kind="trusted_internal_relay"),
         handled_turn=TurnRecord.create([event.event_id]),
     )
+    dispatch = await bot._turn_dispatcher._prepare_dispatch(turn)
 
     assert dispatch is not None
     dispatch = dispatch.dispatch
@@ -777,8 +777,8 @@ async def test_prepare_dispatch_uses_trusted_router_context_for_router_relays(tm
     assert dispatch.envelope.origin.trust.value == "trusted_user_relay"
     bot._conversation_resolver.extract_trusted_router_relay_context.assert_awaited_once_with(
         room,
-        event,
-        payload_metadata=None,
+        turn.event,
+        payload_metadata=turn.payload,
     )
     bot._conversation_resolver.extract_dispatch_context.assert_not_called()
 
@@ -834,21 +834,21 @@ async def test_prepare_dispatch_keeps_standard_context_for_non_router_internal_r
         return_value=dispatch_context_result(standard_context),
     )
 
-    dispatch = await bot._turn_dispatcher._prepare_dispatch(
+    turn = make_test_turn(
         room,
         event,
-        replace(bot._ingress_validator.classify(event), source_kind="trusted_internal_relay"),
-        event_label="message",
+        facts=replace(bot._ingress_validator.classify(event), source_kind="trusted_internal_relay"),
         handled_turn=TurnRecord.create([event.event_id]),
     )
+    dispatch = await bot._turn_dispatcher._prepare_dispatch(turn)
 
     assert dispatch is not None
     dispatch = dispatch.dispatch
     assert dispatch.context is standard_context
     bot._conversation_resolver.extract_dispatch_context.assert_awaited_once_with(
         room,
-        event,
-        payload_metadata=None,
+        turn.event,
+        payload_metadata=turn.payload,
     )
     bot._conversation_resolver.extract_trusted_router_relay_context.assert_not_called()
 
@@ -887,10 +887,8 @@ async def test_dispatch_text_message_continues_for_hook_originated_mentions(tmp_
     await dispatch_test_turn(
         bot._turn_dispatcher,
         room,
-        PrecheckedEvent(
-            event=event,
-            facts=bot._ingress_validator.classify(event),
-        ),
+        event,
+        facts=bot._ingress_validator.classify(event),
     )
 
     bot._turn_policy.plan_turn.assert_awaited_once()
@@ -1086,7 +1084,8 @@ async def test_user_message_cannot_spoof_hook_origin_to_bypass_message_received_
     await dispatch_test_turn(
         bot._turn_dispatcher,
         room,
-        PrecheckedEvent(event=event, facts=bot._ingress_validator.classify(event)),
+        event,
+        facts=bot._ingress_validator.classify(event),
     )
 
     assert hook_calls == ["called"]
@@ -1167,7 +1166,8 @@ async def test_dispatch_text_message_runs_message_received_before_command_parsin
     await dispatch_test_turn(
         bot._turn_dispatcher,
         room,
-        PrecheckedEvent(event=event, facts=bot._ingress_validator.classify(event)),
+        event,
+        facts=bot._ingress_validator.classify(event),
     )
 
     assert hook_calls == ["called"]
@@ -1212,11 +1212,12 @@ async def test_message_received_hook_waits_for_reload_and_rechecks_reply_authori
     gate = bot._runtime_view.response_admission_gate
     prepare_task = asyncio.create_task(
         bot._turn_dispatcher._prepare_dispatch(
-            room,
-            event,
-            bot._ingress_validator.classify(event),
-            event_label="message",
-            handled_turn=TurnRecord.create([event.event_id]),
+            make_test_turn(
+                room,
+                event,
+                facts=bot._ingress_validator.classify(event),
+                handled_turn=TurnRecord.create([event.event_id]),
+            ),
         ),
     )
     await asyncio.wait_for(lookup_started.wait(), timeout=1)
@@ -1266,11 +1267,12 @@ async def test_prepare_dispatch_compacts_all_source_events_when_hooks_suppress_b
     replace_turn_deps(bot, settle_ignored_sources=settle_ignored)
 
     dispatch = await bot._turn_dispatcher._prepare_dispatch(
-        room,
-        event,
-        bot._ingress_validator.classify(event),
-        event_label="message",
-        handled_turn=TurnRecord.create(["$m1", "$m2"]),
+        make_test_turn(
+            room,
+            event,
+            facts=bot._ingress_validator.classify(event),
+            handled_turn=TurnRecord.create(["$m1", "$m2"]),
+        ),
     )
 
     assert dispatch is None
@@ -1456,11 +1458,12 @@ async def test_prepare_dispatch_allows_hook_dispatch_without_mention(tmp_path: P
     )
 
     dispatch = await bot._turn_dispatcher._prepare_dispatch(
-        room,
-        event,
-        bot._ingress_validator.classify(event),
-        event_label="message",
-        handled_turn=TurnRecord.create([event.event_id]),
+        make_test_turn(
+            room,
+            event,
+            facts=bot._ingress_validator.classify(event),
+            handled_turn=TurnRecord.create([event.event_id]),
+        ),
     )
 
     # Should NOT be filtered despite sender being an agent and no mention
@@ -1510,11 +1513,12 @@ async def test_prepare_dispatch_reruns_message_received_for_hook_dispatch_from_n
     )
 
     dispatch = await bot._turn_dispatcher._prepare_dispatch(
-        room,
-        event,
-        bot._ingress_validator.classify(event),
-        event_label="message",
-        handled_turn=TurnRecord.create([event.event_id]),
+        make_test_turn(
+            room,
+            event,
+            facts=bot._ingress_validator.classify(event),
+            handled_turn=TurnRecord.create([event.event_id]),
+        ),
     )
 
     assert dispatch is not None
@@ -1571,11 +1575,12 @@ async def test_hook_dispatch_from_message_received_reenters_once_and_skips_origi
     )
 
     dispatch = await bot._turn_dispatcher._prepare_dispatch(
-        room,
-        event,
-        bot._ingress_validator.classify(event),
-        event_label="message",
-        handled_turn=TurnRecord.create([event.event_id]),
+        make_test_turn(
+            room,
+            event,
+            facts=bot._ingress_validator.classify(event),
+            handled_turn=TurnRecord.create([event.event_id]),
+        ),
     )
 
     assert dispatch is not None
@@ -1634,11 +1639,12 @@ async def test_hook_dispatch_from_message_received_stops_reentry_after_first_syn
     )
 
     dispatch = await bot._turn_dispatcher._prepare_dispatch(
-        room,
-        event,
-        bot._ingress_validator.classify(event),
-        event_label="message",
-        handled_turn=TurnRecord.create([event.event_id]),
+        make_test_turn(
+            room,
+            event,
+            facts=bot._ingress_validator.classify(event),
+            handled_turn=TurnRecord.create([event.event_id]),
+        ),
     )
 
     assert dispatch is not None
@@ -1706,7 +1712,8 @@ async def test_router_reply_to_hook_dispatch_text_preserves_original_envelope_me
     await dispatch_test_turn(
         bot._turn_dispatcher,
         room,
-        PrecheckedEvent(event=event, facts=bot._ingress_validator.classify(event)),
+        event,
+        facts=bot._ingress_validator.classify(event),
     )
 
     request = bot._delivery_gateway.send_text.await_args.args[0]
@@ -1736,12 +1743,7 @@ async def test_deep_hook_dispatch_does_not_consume_interactive_answer_on_message
     interactive_questions = MagicMock()
     interactive_questions.claim_interactive_text = AsyncMock()
     replace_turn_deps(bot, interactive_questions=interactive_questions)
-    bot._turn_ingress._precheck_dispatch_event = AsyncMock(
-        return_value=PrecheckedEvent(
-            event=event,
-            facts=bot._ingress_validator.classify(event),
-        ),
-    )
+    bot._turn_ingress._precheck_dispatch_event = AsyncMock(return_value=True)
     bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=_prepared_text_event(event))
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=dispatch_context_result(_dispatch_context(bot)),
@@ -1775,12 +1777,7 @@ async def test_first_hop_hook_dispatch_does_not_consume_interactive_answer_on_me
     interactive_questions = MagicMock()
     interactive_questions.claim_interactive_text = AsyncMock()
     replace_turn_deps(bot, interactive_questions=interactive_questions)
-    bot._turn_ingress._precheck_dispatch_event = AsyncMock(
-        return_value=PrecheckedEvent(
-            event=event,
-            facts=bot._ingress_validator.classify(event),
-        ),
-    )
+    bot._turn_ingress._precheck_dispatch_event = AsyncMock(return_value=True)
     bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=_prepared_text_event(event))
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=dispatch_context_result(_dispatch_context(bot)),
@@ -1828,10 +1825,8 @@ async def test_first_hop_plain_hook_from_non_message_hook_still_dispatches(tmp_p
     await dispatch_test_turn(
         bot._turn_dispatcher,
         room,
-        PrecheckedEvent(
-            event=event,
-            facts=bot._ingress_validator.classify(event),
-        ),
+        event,
+        facts=bot._ingress_validator.classify(event),
     )
 
     bot._turn_policy.plan_turn.assert_awaited_once()
@@ -1896,17 +1891,15 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
         )
         handled = await bot._turn_ingress._dispatch_file_sidecar_text_preview(
             room,
-            PrecheckedEvent(
-                event=sidecar_event,
-                facts=bot._ingress_validator.classify(sidecar_event),
-            ),
+            sidecar_event,
+            bot._ingress_validator.classify(sidecar_event),
             ticket=ticket,
             coalescing_thread_id=None,
         )
         ticket.close()
         await bot._coalescing_gate.drain_all()
 
-    assert handled is _IngressAdmissionOutcome.DEFERRED
+    assert handled is TurnDispatchOutcome.DEFERRED
     interactive_questions.claim_interactive_text.assert_not_awaited()
     mock_dispatch.assert_awaited_once()
 
@@ -1967,16 +1960,14 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
         )
         handled = await bot._turn_ingress._dispatch_file_sidecar_text_preview(
             room,
-            PrecheckedEvent(
-                event=sidecar_event,
-                facts=bot._ingress_validator.classify(sidecar_event),
-            ),
+            sidecar_event,
+            bot._ingress_validator.classify(sidecar_event),
             ticket=ticket,
             coalescing_thread_id=None,
         )
         ticket.close()
 
-    assert handled is _IngressAdmissionOutcome.CONSUMED
+    assert handled is TurnDispatchOutcome.INTENTIONALLY_IGNORED
     interactive_questions.claim_interactive_text.assert_not_awaited()
     mock_dispatch.assert_not_awaited()
 
@@ -2008,10 +1999,8 @@ async def test_first_hop_prepared_text_hook_dispatch_still_reaches_dispatch(tmp_
     await dispatch_test_turn(
         bot._turn_dispatcher,
         room,
-        PrecheckedEvent(
-            event=event,
-            facts=bot._ingress_validator.classify(event),
-        ),
+        event,
+        facts=bot._ingress_validator.classify(event),
     )
 
     bot._turn_policy.plan_turn.assert_awaited_once()
@@ -2052,13 +2041,14 @@ async def test_prepare_dispatch_still_filters_plain_hook_without_mention(tmp_pat
     )
 
     dispatch = await bot._turn_dispatcher._prepare_dispatch(
-        room,
-        event,
-        bot._ingress_validator.classify(event),
-        event_label="message",
-        handled_turn=TurnRecord.create(
-            [event.event_id],
-            requester_id="@mindroom_router:localhost",
+        make_test_turn(
+            room,
+            event,
+            facts=bot._ingress_validator.classify(event),
+            handled_turn=TurnRecord.create(
+                [event.event_id],
+                requester_id="@mindroom_router:localhost",
+            ),
         ),
     )
 
@@ -2098,17 +2088,18 @@ async def test_router_precheck_allows_self_authored_hook_dispatch_without_reques
         ),
     )
 
-    prechecked = await bot._turn_ingress._precheck_dispatch_event(room, event, bot._ingress_validator.classify(event))
+    facts = bot._ingress_validator.classify(event)
 
-    assert prechecked is not None
-    assert prechecked.facts.lane_requester_id == "@mindroom_router:localhost"
+    assert await bot._turn_ingress._precheck_dispatch_event(room, event, facts) is True
+    assert facts.lane_requester_id == "@mindroom_router:localhost"
 
     dispatch = await bot._turn_dispatcher._prepare_dispatch(
-        room,
-        prechecked.event,
-        prechecked.facts,
-        event_label="message",
-        handled_turn=TurnRecord.create([event.event_id]),
+        make_test_turn(
+            room,
+            event,
+            facts=facts,
+            handled_turn=TurnRecord.create([event.event_id]),
+        ),
     )
 
     assert dispatch is not None
@@ -2148,7 +2139,7 @@ async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(
         },
     )
 
-    prechecked = await bot._turn_ingress._precheck_dispatch_event(room, event, bot._ingress_validator.classify(event))
-
-    assert prechecked is None
+    assert (
+        await bot._turn_ingress._precheck_dispatch_event(room, event, bot._ingress_validator.classify(event)) is False
+    )
     turn_store.record_turn.assert_called_once_with(TurnRecord.create([event.event_id]), room_id=room.room_id)

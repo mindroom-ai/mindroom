@@ -382,9 +382,6 @@ async def test_simple_edit_regenerates_and_records_new_response(tmp_path: Path) 
     assert envelope_kwargs["target"] == record.conversation_target
     assert envelope_kwargs["facts"].run_requester_id == USER_ID
 
-    metadata_kwargs = harness.turn_store.build_run_metadata.call_args.kwargs
-    assert metadata_kwargs["additional_discovery_event_ids"] == ()
-
     harness.turn_store.record_edit.assert_called_once()
     recorded = harness.turn_store.record_edit.call_args.args[0]
     assert recorded.response_event_id == NEW_RESPONSE_EVENT_ID
@@ -467,14 +464,12 @@ async def test_coalesced_edit_rebuilds_combined_prompt(tmp_path: Path) -> None:
     )
     assert harness.generate_response.await_args.args[0].prompt == expected_prompt
 
-    metadata_call = harness.turn_store.build_run_metadata.call_args
-    handled_turn = metadata_call.args[0]
+    handled_turn = harness.turn_store.build_run_metadata.call_args.args[0]
     assert handled_turn.source_event_ids == (first_event_id, second_event_id)
     assert handled_turn.source_event_prompts == {
         first_event_id: "edited first message",
         second_event_id: "second message",
     }
-    assert metadata_call.kwargs["additional_discovery_event_ids"] == ()
 
     recorded = harness.turn_store.record_edit.call_args.args[0]
     assert recorded.response_event_id == NEW_RESPONSE_EVENT_ID
@@ -1229,20 +1224,6 @@ async def test_edit_context_realigned_to_recorded_thread_root(tmp_path: Path) ->
         THREAD_ID,
     )
     assert harness.generate_response.await_args.args[0].thread_history == refetched_history
-
-
-@pytest.mark.asyncio
-async def test_non_coalesced_anchor_mismatch_adds_run_discovery_alias(tmp_path: Path) -> None:
-    """A non-coalesced turn anchored to another event keeps the edited event discoverable."""
-    anchor_event_id = "$question:example.org"
-    record = _turn_record(source_event_ids=(anchor_event_id,), anchor_event_id=anchor_event_id)
-    harness = _harness(tmp_path, turn_record=record)
-    event, event_info = _edit_event(original_event_id=ORIGINAL_EVENT_ID)
-
-    await _handle_edit(harness, event, event_info)
-
-    metadata_kwargs = harness.turn_store.build_run_metadata.call_args.kwargs
-    assert metadata_kwargs["additional_discovery_event_ids"] == (ORIGINAL_EVENT_ID,)
 
 
 @pytest.mark.asyncio

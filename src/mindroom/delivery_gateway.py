@@ -25,7 +25,6 @@ from mindroom.event_journal import (
     MatrixDelivery,
     MatrixDeliveryView,
     ProjectedEvent,
-    TerminalTurnWrite,
     matrix_delivery_payload,
     replacement_target,
     thread_root,
@@ -38,7 +37,6 @@ from mindroom.event_journal.matrix_delivery import (
     ReplyRowDelivery,
     ReplyRowEnqueuer,
     SendDelivery,
-    TurnHandoff,
 )
 from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.event_journal.replies import (
@@ -590,8 +588,9 @@ class DeliveryGatewayDeps:
     outbox: MatrixDeliveryView
     # The outbox-enqueue handoff: the journal owns an actionable source until the
     # turn's answer is durably owed to a room, and this is where that becomes
-    # true. Everything after it is the outbox's to recover.
-    turn_handoff: TurnHandoff
+    # true. Everything after it is the outbox's to recover. Told the sources the
+    # outbox took over, after their commit.
+    turn_handoff: Callable[[tuple[str, ...]], None]
     # The Matrix device this process sends as, asked for rather than held: the
     # gateway is built before login, and a re-login replaces it. ``None`` means
     # no login has completed, which the outbox reads as "device unknown".
@@ -900,11 +899,16 @@ class DeliveryGateway:
         projections.append(delivered)
         return tuple(projections)
 
-    def _response_delivery(self, send: SendDelivery, *, handoff: TurnHandoff | None) -> MatrixDeliveryWorker:
+    def _response_delivery(
+        self,
+        send: SendDelivery,
+        *,
+        handoff: Callable[[tuple[str, ...]], None] | None,
+    ) -> MatrixDeliveryWorker:
         """Return the outbox writer, for a live delivery or for recovery.
 
         Both go through here so they cannot drift. They did: recovery was built
-        separately and silently lacked the terminal-record hook, so a recovered
+        separately and silently lacked turn completion, so a recovered
         answer acknowledged its row while the turn record stayed ignorant of
         the event -- the very state the deleted repair pass used to fix.
 
@@ -920,7 +924,7 @@ class DeliveryGateway:
             sending_device_id=self.deps.sending_device_id(),
             resolve_delivered=self._delivered_under_a_previous_device,
             handoff=handoff,
-            terminal_turn_for=self._terminal_turn_write,
+            completes_turns=True,
             process_shutdown_requested=current_task_is_process_shutdown,
             delivery_locks=self._delivery_turn_locks,
             reply_row_resolved=self.deps.reply_row_resolved,
@@ -935,21 +939,6 @@ class DeliveryGateway:
             return delivered.event_id
 
         return self._response_delivery(send, handoff=None)
-
-    def _terminal_turn_write(self, delivery: MatrixDelivery, event_id: str) -> TerminalTurnWrite | None:
-        """Name the turn a delivered non-AI FINAL answer completes in its acknowledgement's transaction.
-
-        It is the turn the answer was bound to when its row became durable. A
-        reply's row completes nothing here: the reply's records record its turn
-        answered when they settle its sources.
-        """
-        if delivery.reply_id is not None:
-            return None
-        return TerminalTurnWrite(
-            agent_name=self.deps.agent_name,
-            delivery_id=delivery.delivery_id,
-            response_event_id=event_id,
-        )
 
     async def _delivered_under_a_previous_device(self, claimed: MatrixDelivery) -> str | None:
         """Return the exact marker-bearing event an earlier device delivered."""

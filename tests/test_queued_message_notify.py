@@ -87,7 +87,6 @@ from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.session_storage.types import ConversationSession, SessionKind
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
 from mindroom.turns.dispatch import TurnDispatcher
-from mindroom.turns.facts import PrecheckedEvent
 from tests.access_schema_support import with_current_room_member_access
 from tests.agent_loop.helpers import collect, context, spec, toolkit
 from tests.bot_helpers import make_test_agent_bot
@@ -2421,10 +2420,8 @@ async def test_reserved_command_follow_up_cleanup_when_dispatch_returns(tmp_path
             await dispatch_test_turn(
                 bot._turn_dispatcher,
                 room,
-                PrecheckedEvent(
-                    event=event,
-                    facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
-                ),
+                event,
+                "@user:localhost",
                 queued_notice_reservation=reservation,
             )
     finally:
@@ -2486,10 +2483,8 @@ async def test_reserved_superseded_follow_up_cleanup_when_dispatch_returns(tmp_p
             await dispatch_test_turn(
                 bot._turn_dispatcher,
                 room,
-                PrecheckedEvent(
-                    event=event,
-                    facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
-                ),
+                event,
+                "@user:localhost",
                 queued_notice_reservation=reservation,
             )
     finally:
@@ -2514,10 +2509,8 @@ async def test_reserved_follow_up_cleanup_when_hook_suppression_returns_before_d
             await dispatch_test_turn(
                 bot._turn_dispatcher,
                 room,
-                PrecheckedEvent(
-                    event=case.event,
-                    facts=make_ingress_facts(case.event.sender, requester_user_id="@user:localhost"),
-                ),
+                case.event,
+                "@user:localhost",
                 queued_notice_reservation=case.reservation,
             )
     finally:
@@ -2549,10 +2542,8 @@ async def test_reserved_follow_up_cleanup_when_plan_ignores_before_response(tmp_
             await dispatch_test_turn(
                 bot._turn_dispatcher,
                 room,
-                PrecheckedEvent(
-                    event=case.event,
-                    facts=make_ingress_facts(case.event.sender, requester_user_id="@user:localhost"),
-                ),
+                case.event,
+                "@user:localhost",
                 queued_notice_reservation=case.reservation,
             )
     finally:
@@ -2584,10 +2575,8 @@ async def test_reserved_follow_up_cleanup_when_route_returns_before_response(tmp
             await dispatch_test_turn(
                 bot._turn_dispatcher,
                 room,
-                PrecheckedEvent(
-                    event=case.event,
-                    facts=make_ingress_facts(case.event.sender, requester_user_id="@user:localhost"),
-                ),
+                case.event,
+                "@user:localhost",
                 queued_notice_reservation=case.reservation,
             )
     finally:
@@ -2630,10 +2619,8 @@ async def test_reserved_follow_up_cleanup_when_dispatch_raises_before_lifecycle(
             await dispatch_test_turn(
                 bot._turn_dispatcher,
                 room,
-                PrecheckedEvent(
-                    event=case.event,
-                    facts=make_ingress_facts(case.event.sender, requester_user_id="@user:localhost"),
-                ),
+                case.event,
+                "@user:localhost",
                 queued_notice_reservation=case.reservation,
             )
     finally:
@@ -2674,10 +2661,8 @@ async def test_reserved_follow_up_cleanup_when_dispatch_cancelled_before_lifecyc
             await dispatch_test_turn(
                 bot._turn_dispatcher,
                 room,
-                PrecheckedEvent(
-                    event=case.event,
-                    facts=make_ingress_facts(case.event.sender, requester_user_id="@user:localhost"),
-                ),
+                case.event,
+                "@user:localhost",
                 queued_notice_reservation=case.reservation,
             )
     finally:
@@ -2948,10 +2933,11 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
                 patch.object(bot._turn_ingress, "_enqueue_for_dispatch", new=cancel_enqueue),
                 pytest.raises(asyncio.CancelledError),
             ):
-                await bot._turn_ingress._enqueue_prepared_text_for_dispatch(
-                    room=room,
-                    prepared_event=event,
+                await bot._turn_ingress._enqueue_prepared_ingress(
+                    room,
+                    event,
                     facts=make_ingress_facts(event.sender),
+                    target=target,
                     envelope=envelope,
                     coalescing_thread_id="$thread",
                     ticket=ticket,
@@ -3111,7 +3097,8 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
         await dispatch_test_turn(
             bot._turn_dispatcher,
             room,
-            PrecheckedEvent(event=event, facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost")),
+            event,
+            "@user:localhost",
         )
 
     assert not await bot._turn_store.is_handled(room.room_id, "$older")

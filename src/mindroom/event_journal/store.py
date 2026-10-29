@@ -89,7 +89,6 @@ if TYPE_CHECKING:
         RefreshRequest,
         RoomMembershipPosition,
         SemanticConsumer,
-        TerminalTurnWrite,
         UnreadableMatrixDelivery,
     )
     from .projection import ProjectedEvent
@@ -228,21 +227,13 @@ class PrincipalStore:
             lambda transaction: journal.is_pending(transaction, self._principal_id, event_id),
         )
 
-    async def response_recovery_state(
-        self,
-        turn_record: TurnRecord,
-        *,
-        agent_name: str,
-    ) -> ResponseRecoveryState:
+    async def response_recovery_state(self, turn_record: TurnRecord) -> ResponseRecoveryState:
         """Read one response's durable handoff through the reserved recovery lane."""
+        agent_name = turn_rows.agent_of_principal(self._principal_id)
 
         def load(transaction: Transaction) -> ResponseRecoveryState:
             source_event_ids = turn_record.source_event_ids
             turn_id = turn_record.anchor_event_id
-            records = {
-                event_id: turn_rows.get_turn_record(transaction, agent_name, event_id)
-                for event_id in turn_record.indexed_event_ids
-            }
             pending = tuple(
                 journal.is_pending(transaction, self._principal_id, event_id) for event_id in source_event_ids
             )
@@ -263,7 +254,10 @@ class PrincipalStore:
                     and journal.source_has_redaction_handoff(transaction, self._principal_id, event_id, turn_record)
                     for event_id, is_pending in zip(source_event_ids, pending, strict=True)
                 ),
-                turn_records=tuple(records.values()),
+                turn_records=tuple(
+                    turn_rows.get_turn_record(transaction, agent_name, event_id)
+                    for event_id in turn_record.indexed_event_ids
+                ),
                 final_delivery=delivery,
                 sources_settled_by_departure=(
                     not any(pending)
@@ -964,7 +958,7 @@ class PrincipalStore:
         stage: DeliveryStage,
         event_id: str,
         delivered_projections: tuple[ProjectedEvent, ...],
-        terminal_turn: TerminalTurnWrite | None = None,
+        terminal_response_event_id: str | None = None,
     ) -> DeliveryAcknowledgement:
         """Record the Matrix event one claimed delivery produced, if nothing else has.
 
@@ -980,8 +974,9 @@ class PrincipalStore:
         while it bound nothing at all -- and only the conditional update below
         knows the difference.
 
-        ``terminal_turn`` is the turn record this acknowledgement completes,
-        written in the same transaction. The acknowledgement is the durable
+        ``terminal_response_event_id``, when given, completes the turn this
+        delivery was bound to with that response event, written in the same
+        transaction. The acknowledgement is the durable
         proof that a visible answer exists and what its event ID is, and that
         is precisely the fact the record is missing until it is told. Two
         commits leave a window in which the answer is delivered and the record
@@ -1020,12 +1015,12 @@ class PrincipalStore:
             # either. The row already names another event, and a terminal
             # record pointing somewhere else is the disagreement this whole
             # transaction exists to prevent.
-            if bound and may_project and terminal_turn is not None:
+            if bound and may_project and terminal_response_event_id is not None:
                 turn_rows.complete_bound_delivery(
                     transaction,
-                    terminal_turn.agent_name,
-                    delivery_id=terminal_turn.delivery_id,
-                    response_event_id=terminal_turn.response_event_id,
+                    turn_rows.agent_of_principal(self._principal_id),
+                    delivery_id=delivery_id,
+                    response_event_id=terminal_response_event_id,
                 )
             if bound and may_project:
                 for delivered_projection in delivered_projections:

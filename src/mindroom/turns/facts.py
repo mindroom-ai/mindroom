@@ -91,14 +91,6 @@ class IngressFacts:
         )
 
 
-@dataclass(frozen=True)
-class PrecheckedEvent[T]:
-    """A raw or prepared event that already passed ingress prechecks, with the provenance precheck read."""
-
-    event: T
-    facts: IngressFacts
-
-
 def is_router_voice_echo(facts: IngressFacts, content: object) -> bool:
     """Return whether content is the router's display-only transcript of a human's or bot account's audio."""
     return (

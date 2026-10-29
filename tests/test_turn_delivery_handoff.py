@@ -34,7 +34,7 @@ from mindroom.event_journal import (
     EventJournalStore,
     EventKind,
 )
-from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker, TurnHandoff
+from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
@@ -639,9 +639,7 @@ class TestTheHandoffIsOneCommit:
             ).principal(bot._journal_principal_id),
             send=send,
             observe_delivered=ignore_delivered_projection,
-            handoff=TurnHandoff(
-                released=lambda event_ids: commits_when_released.append(backend.commits) or handoff.released(event_ids),
-            ),
+            handoff=lambda event_ids: commits_when_released.append(backend.commits) or handoff(event_ids),
         ).deliver(
             delivery_id="$cause",
             stage=DeliveryStage.FINAL,

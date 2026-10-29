@@ -47,7 +47,6 @@ from mindroom.event_journal.matrix_delivery import (
     MatrixDeliveryWorker,
     PermanentDeliveryError,
     RecoveryOutcome,
-    TurnHandoff,
 )
 from mindroom.event_journal.sqlite_backend import SqliteBackend
 from mindroom.history.types import CompactionLifecycleFailure
@@ -83,7 +82,7 @@ from tests.reply_span_helpers import final_in_resume_span, final_in_span, reply_
 from tests.test_turn_store import _in_room, _redact, _store
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping
+    from collections.abc import AsyncIterator, Callable, Mapping
     from pathlib import Path
 
     from mindroom.event_journal import (
@@ -192,7 +191,7 @@ def _gateway(
     outbox: MatrixDeliveryView | None = None,
     *,
     sending_device_id: str | None = "CURRENT-DEVICE",
-    turn_handoff: TurnHandoff = ignore_final_delivery_handoff,
+    turn_handoff: Callable[[tuple[str, ...]], None] = ignore_final_delivery_handoff,
     large_message_strategy: _LargeMessageStrategy = "sidecar",
 ) -> DeliveryGateway:
     """Return a delivery gateway whose only real collaborator is the outbox."""
@@ -2899,7 +2898,7 @@ class TestTurnDeliverySerialization:
                 },
             ),
         )
-        handoff = TurnHandoff(released=lambda _source_event_ids: None)
+        handoff = ignore_final_delivery_handoff
         gateway = _gateway(
             tmp_path,
             alice,
@@ -2987,7 +2986,7 @@ class TestTurnDeliverySerialization:
                 },
             ),
         )
-        handoff = TurnHandoff(released=lambda _source_event_ids: None)
+        handoff = ignore_final_delivery_handoff
         gateway = _gateway(
             tmp_path,
             alice,

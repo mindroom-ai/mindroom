@@ -37,7 +37,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.turn_policy import DispatchPlan
-from mindroom.turn_record import TurnRecord
+from mindroom.turn_record import SourceVisibleEcho, TurnRecord
 from mindroom.voice.handler import prepare_voice_message
 from mindroom.voice.visible_voice_echo import VisibleVoiceEchoRequest
 from tests.access_schema_support import with_current_room_member_access
@@ -1206,7 +1206,7 @@ async def test_voice_echo_edit_failure_retries_existing_placeholder(tmp_path) ->
     bot._delivery_gateway.send_text.assert_awaited_once()
     assert bot._delivery_gateway.edit_text.await_count == 2
     assert await bot._turn_store.is_handled(room.room_id, event.event_id)
-    assert await bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
+    assert (await bot._turn_store.visible_echo(event.event_id)).event_id == "$voice_echo"
 
 
 @pytest.mark.asyncio
@@ -1370,7 +1370,7 @@ async def test_transcript_wins_when_fallback_edit_is_in_flight(tmp_path) -> None
         f"{VOICE_PREFIX}[Attached voice message]",
         f"{VOICE_PREFIX}summarize this audio",
     ]
-    finalized = await bot._turn_store.finalized_visible_echo(event.event_id)
+    finalized = await bot._turn_store.visible_echo(event.event_id)
     assert finalized is not None
     assert finalized.is_fallback is False
 
@@ -1610,10 +1610,7 @@ async def test_router_visible_voice_echo_keeps_multi_agent_handoff(tmp_path) -> 
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
         VOICE_TRANSCRIPT_KEY: True,
     }
-    finalized_echo = await bot._turn_store.finalized_visible_echo(event.event_id)
-    assert finalized_echo is not None
-    assert finalized_echo.event_id == "$voice_echo"
-    assert finalized_echo.is_fallback is False
+    assert await bot._turn_store.visible_echo(event.event_id) == SourceVisibleEcho("$voice_echo", is_fallback=False)
 
 
 @pytest.mark.asyncio
@@ -1672,7 +1669,7 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(
         await drain_coalescing(bot)
 
         assert not await bot._turn_store.is_handled(room.room_id, event.event_id)
-        assert await bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
+        assert (await bot._turn_store.visible_echo(event.event_id)).event_id == "$voice_echo"
 
         await bot._on_media_message(room, event)
         await drain_coalescing(bot)
@@ -1685,7 +1682,7 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(
     ]
     bot._delivery_gateway.edit_text.assert_awaited_once()
     assert await bot._turn_store.is_handled(room.room_id, event.event_id)
-    assert await bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
+    assert (await bot._turn_store.visible_echo(event.event_id)).event_id == "$voice_echo"
 
 
 @pytest.mark.asyncio
@@ -1716,7 +1713,7 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
         await drain_coalescing(bot)
 
     assert not await bot._turn_store.is_handled(room.room_id, event.event_id)
-    assert await bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
+    assert (await bot._turn_store.visible_echo(event.event_id)).event_id == "$voice_echo"
 
     restarted_bot, restarted_room, restarted_event = _make_visible_router_echo_scenario(
         tmp_path,
@@ -1746,7 +1743,7 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
     response_texts = [call.args[0].response_text for call in restarted_bot._delivery_gateway.send_text.call_args_list]
     assert response_texts == ["@home could you help with this?"]
     assert await restarted_bot._turn_store.is_handled(room.room_id, event.event_id)
-    assert await restarted_bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
+    assert (await restarted_bot._turn_store.visible_echo(event.event_id)).event_id == "$voice_echo"
 
 
 @pytest.mark.asyncio

@@ -70,7 +70,6 @@ from .models import (
     RefreshRequest,
     RoomMembershipPosition,
     SemanticConsumer,
-    TerminalTurnWrite,
     UnreadableMatrixDelivery,
     VisibleMessage,
 )
@@ -173,7 +172,6 @@ __all__ = [
     "ScheduledCallOutcome",
     "ScheduledCallRefusal",
     "SemanticConsumer",
-    "TerminalTurnWrite",
     "ToolJobExistsError",
     "ToolJobOwnershipLostError",
     "ToolJobStore",

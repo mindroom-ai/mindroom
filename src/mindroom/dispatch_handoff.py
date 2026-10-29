@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import nio
 
@@ -24,10 +24,6 @@ from mindroom.matrix.media import (
     is_video_message_event,
 )
 from mindroom.tool_system.events import body_without_tool_markers
-
-if TYPE_CHECKING:
-    from mindroom.coalescing.batch import CoalescingKey
-
 
 # Voice messages are normalized into PreparedIngress before coalescing, so
 # this contract only includes routed image/file/video events.
@@ -64,14 +60,6 @@ class PreparedIngress:
     # Whom it mentions: ``None`` nobody, ``False`` this agent, ``True`` only other agents or people.
     # A message for another participant never shares a turn with messages for this agent.
     for_another_participant: bool | None = None
-
-
-@dataclass(frozen=True)
-class DispatchIngressMetadata:
-    """Gate-owned dispatch metadata for one prepared turn."""
-
-    coalescing_key: CoalescingKey | None = None
-    active_follow_up: bool = False
 
 
 @dataclass(frozen=True)

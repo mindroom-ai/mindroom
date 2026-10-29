@@ -21,7 +21,6 @@ from mindroom.event_journal import (
     EventKind,
     InboundEvent,
     ProjectedEvent,
-    TerminalTurnWrite,
     journal,
     turn_rows,
 )
@@ -31,7 +30,7 @@ from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import command_result_content_to_dict
 from mindroom.turn_record import PreparedVoiceSource, SourceEventMetadata, TurnRecord, canonicalize_turn_record
-from mindroom.turn_store import TurnStore, TurnStoreDeps, _reset_turn_claim_registries
+from mindroom.turn_store import _CLAIM_REGISTRIES, TurnStore, TurnStoreDeps
 from tests.journal_helpers import admit_room_event
 
 if TYPE_CHECKING:
@@ -142,12 +141,11 @@ class TurnStateAdapter:
 
     async def open(self) -> None:
         """Open the journal and a started turn store, as startup does."""
-        _reset_turn_claim_registries()
+        _CLAIM_REGISTRIES.clear()
         self.journal = EventJournalStore.open_sqlite(self.database)
         self.principal = self.journal.principal(PRINCIPAL)
         self.store = TurnStore(
             TurnStoreDeps(
-                agent_name=AGENT,
                 turn_records=self.journal.turn_records(AGENT),
                 legacy_responses_file=self.legacy_ledger,
                 state_writer=MagicMock(),
@@ -172,7 +170,7 @@ class TurnStateAdapter:
     async def close(self) -> None:
         """Close the journal and drop the process's live claims."""
         await self.journal.close()
-        _reset_turn_claim_registries()
+        _CLAIM_REGISTRIES.clear()
 
     def _room_of(self, event_id: str) -> str:
         """Return the room an event was seen or recorded in, as the runtime always knows it."""
@@ -250,7 +248,6 @@ class TurnStateAdapter:
         self,
         room: str,
         sources: Sequence[str],
-        terminal: Sequence[str] | None = None,
         history: Sequence[tuple[str, str | None, int]] = (),
     ) -> str:
         """Prepare a locked response: register the history's edits as context, then check its sources."""
@@ -265,7 +262,6 @@ class TurnStateAdapter:
         preparation = await self.store.prepare_pending_response_source(
             target=TARGETS[room],
             source_event_ids=tuple(sources),
-            terminal_source_event_ids=tuple(sources if terminal is None else terminal),
             thread_history=thread_history,
         )
         return "suppressed" if preparation.invalid else "proceed"
@@ -340,7 +336,7 @@ class TurnStateAdapter:
             stage=DeliveryStage.FINAL,
             event_id=response,
             delivered_projections=(),
-            terminal_turn=TerminalTurnWrite(agent_name=AGENT, delivery_id=turn, response_event_id=response),
+            terminal_response_event_id=response,
         )
         after = await self.store.get_turn_record(turn)
         return {
@@ -352,12 +348,11 @@ class TurnStateAdapter:
     async def settle(self, sources: Sequence[str], *, publish: bool = True) -> str:  # noqa: ARG002
         """Settle a reply's sources and complete their turn in one transaction, as a reply's ``SettleSources`` does."""
 
-        def settle(transaction: Transaction) -> TurnRecord | None:
+        def settle(transaction: Transaction) -> bool:
             journal.settle_many(transaction, PRINCIPAL, tuple(sources))
             return turn_rows.complete_turn_of(transaction, AGENT, tuple(sources))
 
-        completed = await self.journal.backend.write(settle)
-        return "unchanged" if completed is None else "completed"
+        return "completed" if await self.journal.backend.write(settle) else "unchanged"
 
     async def cleanup(self, days: int = 0, unsettled: Sequence[str] = ()) -> str:
         """Let ``days`` pass, then run retention with these journal sources still unsettled."""
@@ -383,12 +378,15 @@ class TurnStateAdapter:
 
     async def visible_echo(self, event_id: str) -> str | None:
         """Return the visible echo tracked for a source."""
-        return await self.store.visible_echo_for_source(event_id)
+        echo = await self.store.visible_echo(event_id)
+        return None if echo is None else echo.event_id
 
     async def finalized_echo(self, event_id: str) -> dict[str, object] | None:
         """Return a source's replaced echo and whether a fallback replaced it."""
-        finalized = await self.store.finalized_visible_echo(event_id)
-        return None if finalized is None else {"event_id": finalized.event_id, "is_fallback": finalized.is_fallback}
+        echo = await self.store.visible_echo(event_id)
+        if echo is None or echo.is_fallback is None:
+            return None
+        return {"event_id": echo.event_id, "is_fallback": echo.is_fallback}
 
     async def pending_intent(self, event_id: str) -> bool:
         """Return whether the source owns an incomplete response attempt."""

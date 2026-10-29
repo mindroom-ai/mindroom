@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 from dataclasses import dataclass, field, fields, replace
-from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -616,12 +615,11 @@ def _build_harness(
     journal_principal = journal_store.principal(f"{agent_name}@{matrix_id.full_id}")
     turn_store = TurnStore(
         TurnStoreDeps(
-            agent_name=agent_name,
             turn_records=journal_store.turn_records(agent_name),
             legacy_responses_file=None,
             state_writer=state_writer,
             tool_runtime=tool_runtime,
-            response_recovery_state=partial(journal_principal.response_recovery_state, agent_name=agent_name),
+            response_recovery_state=journal_principal.response_recovery_state,
             # Resolved late: the retry recorder is defined below, with the turn owners'.
             retry_dispatch_sources=lambda room_id, event_ids: _retry_dispatch_sources(room_id, event_ids),
         ),
@@ -641,8 +639,7 @@ def _build_harness(
 
     async def _answered(logical_source_event_ids: tuple[str, ...]) -> None:
         # The reply's records complete the turn when they settle its sources.
-        completed = await turn_store.deps.turn_records.write(turn_rows.complete_turn_of, logical_source_event_ids)
-        assert completed is not None
+        assert await turn_store.deps.turn_records.write(turn_rows.complete_turn_of, logical_source_event_ids)
 
     runner = _RecordingResponseRunner(answered=_answered)
     gateway = _RecordingDeliveryGateway(answered=_answered)
@@ -1201,7 +1198,7 @@ async def _redact(harness: _Harness, event_id: str, room_id: str) -> None:
     await harness.turn_store.deps.turn_records.backend.write(
         lambda transaction: journal.redact_for_agent(
             transaction,
-            harness.turn_store.deps.agent_name,
+            harness.turn_store.deps.turn_records.agent_name,
             room_id=room_id,
             event_id=event_id,
             receipt_order=0,
@@ -1778,8 +1775,6 @@ async def test_a_selection_coalesced_with_another_message_is_refused(config: Con
                 thread_id=None,
             ),
             response_target=target,
-            source_event_id="$selection:localhost",
-            facts=_SELECTION_FACTS,
         ),
     )
     message = PendingEvent(
@@ -2384,7 +2379,6 @@ async def test_managed_follow_up_cannot_settle_human_source_queued_before_it(
             key,
             ready_result=ReadyPendingEvent(pending_event=pending_event),
             source_event_id=pending_event.event.event_id,
-            source_kind=pending_event.facts.source_kind,
         )
     await gate.drain_all()
 
@@ -3394,7 +3388,6 @@ async def test_agent_reply_for_a_human_does_not_share_that_humans_follow_up_batc
             active_follow_up_coalescing_key(room.room_id, thread_root),
             ready_result=ReadyPendingEvent(pending_event=pending_event),
             source_event_id=pending_event.event.event_id,
-            source_kind=MESSAGE_SOURCE_KIND,
         )
     await gate.drain_all()
     await harness.runner.settle_inbox_responses()
@@ -5419,7 +5412,6 @@ async def test_rejection_replay_adopts_durable_response(config: Config, tmp_path
             dispatch,
             action,
             DispatchPayloadInputs((), (), ()),
-            processing_log="rejecting",
             dispatch_started_at=0.0,
             handled_turn=pending.record,
         )
@@ -5435,7 +5427,6 @@ async def test_rejection_replay_adopts_durable_response(config: Config, tmp_path
         dispatch,
         action,
         DispatchPayloadInputs((), (), ()),
-        processing_log="rejecting",
         dispatch_started_at=0.0,
         handled_turn=pending_turn,
         reconcile_visible_response=True,
@@ -6503,7 +6494,7 @@ async def test_opted_in_active_backlog_preserves_idle_dispatch_and_requesters(
         async with asyncio.timeout(1):
             await dispatched.wait()
         assert len(batches) == len(harness.runner.requests) == expected_batch_count
-        assert all(batch.ingress.coalescing_key == key for batch in batches)
+        assert all(batch.coalescing_key == key for batch in batches)
         if mode == "single_human":
             expected_turns = [(("$first:localhost", "$second:localhost"), _SENDER, (True, True), False)]
         else:
@@ -6875,7 +6866,6 @@ async def test_a_batch_source_ended_before_its_reply_hands_the_rest_back_once_th
         dispatch,
         ResponseAction(kind="individual"),
         DispatchPayloadInputs((), (), ()),
-        processing_log="Processing",
         dispatch_started_at=0.0,
         handled_turn=pending.record,
     )

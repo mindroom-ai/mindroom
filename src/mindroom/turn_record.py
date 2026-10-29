@@ -146,37 +146,6 @@ class RevisionReplay:
 
 
 @dataclass(frozen=True)
-class _CanonicalSourceState:
-    """Canonical source identity and source-owned facts."""
-
-    source_event_ids: tuple[str, ...]
-    discovery_event_ids: tuple[str, ...]
-    anchor_event_id: str | None
-    source_event_prompts: Mapping[str, str] | None
-    source_event_revisions: Mapping[str, SourceEventRevision] | None
-    source_event_metadata: Mapping[str, SourceEventMetadata] | None
-    prepared_voice_sources: Mapping[str, PreparedVoiceSource] | None
-
-
-@dataclass(frozen=True)
-class _CanonicalCommandState:
-    """Canonical command execution checkpoint."""
-
-    command_execution_started: bool
-    command_result_text: str | None
-
-
-@dataclass(frozen=True)
-class _CanonicalContextState:
-    """Canonical requester and conversation context."""
-
-    response_owner: str | None
-    requester_id: str | None
-    history_scope: HistoryScope | None
-    conversation_target: MessageTarget | None
-
-
-@dataclass(frozen=True)
 class TurnRecord:
     """Canonical immutable identity, outcome, and regeneration facts for one turn."""
 
@@ -214,7 +183,7 @@ class TurnRecord:
         source_event_prompts: Mapping[str, str] | None = None,
         source_event_revisions: Mapping[str, object] | None = None,
         revision_replay: Mapping[str, RevisionReplay] | None = None,
-        source_event_metadata: Mapping[str, object] | None = None,
+        source_event_metadata: Mapping[str, SourceEventMetadata] | None = None,
         prepared_voice_sources: Mapping[str, object] | None = None,
         response_owner: str | None = None,
         requester_id: str | None = None,
@@ -227,46 +196,40 @@ class TurnRecord:
         visible_echoes: Mapping[str, SourceVisibleEcho] | None = None,
     ) -> TurnRecord:
         """Create a canonical record from permissive runtime inputs."""
-        source = _canonical_source_state(
-            source_event_ids,
-            discovery_event_ids=discovery_event_ids,
-            anchor_event_id=anchor_event_id,
-            source_event_prompts=source_event_prompts,
-            source_event_revisions=source_event_revisions,
-            source_event_metadata=source_event_metadata,
-            prepared_voice_sources=prepared_voice_sources if not completed else None,
+        sources = canonical_source_event_ids(source_event_ids)
+        source_ids = set(sources)
+        aliases = tuple(
+            event_id for event_id in canonical_source_event_ids(discovery_event_ids) if event_id not in source_ids
         )
-        command = _canonical_command_state(command_execution_started, command_result_text)
-        context = _canonical_context_state(
-            response_owner,
-            requester_id,
-            history_scope,
-            conversation_target,
-        )
+        voice = {
+            event_id: prepared
+            for event_id, raw in (prepared_voice_sources or {}).items()
+            if not completed and event_id in source_ids and (prepared := PreparedVoiceSource._from_raw(raw)) is not None
+        }
+        echoes = {event_id: echo for event_id in sources if (echo := (visible_echoes or {}).get(event_id)) is not None}
+        result_text = canonical_optional_string(command_result_text)
         return cls(
-            source_event_ids=source.source_event_ids,
-            discovery_event_ids=source.discovery_event_ids,
-            anchor_event_id=source.anchor_event_id,
+            source_event_ids=sources,
+            discovery_event_ids=aliases,
+            anchor_event_id=canonical_optional_string(anchor_event_id) or (sources[-1] if sources else None),
             response_event_id=canonical_optional_string(response_event_id),
             completed=completed,
-            source_event_prompts=source.source_event_prompts,
-            source_event_revisions=source.source_event_revisions,
-            revision_replay=_revision_replay_map(revision_replay),
-            source_event_metadata=source.source_event_metadata,
-            prepared_voice_sources=source.prepared_voice_sources,
-            response_owner=context.response_owner,
-            requester_id=context.requester_id,
-            command_execution_started=command.command_execution_started,
-            command_result_text=command.command_result_text,
+            source_event_prompts=_immutable_prompt_map(sources, source_event_prompts),
+            source_event_revisions=_immutable_source_event_revisions((*sources, *aliases), source_event_revisions),
+            revision_replay=MappingProxyType(dict(revision_replay)) if revision_replay else None,
+            source_event_metadata=_immutable_source_event_metadata(sources, source_event_metadata),
+            prepared_voice_sources=MappingProxyType(voice) if voice else None,
+            response_owner=canonical_optional_string(response_owner),
+            requester_id=canonical_optional_string(requester_id),
+            command_execution_started=command_execution_started is True or result_text is not None,
+            command_result_text=result_text,
             command_result_extra_content=(
-                freeze_command_result_content(command_result_extra_content)
-                if command.command_result_text is not None
-                else None
+                freeze_command_result_content(command_result_extra_content) if result_text is not None else None
             ),
-            history_scope=context.history_scope,
-            conversation_target=context.conversation_target,
+            history_scope=history_scope if isinstance(history_scope, HistoryScope) else None,
+            conversation_target=conversation_target if isinstance(conversation_target, MessageTarget) else None,
             turn_key=canonical_optional_string(turn_key),
-            visible_echoes=_canonical_visible_echoes(source.source_event_ids, visible_echoes),
+            visible_echoes=MappingProxyType(echoes) if echoes else None,
         )
 
     @property
@@ -294,7 +257,12 @@ class TurnRecord:
 
     def prompt_source_event_id(self, event_id: str) -> str:
         """Return the physical prompt owner for a source or discovery alias."""
-        return _prompt_source_event_id(self.source_event_ids, self.source_event_metadata, event_id)
+        if event_id in self.source_event_ids:
+            return event_id
+        for source_id, metadata in (self.source_event_metadata or {}).items():
+            if metadata.discovery_event_id == event_id:
+                return source_id
+        return event_id
 
     def requester_id_for_source(self, event_id: str) -> str | None:
         """Return the exact requester for one source, or None when it cannot be proven."""
@@ -327,7 +295,7 @@ class _TurnRecordChanges(typing.TypedDict, total=False):
     source_event_prompts: Mapping[str, str] | None
     source_event_revisions: Mapping[str, object] | None
     revision_replay: Mapping[str, RevisionReplay] | None
-    source_event_metadata: Mapping[str, object] | None
+    source_event_metadata: Mapping[str, SourceEventMetadata] | None
     prepared_voice_sources: Mapping[str, object] | None
     response_owner: str | None
     requester_id: str | None
@@ -367,100 +335,6 @@ def canonicalize_turn_record(
         turn_key=candidate.turn_key,
         visible_echoes=candidate.visible_echoes,
     )
-
-
-def _revision_replay_map(raw: Mapping[str, RevisionReplay] | None) -> Mapping[str, RevisionReplay] | None:
-    """Freeze edit provenance."""
-    replay = {event_id: value for event_id, value in (raw or {}).items() if isinstance(value, RevisionReplay)}
-    return MappingProxyType(replay) if replay else None
-
-
-def _canonical_source_state(
-    source_event_ids: Sequence[object],
-    *,
-    discovery_event_ids: Sequence[object],
-    anchor_event_id: object,
-    source_event_prompts: Mapping[str, str] | None,
-    source_event_revisions: Mapping[str, object] | None,
-    source_event_metadata: Mapping[str, object] | None,
-    prepared_voice_sources: Mapping[str, object] | None,
-) -> _CanonicalSourceState:
-    """Return canonical source identity and source-owned facts."""
-    canonical_sources = canonical_source_event_ids(source_event_ids)
-    source_ids = set(canonical_sources)
-    canonical_discovery = tuple(
-        event_id for event_id in canonical_source_event_ids(discovery_event_ids) if event_id not in source_ids
-    )
-    canonical_anchor = canonical_optional_string(anchor_event_id)
-    if canonical_anchor is None and canonical_sources:
-        canonical_anchor = canonical_sources[-1]
-    return _CanonicalSourceState(
-        source_event_ids=canonical_sources,
-        discovery_event_ids=canonical_discovery,
-        anchor_event_id=canonical_anchor,
-        source_event_prompts=_immutable_prompt_map(canonical_sources, source_event_prompts),
-        source_event_revisions=_immutable_source_event_revisions(
-            (*canonical_sources, *canonical_discovery),
-            source_event_revisions,
-        ),
-        source_event_metadata=_immutable_source_event_metadata(canonical_sources, source_event_metadata),
-        prepared_voice_sources=MappingProxyType(
-            {
-                event_id: prepared
-                for event_id, raw in (prepared_voice_sources or {}).items()
-                if event_id in source_ids and (prepared := PreparedVoiceSource._from_raw(raw)) is not None
-            },
-        )
-        or None,
-    )
-
-
-def _canonical_visible_echoes(
-    source_event_ids: tuple[str, ...],
-    visible_echoes: Mapping[str, SourceVisibleEcho] | None,
-) -> Mapping[str, SourceVisibleEcho] | None:
-    """Keep the echoes of physical sources only."""
-    echoes = {
-        event_id: echo
-        for event_id in source_event_ids
-        if isinstance((echo := (visible_echoes or {}).get(event_id)), SourceVisibleEcho)
-    }
-    return MappingProxyType(echoes) if echoes else None
-
-
-def _canonical_command_state(started: object, result_text: object) -> _CanonicalCommandState:
-    """Return a canonical command execution checkpoint."""
-    canonical_result = canonical_optional_string(result_text)
-    return _CanonicalCommandState(started is True or canonical_result is not None, canonical_result)
-
-
-def _canonical_context_state(
-    response_owner: object,
-    requester_id: object,
-    history_scope: object,
-    conversation_target: object,
-) -> _CanonicalContextState:
-    """Return canonical requester and conversation context."""
-    return _CanonicalContextState(
-        response_owner=canonical_optional_string(response_owner),
-        requester_id=canonical_optional_string(requester_id),
-        history_scope=history_scope if isinstance(history_scope, HistoryScope) else None,
-        conversation_target=conversation_target if isinstance(conversation_target, MessageTarget) else None,
-    )
-
-
-def _prompt_source_event_id(
-    source_event_ids: tuple[str, ...],
-    source_event_metadata: Mapping[str, SourceEventMetadata] | None,
-    event_id: str,
-) -> str:
-    """Return the physical prompt owner for a source or discovery alias."""
-    if event_id in source_event_ids:
-        return event_id
-    for source_id, metadata in (source_event_metadata or {}).items():
-        if metadata.discovery_event_id == event_id:
-            return source_id
-    return event_id
 
 
 def canonical_source_event_ids(source_event_ids: Sequence[object]) -> tuple[str, ...]:
@@ -517,19 +391,15 @@ def _immutable_source_event_revisions(
 
 def _immutable_source_event_metadata(
     source_event_ids: tuple[str, ...],
-    source_event_metadata: Mapping[str, object] | None,
+    source_event_metadata: Mapping[str, SourceEventMetadata] | None,
 ) -> Mapping[str, SourceEventMetadata] | None:
-    """Normalize and freeze source metadata belonging to the canonical identity."""
+    """Freeze source metadata belonging to the canonical identity."""
     if source_event_metadata is None:
         return None
-    metadata: dict[str, SourceEventMetadata] = {}
-    for event_id in source_event_ids:
-        raw_metadata = source_event_metadata.get(event_id)
-        normalized = (
-            raw_metadata
-            if isinstance(raw_metadata, SourceEventMetadata)
-            else SourceEventMetadata._from_raw(raw_metadata)
-        )
-        if normalized is not None:
-            metadata[event_id] = normalized
-    return MappingProxyType(metadata)
+    return MappingProxyType(
+        {
+            event_id: metadata
+            for event_id in source_event_ids
+            if (metadata := source_event_metadata.get(event_id)) is not None
+        },
+    )

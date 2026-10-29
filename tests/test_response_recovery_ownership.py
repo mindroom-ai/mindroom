@@ -14,7 +14,6 @@ from mindroom import reply_lifecycle as rl
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind
-from mindroom.event_journal.matrix_delivery import TurnHandoff
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget
 from mindroom.response_payload_preparation import DispatchPayloadInputs
@@ -88,7 +87,7 @@ async def test_preparation_outcomes_reach_dispatch_and_journal_owners(  # noqa: 
     gateway = _gateway(
         tmp_path,
         principal,
-        turn_handoff=TurnHandoff(released=lambda ids: dispatcher.release_delivered_turn_sources(ids)),
+        turn_handoff=lambda ids: dispatcher.release_delivered_turn_sources(ids),
     )
     gateway = replace(
         gateway,
@@ -200,7 +199,6 @@ async def test_preparation_outcomes_reach_dispatch_and_journal_owners(  # noqa: 
                 dispatch,
                 ResponseAction(kind="individual"),
                 DispatchPayloadInputs((), (), ()),
-                processing_log="Processing",
                 dispatch_started_at=0.0,
                 handled_turn=await store.get_turn_record(SOURCE),
             ),

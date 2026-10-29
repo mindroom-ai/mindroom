@@ -177,31 +177,11 @@ class VisibleResponseReconciler:
     ) -> str | None:
         """Send and durably bind one non-model reply unless recovery already found it.
 
-        Every reply here has a turn behind it, so every one goes through the
-        same claim-before-send row a model answer uses. Two things follow from
-        that, and both are the point.
-
-        The journal sources this turn answers settle inside the enqueue, so the
-        answer becoming durably owed and the turn stopping being the journal's
-        work are one commit. On the direct path the terminal record would land
-        in the turn rows first and the journal would settle afterwards, leaving
-        a window where a pending row describes finished work -- the window the
-        degraded replay guard has to consult two records to survive.
-
-        And a crashed send is recovered by resending the frozen row rather than
-        by scanning the room for what might already be there. The scan still
-        runs ahead of the send here, because a row from a previous membership
-        is gone and its answer is not, but it stops being the only thing
-        standing between a crash and a lost reply.
-
-        Only callers that send exactly once per turn may use this. The outbox
-        freezes a row at its first attempt, so a second send for the same turn
-        would be refused and its text would never reach the room.
-
-        A send that genuinely is not a turn -- a voice echo, a reconciliation
-        notice -- has no identity a restart can resolve and does not belong
-        here at all; it builds its own ``SendTextRequest`` and the gateway
-        gives it the direct path.
+        The reply goes through the same outbox row a model answer uses, so a
+        crashed send is resent. Call it once per turn: the outbox freezes a row
+        at its first attempt and refuses a second send for the same turn. A
+        send that is not a turn, such as a voice echo, builds its own
+        ``SendTextRequest`` instead.
         """
         if recovered_response_event_id is not None:
             return recovered_response_event_id

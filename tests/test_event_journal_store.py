@@ -59,7 +59,6 @@ from mindroom.event_journal import (
     InteractiveSelection,
     ProjectedEvent,
     SemanticConsumer,
-    TerminalTurnWrite,
     approval_arguments_digest,
     delivery_transaction_id,
     reads,
@@ -2433,7 +2432,7 @@ class TestProjectedInteractivePrompts:
             delivered_projections=(
                 projection("$answer", thread_id="$thread", sender="alice", ts=2_000, content=content),
             ),
-            terminal_turn=TerminalTurnWrite(agent_name="agent", delivery_id="$turn", response_event_id="$answer"),
+            terminal_response_event_id="$answer",
         )
         await admit_room_membership(alice, ROOM, "join")
 
@@ -5603,7 +5602,7 @@ class TestOutbox:
                 stage=DeliveryStage.FINAL,
                 event_id=event_id,
                 delivered_projections=(),
-                terminal_turn=TerminalTurnWrite(agent_name="agent", delivery_id="$source", response_event_id=event_id),
+                terminal_response_event_id=event_id,
             )
 
         stored = await alice.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
@@ -5713,7 +5712,7 @@ class TestOutbox:
                 stage=DeliveryStage.FINAL,
                 event_id=event_id,
                 delivered_projections=(),
-                terminal_turn=TerminalTurnWrite(agent_name="agent", delivery_id="turn-1", response_event_id=event_id),
+                terminal_response_event_id=event_id,
             )
 
         with _outbox_row_held(rival_stores.database_url, principal_id=principal_id, turn_id="turn-1"):

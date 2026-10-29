@@ -244,7 +244,7 @@ class VisibleVoiceEchoLifecycle:
         always settled, including when the claiming task is cancelled.
         """
         if self.deps.agent_name == ROUTER_AGENT_NAME:
-            published = await self.deps.turn_store.visible_echo_for_source(source_event_id) is not None
+            published = await self.deps.turn_store.visible_echo(source_event_id) is not None
             return published or not self._publication_required(room.room_id, requester_user_id)
         key = self._barrier_key(room.room_id, source_event_id)
         barrier = _echo_barriers.get(key)
@@ -431,10 +431,10 @@ class VisibleVoiceEchoLifecycle:
         ):
             if not self._sender_is_authorized(request):
                 return None
-            existing_event_id = await self.deps.turn_store.visible_echo_for_source(request.source_event_id)
-            if existing_event_id is not None:
-                _publish_echo_barrier(barrier, existing_event_id)
-                return existing_event_id
+            existing = await self.deps.turn_store.visible_echo(request.source_event_id)
+            if existing is not None:
+                _publish_echo_barrier(barrier, existing.event_id)
+                return existing.event_id
             existing_event_id = await self._recover_visible_echo_event_id(request)
             if existing_event_id is not None:
                 await self.deps.turn_store.record_visible_echo(
@@ -488,13 +488,11 @@ class VisibleVoiceEchoLifecycle:
         ):
             if not self._sender_is_authorized(request):
                 return None
-            finalized = await self.deps.turn_store.finalized_visible_echo(request.source_event_id)
-            if finalized is not None and (not finalized.is_fallback or is_fallback):
-                return finalized.event_id
+            tracked = await self.deps.turn_store.visible_echo(request.source_event_id)
+            if tracked is not None and tracked.is_fallback is not None and (not tracked.is_fallback or is_fallback):
+                return tracked.event_id
 
-            event_id = placeholder_event_id or await self.deps.turn_store.visible_echo_for_source(
-                request.source_event_id,
-            )
+            event_id = placeholder_event_id or (None if tracked is None else tracked.event_id)
             extra_content = self._extra_content(
                 requester_user_id=request.requester_user_id,
                 normalized_source=normalized_event.source,

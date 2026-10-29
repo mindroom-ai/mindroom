@@ -117,21 +117,14 @@ class IngressHookRunner:
         item_count = 0
         transient_enrichment_items: tuple[EnrichmentItem, ...] = ()
 
-        envelope = MessageEnvelope(
-            source_event_id=dispatch.envelope.source_event_id,
-            target=dispatch.envelope.target,
-            body=dispatch.envelope.body,
+        envelope = replace(
+            dispatch.envelope,
             attachment_ids=(
                 tuple(payload.attachment_ids)
                 if payload.attachment_ids is not None
                 else dispatch.envelope.attachment_ids
             ),
-            mentioned_agents=dispatch.envelope.mentioned_agents,
             agent_name=target_entity_name,
-            hook_source=dispatch.envelope.hook_source,
-            message_received_depth=dispatch.envelope.message_received_depth,
-            dispatch_policy_source_kind=dispatch.envelope.dispatch_policy_source_kind,
-            origin=dispatch.envelope.origin,
         )
         model_prompt = payload.model_prompt
         if hook_registered:

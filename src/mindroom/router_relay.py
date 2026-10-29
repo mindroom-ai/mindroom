@@ -260,19 +260,14 @@ async def execute_router_relay(
     """Run one explicit router relay from turn dispatch."""
     assert deps.agent_name == ROUTER_AGENT_NAME
 
-    permission_sender_id = requester_user_id
-    responder_candidates = await deps.turn_policy.responder_candidates_for_room(
-        room,
-        permission_sender_id,
-    )
+    source_turn = handled_turn or TurnRecord.create([event.event_id])
+    responder_candidates = await deps.turn_policy.responder_candidates_for_room(room, requester_user_id)
     if not responder_candidates:
         deps.logger.debug(
             "No responders to route to in this room for sender",
-            sender=permission_sender_id,
+            sender=requester_user_id,
         )
-        await deps.visible_responses.settle_source_events_ignored(
-            handled_turn or TurnRecord.create([event.event_id]),
-        )
+        await deps.visible_responses.settle_source_events_ignored(source_turn)
         return
 
     with bound_log_context(room_id=room.room_id, thread_id=thread_id):
@@ -348,7 +343,6 @@ async def execute_router_relay(
         response_text=response_text,
         extra_content=routed_extra_content or None,
     )
-    source_turn = handled_turn or TurnRecord.create([event.event_id])
     (
         tracked_handled_turn,
         recovered_response_event_id,

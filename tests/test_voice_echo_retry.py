@@ -443,7 +443,7 @@ async def test_router_initial_echo_failure_retains_owner_and_reuses_checkpoint( 
         await _settle_dispatcher(router, dispatcher)
         await router.gate.drain_all()
         assert len(router.gateway.sent) == 1
-        assert await router.turn_store.visible_echo_for_source(event.event_id) == "$sent-1:localhost"
+        assert (await router.turn_store.visible_echo(event.event_id)).event_id == "$sent-1:localhost"
         normalize.assert_awaited_once()
         await router.ingress.handle_media_event(room, event)
         await router.gate.drain_all()

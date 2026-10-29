@@ -448,7 +448,6 @@ async def _admit_ready(
     await gate.admit(
         key,
         source_event_id=pending_event.event.event_id,
-        source_kind=pending_event.facts.source_kind,
         ready_result=ReadyPendingEvent(pending_event=pending_event),
         receipt_time=receipt_time,
     )
@@ -532,7 +531,6 @@ async def test_submit_rejects_released_lane_slot() -> None:
             slot,
             key=CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost")),
             source_event_id="$late:localhost",
-            source_kind=MESSAGE_SOURCE_KIND,
             ready_result=ReadyPendingEvent(
                 pending_event=_pending(_text_event("$late:localhost", "late", 1000)),
             ),
@@ -569,7 +567,6 @@ async def test_late_lane_delivery_combines_queued_text_backlog_in_receipt_order(
         second_slot,
         key=key,
         source_event_id="$second:localhost",
-        source_kind=MESSAGE_SOURCE_KIND,
         ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$second:localhost", "second", 1_000_500))),
     )
     await asyncio.sleep(0)
@@ -579,7 +576,6 @@ async def test_late_lane_delivery_combines_queued_text_backlog_in_receipt_order(
         first_slot,
         key=key,
         source_event_id="$first:localhost",
-        source_kind=MESSAGE_SOURCE_KIND,
         ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$first:localhost", "first", 1_000_000))),
     )
 
@@ -637,8 +633,7 @@ def test_single_prepared_turn_owns_final_dispatch_event_and_turn_record() -> Non
 
     assert turn.event.body == "sidecar preview"
     assert turn.event.source is pending.event.source
-    assert turn.ingress.coalescing_key is not None
-    assert turn.ingress.coalescing_key.thread_id == "$thread:localhost"
+    assert turn.coalescing_key.thread_id == "$thread:localhost"
     assert "m.relates_to" not in turn.event.source["content"]
     assert turn.handled_turn.source_event_ids == ("$sidecar:localhost",)
     assert turn.handled_turn.source_event_prompts == {"$sidecar:localhost": "sidecar preview"}
@@ -748,7 +743,6 @@ async def test_room_message_sent_while_voice_is_preparing_keeps_its_own_turn() -
         voice_slot,
         key=key,
         source_event_id="$voice:localhost",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(
             _ready_after(voice_ready, _voice_pending("$voice:localhost", "voice transcript", 1_000_000)),
         ),
@@ -758,7 +752,6 @@ async def test_room_message_sent_while_voice_is_preparing_keeps_its_own_turn() -
         text_slot,
         key=key,
         source_event_id="$text:localhost",
-        source_kind=MESSAGE_SOURCE_KIND,
         ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$text:localhost", "test", 1_010_000))),
     )
     await asyncio.sleep(0.01)
@@ -905,7 +898,7 @@ async def test_thread_caption_promotes_only_the_pending_room_media_burst() -> No
     await gate.drain_all()
 
     assert len(batches) == 2
-    assert {batch.ingress.coalescing_key.thread_id: list(batch.handled_turn.source_event_ids) for batch in batches} == {
+    assert {batch.coalescing_key.thread_id: list(batch.handled_turn.source_event_ids) for batch in batches} == {
         "$image:localhost": ["$image:localhost", "$caption:localhost"],
         None: ["$room:localhost"],
     }
@@ -931,7 +924,7 @@ async def test_thread_caption_promotes_only_the_upload_burst_it_started() -> Non
     await gate.drain_all()
 
     assert len(batches) == 2
-    assert {batch.ingress.coalescing_key.thread_id: list(batch.handled_turn.source_event_ids) for batch in batches} == {
+    assert {batch.coalescing_key.thread_id: list(batch.handled_turn.source_event_ids) for batch in batches} == {
         "$first:localhost": ["$first:localhost", "$second:localhost", "$caption:localhost"],
         None: ["$third:localhost", "$fourth:localhost"],
     }
@@ -971,7 +964,7 @@ async def test_thread_reply_does_not_promote_a_completed_room_media_turn(complet
     await gate.drain_all()
 
     assert len(batches) == 2
-    assert {batch.ingress.coalescing_key.thread_id: list(batch.handled_turn.source_event_ids) for batch in batches} == {
+    assert {batch.coalescing_key.thread_id: list(batch.handled_turn.source_event_ids) for batch in batches} == {
         None: ["$image:localhost", completion_event.event.event_id],
         "$image:localhost": ["$thread-reply:localhost"],
     }
@@ -990,7 +983,7 @@ async def test_thread_caption_promotes_its_pending_room_voice_root() -> None:
     await _wait_for(lambda: _dispatched_source_count(batches) == 2)
 
     assert len(batches) == 1
-    assert batches[0].ingress.coalescing_key.thread_id == "$voice:localhost"
+    assert batches[0].coalescing_key.thread_id == "$voice:localhost"
     assert list(batches[0].handled_turn.source_event_ids) == ["$voice:localhost", "$caption:localhost"]
     await gate.drain_all()
 
@@ -1009,7 +1002,6 @@ async def test_caption_held_behind_a_transcribing_room_voice_root_joins_its_turn
         voice_slot,
         key=room_key,
         source_event_id="$voice:localhost",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(
             _ready_after(voice_ready, _voice_pending("$voice:localhost", "voice transcript", 1_000_000)),
         ),
@@ -1019,7 +1011,6 @@ async def test_caption_held_behind_a_transcribing_room_voice_root_joins_its_turn
         caption_slot,
         key=CoalescingKey("!room:localhost", "$voice:localhost", owner),
         source_event_id="$caption:localhost",
-        source_kind=MESSAGE_SOURCE_KIND,
         ready_result=ReadyPendingEvent(
             pending_event=_pending(_text_event("$caption:localhost", "typed caption", 1_000_200)),
         ),
@@ -1031,7 +1022,7 @@ async def test_caption_held_behind_a_transcribing_room_voice_root_joins_its_turn
     await _wait_for(lambda: _dispatched_source_count(batches) == 2)
 
     assert len(batches) == 1
-    assert batches[0].ingress.coalescing_key.thread_id == "$voice:localhost"
+    assert batches[0].coalescing_key.thread_id == "$voice:localhost"
     assert list(batches[0].handled_turn.source_event_ids) == ["$voice:localhost", "$caption:localhost"]
     await gate.drain_all()
 
@@ -1087,7 +1078,6 @@ async def test_text_dispatch_waits_for_same_window_unready_media_lane_slot() -> 
         slot,
         key=key,
         source_event_id="$image:localhost",
-        source_kind=IMAGE_SOURCE_KIND,
         ready_result=ReadyPendingEvent(pending_event=_image_pending("$image:localhost", 1_000_600)),
     )
     await gate.drain_all()
@@ -1790,7 +1780,6 @@ async def test_different_thread_normal_gate_does_not_wait_behind_older_active_ba
         slot,
         key=normal_key,
         source_event_id="$normal:localhost",
-        source_kind=MESSAGE_SOURCE_KIND,
         ready_result=ReadyPendingEvent(
             pending_event=_pending(_text_event("$normal:localhost", "later normal", 1_000_001)),
         ),
@@ -1824,7 +1813,6 @@ async def test_unready_lane_slot_backlog_combines_into_one_turn() -> None:
         first_slot,
         key=key,
         source_event_id="$first:localhost",
-        source_kind=MESSAGE_SOURCE_KIND,
         ready_task=asyncio.create_task(_ready_after(release_first, first_pending)),
     )
 
@@ -1834,7 +1822,6 @@ async def test_unready_lane_slot_backlog_combines_into_one_turn() -> None:
         second_slot,
         key=key,
         source_event_id="$second:localhost",
-        source_kind=MESSAGE_SOURCE_KIND,
         ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$second:localhost", "second", 1_000_001))),
     )
     await asyncio.sleep(0.05)
@@ -1843,7 +1830,6 @@ async def test_unready_lane_slot_backlog_combines_into_one_turn() -> None:
         third_slot,
         key=key,
         source_event_id="$third:localhost",
-        source_kind=MESSAGE_SOURCE_KIND,
         ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$third:localhost", "third", 1_000_002))),
     )
     await asyncio.sleep(0.05)
@@ -1880,9 +1866,7 @@ async def test_voice_readiness_delay_combines_backlog_in_receipt_order() -> None
         voice_slot,
         key=key,
         source_event_id="$voice:localhost",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(_ready_after(voice_ready, voice_pending)),
-        received_at=1_000.0,
     )
     await asyncio.sleep(0.08)
     await _admit_ready(gate, key, _pending(_text_event("$typed:localhost", "typed follow-up", 1_000_800)))
@@ -1923,7 +1907,6 @@ async def test_failed_lane_ready_task_does_not_block_later_lane_work() -> None:
         voice_slot,
         key=key,
         source_event_id="$voice:localhost",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(failed_voice()),
     )
     later_slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, sender_id=key.owner.requester_user_id))
@@ -1931,7 +1914,6 @@ async def test_failed_lane_ready_task_does_not_block_later_lane_work() -> None:
         later_slot,
         key=key,
         source_event_id="$later:localhost",
-        source_kind=MESSAGE_SOURCE_KIND,
         ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$later:localhost", "later", 1_000_002))),
     )
     fail_voice.set()
@@ -1961,7 +1943,6 @@ async def test_lane_admission_does_not_wait_for_its_own_unsettled_slot() -> None
     delivery = LaneDelivery(
         key=key,
         source_event_id="$lane:localhost",
-        source_kind=MESSAGE_SOURCE_KIND,
         ready_result=ready,
         ready_task=None,
         received_at=1_000.0,
@@ -2198,7 +2179,6 @@ async def test_drain_all_waits_for_lane_slot_to_admit() -> None:
         slot,
         key=key,
         source_event_id="$voice:localhost",
-        source_kind=VOICE_SOURCE_KIND,
         ready_result=ReadyPendingEvent(
             pending_event=_voice_pending("$voice:localhost", "voice transcript", 1_000_000),
         ),
@@ -2234,7 +2214,6 @@ async def test_debounce_does_not_wait_for_later_lane_slot_outside_window() -> No
         slot,
         key=key,
         source_event_id="$voice:localhost",
-        source_kind=VOICE_SOURCE_KIND,
         ready_result=ReadyPendingEvent(pending_event=_voice_pending("$voice:localhost", "voice later", 1_000_050)),
     )
     await gate.drain_all()
@@ -2266,7 +2245,6 @@ async def test_ready_text_waits_behind_unready_older_voice_lane_slot() -> None:
         voice_slot,
         key=key,
         source_event_id="$voice:localhost",
-        source_kind=VOICE_SOURCE_KIND,
         ready_task=asyncio.create_task(_ready_after(release_voice, voice_pending)),
     )
     text_slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, sender_id=key.owner.requester_user_id))
@@ -2274,7 +2252,6 @@ async def test_ready_text_waits_behind_unready_older_voice_lane_slot() -> None:
         text_slot,
         key=key,
         source_event_id="$text:localhost",
-        source_kind=MESSAGE_SOURCE_KIND,
         ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$text:localhost", "text", 1_000_002))),
     )
 
@@ -2299,7 +2276,7 @@ async def test_different_canonical_threads_do_not_serialize_after_admission() ->
 
     async def dispatch_batch(batch: PreparedTurn) -> None:
         batches.append(list(batch.handled_turn.source_event_ids))
-        if batch.ingress.coalescing_key.thread_id == "$thread-a:localhost":
+        if batch.coalescing_key.thread_id == "$thread-a:localhost":
             first_started.set()
             await release_first.wait()
 
@@ -2344,7 +2321,6 @@ async def test_none_resolving_lane_slot_settles_without_residue() -> None:
         none_slot,
         key=key,
         source_event_id="$none:localhost",
-        source_kind=MESSAGE_SOURCE_KIND,
         ready_task=asyncio.create_task(_none_after(release_none)),
     )
     later_slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, sender_id=key.owner.requester_user_id))
@@ -2352,7 +2328,6 @@ async def test_none_resolving_lane_slot_settles_without_residue() -> None:
         later_slot,
         key=key,
         source_event_id="$later:localhost",
-        source_kind=MESSAGE_SOURCE_KIND,
         ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$later:localhost", "later", 1_000_001))),
     )
 
@@ -2388,7 +2363,6 @@ async def test_recovery_context_survives_existing_lane_and_gate_workers() -> Non
             slot,
             key=key,
             source_event_id=pending.event.event_id,
-            source_kind=MESSAGE_SOURCE_KIND,
             ready_result=ReadyPendingEvent(pending_event=pending),
         )
 
@@ -2417,7 +2391,6 @@ async def test_partial_ready_failure_dispatches_ready_events_and_clears_claim() 
         ready_slot,
         key=key,
         source_event_id="$ready:localhost",
-        source_kind=MESSAGE_SOURCE_KIND,
         ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$ready:localhost", "ready", 1_000_000))),
     )
     none_slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, sender_id=key.owner.requester_user_id))
@@ -2425,7 +2398,6 @@ async def test_partial_ready_failure_dispatches_ready_events_and_clears_claim() 
         none_slot,
         key=key,
         source_event_id="$none:localhost",
-        source_kind=MESSAGE_SOURCE_KIND,
         ready_task=asyncio.create_task(_none_after(release_none)),
     )
 
@@ -2445,7 +2417,7 @@ async def test_same_window_lane_slot_resolving_to_different_thread_waits_then_sp
     batches: list[tuple[CoalescingKey, list[str]]] = []
 
     async def dispatch_batch(batch: PreparedTurn) -> None:
-        batches.append((batch.ingress.coalescing_key, list(batch.handled_turn.source_event_ids)))
+        batches.append((batch.coalescing_key, list(batch.handled_turn.source_event_ids)))
 
     gate = CoalescingGate(
         dispatch_turn=dispatch_batch,
@@ -2470,7 +2442,6 @@ async def test_same_window_lane_slot_resolving_to_different_thread_waits_then_sp
         slot,
         key=second_key,
         source_event_id="$second:localhost",
-        source_kind=MESSAGE_SOURCE_KIND,
         ready_result=ReadyPendingEvent(
             pending_event=_pending(_text_event("$second:localhost", "second", 1_000_010)),
         ),
@@ -2514,14 +2485,12 @@ async def test_batch_order_follows_lane_receipt_order_not_readiness_order() -> N
         first_slot,
         key=key,
         source_event_id="$first:localhost",
-        source_kind=MESSAGE_SOURCE_KIND,
         ready_task=asyncio.create_task(_ready_after(release_first, first_pending)),
     )
     gate.submit_lane_slot(
         second_slot,
         key=key,
         source_event_id="$second:localhost",
-        source_kind=MESSAGE_SOURCE_KIND,
         ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$second:localhost", "second", 1_000_200))),
     )
     release_first.set()

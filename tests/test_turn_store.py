@@ -6,7 +6,6 @@ import asyncio
 import time
 from dataclasses import replace
 from datetime import UTC, datetime
-from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -49,6 +48,7 @@ from mindroom.turn_record import (
     PreparedVoiceSource,
     RevisionReplay,
     SourceEventMetadata,
+    SourceVisibleEcho,
     TurnRecord,
     canonicalize_turn_record,
 )
@@ -119,12 +119,11 @@ async def _store(journal_store: EventJournalStore, *, agent_name: str = "agent")
     principal = journal_store.principal(f"{agent_name}@alice")
     store = TurnStore(
         TurnStoreDeps(
-            agent_name=agent_name,
             turn_records=journal_store.turn_records(agent_name),
             legacy_responses_file=None,
             state_writer=MagicMock(),
             tool_runtime=MagicMock(),
-            response_recovery_state=partial(principal.response_recovery_state, agent_name=agent_name),
+            response_recovery_state=principal.response_recovery_state,
             retry_dispatch_sources=MagicMock(),
         ),
     )
@@ -165,7 +164,6 @@ def test_a_team_reply_records_the_history_scope_of_the_members_it_formed_with(tm
     )
     store = TurnStore(
         TurnStoreDeps(
-            agent_name="research",
             turn_records=MagicMock(),
             legacy_responses_file=None,
             state_writer=state_writer,
@@ -260,7 +258,6 @@ async def _store_with_storage(
     state_writer.history_scope.return_value = HistoryScope(kind="agent", scope_id="agent")
     store = TurnStore(
         TurnStoreDeps(
-            agent_name=agent_name,
             turn_records=journal_store.turn_records(agent_name),
             legacy_responses_file=None,
             state_writer=state_writer,
@@ -336,7 +333,6 @@ async def test_response_preparation_leaves_its_own_and_unrelated_turns_alone(
         preparation = await store.prepare_pending_response_source(
             target=target,
             source_event_ids=("$user_msg",),
-            terminal_source_event_ids=("$user_msg",),
         )
         assert preparation.invalid == ()
 
@@ -453,7 +449,6 @@ async def test_redaction_in_another_room_cannot_tombstone_an_event_without_a_rec
     preparation = await store.prepare_pending_response_source(
         target=target,
         source_event_ids=("$user_msg",),
-        terminal_source_event_ids=("$user_msg",),
         thread_history=[make_visible_message(event_id="$victim", body="Earlier message", thread_id="$thread")],
     )
     assert preparation.invalid == ()
@@ -488,7 +483,6 @@ async def test_source_preparation_writes_only_to_register_the_edits_its_history_
         return await store.prepare_pending_response_source(
             target=target,
             source_event_ids=("$user_msg",),
-            terminal_source_event_ids=("$user_msg",),
             thread_history=history,
         )
 
@@ -562,7 +556,6 @@ async def _suppressed(store: TurnStore, target: MessageTarget, source_event_ids:
     await store.prepare_pending_response_source(
         target=target,
         source_event_ids=source_event_ids,
-        terminal_source_event_ids=(),
     )
     return bool(await store.deps.turn_records.read(turn_rows.deleted_events, target.room_id, source_event_ids))
 
@@ -572,7 +565,7 @@ async def _redact_through(store: TurnStore, event_id: str, room_id: str = ROOM) 
     await store.deps.turn_records.backend.write(
         lambda transaction: journal.redact_for_agent(
             transaction,
-            store.deps.agent_name,
+            store.deps.turn_records.agent_name,
             room_id=room_id,
             event_id=event_id,
             receipt_order=0,
@@ -1208,7 +1201,6 @@ async def test_each_history_scope_that_read_a_redacted_source_drops_it_when_open
     state_writer.history_scope.return_value = agent_scope
     store = TurnStore(
         TurnStoreDeps(
-            agent_name="agent",
             turn_records=journal_store.turn_records("agent"),
             legacy_responses_file=None,
             state_writer=state_writer,
@@ -1278,7 +1270,6 @@ async def test_another_requesters_private_scope_drops_a_redacted_source_when_ope
     tool_runtime.build_execution_identity.side_effect = lambda *, target, user_id: user_id  # noqa: ARG005
     store = TurnStore(
         TurnStoreDeps(
-            agent_name="agent",
             turn_records=journal_store.turn_records("agent"),
             legacy_responses_file=None,
             state_writer=state_writer,
@@ -1608,7 +1599,6 @@ async def test_active_ad_hoc_team_redaction_uses_pending_response_scope(
     state_writer.history_scope.return_value = HistoryScope(kind="agent", scope_id="agent")
     store = TurnStore(
         TurnStoreDeps(
-            agent_name="agent",
             turn_records=journal_store.turn_records("agent"),
             legacy_responses_file=None,
             state_writer=state_writer,
@@ -1858,14 +1848,14 @@ def test_physical_source_membership_outranks_alias_when_metadata_is_partial() ->
 
 @pytest.mark.asyncio
 async def test_build_run_metadata_normalizes_discovery_aliases(journal_store: EventJournalStore) -> None:
-    """Additional discovery IDs should share canonical source-ID normalization."""
+    """Run metadata names a turn's sources and its discovery aliases, normalized like its source IDs."""
     store = await _store(journal_store)
-    turn_record = TurnRecord.create(["$first", "$anchor"])
-
-    metadata = store.build_run_metadata(
-        turn_record,
-        additional_discovery_event_ids=("", "$first", "$selection", "$selection"),
+    turn_record = TurnRecord.create(
+        ["$first", "$anchor"],
+        discovery_event_ids=("", "$first", "$selection", "$selection"),
     )
+
+    metadata = store.build_run_metadata(turn_record)
 
     assert metadata == {
         constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$first", "$anchor"],
@@ -1926,7 +1916,7 @@ async def test_terminal_turn_can_absorb_a_source_that_only_carries_an_echo(journ
     assert first_record is not None
     assert first_record == second_record
     assert first_record.source_event_ids == ("$first", "$second")
-    assert await store.visible_echo_for_source("$second") == "$echo"
+    assert await store.visible_echo("$second") == SourceVisibleEcho("$echo")
 
 
 @pytest.mark.asyncio
@@ -1946,10 +1936,7 @@ async def test_visible_echo_is_finalized_only_after_replacement_acknowledgement(
     assert not record.completed
     assert record.response_event_id is None
     assert await store.finalized_visible_echoes(("$event",)) == ("$echo",)
-    finalized = await store.finalized_visible_echo("$event")
-    assert finalized is not None
-    assert finalized.event_id == "$echo"
-    assert finalized.is_fallback is False
+    assert await store.visible_echo("$event") == SourceVisibleEcho("$echo", is_fallback=False)
 
 
 @pytest.mark.asyncio
@@ -1975,10 +1962,7 @@ async def test_visible_echo_finalization_cannot_overwrite_terminal_outcome(journ
     assert record is not None
     assert record.completed
     assert record.response_event_id == "$response"
-    finalized = await store.finalized_visible_echo("$event")
-    assert finalized is not None
-    assert finalized.event_id == "$echo"
-    assert finalized.is_fallback is False
+    assert await store.visible_echo("$event") == SourceVisibleEcho("$echo", is_fallback=False)
 
 
 @pytest.mark.asyncio
@@ -1988,18 +1972,15 @@ async def test_finalized_visible_echo_keeps_transcript_over_fallback(journal_sto
     await store.record_visible_echo(ROOM, "$event", "$echo")
 
     await store.record_finalized_visible_echo("$event", "$echo", is_fallback=True)
-    fallback = await store.finalized_visible_echo("$event")
-    assert fallback is not None
-    assert fallback.is_fallback is True
+    assert await store.visible_echo("$event") == SourceVisibleEcho("$echo", is_fallback=True)
 
     await store.record_finalized_visible_echo("$event", "$echo", is_fallback=False)
-    transcript = await store.finalized_visible_echo("$event")
-    assert transcript is not None
-    assert transcript.is_fallback is False
+    transcript = SourceVisibleEcho("$echo", is_fallback=False)
+    assert await store.visible_echo("$event") == transcript
 
     await store.record_finalized_visible_echo("$event", "$echo", is_fallback=True)
-    assert await store.finalized_visible_echo("$event") == transcript
-    assert await (await _store(journal_store)).finalized_visible_echo("$event") == transcript
+    assert await store.visible_echo("$event") == transcript
+    assert await (await _store(journal_store)).visible_echo("$event") == transcript
 
 
 @pytest.mark.asyncio
@@ -2054,7 +2035,7 @@ async def test_visible_echo_cannot_overwrite_concurrent_terminal_outcome(journal
         assert record is not None
         assert record.completed
         assert record.response_event_id == "$response"
-        assert await current.visible_echo_for_source("$event") == "$echo"
+        assert await current.visible_echo("$event") == SourceVisibleEcho("$echo")
 
 
 @pytest.mark.asyncio
@@ -2099,7 +2080,6 @@ async def test_router_turn_replay_uses_persisted_turns_across_two_restarts(
         config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
         store = TurnStore(
             TurnStoreDeps(
-                agent_name="router",
                 turn_records=journal_store.turn_records("router"),
                 legacy_responses_file=None,
                 state_writer=ConversationStateWriter(
@@ -2187,7 +2167,11 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
         source_event_prompts={"$user_msg": "CURRENT_SOURCE" if context_only else "DELETED_EDIT_MARKER"},
         source_event_revisions=None if context_only else {"$user_msg": (10, "$physical-edit")},
     )
-    await store.record_turn(original)
+    if context_only:
+        # The reply that consumes the edited context is still being prepared; it records its answer below.
+        await store.record_pending_turn(replace(original, completed=False))
+    else:
+        await store.record_turn(original)
 
     def storage_factory(*_args: object, **_kwargs: object) -> ConversationStore:
         return create_state_storage("agent", tmp_path)
@@ -2229,7 +2213,6 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
             prepare_source_turn=lambda history: store.prepare_pending_response_source(
                 target=target,
                 source_event_ids=("$user_msg",),
-                terminal_source_event_ids=(),
                 thread_history=history,
             ),
         )
@@ -2272,6 +2255,7 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
         )
         edited.messages = list(turn.in_request_order())
         edited.metadata = {constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY: consumed}
+        await store.record_turn(original)
     session = ConversationSession(
         kind="agent",
         session_id=target.session_id,
@@ -2907,8 +2891,7 @@ async def test_a_batch_source_ended_before_any_reply_leaves_its_sibling_owing_an
 
     preparation = await store.prepare_pending_response_source(
         target=target,
-        source_event_ids=pending.record.indexed_event_ids,
-        terminal_source_event_ids=pending.record.source_event_ids,
+        source_event_ids=pending.record.source_event_ids,
     )
 
     assert preparation.invalid == ("$s",)
@@ -2928,10 +2911,7 @@ async def test_another_login_of_the_agent_reads_its_turns_redactions_and_live_cl
     relogin = TurnStore(
         replace(
             first.deps,
-            response_recovery_state=partial(
-                journal_store.principal("agent@bob").response_recovery_state,
-                agent_name="agent",
-            ),
+            response_recovery_state=journal_store.principal("agent@bob").response_recovery_state,
         ),
     )
     await relogin.warm()

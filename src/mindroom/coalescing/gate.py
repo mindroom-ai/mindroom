@@ -89,7 +89,6 @@ class _QueuedEvent:
     received_at: float
     receipt_time: float
     source_event_id: str | None
-    source_kind: str
     ready_result: ReadyPendingEvent
     lane_slot: LaneSlot | None = None
 
@@ -348,22 +347,18 @@ class CoalescingGate:
         *,
         key: CoalescingKey,
         source_event_id: str | None,
-        source_kind: str,
         ready_result: ReadyPendingEvent | None = None,
         ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None,
         claim: TurnClaim | None = None,
-        received_at: float | None = None,
     ) -> None:
         """Load one lane slot with its resolved conversation key and ready payload."""
         self._lanes.submit(
             slot,
             key=key,
             source_event_id=source_event_id,
-            source_kind=source_kind,
             ready_result=ready_result,
             ready_task=ready_task,
             claim=claim,
-            received_at=received_at,
             busy_at_submit=self._conversation_is_busy(key),
         )
 
@@ -410,7 +405,6 @@ class CoalescingGate:
             received_at=delivery.received_at,
             receipt_time=slot.receipt_time,
             source_event_id=delivery.source_event_id,
-            source_kind=delivery.source_kind,
             lane_slot=slot,
         )
 
@@ -428,15 +422,13 @@ class CoalescingGate:
     @staticmethod
     def _queued_event_allows_room_scope_batching(queued: _QueuedEvent) -> bool:
         return source_or_event_allows_room_scope_batching(
-            queued.source_kind,
-        ) or source_or_event_allows_room_scope_batching(
             queued.pending_event.facts.source_kind,
             queued.pending_event.event,
         )
 
     @staticmethod
     def _queued_event_is_voice(queued: _QueuedEvent) -> bool:
-        return VOICE_SOURCE_KIND in {queued.source_kind, queued.pending_event.facts.source_kind}
+        return queued.pending_event.facts.source_kind == VOICE_SOURCE_KIND
 
     @staticmethod
     def _queued_event_is_thread_root_media(queued: _QueuedEvent, thread_id: str) -> bool:
@@ -852,7 +844,6 @@ class CoalescingGate:
         received_at: float | None = None,
         receipt_time: float | None = None,
         source_event_id: str | None = None,
-        source_kind: str = "pending",
         lane_slot: LaneSlot | None = None,
     ) -> None:
         """Admit one ready, conversation-assigned event under its coalescing key.
@@ -867,7 +858,6 @@ class CoalescingGate:
             received_at=received_at if received_at is not None else time.time(),
             receipt_time=receipt_time if receipt_time is not None else time.monotonic(),
             source_event_id=source_event_id,
-            source_kind=source_kind,
             ready_result=ready_result,
             lane_slot=lane_slot,
         )

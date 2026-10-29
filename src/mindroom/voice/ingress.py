@@ -11,7 +11,6 @@ from mindroom.coalescing.gate import ReadyPendingEvent
 from mindroom.coalescing.ingress_lanes import IngressRetryError
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
-from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.thread_utils import mentions_another_participant
 from mindroom.turns.queued_notice import mark_waiting_for_approval, queued_notice_reservation_if_busy
 
@@ -32,7 +31,7 @@ if TYPE_CHECKING:
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
     from mindroom.timing import DispatchPipelineTiming
-    from mindroom.turns.facts import PrecheckedEvent
+    from mindroom.turns.facts import IngressFacts
     from mindroom.voice.readiness import VoiceReadiness
 
 
@@ -59,7 +58,8 @@ class VoiceIngress:
     async def admit(
         self,
         room: nio.MatrixRoom,
-        prechecked_event: PrecheckedEvent[AudioMessageEvent],
+        event: AudioMessageEvent,
+        facts: IngressFacts,
         *,
         dispatch_timing: DispatchPipelineTiming | None,
         ticket: IngressTicket,
@@ -68,7 +68,6 @@ class VoiceIngress:
 
         Raises ``RelatedEventUnavailableError`` when the message's relation target cannot be read.
         """
-        event = prechecked_event.event
         prepared = await self.deps.readiness.prepared_source(event.event_id)
         coalescing_thread_id = (
             prepared.coalescing_thread_id
@@ -83,23 +82,20 @@ class VoiceIngress:
         )
         if prepared is not None:
             voice_target = voice_target.with_thread_root(prepared.thread_id)
-        admission_key = requester_coalescing_key(
-            room.room_id,
-            coalescing_thread_id,
-            prechecked_event.facts.lane_requester_id,
-        )
+        admission_key = requester_coalescing_key(room.room_id, coalescing_thread_id, facts.lane_requester_id)
 
         ready_task = asyncio.create_task(
             self._ready_voice_event(
                 room=room,
-                prechecked_event=prechecked_event,
+                event=event,
+                facts=facts,
                 voice_target=voice_target,
                 coalescing_thread_id=coalescing_thread_id,
                 dispatch_timing=dispatch_timing,
             ),
             name=f"voice_ready:{room.room_id}:{event.event_id}",
         )
-        ticket.admit_ready(admission_key, ready_task, source_event_id=event.event_id, source_kind=VOICE_SOURCE_KIND)
+        ticket.admit_ready(admission_key, ready_task, source_event_id=event.event_id)
         return TurnDispatchOutcome.DEFERRED
 
     def _final_queued_notice(
@@ -127,16 +123,14 @@ class VoiceIngress:
         self,
         *,
         room: nio.MatrixRoom,
-        prechecked_event: PrecheckedEvent[AudioMessageEvent],
+        event: AudioMessageEvent,
+        facts: IngressFacts,
         voice_target: MessageTarget,
         coalescing_thread_id: str | None,
         dispatch_timing: DispatchPipelineTiming | None,
     ) -> ReadyPendingEvent:
         """Normalize a raw voice event after its conversation key is fixed; its lane holds the turn claim."""
-        event = prechecked_event.event
-        facts = prechecked_event.facts
         queued_notice_reservation = None
-        reservation_released_or_handed_off = False
         try:
             envelope = self.deps.resolver.build_envelope(
                 event=cast("DispatchEvent", event),
@@ -190,9 +184,10 @@ class VoiceIngress:
             )
             raise IngressRetryError from exc
         else:
-            reservation_released_or_handed_off = True
+            # The ready event owns its queued notice from here.
+            queued_notice_reservation = None
             mark_waiting_for_approval(self.deps, room, event.source, voice_target, envelope)
             return ready
         finally:
-            if not reservation_released_or_handed_off and queued_notice_reservation is not None:
+            if queued_notice_reservation is not None:
                 queued_notice_reservation.release()

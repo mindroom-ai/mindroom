@@ -20,7 +20,6 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SOURCE_KIND_KEY, VOICE_PREFIX
 from mindroom.conversation_resolver import MessageContext
-from mindroom.dispatch_handoff import DispatchIngressMetadata
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.thread_history_result import thread_history_result
@@ -30,7 +29,6 @@ from mindroom.scheduling import tasks as scheduling
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_record import TurnRecord
-from mindroom.turns.facts import PrecheckedEvent
 from tests.bot_helpers import make_test_agent_bot, owned_matrix_login
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
@@ -43,7 +41,6 @@ from tests.conftest import (
     install_generate_response_mock,
     install_runtime_journal_support,
     install_send_response_mock,
-    make_ingress_facts,
     make_matrix_client_mock,
     replace_turn_deps,
     replace_turn_policy_deps,
@@ -54,7 +51,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.identity_helpers import entity_ids, persist_entity_accounts
-from tests.turn_dispatch_helpers import dispatch_test_turn
+from tests.turn_dispatch_helpers import dispatch_test_turn, make_test_turn
 
 if TYPE_CHECKING:
     from mindroom.bot import AgentBot
@@ -1233,11 +1230,12 @@ class TestCommandHandling:
             )
 
             result = await bot._turn_dispatcher._prepare_dispatch(
-                room,
-                event,
-                replace(bot._ingress_validator.classify(event), source_kind=SCHEDULED_SOURCE_KIND),
-                event_label="message",
-                handled_turn=TurnRecord.create([event.event_id]),
+                make_test_turn(
+                    room,
+                    event,
+                    facts=replace(bot._ingress_validator.classify(event), source_kind=SCHEDULED_SOURCE_KIND),
+                    handled_turn=TurnRecord.create([event.event_id]),
+                ),
             )
 
         assert result is not None
@@ -1296,14 +1294,11 @@ class TestCommandHandling:
                 },
             )
 
-            result = await bot._turn_ingress._precheck_dispatch_event(
-                room,
-                event,
-                bot._ingress_validator.classify(event),
-            )
+            facts = bot._ingress_validator.classify(event)
+            passed = await bot._turn_ingress._precheck_dispatch_event(room, event, facts)
 
-        assert result is not None
-        assert result.facts.lane_requester_id == "@mindroom_router:localhost"
+        assert passed is True
+        assert facts.lane_requester_id == "@mindroom_router:localhost"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1929,6 +1924,9 @@ class TestRouterSkipsSingleAgent:
             "message": None,
             "requester_user_id": "@user:localhost",
             "extra_content": None,
+            "media_events": None,
+            "handled_turn": None,
+            "scheduled_prompt": None,
         }
 
         # Verify it didn't log about skipping
@@ -2018,16 +2016,12 @@ class TestRouterSkipsSingleAgent:
             await dispatch_test_turn(
                 bot._turn_dispatcher,
                 room,
-                PrecheckedEvent(
-                    event=event,
-                    facts=make_ingress_facts(event.sender, requester_user_id="@alice:localhost"),
-                ),
-                ingress_metadata=DispatchIngressMetadata(
-                    coalescing_key=CoalescingKey(
-                        room.room_id,
-                        "$thread1",
-                        RequesterCoalescingOwner("@alice:localhost"),
-                    ),
+                event,
+                "@alice:localhost",
+                coalescing_key=CoalescingKey(
+                    room.room_id,
+                    "$thread1",
+                    RequesterCoalescingOwner("@alice:localhost"),
                 ),
             )
 

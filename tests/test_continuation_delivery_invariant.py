@@ -47,7 +47,6 @@ if TYPE_CHECKING:
         MatrixDeliveryView,
         PermanentDeliveryFailure,
         ProjectedEvent,
-        TerminalTurnWrite,
     )
     from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowEnqueue, ReplyRowRequest, ReplyStore
     from mindroom.llm.provider import ModelRequest, StreamEvent
@@ -242,7 +241,7 @@ class _WatchedOutbox:
         stage: DeliveryStage,
         event_id: str,
         delivered_projections: tuple[ProjectedEvent, ...],
-        terminal_turn: TerminalTurnWrite | None = None,
+        terminal_response_event_id: str | None = None,
     ) -> DeliveryAcknowledgement:
         """Record the Matrix event one claimed delivery produced, and the turn it completes."""
         return await self.inner.acknowledge_matrix_delivery(
@@ -250,7 +249,7 @@ class _WatchedOutbox:
             stage=stage,
             event_id=event_id,
             delivered_projections=delivered_projections,
-            terminal_turn=terminal_turn,
+            terminal_response_event_id=terminal_response_event_id,
         )
 
     async def unacknowledged_matrix_deliveries(

@@ -909,7 +909,6 @@ class _TeamResponseRequest:
     request: ResponseRequest
     member_names: tuple[str, ...]
     team_mode: str
-    reason_prefix: str = "Team request"
 
 
 def _post_lock_error(error: Exception, early_placeholder: _EarlyPlaceholderState) -> Exception:
@@ -3022,14 +3021,12 @@ class ResponseRunner:
         *,
         member_names: Sequence[str],
         team_mode: str,
-        reason_prefix: str = "Team request",
     ) -> str | None:
         """Generate a team response of ``member_names`` with lifecycle locking and queued-message state."""
         team_request = _TeamResponseRequest(
             request=request,
             member_names=tuple(member_names),
             team_mode=team_mode,
-            reason_prefix=reason_prefix,
         )
         return await self.run_locked_response_lifecycle(
             request,
@@ -3103,21 +3100,14 @@ class ResponseRunner:
             requester_user_id=execution_identity.requester_id,
         )
         request = replace(request, participating_agent_names=member_names)
-        admitted_request = await self._admit_locked_turn(
+        prepared_request = await self._begin_locked_turn(
             request,
             resolved_target=resolved_target,
             history_scope=session_scope,
-            reply_entity_names=member_names,
-        )
-        if admitted_request is None:
-            return None
-        prepared_request = await self._prepare_admitted_locked_turn(
-            admitted_request,
-            resolved_target=resolved_target,
-            history_scope=session_scope,
             execution_identity=execution_identity,
-            placeholder_message=(None if _is_silent_schedule_response(admitted_request) else TEAM_PROGRESS_PLACEHOLDER),
+            placeholder_message=None if _is_silent_schedule_response(request) else TEAM_PROGRESS_PLACEHOLDER,
             early_placeholder_state=early_placeholder_state,
+            reply_entity_names=member_names,
         )
         if prepared_request is None:
             return None
@@ -3420,7 +3410,6 @@ class ResponseRunner:
                             run_metadata_collector=team_run_metadata_content,
                             compaction_lifecycle=compaction_lifecycle,
                             configured_team_name=configured_team_name,
-                            reason_prefix=team_request.reason_prefix,
                             pipeline_timing=request.pipeline_timing,
                             turn_recorder=team_turn_recorder,
                         )
@@ -3510,7 +3499,6 @@ class ResponseRunner:
                                     run_metadata_collector=team_run_metadata_content,
                                     compaction_lifecycle=compaction_lifecycle,
                                     configured_team_name=configured_team_name,
-                                    reason_prefix=team_request.reason_prefix,
                                     pipeline_timing=request.pipeline_timing,
                                     turn_recorder=team_turn_recorder,
                                     tool_trace_collector=team_tool_trace,

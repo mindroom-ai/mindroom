@@ -269,7 +269,6 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log(
         dispatch,
         ResponseAction(kind="individual"),
         DispatchPayloadInputs((), (), ()),
-        processing_log="Processing",
         dispatch_started_at=time.monotonic(),
         handled_turn=TurnRecord.create(
             [event.event_id],

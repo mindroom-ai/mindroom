@@ -56,7 +56,6 @@ class LaneDelivery:
 
     key: CoalescingKey
     source_event_id: str | None
-    source_kind: str
     ready_result: ReadyPendingEvent | None
     ready_task: asyncio.Task[ReadyPendingEvent | None] | None
     received_at: float
@@ -155,11 +154,9 @@ class IngressLanes:
         *,
         key: CoalescingKey,
         source_event_id: str | None,
-        source_kind: str,
         ready_result: ReadyPendingEvent | None = None,
         ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None,
         claim: TurnClaim | None = None,
-        received_at: float | None = None,
         busy_at_submit: bool = False,
     ) -> None:
         """Load one slot with its conversation key and ready payload."""
@@ -172,10 +169,9 @@ class IngressLanes:
         slot.delivery = LaneDelivery(
             key=key,
             source_event_id=source_event_id,
-            source_kind=source_kind,
             ready_result=ready_result,
             ready_task=ready_task,
-            received_at=received_at if received_at is not None else time.time(),
+            received_at=time.time(),
             busy_at_submit=busy_at_submit,
             claim=claim,
         )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from weakref import WeakValueDictionary
@@ -100,25 +101,12 @@ class CommandTurnExecutor:
             self._client().device_id,
         ):
             return
+        lock: asyncio.Lock | nullcontext[None] = nullcontext()
         if command.type is CommandType.MODEL:
-            key = room.room_id, target.resolved_thread_id
-            lock = self._model_command_locks.get(key)
-            if lock is None:
-                lock = asyncio.Lock()
-                self._model_command_locks[key] = lock
             # Keep a strong local reference while waiting. Text and structured
             # model commands share the same order across requester ingress lanes.
-            async with lock:
-                await self._execute(
-                    room,
-                    event,
-                    requester_user_id,
-                    command,
-                    target=target,
-                    handled_turn=handled_turn,
-                    acts_for_requester=acts_for_requester,
-                )
-        else:
+            lock = self._model_command_locks.setdefault((room.room_id, target.resolved_thread_id), asyncio.Lock())
+        async with lock:
             await self._execute(
                 room,
                 event,

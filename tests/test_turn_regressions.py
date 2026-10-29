@@ -125,7 +125,6 @@ async def test_rejected_readiness_admission_releases_its_claim_once_readiness_en
             CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost")),
             ready_task,
             source_event_id="$voice:localhost",
-            source_kind=MESSAGE_SOURCE_KIND,
         )
     ticket.close()
 
@@ -162,7 +161,6 @@ async def test_rejected_readiness_admission_cancelled_before_its_first_step_rele
             CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost")),
             ready_task,
             source_event_id="$voice:localhost",
-            source_kind=MESSAGE_SOURCE_KIND,
         )
 
     await asyncio.gather(ready_task, return_exceptions=True)
@@ -568,7 +566,7 @@ async def test_sidecar_preview_claims_interactive_text_by_durable_source_event(
         ),
         patch.object(
             bot._turn_ingress,
-            "_enqueue_prepared_text_for_dispatch",
+            "_enqueue_prepared_ingress",
             new_callable=AsyncMock,
         ) as mock_enqueue,
     ):
@@ -578,4 +576,4 @@ async def test_sidecar_preview_claims_interactive_text_by_durable_source_event(
         source_event_id=prepared_event.event_id,
     )
     mock_enqueue.assert_awaited_once()
-    assert mock_enqueue.await_args.kwargs["prepared_event"] is prepared_event
+    assert mock_enqueue.await_args.args[1] is prepared_event

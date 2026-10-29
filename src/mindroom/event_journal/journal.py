@@ -251,12 +251,13 @@ def _apply_semantic_ingestion_disposition(
     if semantic_result is AdmissionResult.DUPLICATE:
         retained = _require_matching_semantic_event(transaction, principal_id, event)
         if retained["kind"] == EventKind.OPAQUE_HISTORY and projected is not None:
-            _project_admitted_event(
+            project_with_redactions(
                 transaction,
                 principal_id,
                 projected,
                 receipt_order=int(retained["receipt_order"]),
                 membership_epoch=state.membership_epoch,
+                settle_redacted_arrival=True,
             )
     elif semantic_result is not AdmissionResult.ADMITTED:
         raise IngestionBatchIntegrityError
@@ -837,33 +838,15 @@ def admit(
     if row is None:
         return AdmissionResult.DUPLICATE
     if projected is not None:
-        _project_admitted_event(
+        project_with_redactions(
             transaction,
             principal_id,
             projected,
             receipt_order=int(row["receipt_order"]),
             membership_epoch=epoch,
+            settle_redacted_arrival=True,
         )
     return AdmissionResult.ADMITTED
-
-
-def _project_admitted_event(
-    transaction: Transaction,
-    principal_id: str,
-    projected: ProjectedEvent,
-    *,
-    receipt_order: int,
-    membership_epoch: int,
-) -> None:
-    """Project readable content, apply a redaction to the agent, and retire a source that arrived already redacted."""
-    project_with_redactions(
-        transaction,
-        principal_id,
-        projected,
-        receipt_order=receipt_order,
-        membership_epoch=membership_epoch,
-        settle_redacted_arrival=True,
-    )
 
 
 def project_with_redactions(

@@ -735,7 +735,7 @@ async def test_non_router_skips_visible_echo_and_dispatches_canonical_voice(
 
     generate_response_mock.assert_called_once()
     assert generate_response_mock.call_args.kwargs["prompt"].startswith("canonical voice transcript")
-    assert await bot._turn_store.visible_echo_for_source(voice_event.event_id) is None
+    assert await bot._turn_store.visible_echo(voice_event.event_id) is None
 
 
 @pytest.mark.asyncio

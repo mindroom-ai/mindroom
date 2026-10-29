@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from mindroom import interactive
 from mindroom.background_tasks import run_coroutine_until_complete
@@ -24,7 +24,7 @@ from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Coroutine
 
     import nio
     import structlog
@@ -50,13 +50,13 @@ _SELECTION_RESPONSE_SOURCE_KIND = MESSAGE_SOURCE_KIND
 
 @dataclass(frozen=True)
 class InteractiveSelectionDispatch:
-    """One admitted selection carried through receipt-ordered coalescing, which dispatch then runs."""
+    """One admitted selection carried through receipt-ordered coalescing, which dispatch then runs.
+
+    Its barrier event is the answering event, whose turn carries that event's facts with the selection source kind.
+    """
 
     selection: interactive.InteractiveSelection
     response_target: MessageTarget
-    source_event_id: str
-    # The answering event's facts with the selection source kind.
-    facts: IngressFacts
 
 
 @dataclass(frozen=True)
@@ -75,7 +75,7 @@ class InteractiveSelectionsDeps:
     visible_responses: VisibleResponseReconciler
     retry_dispatch_sources: Callable[[str, tuple[str, ...]], None]
     settle_dispatch_sources: Callable[[tuple[str, ...]], Awaitable[None]]
-    dispatch_source_is_terminal: Callable[[str], Awaitable[bool]]
+    dispatch_source_is_terminal: Callable[[str], Coroutine[Any, Any, bool]]
 
 
 @dataclass
@@ -104,13 +104,19 @@ class InteractiveSelections:
             origin=replace(facts, source_kind=_SELECTION_RESPONSE_SOURCE_KIND).origin,
         )
 
-    async def _start_interactive_selection(self, room: nio.MatrixRoom, dispatch: InteractiveSelectionDispatch) -> None:
+    async def _start_interactive_selection(
+        self,
+        room: nio.MatrixRoom,
+        dispatch: InteractiveSelectionDispatch,
+        *,
+        facts: IngressFacts,
+        source_event_id: str,
+    ) -> None:
         """Transfer one selection response from journal dispatch to runner ownership."""
         response_target = dispatch.response_target
-        source_event_id = dispatch.source_event_id
         response_envelope = self._interactive_selection_response_envelope(
             target=response_target,
-            facts=dispatch.facts,
+            facts=facts,
             source_event_id=source_event_id,
             selected_value=dispatch.selection.selected_value,
         )
@@ -125,15 +131,14 @@ class InteractiveSelections:
             try:
                 with response_lifecycle_reservation_context(reservation):
                     await reservation.wait_until_acquired()
-                    response = self._handle_interactive_selection(
+                    response_claim_transferred = True
+                    source_handed_off = await self._handle_interactive_selection(
                         room,
                         selection=dispatch.selection,
-                        facts=dispatch.facts,
+                        facts=facts,
                         source_event_id=source_event_id,
                         response_target=response_target,
                     )
-                    response_claim_transferred = True
-                    source_handed_off = await response
                 # Terminal delivery normally settles the discovery alias in its
                 # outbox transaction. This idempotent fallback also handles an
                 # already-terminal replay that has no new delivery to enqueue.
@@ -202,12 +207,7 @@ class InteractiveSelections:
             ),
             room=room,
             facts=facts,
-            selection=InteractiveSelectionDispatch(
-                selection=selection,
-                response_target=response_target,
-                source_event_id=source_event_id,
-                facts=facts,
-            ),
+            selection=InteractiveSelectionDispatch(selection=selection, response_target=response_target),
         )
         ticket.admit(
             requester_coalescing_key(
@@ -226,7 +226,12 @@ class InteractiveSelections:
         if len(turn.handled_turn.source_event_ids) != 1:
             msg = "Interactive selection dispatch must be a single FIFO barrier"
             raise ValueError(msg)
-        await self._start_interactive_selection(turn.room, dispatch)
+        await self._start_interactive_selection(
+            turn.room,
+            dispatch,
+            facts=turn.facts,
+            source_event_id=turn.event.event_id,
+        )
         return True
 
     async def _handle_interactive_selection(
@@ -238,53 +243,28 @@ class InteractiveSelections:
         source_event_id: str,
         response_target: MessageTarget,
     ) -> bool:
-        """Own claim settlement around one validated interactive selection."""
+        """Authorize and execute one selection after its caller transfers claim ownership, and own its settlement."""
         try:
-            return await self._execute_interactive_selection(
-                room,
-                selection=selection,
-                facts=facts,
-                source_event_id=source_event_id,
-                response_target=response_target,
-            )
+            async with self.deps.ingress.admitted_reply_decision(
+                facts.run_requester_id,
+                room.room_id,
+                unanswered=(source_event_id,),
+            ) as allowed:
+                if not allowed:
+                    return False
+                return await self._execute_admitted_interactive_selection(
+                    room,
+                    selection=selection,
+                    facts=facts,
+                    source_event_id=source_event_id,
+                    response_target=response_target,
+                )
         except BaseException as error:
-
-            async def source_is_terminal_after_cancellation() -> bool:
-                return await self.deps.dispatch_source_is_terminal(source_event_id)
-
-            source_is_terminal = await run_coroutine_until_complete(
-                source_is_terminal_after_cancellation(),
-            )
-            if source_is_terminal:
+            if await run_coroutine_until_complete(self.deps.dispatch_source_is_terminal(source_event_id)):
                 if isinstance(error, asyncio.CancelledError):
                     raise
                 return False
             raise
-
-    async def _execute_interactive_selection(
-        self,
-        room: nio.MatrixRoom,
-        *,
-        selection: interactive.InteractiveSelection,
-        facts: IngressFacts,
-        source_event_id: str,
-        response_target: MessageTarget,
-    ) -> bool:
-        """Authorize and execute one selection after its caller transfers claim ownership."""
-        async with self.deps.ingress.admitted_reply_decision(
-            facts.run_requester_id,
-            room.room_id,
-            unanswered=(source_event_id,),
-        ) as allowed:
-            if not allowed:
-                return False
-            return await self._execute_admitted_interactive_selection(
-                room,
-                selection=selection,
-                facts=facts,
-                source_event_id=source_event_id,
-                response_target=response_target,
-            )
 
     async def _execute_admitted_interactive_selection(
         self,
@@ -401,8 +381,7 @@ class InteractiveSelections:
                 matrix_run_metadata=selection_matrix_run_metadata,
                 prepare_source_turn=lambda history: self.deps.turn_store.prepare_pending_response_source(
                     target=response_target,
-                    source_event_ids=selection_handled_turn.indexed_event_ids,
-                    terminal_source_event_ids=selection_handled_turn.source_event_ids,
+                    source_event_ids=selection_handled_turn.source_event_ids,
                     thread_history=history,
                 ),
                 source_handoff=source_handoff,
@@ -441,7 +420,7 @@ class InteractiveSelections:
         target: MessageTarget,
         error: Exception,
         handled_turn: TurnRecord,
-        existing_event_id: str | None = None,
+        existing_event_id: str,
     ) -> str | None:
         """Convert dispatch setup failures into a visible terminal message.
 
@@ -455,10 +434,7 @@ class InteractiveSelections:
             self.deps.agent_name,
             runtime_paths=self.deps.runtime_paths,
         )
-        if existing_event_id is not None and await self.deps.delivery_gateway.fail_reply_dispatch(
-            existing_event_id,
-            error_text,
-        ):
+        if await self.deps.delivery_gateway.fail_reply_dispatch(existing_event_id, error_text):
             return existing_event_id
         response_event_id = await self.deps.delivery_gateway.send_text(
             SendTextRequest(

@@ -81,7 +81,6 @@ class IngressTicket:
                 key=key,
                 ready_result=ReadyPendingEvent(pending_event=pending_event),
                 source_event_id=pending_event.event.event_id,
-                source_kind=pending_event.facts.source_kind,
             )
         except BaseException:
             pending_event.close()
@@ -94,7 +93,6 @@ class IngressTicket:
         ready_task: asyncio.Task[ReadyPendingEvent | None],
         *,
         source_event_id: str,
-        source_kind: str,
     ) -> None:
         """Hand a readiness task to the gate through this lane slot, its lane holding the claim until readiness ends."""
         claim, self.claim = self.claim, None
@@ -105,7 +103,6 @@ class IngressTicket:
                 ready_task=ready_task,
                 claim=claim,
                 source_event_id=source_event_id,
-                source_kind=source_kind,
             )
         except BaseException:
             ready_task.cancel()

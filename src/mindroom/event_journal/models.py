@@ -509,18 +509,3 @@ class PermanentDeliveryFailure:
     acknowledged_event_id: str | None = None
     # Work refused reply rows left for after the commit.
     reply_effects: tuple[PostCommitEffect, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class TerminalTurnWrite:
-    """The turn a non-AI FINAL delivery's acknowledgement completes, in the acknowledgement's transaction.
-
-    The acknowledgement is the proof that a visible answer exists and what its
-    event ID is, and that is exactly the fact the turn needs; committing them
-    apart leaves a delivered answer whose turn cannot be edited. The turn is the
-    one the delivery was bound to when its FINAL row became durable.
-    """
-
-    agent_name: str
-    delivery_id: str
-    response_event_id: str

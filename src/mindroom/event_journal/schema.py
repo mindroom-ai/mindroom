@@ -582,6 +582,106 @@ _TABLES = (
         generation TEXT NOT NULL
     )
     """,
+    # Turn state as rows, scoped to the agent rather than a journal principal: "answered"
+    # must survive a re-login. A turn is named by an immutable surrogate key for one ordered tuple
+    # of physical sources; a different tuple is a different turn. Physical
+    # membership (turn_sources) is exclusive per agent, while an alias may be
+    # indexed by several turns at once, because an original and the router relay
+    # that answers for it are both live turns.
+    """
+    CREATE TABLE IF NOT EXISTS turns (
+        agent_name TEXT NOT NULL,
+        turn_key TEXT NOT NULL,
+        -- The last physical source. Unique because the outbox keys a turn's
+        -- deliveries by it.
+        anchor_event_id TEXT NOT NULL,
+        -- NULL only for content-free completion evidence an upgrade could not
+        -- place in a room; every runtime write names the room.
+        room_id TEXT,
+        completed BOOLEAN NOT NULL,
+        response_event_id TEXT,
+        -- The non-AI FINAL delivery this turn was handed to; a bound turn is
+        -- frozen until that delivery's acknowledgement completes it.
+        final_delivery_id TEXT,
+        response_owner TEXT,
+        requester_id TEXT,
+        history_scope_json TEXT,
+        conversation_target_json TEXT,
+        command_execution_started BOOLEAN NOT NULL,
+        command_result_text TEXT,
+        command_result_extra_content_json TEXT,
+        updated_at DOUBLE PRECISION NOT NULL,
+        PRIMARY KEY (agent_name, turn_key),
+        UNIQUE (agent_name, anchor_event_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS turn_sources (
+        agent_name TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        turn_key TEXT NOT NULL,
+        ordinal BIGINT NOT NULL,
+        prompt TEXT,
+        selected_rev_ts BIGINT,
+        selected_rev_id TEXT,
+        -- NULL means no proof of who sent this source, never "the requester".
+        sender TEXT,
+        timestamp_ms DOUBLE PRECISION,
+        speaker TEXT,
+        discovery_event_id TEXT,
+        prepared_voice_json TEXT,
+        visible_echo_event_id TEXT,
+        visible_echo_is_fallback BOOLEAN,
+        PRIMARY KEY (agent_name, event_id),
+        UNIQUE (agent_name, turn_key, ordinal),
+        FOREIGN KEY (agent_name, turn_key) REFERENCES turns (agent_name, turn_key) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS turn_aliases (
+        agent_name TEXT NOT NULL,
+        turn_key TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        PRIMARY KEY (agent_name, turn_key, event_id),
+        FOREIGN KEY (agent_name, turn_key) REFERENCES turns (agent_name, turn_key) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS turn_revisions (
+        -- Per turn: one physical edit is recorded by every turn that selected
+        -- or consumed it, each with its own response proof.
+        agent_name TEXT NOT NULL,
+        turn_key TEXT NOT NULL,
+        revision_id TEXT NOT NULL,
+        source_event_id TEXT NOT NULL,
+        timestamp_ms BIGINT NOT NULL,
+        response_event_id TEXT,
+        PRIMARY KEY (agent_name, turn_key, revision_id),
+        FOREIGN KEY (agent_name, turn_key) REFERENCES turns (agent_name, turn_key) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS event_redactions (
+        -- The one record that an event was redacted in a room. Ids only, kept
+        -- when the bot leaves, and scoped to the agent so a re-login under a
+        -- new Matrix ID keeps honoring it, as it keeps turn truth.
+        agent_name TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        PRIMARY KEY (agent_name, room_id, event_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS legacy_summary_revisions (
+        -- Revisions a pre-v2026.9.43 compacted summary consumed through their
+        -- source; written only by upgrades and the pre-journal ledger import.
+        agent_name TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        revision_id TEXT NOT NULL,
+        source_event_id TEXT NOT NULL,
+        PRIMARY KEY (agent_name, room_id, revision_id, source_event_id)
+    )
+    """,
 )
 
 
@@ -690,113 +790,6 @@ _INDEXES = (
     ON matrix_delivery_outbox (principal_id, reply_id, reply_sequence)
     WHERE reply_id IS NOT NULL
     """,
-)
-
-
-# Turn state as rows, scoped to the agent rather than a journal principal: "answered"
-# must survive a re-login. A turn is named by an immutable surrogate key for one ordered tuple
-# of physical sources; a different tuple is a different turn. Physical
-# membership (turn_sources) is exclusive per agent, while an alias may be
-# indexed by several turns at once, because an original and the router relay
-# that answers for it are both live turns.
-_TURN_ROW_TABLES = (
-    """
-    CREATE TABLE IF NOT EXISTS turns (
-        agent_name TEXT NOT NULL,
-        turn_key TEXT NOT NULL,
-        -- The last physical source. Unique because the outbox keys a turn's
-        -- deliveries by it.
-        anchor_event_id TEXT NOT NULL,
-        -- NULL only for content-free completion evidence an upgrade could not
-        -- place in a room; every runtime write names the room.
-        room_id TEXT,
-        completed BOOLEAN NOT NULL,
-        response_event_id TEXT,
-        -- The non-AI FINAL delivery this turn was handed to; a bound turn is
-        -- frozen until that delivery's acknowledgement completes it.
-        final_delivery_id TEXT,
-        response_owner TEXT,
-        requester_id TEXT,
-        history_scope_json TEXT,
-        conversation_target_json TEXT,
-        command_execution_started BOOLEAN NOT NULL,
-        command_result_text TEXT,
-        command_result_extra_content_json TEXT,
-        updated_at DOUBLE PRECISION NOT NULL,
-        PRIMARY KEY (agent_name, turn_key),
-        UNIQUE (agent_name, anchor_event_id)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS turn_sources (
-        agent_name TEXT NOT NULL,
-        event_id TEXT NOT NULL,
-        turn_key TEXT NOT NULL,
-        ordinal BIGINT NOT NULL,
-        prompt TEXT,
-        selected_rev_ts BIGINT,
-        selected_rev_id TEXT,
-        -- NULL means no proof of who sent this source, never "the requester".
-        sender TEXT,
-        timestamp_ms DOUBLE PRECISION,
-        speaker TEXT,
-        discovery_event_id TEXT,
-        prepared_voice_json TEXT,
-        visible_echo_event_id TEXT,
-        visible_echo_is_fallback BOOLEAN,
-        PRIMARY KEY (agent_name, event_id),
-        UNIQUE (agent_name, turn_key, ordinal),
-        FOREIGN KEY (agent_name, turn_key) REFERENCES turns (agent_name, turn_key) ON DELETE CASCADE
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS turn_aliases (
-        agent_name TEXT NOT NULL,
-        turn_key TEXT NOT NULL,
-        event_id TEXT NOT NULL,
-        PRIMARY KEY (agent_name, turn_key, event_id),
-        FOREIGN KEY (agent_name, turn_key) REFERENCES turns (agent_name, turn_key) ON DELETE CASCADE
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS turn_revisions (
-        -- Per turn: one physical edit is recorded by every turn that selected
-        -- or consumed it, each with its own response proof.
-        agent_name TEXT NOT NULL,
-        turn_key TEXT NOT NULL,
-        revision_id TEXT NOT NULL,
-        source_event_id TEXT NOT NULL,
-        timestamp_ms BIGINT NOT NULL,
-        response_event_id TEXT,
-        PRIMARY KEY (agent_name, turn_key, revision_id),
-        FOREIGN KEY (agent_name, turn_key) REFERENCES turns (agent_name, turn_key) ON DELETE CASCADE
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS event_redactions (
-        -- The one record that an event was redacted in a room. Ids only, kept
-        -- when the bot leaves, and scoped to the agent so a re-login under a
-        -- new Matrix ID keeps honoring it, as it keeps turn truth.
-        agent_name TEXT NOT NULL,
-        room_id TEXT NOT NULL,
-        event_id TEXT NOT NULL,
-        PRIMARY KEY (agent_name, room_id, event_id)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS legacy_summary_revisions (
-        -- Revisions a pre-v2026.9.43 compacted summary consumed through their
-        -- source; written only by upgrades and the pre-journal ledger import.
-        agent_name TEXT NOT NULL,
-        room_id TEXT NOT NULL,
-        revision_id TEXT NOT NULL,
-        source_event_id TEXT NOT NULL,
-        PRIMARY KEY (agent_name, room_id, revision_id, source_event_id)
-    )
-    """,
-)
-
-_TURN_ROW_INDEXES = (
     """
     CREATE INDEX IF NOT EXISTS turns_response ON turns (agent_name, response_event_id)
     """,
@@ -841,10 +834,7 @@ def schema_statements(dialect: SchemaDialect) -> tuple[str, ...]:
     whose default text collation is already byte order, so the mismatch shows up
     only on the backend that is not measured by a local query-plan test.
     """
-    return tuple(
-        create_statement(statement, dialect)
-        for statement in (*_TABLES, *_TURN_ROW_TABLES, *_INDEXES, *_TURN_ROW_INDEXES)
-    )
+    return tuple(create_statement(statement, dialect) for statement in (*_TABLES, *_INDEXES))
 
 
 def render(sql: str, dialect: SchemaDialect) -> str:
@@ -869,17 +859,3 @@ def render(sql: str, dialect: SchemaDialect) -> str:
     if dialect.placeholder == "?":
         return sql
     return sql.replace("?", dialect.placeholder)
-
-
-__all__ = [
-    "APPROVAL_TABLES",
-    "OUTBOX_TABLE",
-    "PENDING_STATE",
-    "POSTGRES_DIALECT",
-    "SETTLED_STATE",
-    "SQLITE_DIALECT",
-    "SchemaDialect",
-    "create_statement",
-    "render",
-    "schema_statements",
-]

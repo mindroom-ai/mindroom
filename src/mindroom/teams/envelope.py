@@ -762,7 +762,6 @@ def _team_turn(
     configured_team_name: str | None,
     pipeline_timing: DispatchPipelineTiming | None,
     turn_recorder: TurnRecorder,
-    reason_prefix: str,
     member_model_names: Mapping[str, str] | None,
 ) -> _TeamTurn | str:
     """Resolve the team's members and return the turn's constants, or the text that explains why it cannot run.
@@ -801,7 +800,7 @@ def _team_turn(
             execution_identity,
             config=config,
             unavailable_bases=unavailable_bases,
-            reason_prefix=reason_prefix,
+            reason_prefix="Team request",
             configured_team_name=configured_team_name,
             active_model_names=active_member_model_names,
         )
@@ -865,7 +864,6 @@ async def team_response(
     pipeline_timing: DispatchPipelineTiming | None = None,
     *,
     turn_recorder: TurnRecorder,
-    reason_prefix: str = "Team request",
     member_model_names: Mapping[str, str] | None = None,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
 ) -> str:
@@ -896,7 +894,6 @@ async def team_response(
         configured_team_name=configured_team_name,
         pipeline_timing=pipeline_timing,
         turn_recorder=turn_recorder,
-        reason_prefix=reason_prefix,
         member_model_names=member_model_names,
     )
     async with closing_async_stream(stream):
@@ -933,7 +930,6 @@ async def team_response_stream(
     pipeline_timing: DispatchPipelineTiming | None = None,
     *,
     turn_recorder: TurnRecorder,
-    reason_prefix: str = "Team request",
     member_model_names: Mapping[str, str] | None = None,
 ) -> AsyncIterator[TeamStreamChunk]:
     """Stream one team turn as a live document: a header, one section per member, and the leader's consensus.
@@ -960,7 +956,6 @@ async def team_response_stream(
         configured_team_name=configured_team_name,
         pipeline_timing=pipeline_timing,
         turn_recorder=turn_recorder,
-        reason_prefix=reason_prefix,
         member_model_names=member_model_names,
     )
     if isinstance(turn, str):

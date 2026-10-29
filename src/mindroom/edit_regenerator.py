@@ -322,7 +322,6 @@ class EditRegenerator:
                 record=record,
                 live_source_event_ids=edited.live_source_event_ids,
                 driving_revision_id=revision[1],
-                consumed_revision_ids=tuple(message.latest_event_id for message in history),
                 thread_history=history,
             )
             return SourcePreparation(invalid=record.source_event_ids) if stale else SourcePreparation()
@@ -351,14 +350,7 @@ class EditRegenerator:
             existing_event_id=edited.reply_event_id,
             user_id=requester_id,
             correlation_id=revision[1],
-            matrix_run_metadata=self.deps.turn_store.build_run_metadata(
-                record,
-                additional_discovery_event_ids=(
-                    (edited.source_event_id,)
-                    if not record.is_coalesced and edited.source_event_id != record.anchor_event_id
-                    else ()
-                ),
-            ),
+            matrix_run_metadata=self.deps.turn_store.build_run_metadata(record),
             current_timestamp_ms=normalize_timestamp_ms(revision[0]),
             current_prompt_is_structured=structured,
             prepare_source_turn=prepare_snapshot,

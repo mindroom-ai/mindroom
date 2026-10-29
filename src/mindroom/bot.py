@@ -6,7 +6,7 @@ import asyncio
 import random
 import time
 from contextvars import Context
-from functools import cached_property, partial
+from functools import cached_property
 from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 
@@ -20,7 +20,6 @@ from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_live_bot
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
 from mindroom.event_journal.legacy_turn_rows import legacy_responses_file_path
-from mindroom.event_journal.matrix_delivery import TurnHandoff
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -650,12 +649,11 @@ class AgentBot:
         )
         self._turn_store = TurnStore(
             TurnStoreDeps(
-                agent_name=self.agent_name,
                 turn_records=self._journal_store.turn_records(self.agent_name),
                 legacy_responses_file=legacy_responses_file_path(self.storage_path, self.agent_name),
                 state_writer=self._conversation_state_writer,
                 tool_runtime=self._tool_runtime_support,
-                response_recovery_state=partial(principal.response_recovery_state, agent_name=self.agent_name),
+                response_recovery_state=principal.response_recovery_state,
                 retry_dispatch_sources=self._journal_dispatcher.retry_turn_sources,
             ),
         )
@@ -680,7 +678,7 @@ class AgentBot:
                     hook_context=self._hook_context_support,
                 ),
                 outbox=principal,
-                turn_handoff=TurnHandoff(released=self._journal_dispatcher.release_delivered_turn_sources),
+                turn_handoff=self._journal_dispatcher.release_delivered_turn_sources,
                 # Read when each send is claimed: this gateway is built before
                 # the bot has logged in, and a re-login replaces the device
                 # that the frozen transaction IDs belong to.
@@ -1020,7 +1018,7 @@ class AgentBot:
     @property
     def approval_store(self) -> PrincipalStore:
         """Return this bot principal's complete event-journal view."""
-        return self._journal_store.principal(self._journal_principal_id)
+        return self._journal_principal
 
     @property
     def runtime_started_at(self) -> float:
@@ -2462,7 +2460,7 @@ class AgentBot:
         """
         return await self._turn_ingress.handle_text_event(room, event)
 
-    async def _on_redaction(self, room: nio.MatrixRoom, event: nio.Event) -> None:  # noqa: ARG002
+    async def _on_redaction(self, room: nio.MatrixRoom, event: nio.RedactionEvent) -> None:  # noqa: ARG002
         """Run what the redaction's admission left for the bot.
 
         Admission recorded the redaction for the agent, removed its text, and
@@ -2471,7 +2469,6 @@ class AgentBot:
         spans stop and what they showed is redacted. Raising leaves the callback
         unaccepted and the source available for sync to redeliver.
         """
-        assert isinstance(event, nio.RedactionEvent)
         self._replies_ended(await self._reply_runtime.deletions_ended())
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> TurnDispatchOutcome:

@@ -32,6 +32,7 @@ from mindroom.delivery_gateway import (
     ResponseIdentity,
     SendTextRequest,
 )
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import (
     EXTERNAL_TRIGGER_SOURCE_KIND,
@@ -65,8 +66,6 @@ from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
 from mindroom.turn_record import SourceVisibleEcho, TurnRecord
 from mindroom.turn_store import ClaimContended, TurnClaim
 from mindroom.turns.dispatch import TurnDispatcher
-from mindroom.turns.facts import PrecheckedEvent
-from mindroom.turns.ingress import _IngressAdmissionOutcome
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -191,10 +190,8 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._voice_ingress._ready_voice_event(
                 room=room,
-                prechecked_event=PrecheckedEvent(
-                    event=voice_event,
-                    facts=make_ingress_facts(voice_event.sender, source_kind=VOICE_SOURCE_KIND),
-                ),
+                event=voice_event,
+                facts=make_ingress_facts(voice_event.sender, source_kind=VOICE_SOURCE_KIND),
                 voice_target=target,
                 coalescing_thread_id="$thread-root",
                 dispatch_timing=None,
@@ -281,7 +278,6 @@ class TestAgentBot(AgentBotTestBase):
                     dispatch,
                     action,
                     DispatchPayloadInputs((), (), ()),
-                    processing_log="processing",
                     dispatch_started_at=0.0,
                     handled_turn=handled_turn.record,
                 ),
@@ -380,7 +376,6 @@ class TestAgentBot(AgentBotTestBase):
                 dispatch,
                 action,
                 DispatchPayloadInputs((), (), ()),
-                processing_log="processing",
                 dispatch_started_at=0.0,
                 handled_turn=handled_turn.record,
             )
@@ -676,10 +671,8 @@ class TestAgentBot(AgentBotTestBase):
             await dispatch_test_turn(
                 bot._turn_dispatcher,
                 room,
-                PrecheckedEvent(
-                    event=event,
-                    facts=bot._ingress_validator.classify(event),
-                ),
+                event,
+                facts=bot._ingress_validator.classify(event),
             )
             await drain_coalescing(bot)
 
@@ -762,10 +755,8 @@ class TestAgentBot(AgentBotTestBase):
             await dispatch_test_turn(
                 bot._turn_dispatcher,
                 room,
-                PrecheckedEvent(
-                    event=event,
-                    facts=bot._ingress_validator.classify(event),
-                ),
+                event,
+                facts=bot._ingress_validator.classify(event),
             )
 
         mock_build_payload.assert_not_awaited()
@@ -839,10 +830,8 @@ class TestAgentBot(AgentBotTestBase):
             await dispatch_test_turn(
                 bot._turn_dispatcher,
                 room,
-                PrecheckedEvent(
-                    event=event,
-                    facts=bot._ingress_validator.classify(event),
-                ),
+                event,
+                facts=bot._ingress_validator.classify(event),
             )
 
         mock_execute_command.assert_awaited_once()
@@ -918,10 +907,8 @@ class TestAgentBot(AgentBotTestBase):
             await dispatch_test_turn(
                 bot._turn_dispatcher,
                 room,
-                PrecheckedEvent(
-                    event=event,
-                    facts=bot._ingress_validator.classify(event),
-                ),
+                event,
+                facts=bot._ingress_validator.classify(event),
             )
 
         mock_full_history.assert_not_awaited()
@@ -995,10 +982,8 @@ class TestAgentBot(AgentBotTestBase):
             await dispatch_test_turn(
                 bot._turn_dispatcher,
                 room,
-                PrecheckedEvent(
-                    event=event,
-                    facts=bot._ingress_validator.classify(event),
-                ),
+                event,
+                facts=bot._ingress_validator.classify(event),
                 handled_turn=TurnRecord.create(
                     ["$voice", "$text"],
                     source_event_prompts={"$voice": "voice prompt", "$text": "text prompt"},
@@ -1083,11 +1068,13 @@ class TestAgentBot(AgentBotTestBase):
             extra_content: dict[str, Any] | None = None,
             media_events: list[object] | None = None,
             handled_turn: TurnRecord | None = None,
+            scheduled_prompt: str | None = None,
         ) -> None:
             assert message == "hello"
             assert requester_user_id == "@user:localhost"
             assert extra_content is None
             assert media_events is None
+            assert scheduled_prompt is None
             assert handled_turn is not None
             assert handled_turn.source_event_prompts == {"$voice": "voice prompt", "$text": "hello"}
             await bot._turn_store.record_responded_turn(replace(handled_turn, response_event_id="$route"))
@@ -1119,10 +1106,8 @@ class TestAgentBot(AgentBotTestBase):
             await dispatch_test_turn(
                 bot._turn_dispatcher,
                 room,
-                PrecheckedEvent(
-                    event=event,
-                    facts=bot._ingress_validator.classify(event),
-                ),
+                event,
+                facts=bot._ingress_validator.classify(event),
                 handled_turn=coalesced_turn,
             )
 
@@ -1261,13 +1246,11 @@ class TestAgentBot(AgentBotTestBase):
             await dispatch_test_turn(
                 bot._turn_dispatcher,
                 room,
-                PrecheckedEvent(
-                    event=event,
-                    facts=bot._ingress_validator.classify(event),
-                ),
+                event,
+                facts=bot._ingress_validator.classify(event),
             )
 
-        handled_turn = mock_prepare.await_args.kwargs["handled_turn"]
+        handled_turn = mock_prepare.await_args.args[0].handled_turn
         assert handled_turn.source_event_ids == ("$relay:localhost",)
         assert "$user_msg:localhost" in handled_turn.discovery_event_ids
 
@@ -1450,10 +1433,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(
                 bot._turn_ingress,
                 "_precheck_dispatch_event",
-                return_value=PrecheckedEvent(
-                    event=event,
-                    facts=bot._ingress_validator.classify(event),
-                ),
+                return_value=True,
             ),
             patch.object(bot._turn_ingress, "_ingest_live_text_event", side_effect=hold_ingress),
         ):
@@ -1493,10 +1473,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(
                 bot._turn_ingress,
                 "_precheck_dispatch_event",
-                return_value=PrecheckedEvent(
-                    event=event,
-                    facts=bot._ingress_validator.classify(event),
-                ),
+                return_value=True,
             ),
             patch.object(bot._turn_ingress, "_ingest_live_text_event", side_effect=hold_ingress),
         ):
@@ -1570,10 +1547,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(
                 bot._turn_ingress,
                 "_precheck_dispatch_event",
-                return_value=PrecheckedEvent(
-                    event=event,
-                    facts=bot._ingress_validator.classify(event),
-                ),
+                return_value=True,
             ),
             patch(
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
@@ -1692,7 +1666,7 @@ class TestAgentBot(AgentBotTestBase):
             )
             await asyncio.wait_for(ticket.slot.settled.wait(), timeout=1.0)
 
-        assert outcome is _IngressAdmissionOutcome.DEFERRED
+        assert outcome is TurnDispatchOutcome.DEFERRED
         reserve_waiting_human_message.assert_not_called()
         admit.assert_awaited_once()
         ready_result = admit.await_args.kwargs["ready_result"]
@@ -1758,7 +1732,7 @@ class TestAgentBot(AgentBotTestBase):
             )
             await asyncio.wait_for(ticket.slot.settled.wait(), timeout=1.0)
 
-        assert outcome is _IngressAdmissionOutcome.DEFERRED
+        assert outcome is TurnDispatchOutcome.DEFERRED
         reserve_waiting_human_message.assert_called_once()
         admit.assert_awaited_once()
         ready_result = admit.await_args.kwargs["ready_result"]
@@ -1807,10 +1781,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(
                 bot._turn_ingress,
                 "_precheck_dispatch_event",
-                return_value=PrecheckedEvent(
-                    event=event,
-                    facts=bot._ingress_validator.classify(event),
-                ),
+                return_value=True,
             ),
             patch(
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
@@ -1894,10 +1865,8 @@ class TestAgentBot(AgentBotTestBase):
             turn_claim = ticket.claim
             await bot._voice_ingress.admit(
                 room,
-                PrecheckedEvent(
-                    event=voice_event,
-                    facts=bot._ingress_validator.classify(voice_event, source_kind=VOICE_SOURCE_KIND),
-                ),
+                voice_event,
+                bot._ingress_validator.classify(voice_event, source_kind=VOICE_SOURCE_KIND),
                 dispatch_timing=None,
                 ticket=ticket,
             )
@@ -1998,16 +1967,14 @@ class TestAgentBot(AgentBotTestBase):
             ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
             handled = await bot._turn_ingress._dispatch_file_sidecar_text_preview(
                 room,
-                PrecheckedEvent(
-                    event=sidecar_event,
-                    facts=bot._ingress_validator.classify(sidecar_event),
-                ),
+                sidecar_event,
+                bot._ingress_validator.classify(sidecar_event),
                 ticket=ticket,
                 coalescing_thread_id="$thread_root",
             )
             await asyncio.wait_for(ticket.slot.settled.wait(), timeout=1.0)
 
-        assert handled is _IngressAdmissionOutcome.DEFERRED
+        assert handled is TurnDispatchOutcome.DEFERRED
         mock_dispatch.assert_not_awaited()
         mock_admit.assert_awaited_once()
         key = mock_admit.await_args.args[0]
@@ -2110,16 +2077,14 @@ class TestAgentBot(AgentBotTestBase):
             ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
             handled = await bot._turn_ingress._dispatch_file_sidecar_text_preview(
                 room,
-                PrecheckedEvent(
-                    event=sidecar_event,
-                    facts=bot._ingress_validator.classify(sidecar_event),
-                ),
+                sidecar_event,
+                bot._ingress_validator.classify(sidecar_event),
                 ticket=ticket,
                 coalescing_thread_id="$thread_root",
             )
             await asyncio.wait_for(ticket.slot.settled.wait(), timeout=1.0)
 
-        assert handled is _IngressAdmissionOutcome.DEFERRED
+        assert handled is TurnDispatchOutcome.DEFERRED
         mock_dispatch.assert_not_awaited()
         mock_reserve_waiting_human_message.assert_called_once()
         mock_admit.assert_awaited_once()
@@ -2220,7 +2185,6 @@ class TestAgentBot(AgentBotTestBase):
                 dispatch,
                 action,
                 DispatchPayloadInputs((), (), ()),
-                processing_log="processing",
                 dispatch_started_at=0.0,
                 handled_turn=TurnRecord.create([event.event_id]),
             )
@@ -2308,7 +2272,6 @@ class TestAgentBot(AgentBotTestBase):
                 dispatch,
                 action,
                 DispatchPayloadInputs((), (), ()),
-                processing_log="processing",
                 dispatch_started_at=0.0,
                 handled_turn=TurnRecord.create([event.event_id]),
             )
@@ -2400,7 +2363,6 @@ class TestAgentBot(AgentBotTestBase):
                 dispatch,
                 action,
                 DispatchPayloadInputs((), (), ()),
-                processing_log="processing",
                 dispatch_started_at=0.0,
                 handled_turn=TurnRecord.create([event.event_id]),
             )
@@ -2464,7 +2426,6 @@ class TestAgentBot(AgentBotTestBase):
                 dispatch,
                 ResponseAction(kind="individual"),
                 DispatchPayloadInputs((), (), ()),
-                processing_log="processing",
                 dispatch_started_at=0.0,
                 handled_turn=TurnRecord.create([event.event_id]),
             )
@@ -2542,37 +2503,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Dispatch setup failures should go through the terminal delivery gateway."""
-        config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        _wrap_extracted_collaborators(bot)
-        bot.client = AsyncMock()
-        bot.logger = MagicMock()
-        bot._delivery_gateway.send_text = AsyncMock(return_value="$error")
-        _replace_turn_policy_deps(bot, delivery_gateway=bot._delivery_gateway)
-
-        resolution = await bot._interactive_selections._finalize_dispatch_failure(
-            target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
-            error=RuntimeError("boom"),
-            handled_turn=TurnRecord.create(["$event"], completed=False),
-        )
-
-        assert resolution == "$error"
-        bot._delivery_gateway.send_text.assert_awaited_once_with(
-            SendTextRequest(
-                target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
-                response_text="[calculator] ⚠️ Error: boom",
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
-            ),
-        )
-
-    @pytest.mark.asyncio
-    async def test_finalize_dispatch_failure_sends_directly_when_no_reply_owns_the_event(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Without a reply to show it, nothing else will deliver the notice."""
+        """Without a reply to show it, a setup failure is sent directly through the terminal delivery gateway."""
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
@@ -2589,8 +2520,13 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         assert resolution == "$error"
-        sent = bot._delivery_gateway.send_text.await_args.args[0]
-        assert sent.delivery_turn_id is None
+        bot._delivery_gateway.send_text.assert_awaited_once_with(
+            SendTextRequest(
+                target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
+                response_text="[calculator] ⚠️ Error: boom",
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
+            ),
+        )
 
     @pytest.mark.asyncio
     async def test_finalize_dispatch_failure_records_fallback_before_return(
@@ -2665,6 +2601,7 @@ class TestAgentBot(AgentBotTestBase):
             target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
             error=RuntimeError("boom"),
             handled_turn=TurnRecord.create(["$event"], completed=False),
+            existing_event_id="$placeholder",
         )
 
         assert bot._delivery_gateway.send_text.await_args.args == (
@@ -2726,7 +2663,6 @@ class TestAgentBot(AgentBotTestBase):
                 dispatch,
                 ResponseAction(kind="individual"),
                 DispatchPayloadInputs((), (), ()),
-                processing_log="processing",
                 dispatch_started_at=0.0,
                 handled_turn=TurnRecord.create([event.event_id]),
             )
@@ -2958,7 +2894,6 @@ class TestAgentBot(AgentBotTestBase):
                 dispatch,
                 ResponseAction(kind="individual"),
                 DispatchPayloadInputs((), (), ()),
-                processing_log="processing",
                 dispatch_started_at=0.0,
                 handled_turn=TurnRecord.create([event.event_id]),
             )

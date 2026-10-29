@@ -1,10 +1,8 @@
 """Turn state as rows: every statement on the turn tables and the redaction table.
 
-A turn used to be one JSON blob stored once per event that indexed it, so every
-writer rewrote the whole record and had to merge with whatever else had
-committed. Here each fact has a column and a narrow writer, and the only
-whole-turn operation left is ``_reshape``: forming a turn whose ordered sources
-differ from every stored one.
+Each fact about a turn has a column and a narrow writer. The only whole-turn
+operation is ``_reshape``: forming a turn whose ordered sources differ from
+every stored one.
 
 Three rules carry the design, and each is easy to get backwards.
 
@@ -30,7 +28,7 @@ import json
 import time
 import uuid
 from dataclasses import dataclass, field, replace
-from itertools import chain
+from itertools import batched, chain
 from typing import TYPE_CHECKING
 
 from mindroom.history.types import HistoryScope
@@ -78,8 +76,6 @@ class Accepted:
 @dataclass(frozen=True, slots=True)
 class Answered:
     """The turn is already answered or handed to its final delivery; nothing was written."""
-
-    record: TurnRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,21 +163,10 @@ def _placeholders(values: Collection[object]) -> str:
     return ", ".join("?" for _ in values)
 
 
-def _chunks[T](values: Iterable[T]) -> Iterable[tuple[T, ...]]:
-    batch: list[T] = []
-    for value in values:
-        batch.append(value)
-        if len(batch) == _CHUNK:
-            yield tuple(batch)
-            batch = []
-    if batch:
-        yield tuple(batch)
-
-
 def _fetch_in(transaction: Transaction, sql: str, prefix: tuple[object, ...], values: Iterable[object]) -> list[Row]:
     """Run ``sql`` once per bounded batch of ``values``; ``{in}`` marks where the batch's placeholders go."""
     rows: list[Row] = []
-    for batch in _chunks(dict.fromkeys(values)):
+    for batch in batched(dict.fromkeys(values), _CHUNK):
         rows.extend(transaction.fetchall(sql.format(**{"in": _placeholders(batch)}), (*prefix, *batch)))
     return rows
 
@@ -363,12 +348,8 @@ def _assemble(rows: _Rows) -> TurnRecord:
     )
 
 
-def _records(transaction: Transaction, agent_name: str, keys: Iterable[str]) -> dict[str, TurnRecord]:
-    return {key: _assemble(rows) for key, rows in _load_rows(transaction, agent_name, keys).items()}
-
-
 def _record(transaction: Transaction, agent_name: str, turn_key: str) -> TurnRecord:
-    return _records(transaction, agent_name, (turn_key,))[turn_key]
+    return _assemble(_load_rows(transaction, agent_name, (turn_key,))[turn_key])
 
 
 # Redaction reads.
@@ -390,29 +371,32 @@ def redacted_events(
     return frozenset(str(row["event_id"]) for row in rows)
 
 
+def _deleted_given(sources: Sequence[_Source], redacted: Collection[str]) -> frozenset[str]:
+    """Return the sources deleted because they, or the discovery alias mapped to them, are in ``redacted``.
+
+    An id that is a physical source of the turn is never read as another
+    source's alias: physical membership takes precedence over alias mapping.
+    """
+    physical = {source.event_id for source in sources}
+    return frozenset(
+        source.event_id
+        for source in sources
+        if source.event_id in redacted
+        or (source.discovery_event_id not in physical and source.discovery_event_id in redacted)
+    )
+
+
 def _deleted_among(
     transaction: Transaction,
     agent_name: str,
     room_id: str | None,
     sources: Sequence[_Source],
 ) -> frozenset[str]:
-    """Return the sources deleted because they, or the discovery alias mapped to them, are redacted.
-
-    An id that is a physical source of the turn is never read as another
-    source's alias: physical membership takes precedence over alias mapping.
-    """
+    """Return the sources deleted by the redactions recorded in ``room_id``."""
     if room_id is None:
         return frozenset()
-    physical = {source.event_id for source in sources}
-    aliases = {
-        source.event_id: source.discovery_event_id
-        for source in sources
-        if source.discovery_event_id is not None and source.discovery_event_id not in physical
-    }
-    redacted = redacted_events(transaction, agent_name, room_id, chain(physical, aliases.values()))
-    return frozenset(
-        source.event_id for source in sources if source.event_id in redacted or aliases.get(source.event_id) in redacted
-    )
+    ids = chain.from_iterable((source.event_id, source.discovery_event_id or source.event_id) for source in sources)
+    return _deleted_given(sources, redacted_events(transaction, agent_name, room_id, ids))
 
 
 def deleted_sources(transaction: Transaction, agent_name: str, source_event_ids: Iterable[str]) -> frozenset[str]:
@@ -491,8 +475,8 @@ def _lookup_key(transaction: Transaction, agent_name: str, event_id: str) -> str
     A completed owner wins: the physical owner if it is completed, else a
     completed alias owner. Then the physical owner, then the most recently
     updated alias owner. A relay that completed for an original whose own turn
-    is unfinished is therefore what the original reads, as it is today, while
-    physical ownership stays with the original for claims and checkpoints.
+    is unfinished is therefore what the original reads, while physical
+    ownership stays with the original for claims and checkpoints.
     """
     physical = _physical_owners(transaction, agent_name, (event_id,)).get(event_id)
     aliases = _alias_owners(transaction, agent_name, (event_id,)).get(event_id, set())
@@ -516,7 +500,8 @@ def get_turn_record(transaction: Transaction, agent_name: str, event_id: str) ->
 
 def load_turn(transaction: Transaction, agent_name: str, turn_key: str) -> TurnRecord | None:
     """Return one turn by its key, as an edit that captured it reads it again."""
-    return _records(transaction, agent_name, (turn_key,)).get(turn_key)
+    rows = _load_rows(transaction, agent_name, (turn_key,)).get(turn_key)
+    return None if rows is None else _assemble(rows)
 
 
 def _answered_among(transaction: Transaction, agent_name: str, event_ids: Collection[str]) -> frozenset[str]:
@@ -743,25 +728,6 @@ def _new_one_source_turn(room_id: str | None, event_id: str) -> _Rows:
     )
 
 
-def _owned_or_new_source(
-    transaction: Transaction,
-    agent_name: str,
-    *,
-    room_id: str,
-    event_id: str,
-) -> tuple[_Rows, _Source]:
-    """Return the physical owner of one source, creating a one-source turn for it in ``room_id`` if it has none."""
-    _require_room(room_id)
-    owner = _physical_owners(transaction, agent_name, (event_id,)).get(event_id)
-    if owner is None:
-        rows = _new_one_source_turn(room_id, event_id)
-        _insert_rows(transaction, agent_name, rows)
-        return rows, rows.sources[0]
-    rows = _load_rows(transaction, agent_name, (owner,))[owner]
-    _require_same_room(rows.turn, room_id)
-    return rows, next(source for source in rows.sources if source.event_id == event_id)
-
-
 def _require_room(room_id: str) -> None:
     if not room_id:
         msg = "A turn write requires the room its sources were sent in"
@@ -853,8 +819,8 @@ def record_edit(
     edited_event_id: str,
     prompt: str,
     revision: SourceEventRevision,
-) -> bool:
-    """Commit one edit's text to its source as its regeneration claims the reply; return whether it was selected.
+) -> None:
+    """Commit one edit's text to its source as its regeneration claims the reply.
 
     The revision is always recorded. Its text is selected only when the source
     is not deleted, the revision is not redacted, and nothing newer is selected.
@@ -862,11 +828,11 @@ def record_edit(
     """
     rows = _load_rows(transaction, agent_name, (turn_key,)).get(turn_key)
     if rows is None:
-        return False
+        return
     source_id = _prompt_source(rows, edited_event_id)
     source = next((source for source in rows.sources if source.event_id == source_id), None)
     if source is None:
-        return False
+        return
     timestamp_ms, revision_id = revision
     if revision_id != source_id:
         _upsert_revision(transaction, agent_name, turn_key, _Revision(revision_id, source_id, timestamp_ms))
@@ -878,13 +844,12 @@ def record_edit(
         or redacted_events(transaction, agent_name, room_id, (revision_id,))
         or (source.selected is not None and source.selected >= revision)
     ):
-        return False
+        return
     transaction.execute(
         "UPDATE turn_sources SET prompt = ?, selected_rev_ts = ?, selected_rev_id = ? "
         "WHERE agent_name = ? AND turn_key = ? AND event_id = ?",
         (prompt, timestamp_ms, revision_id, agent_name, turn_key, source_id),
     )
-    return True
 
 
 def record_visible_echo(
@@ -896,14 +861,21 @@ def record_visible_echo(
     echo_event_id: str,
 ) -> None:
     """Track the echo published for one physical source, without touching its turn's answer."""
-    rows, _source = _owned_or_new_source(transaction, agent_name, room_id=room_id, event_id=source_event_id)
+    _require_room(room_id)
+    owner = _physical_owners(transaction, agent_name, (source_event_id,)).get(source_event_id)
+    if owner is None:
+        rows = _new_one_source_turn(room_id, source_event_id)
+        _insert_rows(transaction, agent_name, rows)
+        owner = rows.turn.turn_key
+    else:
+        _require_same_room(_turns(transaction, agent_name, (owner,))[owner], room_id)
     transaction.execute(
         "UPDATE turn_sources SET visible_echo_event_id = ? WHERE agent_name = ? AND event_id = ?",
         (echo_event_id, agent_name, source_event_id),
     )
     transaction.execute(
         "UPDATE turns SET room_id = COALESCE(room_id, ?), updated_at = ? WHERE agent_name = ? AND turn_key = ?",
-        (room_id, time.time(), agent_name, rows.turn.turn_key),
+        (room_id, time.time(), agent_name, owner),
     )
 
 
@@ -914,7 +886,7 @@ def record_finalized_visible_echo(
     source_event_id: str,
     echo_event_id: str,
     is_fallback: bool,
-) -> bool:
+) -> None:
     """Mark one source's tracked echo replaced; a transcript is never overwritten by a fallback.
 
     Echo publication never becomes the turn's answer: its response stays as it
@@ -922,36 +894,32 @@ def record_finalized_visible_echo(
     """
     found = _source_row(transaction, agent_name, source_event_id)
     if found is None:
-        return False
+        return
     source, turn_key = found
     if source.visible_echo_event_id != echo_event_id or (source.visible_echo_is_fallback is False and is_fallback):
-        return False
+        return
     transaction.execute(
         "UPDATE turn_sources SET visible_echo_is_fallback = ? WHERE agent_name = ? AND event_id = ?",
         (is_fallback, agent_name, source_event_id),
     )
     _touch(transaction, agent_name, turn_key)
-    return True
 
 
-def record_placeholder(transaction: Transaction, agent_name: str, *, turn_key: str, response_event_id: str) -> bool:
+def record_placeholder(transaction: Transaction, agent_name: str, *, turn_key: str, response_event_id: str) -> None:
     """Record the visible placeholder an unfinished turn's reply streams into."""
-    row = transaction.fetchone(
+    transaction.execute(
         "UPDATE turns SET response_event_id = ?, updated_at = ? "
-        "WHERE agent_name = ? AND turn_key = ? AND NOT completed RETURNING turn_key",
+        "WHERE agent_name = ? AND turn_key = ? AND NOT completed",
         (response_event_id, time.time(), agent_name, turn_key),
     )
-    return row is not None
 
 
-def record_command_started(transaction: Transaction, agent_name: str, *, turn_key: str) -> bool:
+def record_command_started(transaction: Transaction, agent_name: str, *, turn_key: str) -> None:
     """Checkpoint that a command began executing, so a replay does not run it twice."""
-    row = transaction.fetchone(
-        "UPDATE turns SET command_execution_started = TRUE, updated_at = ? "
-        "WHERE agent_name = ? AND turn_key = ? RETURNING turn_key",
+    transaction.execute(
+        "UPDATE turns SET command_execution_started = TRUE, updated_at = ? WHERE agent_name = ? AND turn_key = ?",
         (time.time(), agent_name, turn_key),
     )
-    return row is not None
 
 
 def record_command_result(
@@ -961,16 +929,15 @@ def record_command_result(
     turn_key: str,
     text: str,
     extra_content: object = None,
-) -> bool:
+) -> None:
     """Checkpoint a command's first result; a later one never replaces it."""
     frozen = freeze_command_result_content(extra_content)
-    row = transaction.fetchone(
+    transaction.execute(
         """
         UPDATE turns SET
             command_execution_started = TRUE, command_result_text = ?, command_result_extra_content_json = ?,
             updated_at = ?
         WHERE agent_name = ? AND turn_key = ? AND command_result_text IS NULL
-        RETURNING turn_key
         """,
         (
             text,
@@ -980,7 +947,6 @@ def record_command_result(
             turn_key,
         ),
     )
-    return row is not None
 
 
 # Reshape and the writes that go through it.
@@ -992,8 +958,8 @@ def _reshape(
     candidate: TurnRecord,
     *,
     room_id: str,
-) -> tuple[_Turn, bool] | Refused:
-    """Give the candidate's ordered sources one turn, and return it with whether it was already frozen.
+) -> _Turn | Refused:
+    """Give the candidate's ordered sources one turn and return it.
 
     This is the one whole-turn operation, and it is merge policy written out:
 
@@ -1043,8 +1009,8 @@ def _reshape(
     for key in set(owners.values()):
         _require_same_room(turns[key], room_id)
     if target is not None:
-        return target, target.frozen
-    return _absorb(transaction, agent_name, candidate, room_id=room_id, owner_keys=set(owners.values())), False
+        return target
+    return _absorb(transaction, agent_name, candidate, room_id=room_id, owner_keys=set(owners.values()))
 
 
 def _absorb(
@@ -1151,6 +1117,22 @@ def _candidate_selection(candidate: TurnRecord, source_event_id: str) -> SourceE
     )
 
 
+def _candidate_revisions(record: TurnRecord) -> list[_Revision]:
+    """Return the revisions a record names: its replay entries, then each selected edit not among them.
+
+    A selected edit is also a watermark that keeps older late writes stale.
+    """
+    revisions = {
+        revision_id: _Revision(revision_id, replay.source_event_id, replay.timestamp_ms, replay.response_event_id)
+        for revision_id, replay in (record.revision_replay or {}).items()
+    }
+    for event_id, (timestamp_ms, revision_id) in (record.source_event_revisions or {}).items():
+        source_id = record.prompt_source_event_id(event_id)
+        if revision_id != source_id:
+            revisions.setdefault(revision_id, _Revision(revision_id, source_id, timestamp_ms))
+    return list(revisions.values())
+
+
 def _apply_candidate(
     transaction: Transaction,
     agent_name: str,
@@ -1159,18 +1141,8 @@ def _apply_candidate(
 ) -> None:
     """Write the candidate's context, revisions, and per-source payload into its reshaped turn."""
     _apply_context(transaction, agent_name, turn, candidate)
-    for revision_id, replay in (candidate.revision_replay or {}).items():
-        _upsert_revision(
-            transaction,
-            agent_name,
-            turn.turn_key,
-            _Revision(revision_id, replay.source_event_id, replay.timestamp_ms, replay.response_event_id),
-        )
-    # A selected edit is also a watermark that keeps older late writes stale.
-    for event_id, (timestamp_ms, revision_id) in (candidate.source_event_revisions or {}).items():
-        source_id = candidate.prompt_source_event_id(event_id)
-        if revision_id != source_id:
-            _upsert_revision(transaction, agent_name, turn.turn_key, _Revision(revision_id, source_id, timestamp_ms))
+    for revision in _candidate_revisions(candidate):
+        _upsert_revision(transaction, agent_name, turn.turn_key, revision)
     sources = _load_rows(transaction, agent_name, (turn.turn_key,))[turn.turn_key].sources
     _attribute(sources, candidate)
     _apply_payload(transaction, agent_name, turn, sources, candidate)
@@ -1350,16 +1322,8 @@ def insert_turn(
         turn=turn,
         sources=[_Source(event_id) for event_id in sources],
         aliases=list(record.discovery_event_ids),
-        revisions=[
-            _Revision(revision_id, replay.source_event_id, replay.timestamp_ms, replay.response_event_id)
-            for revision_id, replay in (record.revision_replay or {}).items()
-        ],
+        revisions=_candidate_revisions(record),
     )
-    revisions = {revision.revision_id for revision in rows.revisions}
-    for event_id, (timestamp_ms, revision_id) in (record.source_event_revisions or {}).items():
-        source_id = record.prompt_source_event_id(event_id)
-        if revision_id != source_id and revision_id not in revisions:
-            rows.revisions.append(_Revision(revision_id, source_id, timestamp_ms))
     _attribute(rows.sources, record)
     _apply_payload(transaction, agent_name, turn, rows.sources, record)
     _insert_rows(transaction, agent_name, rows)
@@ -1373,35 +1337,31 @@ def record_pending_turn(
     *,
     room_id: str,
 ) -> ReshapeResult:
-    """Persist a turn's response context before generation starts.
-
-    ``Answered`` means the turn is already complete and the caller settles and
-    stops; ``Refused`` means another answered turn owns a candidate source and
-    the caller writes and settles nothing, releases its claim, and retries each
-    source on its own.
-    """
-    shaped = _reshape(transaction, agent_name, record, room_id=room_id)
-    if isinstance(shaped, Refused):
-        return shaped
-    turn, frozen = shaped
-    if frozen:
-        return Answered(_record(transaction, agent_name, turn.turn_key))
+    """Persist a turn's response context before generation starts."""
+    turn = _reshape(transaction, agent_name, record, room_id=room_id)
+    if isinstance(turn, Refused):
+        return turn
+    if turn.frozen:
+        return Answered()
     _add_aliases(transaction, agent_name, turn.turn_key, record)
     _apply_candidate(transaction, agent_name, turn, record)
     return Accepted(_record(transaction, agent_name, turn.turn_key))
 
 
-def _record_terminal(
+def record_turn(
     transaction: Transaction,
     agent_name: str,
     record: TurnRecord,
     *,
     room_id: str,
-) -> _Turn | Refused:
-    shaped = _reshape(transaction, agent_name, record, room_id=room_id)
-    if isinstance(shaped, Refused):
-        return shaped
-    turn, _frozen = shaped
+) -> str | None:
+    """Record one turn answered without a visible response of its own, as precheck denial and ignores do.
+
+    Returns its key, or None when the write was refused.
+    """
+    turn = _reshape(transaction, agent_name, record, room_id=room_id)
+    if isinstance(turn, Refused):
+        return None
     _add_aliases(transaction, agent_name, turn.turn_key, record)
     # A turn handed to its final delivery keeps its context; only the acknowledgement's answer is still owed.
     if turn.final_delivery_id is None:
@@ -1412,21 +1372,7 @@ def _record_terminal(
         turn.room_id = turn.room_id or room_id
         _apply_candidate(transaction, agent_name, turn, record)
     _complete(transaction, agent_name, turn.turn_key)
-    return turn
-
-
-def record_turn(
-    transaction: Transaction,
-    agent_name: str,
-    record: TurnRecord,
-    *,
-    room_id: str,
-) -> Accepted | Refused:
-    """Record one turn answered without a visible response of its own, as precheck denial and ignores do."""
-    turn = _record_terminal(transaction, agent_name, record, room_id=room_id)
-    if isinstance(turn, Refused):
-        return turn
-    return Accepted(_record(transaction, agent_name, turn.turn_key))
+    return turn.turn_key
 
 
 def record_responded_turn(
@@ -1435,18 +1381,18 @@ def record_responded_turn(
     record: TurnRecord,
     *,
     room_id: str,
-) -> Accepted | Refused:
+) -> None:
     """Record one turn answered by a visible response, attributing it to the revisions the record selected."""
     response_event_id = record.response_event_id
     if not response_event_id:
         msg = "A responded turn requires a visible Matrix response event ID"
         raise ValueError(msg)
-    turn = _record_terminal(transaction, agent_name, record, room_id=room_id)
-    if isinstance(turn, Refused):
-        return turn
+    turn_key = record_turn(transaction, agent_name, record, room_id=room_id)
+    if turn_key is None:
+        return
     transaction.execute(
         "UPDATE turns SET response_event_id = ? WHERE agent_name = ? AND turn_key = ?",
-        (response_event_id, agent_name, turn.turn_key),
+        (response_event_id, agent_name, turn_key),
     )
     consumed = tuple(revision_id for _timestamp, revision_id in (record.source_event_revisions or {}).values())
     if consumed:
@@ -1454,9 +1400,8 @@ def record_responded_turn(
             f"UPDATE turn_revisions SET response_event_id = ? "  # noqa: S608
             f"WHERE agent_name = ? AND turn_key = ? AND response_event_id IS NULL "
             f"AND revision_id IN ({_placeholders(consumed)})",
-            (response_event_id, agent_name, turn.turn_key, *consumed),
+            (response_event_id, agent_name, turn_key, *consumed),
         )
-    return Accepted(_record(transaction, agent_name, turn.turn_key))
 
 
 def bind_final_delivery(
@@ -1494,71 +1439,61 @@ def complete_bound_delivery(
     *,
     delivery_id: str,
     response_event_id: str,
-) -> TurnRecord | None:
+) -> bool:
     """Complete the turn a non-AI FINAL delivery was bound to, in its acknowledgement's transaction.
 
-    A placeholder the turn already names stays its response: the acknowledged
-    event is only the edit that finished it.
+    Returns whether one was. A placeholder the turn already names stays its
+    response: the acknowledged event is only the edit that finished it.
     """
     row = transaction.fetchone(
-        "UPDATE turns SET completed = TRUE, response_event_id = COALESCE(response_event_id, ?), updated_at = ? "
+        "UPDATE turns SET response_event_id = COALESCE(response_event_id, ?) "
         "WHERE agent_name = ? AND final_delivery_id = ? AND NOT completed RETURNING turn_key",
-        (response_event_id, time.time(), agent_name, delivery_id),
+        (response_event_id, agent_name, delivery_id),
     )
     if row is None:
-        return None
-    turn_key = str(row["turn_key"])
-    _complete(transaction, agent_name, turn_key)
-    return _record(transaction, agent_name, turn_key)
+        return False
+    _complete(transaction, agent_name, str(row["turn_key"]))
+    return True
 
 
 def complete_turn_of(
     transaction: Transaction,
     agent_name: str,
     logical_event_ids: Sequence[str],
-) -> TurnRecord | None:
+) -> bool:
     """Complete the turn that physically owns these logical sources, as a reply's settlement does.
 
-    Returns None when nothing changed: it was already complete, or no turn
+    Returns False when nothing changed: it was already complete, or no turn
     owns them, which only the crash window before ingress recorded it leaves.
     """
     owners = _physical_owners(transaction, agent_name, logical_event_ids)
     key = next((owners[event_id] for event_id in logical_event_ids if event_id in owners), None)
     if key is None or _turns(transaction, agent_name, (key,))[key].completed:
-        return None
+        return False
     _complete(transaction, agent_name, key)
-    return _record(transaction, agent_name, key)
+    return True
 
 
 # Redactions.
 
 
-def record_redaction(transaction: Transaction, agent_name: str, *, room_id: str, event_id: str) -> bool:
-    """Record that ``event_id`` was redacted in ``room_id`` and scrub this agent's turn plaintext of it.
-
-    Returns whether the redaction is new. The projection, pending journal rows,
-    and replies of the agent's principals are the caller's to scrub in the same
-    transaction (``journal.redact_for_agent``).
-    """
-    row = transaction.fetchone(
-        "INSERT INTO event_redactions (agent_name, room_id, event_id) VALUES (?, ?, ?) "
-        "ON CONFLICT (agent_name, room_id, event_id) DO NOTHING RETURNING event_id",
-        (agent_name, room_id, event_id),
-    )
-    _scrub_redacted_event(transaction, agent_name, room_id=room_id, event_id=event_id)
-    return row is not None
-
-
-def _scrub_redacted_event(transaction: Transaction, agent_name: str, *, room_id: str, event_id: str) -> None:
-    """Clear the plaintext a redacted event leaves in this agent's turns in ``room_id``.
+def record_redaction(transaction: Transaction, agent_name: str, *, room_id: str, event_id: str) -> None:
+    """Record that ``event_id`` was redacted in ``room_id`` and clear the plaintext it left in the agent's turns there.
 
     A source that is the event, or whose discovery alias it is, loses its
     prompt and voice checkpoint; a source that selected it as its revision
     loses those and the selection, so a newer edit or the earlier body can be
     selected again. Structural ids stay, because deletion and stale-write
     refusal are derived from them: the alias binding, attribution, and the
-    revision rows that hold edit watermarks.
+    revision rows that hold edit watermarks. The projection, pending journal
+    rows, and replies of the agent's principals are the caller's to scrub in
+    the same transaction (``journal.redact_for_agent``).
     """
+    transaction.execute(
+        "INSERT INTO event_redactions (agent_name, room_id, event_id) VALUES (?, ?, ?) "
+        "ON CONFLICT (agent_name, room_id, event_id) DO NOTHING",
+        (agent_name, room_id, event_id),
+    )
     room_turns = "SELECT turn_key FROM turns WHERE agent_name = ? AND room_id = ?"
     transaction.execute(
         f"""
@@ -1594,12 +1529,7 @@ def _scrub_redacted_event(transaction: Transaction, agent_name: str, *, room_id:
 
 @dataclass(frozen=True, slots=True)
 class TurnRecordStore:
-    """One agent's turn rows, each call one transaction on the journal's database.
-
-    Agent-scoped rather than principal-scoped: a turn answered stays answered
-    across a re-login, and a bot that lost that would answer every outstanding
-    message a second time.
-    """
+    """One agent's turn rows, each call one transaction on the journal's database."""
 
     backend: Backend
     agent_name: str
@@ -1707,13 +1637,8 @@ def retain(
     }
 
     def replayable(rows: _Rows) -> bool:
-        physical = {source.event_id for source in rows.sources}
-        gone = redacted[rows.turn.room_id]
-        return any(
-            source.event_id not in gone
-            and (source.discovery_event_id in physical or source.discovery_event_id not in gone)
-            for source in rows.sources
-        )
+        deleted = _deleted_given(rows.sources, redacted[rows.turn.room_id])
+        return any(source.event_id not in deleted for source in rows.sources)
 
     def required(rows: _Rows) -> bool:
         ids = chain(
@@ -1734,7 +1659,7 @@ def retain(
         fresh = [rows for rows in fresh if rows.turn.turn_key in needed] + kept_ordinary
     kept = {rows.turn.turn_key for rows in fresh}
     dropped = [key for key in keys if key not in kept]
-    for batch in _chunks(dropped):
+    for batch in batched(dropped, _CHUNK):
         transaction.execute(
             f"DELETE FROM turns WHERE agent_name = ? AND turn_key IN ({_placeholders(batch)})",  # noqa: S608
             (agent_name, *batch),
@@ -1747,7 +1672,7 @@ def retain(
         and unsettled.isdisjoint(source.event_id for source in rows.sources)
         and any(source.prepared_voice_json is not None for source in rows.sources)
     ]
-    for batch in _chunks(cleared):
+    for batch in batched(cleared, _CHUNK):
         transaction.execute(
             f"UPDATE turn_sources SET prepared_voice_json = NULL "  # noqa: S608
             f"WHERE agent_name = ? AND turn_key IN ({_placeholders(batch)})",

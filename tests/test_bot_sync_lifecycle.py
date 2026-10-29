@@ -286,7 +286,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         assert dispatcher is not first_dispatcher
         assert bot._turn_store.deps.retry_dispatch_sources == dispatcher.retry_turn_sources
         assert bot._reply_runtime.retry_sources == dispatcher.retry_turn_sources
-        assert bot._delivery_gateway.deps.turn_handoff.released == dispatcher.release_delivered_turn_sources
+        assert bot._delivery_gateway.deps.turn_handoff == dispatcher.release_delivered_turn_sources
         assert (
             bot._ingress_validator.deps.settle_ignored_sources == dispatcher.settle_intentionally_ignored_turn_sources
         )

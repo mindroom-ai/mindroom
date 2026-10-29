@@ -46,7 +46,6 @@ if TYPE_CHECKING:
         PermanentDeliveryFailure,
         RefreshRequest,
         SemanticConsumer,
-        TerminalTurnWrite,
         UnreadableMatrixDelivery,
     )
     from .projection import ProjectedEvent
@@ -412,7 +411,7 @@ class MatrixDeliveryView(Protocol):
         stage: DeliveryStage,
         event_id: str,
         delivered_projections: tuple[ProjectedEvent, ...],
-        terminal_turn: TerminalTurnWrite | None = None,
+        terminal_response_event_id: str | None = None,
     ) -> DeliveryAcknowledgement:
         """Atomically record and project the delivery, plus the turn it completes."""
         ...

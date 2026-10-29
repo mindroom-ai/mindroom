@@ -41,8 +41,6 @@ from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_policy import PreparedDispatch
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import ClaimContended, TurnClaim
-from mindroom.turns.facts import PrecheckedEvent
-from mindroom.turns.ingress import _IngressAdmissionOutcome, _media_source_kind
 from tests.bot_helpers import (
     AgentBotTestBase,
     _agent_response_handled_turn,
@@ -68,7 +66,6 @@ from tests.conftest import (
     dispatch_context_result,
     drain_coalescing,
     install_generate_response_mock,
-    make_ingress_facts,
     replace_turn_deps,
     runtime_paths_for,
 )
@@ -216,13 +213,8 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         room = _synced_room(bot.matrix_id.full_id)
         event = self._make_handler_event("image", sender="@user:localhost", event_id="$img_event")
-        prechecked_event = PrecheckedEvent(
-            event=event,
-            facts=make_ingress_facts(event.sender, source_kind=_media_source_kind(event)),
-        )
         bot._conversation_resolver.coalescing_thread_id = AsyncMock(return_value=None)
-        bot._turn_ingress._precheck_dispatch_event = AsyncMock(return_value=prechecked_event)
-        bot._turn_ingress._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
+        bot._turn_ingress._precheck_dispatch_event = AsyncMock(return_value=True)
         bot._turn_ingress._enqueue_for_dispatch = AsyncMock()
 
         await bot._turn_ingress.handle_media_event(room, event)
@@ -266,7 +258,6 @@ class TestAgentBot(AgentBotTestBase):
             *,
             key: CoalescingKey,
             source_event_id: str | None,
-            source_kind: str,
             ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None,
             claim: TurnClaim | None = None,
             **_ignored: object,
@@ -276,7 +267,6 @@ class TestAgentBot(AgentBotTestBase):
             call_order.append("admit")
             assert key == CoalescingKey("!test:localhost", "$thread_root", RequesterCoalescingOwner("@user:localhost"))
             assert source_event_id == "$voice_event"
-            assert source_kind == VOICE_SOURCE_KIND
             assert slot.released is False
             admitted_ready_task = ready_task
             admitted_claim = claim
@@ -286,13 +276,7 @@ class TestAgentBot(AgentBotTestBase):
             await release_stt.wait()
 
         bot._conversation_resolver.coalescing_thread_id = AsyncMock(side_effect=record_thread_id)
-        bot._turn_ingress._precheck_dispatch_event = AsyncMock(
-            return_value=PrecheckedEvent(
-                event=event,
-                facts=make_ingress_facts(event.sender, source_kind=_media_source_kind(event)),
-            ),
-        )
-        bot._turn_ingress._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
+        bot._turn_ingress._precheck_dispatch_event = AsyncMock(return_value=True)
         bot._turn_ingress._enqueue_for_dispatch = AsyncMock()
         bot._coalescing_gate.enter_lane = MagicMock(side_effect=record_enter_lane)
         bot._coalescing_gate.submit_lane_slot = mock_submit = MagicMock(side_effect=record_submit)
@@ -316,7 +300,6 @@ class TestAgentBot(AgentBotTestBase):
             room,
             event,
         )
-        bot._turn_ingress._dispatch_special_media_as_text.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_media_ingress_claims_source_before_async_thread_resolution(
@@ -436,13 +419,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         room = _synced_room(bot.matrix_id.full_id)
         event = self._make_handler_event("voice", sender="@user:localhost", event_id="$voice_event")
-        prechecked_event = PrecheckedEvent(
-            event=event,
-            facts=make_ingress_facts(event.sender, source_kind=_media_source_kind(event)),
-        )
-
-        bot._turn_ingress._precheck_dispatch_event = AsyncMock(return_value=prechecked_event)
-        bot._turn_ingress._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
+        bot._turn_ingress._precheck_dispatch_event = AsyncMock(return_value=True)
         bot._turn_ingress.deps.resolver.coalescing_thread_id = AsyncMock(side_effect=asyncio.CancelledError)
 
         with pytest.raises(asyncio.CancelledError):

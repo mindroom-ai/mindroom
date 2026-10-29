@@ -6064,7 +6064,6 @@ async def test_unconsumed_edit_physical_tombstone_settles_checkpoint(
     journal = EventJournalStore.open_sqlite(ledger)
     store = TurnStore(
         TurnStoreDeps(
-            agent_name="general",
             turn_records=journal.turn_records("general"),
             legacy_responses_file=None,
             state_writer=Mock(),

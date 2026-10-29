@@ -47,7 +47,6 @@ async def _admit_root(
     await gate.admit(
         key,
         source_event_id=event_id,
-        source_kind="message",
         ready_result=ReadyPendingEvent(pending_event=pending),
     )
 
@@ -72,7 +71,7 @@ async def test_independent_root_starts_while_same_key_preparation_is_blocked() -
         await asyncio.wait_for(started["$b"].wait(), timeout=1)
         assert gate.has_pending_source_event("$a")
         assert gate.has_pending_source_event("$b")
-        assert [turn.ingress.coalescing_key for turn in turns] == [_KEY, _KEY]
+        assert [turn.coalescing_key for turn in turns] == [_KEY, _KEY]
     finally:
         release.set()
         await gate.drain_all()
@@ -350,7 +349,6 @@ async def test_caption_joins_room_media_while_an_earlier_root_prepares() -> None
         await gate.admit(
             _KEY,
             source_event_id="$image",
-            source_kind="image",
             ready_result=ReadyPendingEvent(pending_event=pending),
         )
         await _admit_root(gate, "$caption")
@@ -404,5 +402,4 @@ async def test_controller_prepares_independent_roots_without_changing_reply_targ
     targets = {request.response_envelope.target.resolved_thread_id for request in harness.runner.requests}
     assert targets == {"$a", "$b"}
     for turn in harness.gate_batches:
-        assert turn.ingress.coalescing_key is not None
-        assert turn.ingress.coalescing_key.thread_id is None
+        assert turn.coalescing_key.thread_id is None

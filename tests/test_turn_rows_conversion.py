@@ -706,10 +706,10 @@ async def test_an_outstanding_final_delivery_completes_its_turn_after_upgrade(jo
     journal.opened.remove(upgraded)
     reopened = journal.upgraded()
 
-    assert completed is not None
-    assert completed.source_event_ids == ("$first", "$bound")
-    assert unbound is None
+    assert completed
+    assert not unbound
     found = await read(reopened, turn_rows.get_turn_record, "$first")
+    assert found.source_event_ids == ("$first", "$bound")
     assert found.completed
     assert found.response_event_id == "$ack"
     assert not (await read(reopened, turn_rows.get_turn_record, "$elsewhere")).completed
