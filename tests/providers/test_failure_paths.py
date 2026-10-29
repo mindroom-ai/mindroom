@@ -488,7 +488,14 @@ _CLAUDE_CASES = [
         UNAVAILABLE,
         _PIPELINE,
     ),
-    _Case("http_400", _claude_status(400, "invalid_request_error", "messages: bad"), InvalidRequest, ERROR, 1),
+    # A final error's reply shows Anthropic's message, not the SDK's status line and body.
+    _Case(
+        "http_400",
+        _claude_status(400, "invalid_request_error", "messages: bad"),
+        InvalidRequest,
+        f"{ERROR}messages: bad",
+        1,
+    ),
     _Case(
         "http_422",
         _claude_status(422, "invalid_request_error", "messages.0.content: Input should be a valid list"),
@@ -626,7 +633,7 @@ _CLAUDE_CASES = [
         "event_invalid_request_error",
         _claude_stream(_claude_error("invalid_request_error", "Bad block")),
         ProviderError,
-        ERROR,
+        f"{ERROR}Bad block",
         1,
     ),
     _Case(

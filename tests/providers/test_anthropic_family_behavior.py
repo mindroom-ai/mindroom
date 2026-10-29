@@ -385,7 +385,7 @@ async def test_sdk_status_errors_map_to_the_shared_provider_errors(
     expected: type[Exception],
     retryable: bool,
 ) -> None:
-    """Each SDK failure becomes the shared error class whose retryable flag the loop decides from."""
+    """Each SDK failure becomes the shared error class whose retryable flag the loop decides from, under Anthropic's text."""
     wire = Wire(httpx.Response(status, json={"type": "error", "error": body}, headers={"retry-after": "3"}))
     provider = route_provider("anthropic", tmp_path, wire)
     with pytest.raises(expected) as raised:
@@ -394,7 +394,7 @@ async def test_sdk_status_errors_map_to_the_shared_provider_errors(
     assert raised.value.status_code == status
     assert raised.value.provider == "Anthropic"
     assert raised.value.retry_after_seconds == 3.0
-    assert body["message"] in str(raised.value)
+    assert str(raised.value) == body["message"]
     assert len(wire.requests) == 1, "the SDK client never retries; the pipeline alone does"
 
 
@@ -463,6 +463,7 @@ async def test_a_mid_stream_error_event_is_classified_by_its_error_type(
 
     assert type(raised.value) is expected
     assert (raised.value.status_code, raised.value.retryable) == (None, expected is not ProviderError)
+    assert str(raised.value) == "Internal server error"
 
 
 @pytest.mark.asyncio

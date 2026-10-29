@@ -579,9 +579,10 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
     """Return the shared error for an SDK, transport, or Google token failure; any other exception propagates.
 
     The Vertex client mints its Google access token inside the request. An ``error`` event inside the stream arrives
-    with the stream's committed 200 status, so its error type classifies it. A request the organization's billing
-    stops is a final error that keeps Anthropic's message alone, which says what to change. The SDK finds a client's
-    credentials only when it sends, so a client without any fails then, as the missing key it is.
+    with the stream's committed 200 status, so its error type classifies it. A failed response keeps the body's own
+    message as its text, rather than the SDK's status line and body, or the SDK's text when the body has none, so a
+    reply shows what Anthropic said; a request the organization's billing stops is a final error. The SDK finds a
+    client's credentials only when it sends, so a client without any fails then, as the missing key it is.
     """
     if isinstance(error, TypeError) and str(error).startswith(_NO_CREDENTIALS_ERROR):
         return missing_api_key_error(PROVIDER_ENV_KEYS["anthropic"], provider=provider)
@@ -589,15 +590,15 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
         return failure
     if isinstance(error, anthropic.APIStatusError):
         body = _ErrorBody.of(error.body)
+        message = body.message or error.message
         committed = error.status_code == _COMMITTED_STREAM_STATUS
         status_code = None if committed else error.status_code
         if body.stops_on_billing():
-            message = body.message or error.message
             return ProviderError(message, provider=provider, status_code=status_code, code=QUOTA_EXHAUSTED)
         if committed:
-            return classify_provider_error(error.message, provider=provider, error_type=body.type)
+            return classify_provider_error(message, provider=provider, error_type=body.type)
         return classify_provider_error(
-            error.message,
+            message,
             provider=provider,
             status_code=status_code,
             retry_after_seconds=retry_after_seconds(error.response.headers),
