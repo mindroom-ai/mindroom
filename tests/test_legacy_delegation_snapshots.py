@@ -21,6 +21,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, subagent_sessions_dir
 from mindroom.delegation.legacy_snapshots import migrate_subagent_sessions
+from mindroom.delegation.sessions import update_subagent_turn_sync
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, DelegationState, SubagentPersona
 from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
@@ -190,17 +191,21 @@ async def test_a_second_start_changes_nothing(release: str, tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 async def test_a_snapshot_in_the_current_shape_is_left_as_stored(tmp_path: Path) -> None:
-    """A session file and a run that hold only current children keep their bytes, the database only its version."""
+    """Session files and a run the current writers wrote keep their bytes through the rewrite; only the version moves."""
     paths = _restore("v2026.10.683", tmp_path)
     await _start(paths)
-    session_files, rows = _stored(paths)
-    database = _database(paths)
-    with closing(sqlite3.connect(database)) as connection, connection:
+    for child in _session_children(paths).values():
+        update_subagent_turn_sync(DelegationChild.from_dict(child), paths)
+    state = DelegationState.from_metadata({DELEGATION_STATE_KEY: _run_state(paths)})
+    store = create_session_storage("leader", _CONFIG, paths, _OWNER)
+    assert store.patch_run_metadata("parent-session", "parent-run", {DELEGATION_STATE_KEY: state.to_dict()})
+    written = _stored(paths)
+    with closing(sqlite3.connect(_database(paths))) as connection, connection:
         connection.execute('UPDATE "leader_sessions_log_meta" SET version = 4')
 
     await _start(paths)
 
-    assert _stored(paths) == (session_files, rows)
+    assert _stored(paths) == written
 
 
 @pytest.mark.asyncio
