@@ -257,7 +257,7 @@ def _revision_replay(raw: object) -> tuple[dict[str, RevisionReplay], frozenset[
 # Legacy format: turn_records rows (agent_name, index_event_id, anchor_event_id, record_json), one copy of a turn's
 # record under each of its sources and discovery aliases, read by the handled-turn codec, whose own markers cover the
 # retired keys it drops on read.
-# Last legacy release: v2026.10.662 (the table arrived in v2026.8.31); replacement: the next release stores turns in
+# Last legacy release: v2026.10.664 (the table arrived in v2026.8.31); replacement: the next release stores turns in
 # turns, turn_sources, turn_aliases, and turn_revisions.
 # Handling: the schema upgrade converts every agent's rows by the rules marked below and drops turn_records, all in
 # the schema transaction, so a failure leaves the old table in place for the next open to retry.
@@ -305,7 +305,7 @@ def upgrade_turn_records_to_rows(transaction: Transaction, inspector: SchemaInsp
 # LEGACY_COMPAT: Redaction tombstones scoped to one journal principal.
 # Legacy format: redaction_tombstones (principal_id, room_id, redacted_event_id), one row per Matrix login of an agent,
 # deleted when that login left the room.
-# Last legacy release: v2026.10.662 (the table arrived in v2026.8.31); replacement: the next release records each
+# Last legacy release: v2026.10.664 (the table arrived in v2026.8.31); replacement: the next release records each
 # redaction once per agent in event_redactions and keeps it when the bot leaves.
 # Handling: every row becomes (agent of its principal, room, event) and, once the agent's turns are converted, applies
 # the redaction to every login of that agent, as a live redaction does; the table is dropped.
@@ -411,7 +411,7 @@ def _convert(
 # Legacy format: a record's redacted_source_event_ids and redacted revision_replay entries, and a standalone record
 # indexed by a redacted revision whose owners' flags each warm-up joined; releases up to v2026.9.383 also wrote them
 # onto turns recorded in another room.
-# Last legacy release: v2026.10.662 (since v2026.7.197 and v2026.9.43); replacement: the next release keeps
+# Last legacy release: v2026.10.664 (since v2026.7.197 and v2026.9.43); replacement: the next release keeps
 # redactions only in event_redactions.
 # Handling: from every blob, including ones the row ownership below discards, each redaction of a record that has a
 # conversation_target is recorded in that conversation's room before the agent's turns are written and applied after
@@ -492,7 +492,7 @@ def legacy_summary_sources(
 # Legacy format: turn_records index rows whose blobs differ for one turn (a stale pending copy beside a completed one,
 # an original's row a completed relay's alias row overwrote, a partially adopted legacy import) and declared sources
 # no row names, including groups left with only alias rows.
-# Last legacy release: v2026.10.662; replacement: the next release keeps one exclusive physical owner per source.
+# Last legacy release: v2026.10.664; replacement: the next release keeps one exclusive physical owner per source.
 # Handling: a group of rows sharing one blob owns the declared sources and aliases whose row it holds, plus declared
 # sources no row names, which the completed, then most recent, declaring blob claims. A completed group with only
 # alias rows keeps each alias answered as content-free completion evidence; an unfinished one carries no proof and
@@ -558,7 +558,7 @@ def _single_room(rooms: Mapping[str, set[str]], sources: Sequence[str]) -> str |
 # requester's when it had one source; and one visible_echo_event_id per record, which an unfinished record's
 # finalization also wrote as its response_event_id. suppressed_source_event_revisions has had no writer since
 # v2026.10.228.
-# Last legacy release: v2026.10.662 writes the first three (suppressed revisions: v2026.10.227); replacement: the
+# Last legacy release: v2026.10.664 writes the first three (suppressed revisions: v2026.10.227); replacement: the
 # next release names every turn's room, attributes each source, and keeps echoes per source.
 # Handling: the room comes from the conversation target, else from the one room every login of the agent admitted
 # the turn's sources in; without one, a completed turn stays only as content-free completion evidence (no room,
@@ -637,7 +637,7 @@ def _outstanding_final_deliveries(transaction: Transaction) -> dict[str, dict[st
 # LEGACY_COMPAT: Non-AI FINAL deliveries whose turn the acknowledgement looked up when it arrived.
 # Legacy format: an unacknowledged FINAL outbox row without reply identity, whose acknowledgement completed the turn
 # anchored at its delivery id through terminal_turn_record.
-# Last legacy release: v2026.10.662; replacement: the next release binds the turn in the transaction that makes the
+# Last legacy release: v2026.10.664; replacement: the next release binds the turn in the transaction that makes the
 # FINAL durable.
 # Handling: such a row still deliverable binds the converted turn anchored at its delivery id in its room; with no
 # such turn, or two rows for one delivery, it stays unbound and its acknowledgement completes nothing, as before.
