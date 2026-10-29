@@ -7,6 +7,7 @@ Always back up configuration and persistent storage before replacing the running
 ## Upgrading to one owner per conversation database
 
 The first start after this upgrade converts every conversation database once more before any agent comes online, as the [conversation storage v2](#upgrading-to-conversation-storage-v2) upgrade did, so that each records the agent, team, or internal usage store it belongs to.
+A team's database that holds no conversation yet converts when that team next uses it instead.
 Conversation history, compaction summaries, session state, pending tool approvals, and usage records carry over.
 
 ### Before upgrading to one owner per database
