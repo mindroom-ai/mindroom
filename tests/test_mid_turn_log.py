@@ -28,6 +28,7 @@ from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.media_inputs import MediaInputs
 from mindroom.session_storage import summary_rows
 from mindroom.session_storage.agent_storage import create_agent_state_storage
+from mindroom.session_storage.store import watch_session_row
 from mindroom.session_storage.summary_rows import Fold
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
@@ -99,14 +100,12 @@ def _fold(
     members: Sequence[str] = (),
 ) -> bool:
     """Fold the stored runs after the latest summary row and part of the running ``run``, as a mid-turn fold does."""
-    scope = _TEAM_SCOPE if isinstance(run, TeamRunRecord) else _SCOPE
     session = _session(run)
-    basis = read_fold_basis(storage, session, scope)
+    basis = read_fold_basis(storage, session)
     assert basis is not None
     return append_fold(
         storage,
         session=session,
-        scope=scope,
         basis=basis,
         summary=summary,
         fold=Fold(run=run, messages=tuple(folded), member_run_ids=frozenset(members)),
@@ -144,7 +143,10 @@ def test_a_first_fold_writes_against_a_row_of_its_scopes_kind(
     team_store: ConversationStore,
     scope: HistoryScope,
 ) -> None:
-    """The row a first turn's fold creates is the kind of session the scope's runs belong to."""
+    """The row a first turn's fold creates is the kind of session the scope's runs belong to.
+
+    The fold reports creating it to the reply watching the scope's session, which starts the session's hooks.
+    """
     storage = team_store if scope.kind == "team" else storage
     running: AnyRunRecord = (
         TeamRunRecord(run_id="live", team_id="crew", session_id="session", status=RunStatus.running)
@@ -152,8 +154,10 @@ def test_a_first_fold_writes_against_a_row_of_its_scopes_kind(
         else _run("live", status=RunStatus.running)
     )
 
-    assert _fold(storage, running, "S")
+    with watch_session_row(scope, "session") as watch:
+        assert _fold(storage, running, "S")
 
+    assert watch.created
     row = storage.load_session("session")
     assert row is not None
     assert (row.kind, row.owner_id) == (scope.kind, scope.scope_id)
@@ -286,7 +290,7 @@ def test_editing_a_turn_an_older_resumed_run_folded_removes_that_run(storage: Co
     _seed(storage, [_run("r1")])
     _save(storage, paused)
     _save(storage, _run("r2"))
-    compact_runs(storage, _loaded(storage), _SCOPE, ["r1"], "S0")
+    compact_runs(storage, _loaded(storage), ["r1"], "S0")
     assert _fold(storage, paused, "S1")
     assert log_of(storage, _SCOPE.key, "session") == ["run:r1", "row:S0", "run:r2", "row:S1", "run:paused"]
 
@@ -338,14 +342,13 @@ def test_a_fold_is_refused_when_another_compaction_appended_first(storage: Conve
     """A pre-reply compaction that commits during a long turn's summary call wins; the fold builds on stale history."""
     session = _seed(storage, [_run("r1"), _run("r2")])
     running = _run("live")
-    basis = read_fold_basis(storage, _session(), _SCOPE)
+    basis = read_fold_basis(storage, _session())
     assert basis is not None
-    compact_runs(storage, session, _SCOPE, ["r1"], "S-pre-reply")
+    compact_runs(storage, session, ["r1"], "S-pre-reply")
 
     assert not append_fold(
         storage,
         session=session,
-        scope=_SCOPE,
         basis=basis,
         summary="S-fold",
         fold=Fold(run=running, messages=(), member_run_ids=frozenset()),
@@ -356,14 +359,13 @@ def test_a_fold_is_refused_when_another_compaction_appended_first(storage: Conve
 def test_a_fold_racing_a_retirement_is_refused(storage: ConversationStore) -> None:
     """Retirement appends a barrier, so a fold read before it would summarize retired history again."""
     session = _seed(storage, [_run("r1")])
-    basis = read_fold_basis(storage, _session(), _SCOPE)
+    basis = read_fold_basis(storage, _session())
     assert basis is not None
     summary_rows.retire(storage, session=_session(), scope_key=_SCOPE.key)
 
     assert not append_fold(
         storage,
         session=session,
-        scope=_SCOPE,
         basis=basis,
         summary="S",
         fold=Fold(run=_run("live", status=RunStatus.running), messages=(), member_run_ids=frozenset()),
@@ -416,7 +418,7 @@ def test_a_fold_keeps_the_events_its_turn_read_seen_after_the_turn_stops(storage
     running.status = RunStatus.cancelled
     _save(storage, running)
 
-    assert "$context" in read_scope_seen_event_ids(storage, _loaded(storage), _SCOPE)
+    assert "$context" in read_scope_seen_event_ids(storage, _loaded(storage))
 
 
 def test_redacting_a_team_turn_that_folded_removes_its_member_runs(team_store: ConversationStore) -> None:
@@ -506,7 +508,6 @@ def test_a_fold_completed_after_a_later_turn_replays_its_summary_first(storage: 
     assert [message.content for message in built[-3:]] == ["Task A", "A done", "Task C"]
     planned = estimate_prompt_visible_history_tokens(
         session=session,
-        scope=_SCOPE,
         history_settings=_ALL_HISTORY,
         replay_estimator=None,
     )

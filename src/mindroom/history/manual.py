@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.history.policy import describe_compaction_unavailability, resolve_history_execution_plan
 from mindroom.history.session_context import create_scope_session_storage
-from mindroom.history.storage import first_scope_session, set_force_compaction
+from mindroom.history.storage import new_scope_session, set_force_compaction
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.turn_model import ModelScope, resolve_turn_model
@@ -68,7 +68,7 @@ async def request_compaction_before_next_reply(
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
         ),
-        partial(set_force_compaction, session=first_scope_session(scope, session_id), scope=scope, forced=True),
+        partial(set_force_compaction, session=new_scope_session(session_id=session_id, scope=scope), forced=True),
     )
     logger.info(
         "Manual compaction scheduled",

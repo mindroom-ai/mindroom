@@ -30,9 +30,10 @@ from collections.abc import (
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass, field, replace
+from functools import partial
 from itertools import count
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, NoReturn, cast
 from unittest.mock import DEFAULT, AsyncMock, MagicMock, patch
 from urllib.parse import unquote, urlsplit
@@ -56,6 +57,9 @@ import mindroom.api.sandbox_exec as sandbox_exec_module
 import mindroom.approval.continuation_runner as continuation_runner_module
 import mindroom.approval.manager as approval_manager_module
 import mindroom.bot  # noqa: F401
+import mindroom.cli.config as cli_config_module
+import mindroom.cli.desktop as cli_desktop_module
+import mindroom.cli.service as cli_service_module
 import mindroom.custom_tools.todo as todo_tool_module
 import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
@@ -148,11 +152,12 @@ from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.mcp import toolkit as mcp_toolkit_module
 from mindroom.message_target import MessageTarget
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
-from mindroom.orchestration.config_lifecycle import load_startup_config
+from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle, load_published_config, load_startup_config
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
 from mindroom.providers import registry as provider_registry
 from mindroom.providers.pipeline import media as media_pipeline
 from mindroom.reaction_dispatch import ReactionDispatcher
+from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.response_lifecycle import QueuedHumanNoticeReservation
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
@@ -170,6 +175,7 @@ from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.store import _session_state, _write_session_state, ensure_session_row, persist_to
 from mindroom.thread_utils import decide_agent_response
+from mindroom.tool_system import plugin_imports
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_store import _CLAIM_REGISTRIES, TurnClaim, TurnStore, _ClaimRegistry
@@ -2371,6 +2377,27 @@ def normalize_console_output(text: str) -> str:
     return " ".join(_SOFT_WRAP_RE.sub("", _ANSI_RE.sub("", text)).split())
 
 
+@pytest.fixture
+def wide_cli_consoles(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Render the CLI's consoles at a width no output line with a temporary path reaches.
+
+    `normalize_console_output` rejoins a line wrapped at a space without that space, so a temporary path in the middle
+    of a line breaks the assertion at some path lengths. The CLI builds its consoles at import, which fixes a `COLUMNS`
+    exported when pytest starts, and with `FORCE_COLOR` set the root conftest's dumb terminal makes Rich use 80 columns.
+    Rich takes a pinned width and height before either.
+    """
+    for console in (
+        cli_config_module.console,
+        cli_config_module._err_console,
+        cli_desktop_module._console,
+        cli_desktop_module._error_console,
+        cli_service_module._console,
+        cli_service_module._err_console,
+    ):
+        monkeypatch.setattr(console, "_width", 1000)
+        monkeypatch.setattr(console, "_height", 25)
+
+
 class _ExtractedCollaboratorProxy[CollaboratorT]:
     """Mutable proxy that keeps real collaborator attributes visible to tests."""
 
@@ -2552,6 +2579,30 @@ def failed_config_load(error: Exception) -> ConfigLoad:
     )
 
 
+def make_config_reload_lifecycle(
+    runtime_paths: RuntimePaths,
+    *,
+    current_config: Config | None = None,
+    agent_bots: Mapping[str, AgentBot] | None = None,
+    response_admission_gate: ResponseAdmissionGate | None = None,
+    load_config: Callable[[], ConfigLoad] | None = None,
+) -> ConfigReloadLifecycle:
+    """Return a running reload lifecycle with stubbed runtime hooks; it loads the config file unless told otherwise."""
+    runtime_config = current_config if current_config is not None else Config()
+    return ConfigReloadLifecycle(
+        runtime_paths=runtime_paths,
+        is_running=lambda: True,
+        current_config=lambda: runtime_config,
+        agent_bots=lambda: agent_bots if agent_bots is not None else {},
+        load_config=load_config or partial(load_published_config, runtime_paths, api_enabled=False),
+        apply_update_plan=AsyncMock(return_value=True),
+        response_admission_gate=response_admission_gate or ResponseAdmissionGate(),
+        before_runtime_replacement=AsyncMock(),
+        rebind_published_config_consumers=MagicMock(),
+        finish_reload=AsyncMock(),
+    )
+
+
 def write_config_yaml(config: Config, config_path: Path) -> None:
     """Write a test config using the authored YAML representation."""
     path = Path(config_path)
@@ -2623,6 +2674,19 @@ def runtime_paths_for(config: Config) -> RuntimePaths:
         msg = "Test config is missing bound RuntimePaths"
         raise KeyError(msg)
     return runtime_paths
+
+
+def cached_plugin_entry(module_path: Path) -> plugin_imports._ModuleCacheEntry:
+    """Return the one plugin module cache entry for a file, whatever other plugins earlier tests left cached."""
+    (entry,) = (
+        cached for cached in plugin_imports._MODULE_IMPORT_CACHE.values() if cached.module.__file__ == str(module_path)
+    )
+    return entry
+
+
+def cached_plugin_module(module_path: Path) -> ModuleType:
+    """Return the one cached plugin module imported from a file."""
+    return cached_plugin_entry(module_path).module
 
 
 def create_mock_room(

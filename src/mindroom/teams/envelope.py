@@ -324,7 +324,6 @@ async def _persist_bound_seen_event_ids(*, scope_context: ScopeSessionContext, e
     record = partial(
         update_scope_seen_event_ids,
         session=scope_context.first_session(),
-        scope=scope_context.scope,
         event_ids=event_ids,
     )
     await run_session_storage_operation(lambda: storage, record)

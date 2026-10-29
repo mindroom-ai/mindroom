@@ -1,9 +1,9 @@
-"""Paused runs earlier releases stored in shapes no reader reads any more, rewritten once at layout version 5.
+"""Paused runs earlier releases stored in shapes no reader reads any more, rewritten once at layout version 6.
 
 A paused run resumes from its stored row: its system messages, its tool calls, and, for a team, the member runs its
 delegation calls wait on. Earlier releases stored a paused notice as a run's content, Agno's summary block inside a
 paused run's system message, and team delegation calls that do not name the member run they wait on. Moving a
-database to layout version 5 rewrites those rows once, so the resume, the team leader, and a delegation's settlement
+database to layout version 6 rewrites those rows once, so the resume, the team leader, and a delegation's settlement
 read them as a current release's rows.
 """
 
@@ -51,7 +51,7 @@ _WAITING_RESULT = re.compile(r"Member '.*' requires human input before continuin
 
 
 # LEGACY_COMPAT: Paused runs stored with a paused notice, Agno's summary block, or unlinked delegation calls.
-# Legacy format: rows of a database below layout version 5, or rows the Agno-layout conversion just copied, holding:
+# Legacy format: rows of a database below layout version 6, or rows the Agno-layout conversion just copied, holding:
 #   a run ``content`` that is the notice a run paused without text of its own got, "I have tools to execute, but I
 #   need confirmation." for an agent and "Team run paused. The following require input:" with one line per waiting
 #   call for a team, or another wording Agno's runtime wrote, on the paused row and on its later row when the resume
@@ -63,20 +63,24 @@ _WAITING_RESULT = re.compile(r"Member '.*' requires human input before continuin
 #   ``teams/runtime.py``); the summary block v2026.10.346, whose agents and team leaders kept Agno's
 #   ``add_session_summary_to_context``; the null link v2026.10.574; the last-ended link v2026.10.498, the last
 #   release on the Agno runtime; the missing messages v2026.10.611. Each was replaced by the next release.
-# Handling: once, in the write transaction that moves a database to layout version 5 or ends its Agno-layout
-#   conversion. A notice none of the run's own model messages wrote leaves its content, so neither a resume nor a
-#   delegation's settlement hands it to a team leader or a delegating parent. The summary block leaves the system
-#   message, so the resume replays the scope's summary as a history message, as it does for a run a current release
-#   paused, and the model reads it once. Each paused member run, in the order the team's resume runs them, gets the
+# Handling: once, in the write transaction that moves a database to layout version 6, after the delegation
+#   snapshots' version 5, or ends its Agno-layout conversion. A notice none of the run's own model messages wrote
+#   leaves its content, so neither a resume nor a delegation's settlement hands it to a team leader or a delegating
+#   parent. The summary block leaves the system message, so the resume replays the scope's summary as a history
+#   message, as it does for a run a current release paused, and the model reads it once. Each paused member run, in the order the team's resume runs them, gets the
 #   waiting call to its member that names it, else the first such call not yet taken, which is the call the earlier
 #   readers answered with it when every member finishes. Nothing restores the missing messages, so such a run resumes
-#   without them. Rows of every age are rewritten, so a paused run keeps the approval window it paused with. An older
-#   release reads each rewritten row as this one does, so the step keeps no backup.
+#   without them. Rows of every age are rewritten, so a paused run keeps the approval window it paused with. The step
+#   keeps no backup: a release at layout version 4 or 5 opens a version-6 database as current, converting nothing,
+#   and reads each rewritten row as this one does.
 # Coverage: tests/session_storage/test_legacy_paused_runs.py (every test),
 #   tests/teams/test_continue_team.py::test_an_approved_member_call_resumes_the_member_and_then_the_leader,
 #   tests/teams/test_continue_team.py::test_a_row_a_streamed_agno_turn_paused_answers_each_call_with_its_own_member_s_result,
 #   tests/test_history_summary_message.py::test_resuming_a_pre_release_team_pause_replays_the_scope_s_summary_once,
-#   tests/test_history_request_messages.py::test_a_run_paused_without_its_turn_context_resumes_without_it.
+#   tests/test_history_request_messages.py::test_a_run_paused_without_its_turn_context_resumes_without_it,
+#   tests/test_legacy_delegation_snapshots.py::test_a_database_from_any_older_layout_takes_the_paused_run_rewrite_too,
+#   tests/test_legacy_delegation_snapshots.py::test_a_database_at_version_5_takes_only_the_paused_run_rewrite,
+#   tests/test_legacy_delegation_snapshots.py::test_the_startup_sweep_takes_a_team_databases_owner_from_its_meta_row.
 def rewrite_paused_runs(connection: sqlite3.Connection, names: TableNames) -> None:
     """Rewrite every legacy paused-run shape in the caller's write transaction; a current row stays as it is."""
     _drop_paused_notices(connection, names)

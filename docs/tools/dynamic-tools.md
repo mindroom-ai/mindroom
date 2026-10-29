@@ -51,7 +51,7 @@ The endpoint is a non-empty `extra_kwargs.base_url`, otherwise `OPENAI_BASE_URL`
 On this path, deferred tools stay out of the model's context until the model searches for them, and discovering a tool does not invalidate the prompt cache.
 The system prompt names the deferred toolkits and tells the model to search them before concluding that a tool is unavailable.
 Discovered tools are called directly.
-Toolkit instructions are omitted from the system prompt when every function in the toolkit is deferred and not `initial`.
+Deferred tools keep their toolkit and function instructions.
 
 ## MindRoom Tool Search
 

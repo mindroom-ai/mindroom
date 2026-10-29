@@ -17,49 +17,21 @@ from mindroom.api.main import initialize_api_app
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config, load_config
 from mindroom.config.reload_status import ConfigReloadStatus
-from mindroom.orchestration.config_lifecycle import (
-    ConfigReloadLifecycle,
-    _ReplacementDrainState,
-    load_published_config,
-)
+from mindroom.orchestration.config_lifecycle import _ReplacementDrainState
 from mindroom.orchestration.runtime import create_logged_task
 from mindroom.response_admission import ResponseAdmissionGate
-from tests.conftest import bind_runtime_paths, published_config_load, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    make_config_reload_lifecycle,
+    published_config_load,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
     from pathlib import Path
 
-    from mindroom.bot import AgentBot
     from mindroom.config.load_attempt import ConfigLoad
     from mindroom.orchestration.config_updates import ConfigUpdatePlan
-
-
-def _make_lifecycle(
-    tmp_path: Path,
-    *,
-    running: bool = True,
-    current_config: Config | None = None,
-    agent_bots: Mapping[str, AgentBot] | None = None,
-    response_admission_gate: ResponseAdmissionGate | None = None,
-    load_config: Callable[[], ConfigLoad] | None = None,
-) -> ConfigReloadLifecycle:
-    """Return a lifecycle wired to stub dependencies; it loads the test config file unless told otherwise."""
-    gate = response_admission_gate or ResponseAdmissionGate()
-    runtime_paths = test_runtime_paths(tmp_path)
-    runtime_config = current_config if current_config is not None else Config()
-    return ConfigReloadLifecycle(
-        runtime_paths=runtime_paths,
-        is_running=lambda: running,
-        current_config=lambda: runtime_config,
-        agent_bots=lambda: agent_bots if agent_bots is not None else {},
-        load_config=load_config or partial(load_published_config, runtime_paths, api_enabled=False),
-        apply_update_plan=AsyncMock(return_value=True),
-        response_admission_gate=gate,
-        before_runtime_replacement=AsyncMock(),
-        rebind_published_config_consumers=MagicMock(),
-        finish_reload=AsyncMock(),
-    )
 
 
 def test_replacement_drain_state_tracks_wait_warning_and_force() -> None:
@@ -125,7 +97,7 @@ async def test_config_change_during_startup_reaches_the_dashboard_and_applies_on
         loads.append(config)
         return published_config_load(config)
 
-    lifecycle = _make_lifecycle(tmp_path, current_config=config, load_config=load_edit)
+    lifecycle = make_config_reload_lifecycle(test_runtime_paths(tmp_path), current_config=config, load_config=load_edit)
     lifecycle.is_running = lambda: running
 
     lifecycle.request_reload()
@@ -153,7 +125,7 @@ async def test_startup_load_keeps_the_watcher_on_include_files_it_read(
 ) -> None:
     """A root edit made while MindRoom starts that adds an include makes the watcher cover that file, valid or not."""
     monkeypatch.setattr(lifecycle_module, "_CONFIG_RELOAD_DEBOUNCE_SECONDS", 0)
-    lifecycle = _make_lifecycle(tmp_path)
+    lifecycle = make_config_reload_lifecycle(test_runtime_paths(tmp_path))
     lifecycle.is_running = lambda: False
     config_path = lifecycle.runtime_paths.config_path
     included = config_path.with_name("defaults.yaml")
@@ -178,7 +150,11 @@ async def test_config_change_after_the_runtime_stopped_loads_nothing(
     """A file edit during shutdown is neither loaded nor applied, even when startup never published."""
     running = startup_published
     config = load_config(test_runtime_paths(tmp_path))
-    lifecycle = _make_lifecycle(tmp_path, current_config=config, load_config=MagicMock())
+    lifecycle = make_config_reload_lifecycle(
+        test_runtime_paths(tmp_path),
+        current_config=config,
+        load_config=MagicMock(),
+    )
     lifecycle.is_running = lambda: running
     if startup_published:
         lifecycle.startup_published(config)
@@ -199,7 +175,7 @@ async def test_startup_publication_reloads_only_when_its_files_changed_since_loa
     edited: bool,
 ) -> None:
     """An edit that landed before the watcher saw the config files still reaches the runtime."""
-    lifecycle = _make_lifecycle(tmp_path)
+    lifecycle = make_config_reload_lifecycle(test_runtime_paths(tmp_path))
     config_path = lifecycle.runtime_paths.config_path
     config_path.write_text("defaults: {enable_streaming: true}\n", encoding="utf-8")
     config = load_config(lifecycle.runtime_paths)
@@ -221,7 +197,7 @@ async def test_rapid_requests_coalesce_into_one_reload(
     """Multiple quick reload requests should extend the debounce and apply once."""
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.05)
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_IDLE_POLL_SECONDS", 0.01)
-    lifecycle = _make_lifecycle(tmp_path)
+    lifecycle = make_config_reload_lifecycle(test_runtime_paths(tmp_path))
     lifecycle._update_config = AsyncMock(return_value=True)
 
     lifecycle.request_reload()
@@ -249,8 +225,8 @@ async def test_reload_drains_active_responses_before_applying(
     current_config = Config()
     new_config = Config(defaults={"enable_streaming": False})
     load_config_mock = MagicMock(return_value=published_config_load(new_config))
-    lifecycle = _make_lifecycle(
-        tmp_path,
+    lifecycle = make_config_reload_lifecycle(
+        test_runtime_paths(tmp_path),
         load_config=load_config_mock,
         current_config=current_config,
         response_admission_gate=gate,
@@ -282,8 +258,8 @@ async def test_a_reload_ends_the_script_launch_fence_once_published_or_failed(
     """New script launches read the applied config, so a reload releases them only after publishing it or failing."""
     current_config = Config()
     new_config = Config(defaults={"enable_streaming": False})
-    lifecycle = _make_lifecycle(
-        tmp_path,
+    lifecycle = make_config_reload_lifecycle(
+        test_runtime_paths(tmp_path),
         current_config=current_config,
         load_config=lambda: published_config_load(new_config),
     )
@@ -306,8 +282,8 @@ async def test_another_update_waiting_for_the_config_lock_starts_after_the_launc
     tmp_path: Path,
 ) -> None:
     """A plugin reload queued behind a config reload never shares the launch fence that reload then ends."""
-    lifecycle = _make_lifecycle(
-        tmp_path,
+    lifecycle = make_config_reload_lifecycle(
+        test_runtime_paths(tmp_path),
         current_config=Config(),
         load_config=lambda: published_config_load(Config(defaults={"enable_streaming": False})),
     )
@@ -362,8 +338,8 @@ async def test_busy_reload_waits_only_for_restarts_or_reply_authorization_change
     runtime_paths = test_runtime_paths(tmp_path)
     runtime_paths.config_path.write_text(_AGENT1_YAML, encoding="utf-8")
     gate = ResponseAdmissionGate()
-    lifecycle = _make_lifecycle(
-        tmp_path,
+    lifecycle = make_config_reload_lifecycle(
+        runtime_paths,
         current_config=load_config(runtime_paths),
         agent_bots={"router": MagicMock(), "agent1": MagicMock()},
         response_admission_gate=gate,
@@ -414,8 +390,8 @@ async def test_reload_does_not_hold_config_lock_while_draining_responses(
         load_started.set()
         return published_config_load(new_config)
 
-    lifecycle = _make_lifecycle(
-        tmp_path,
+    lifecycle = make_config_reload_lifecycle(
+        test_runtime_paths(tmp_path),
         load_config=observed_load_config,
         current_config=current_config,
         response_admission_gate=gate,
@@ -443,8 +419,8 @@ async def test_semantic_noop_reload_does_not_wait_for_active_responses(
     gate = ResponseAdmissionGate()
     assert gate.admit()
     current_config = Config()
-    lifecycle = _make_lifecycle(
-        tmp_path,
+    lifecycle = make_config_reload_lifecycle(
+        test_runtime_paths(tmp_path),
         load_config=lambda: published_config_load(Config()),
         current_config=current_config,
         response_admission_gate=gate,
@@ -477,8 +453,8 @@ async def test_semantic_noop_reload_records_new_include_sources(
     runtime_paths.config_path.write_text("defaults: !include defaults.yaml\n", encoding="utf-8")
     reloaded_config = load_config(runtime_paths)
     assert current_config.authored_model_dump() == reloaded_config.authored_model_dump()
-    lifecycle = _make_lifecycle(
-        tmp_path,
+    lifecycle = make_config_reload_lifecycle(
+        runtime_paths,
         current_config=current_config,
         load_config=lambda: published_config_load(reloaded_config),
     )
@@ -494,7 +470,7 @@ async def test_semantic_noop_reload_records_new_include_sources(
 async def test_replacement_admission_serializes_config_and_mcp_owners(tmp_path: Path) -> None:
     """Concurrent replacement flows must never share or prematurely reopen gate ownership."""
     gate = ResponseAdmissionGate()
-    lifecycle = _make_lifecycle(tmp_path, response_admission_gate=gate)
+    lifecycle = make_config_reload_lifecycle(test_runtime_paths(tmp_path), response_admission_gate=gate)
     mcp_started = asyncio.Event()
     config_started = asyncio.Event()
 
@@ -542,7 +518,7 @@ async def test_reload_loads_an_edit_while_another_replacement_drains(tmp_path: P
         loaded.set()
         return published_config_load(Config(timezone="Europe/Amsterdam"))
 
-    lifecycle = _make_lifecycle(tmp_path, load_config=load_edit)
+    lifecycle = make_config_reload_lifecycle(test_runtime_paths(tmp_path), load_config=load_edit)
     mcp_started = asyncio.Event()
     release_mcp = asyncio.Event()
 
@@ -595,7 +571,7 @@ async def test_stuck_drain_warns_then_stops_deferring(
     )
     logger_mock = MagicMock()
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle.logger", logger_mock)
-    lifecycle = _make_lifecycle(tmp_path)
+    lifecycle = make_config_reload_lifecycle(test_runtime_paths(tmp_path))
     drain_state = _ReplacementDrainState()
     loop = MagicMock(spec=asyncio.AbstractEventLoop)
     loop.time.side_effect = [wait_started_at, wait_started_at + 1.0, wait_started_at + force_after_seconds]
@@ -660,8 +636,8 @@ async def test_new_request_during_drain_keeps_waiting_for_idle(
     current_config = Config()
     new_config = Config(defaults={"enable_streaming": False})
     load_config_mock = MagicMock(return_value=published_config_load(new_config))
-    lifecycle = _make_lifecycle(
-        tmp_path,
+    lifecycle = make_config_reload_lifecycle(
+        test_runtime_paths(tmp_path),
         load_config=load_config_mock,
         current_config=current_config,
         response_admission_gate=gate,
@@ -692,7 +668,7 @@ async def test_failed_update_does_not_strand_queued_reload(
     """A failed update must not prevent a subsequently queued reload from running."""
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_IDLE_POLL_SECONDS", 0.01)
-    lifecycle = _make_lifecycle(tmp_path)
+    lifecycle = make_config_reload_lifecycle(test_runtime_paths(tmp_path))
 
     call_count = 0
 
@@ -724,7 +700,7 @@ async def test_config_change_during_update_triggers_second_reload(
     """A config change arriving while an update runs should cause a second reload."""
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_IDLE_POLL_SECONDS", 0.01)
-    lifecycle = _make_lifecycle(tmp_path)
+    lifecycle = make_config_reload_lifecycle(test_runtime_paths(tmp_path))
 
     call_count = 0
 
@@ -753,7 +729,7 @@ async def test_cancel_logs_exception_instead_of_suppressing_silently(
     """Reload-task cancellation should log unexpected failures and keep shutdown moving."""
     logger_mock = MagicMock()
     monkeypatch.setattr("mindroom.orchestration.runtime.logger", logger_mock)
-    lifecycle = _make_lifecycle(tmp_path)
+    lifecycle = make_config_reload_lifecycle(test_runtime_paths(tmp_path))
     started = asyncio.Event()
 
     async def fail_during_cancel() -> None:
@@ -796,8 +772,8 @@ async def test_cancel_clears_queued_reload(
     current_config = Config()
     new_config = Config(defaults={"enable_streaming": False})
     load_config_mock = MagicMock(return_value=published_config_load(new_config))
-    lifecycle = _make_lifecycle(
-        tmp_path,
+    lifecycle = make_config_reload_lifecycle(
+        test_runtime_paths(tmp_path),
         load_config=load_config_mock,
         current_config=current_config,
         response_admission_gate=busy_gate,
@@ -837,8 +813,8 @@ async def test_config_load_stays_open_then_apply_waits_for_active_responses(
         assert release_load.wait(timeout=2)
         return published_config_load(new_config)
 
-    lifecycle = _make_lifecycle(
-        tmp_path,
+    lifecycle = make_config_reload_lifecycle(
+        test_runtime_paths(tmp_path),
         load_config=blocked_load,
         current_config=current_config,
         response_admission_gate=gate,
@@ -893,8 +869,8 @@ async def test_apply_does_not_block_response_drain_started_by_the_apply(
     """
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0)
     gate = ResponseAdmissionGate()
-    lifecycle = _make_lifecycle(
-        tmp_path,
+    lifecycle = make_config_reload_lifecycle(
+        test_runtime_paths(tmp_path),
         current_config=Config(),
         response_admission_gate=gate,
         load_config=lambda: published_config_load(Config(defaults={"enable_streaming": False})),
@@ -939,8 +915,8 @@ async def test_drain_applies_reload_after_force_timeout(
     assert gate.admit()
     current_config = Config()
     new_config = Config(defaults={"enable_streaming": False})
-    lifecycle = _make_lifecycle(
-        tmp_path,
+    lifecycle = make_config_reload_lifecycle(
+        test_runtime_paths(tmp_path),
         load_config=lambda: published_config_load(new_config),
         current_config=current_config,
         response_admission_gate=gate,
@@ -967,8 +943,8 @@ async def test_update_config_builds_plan_and_dispatches(
         Config(agents={"agent1": AgentConfig(display_name="Agent One")}),
         runtime_paths,
     )
-    lifecycle = _make_lifecycle(
-        tmp_path,
+    lifecycle = make_config_reload_lifecycle(
+        runtime_paths,
         load_config=lambda: published_config_load(new_config),
         current_config=current_config,
         agent_bots={"router": MagicMock(), "agent1": MagicMock()},
@@ -994,8 +970,8 @@ async def test_failed_partial_publication_retries_from_last_successful_config(
     new_config = Config(defaults={"enable_streaming": False})
     live_config = current_config
     applied_steps: list[tuple[Config, Config]] = []
-    lifecycle = _make_lifecycle(
-        tmp_path,
+    lifecycle = make_config_reload_lifecycle(
+        test_runtime_paths(tmp_path),
         current_config=current_config,
         load_config=lambda: published_config_load(new_config),
     )
@@ -1037,8 +1013,8 @@ async def test_failed_partial_publication_allows_rollback_to_last_successful_con
     live_config = current_config
     applied_from: list[Config] = []
     applied_configs: list[Config] = []
-    lifecycle = _make_lifecycle(
-        tmp_path,
+    lifecycle = make_config_reload_lifecycle(
+        test_runtime_paths(tmp_path),
         current_config=current_config,
         load_config=lambda: published_config_load(loaded_config),
     )
@@ -1089,8 +1065,8 @@ async def test_failed_partial_publication_repairs_before_applying_corrected_conf
     loaded_config = failed_config
     live_config = current_config
     applied_steps: list[tuple[Config, Config]] = []
-    lifecycle = _make_lifecycle(
-        tmp_path,
+    lifecycle = make_config_reload_lifecycle(
+        test_runtime_paths(tmp_path),
         current_config=current_config,
         load_config=lambda: published_config_load(loaded_config),
     )
@@ -1135,8 +1111,8 @@ async def test_update_config_plugin_changes_restart_all_bots(
         "mindroom.orchestration.config_lifecycle.plugin_change_paths",
         lambda *_args: ("plugins/demo",),
     )
-    lifecycle = _make_lifecycle(
-        tmp_path,
+    lifecycle = make_config_reload_lifecycle(
+        test_runtime_paths(tmp_path),
         load_config=lambda: published_config_load(new_config),
         current_config=current_config,
         agent_bots={name: MagicMock() for name in ("router", "agent1", "agent2", "gone")},
@@ -1162,7 +1138,7 @@ async def test_update_config_loads_config_off_event_loop(tmp_path: Path) -> None
         gate.wait()
         return published_config_load(loaded_config)
 
-    lifecycle = _make_lifecycle(tmp_path, load_config=slow_load_config)
+    lifecycle = make_config_reload_lifecycle(test_runtime_paths(tmp_path), load_config=slow_load_config)
 
     update_task = asyncio.get_running_loop().create_task(lifecycle._update_config())
     await asyncio.to_thread(load_started.wait, 5.0)
@@ -1198,7 +1174,11 @@ async def test_update_config_waits_for_shared_lock_before_plugin_aware_loading(
 
     monkeypatch.setattr(lifecycle_module.asyncio, "to_thread", observed_to_thread)
     load_config_mock = MagicMock(return_value=published_config_load(new_config))
-    lifecycle = _make_lifecycle(tmp_path, current_config=current_config, load_config=load_config_mock)
+    lifecycle = make_config_reload_lifecycle(
+        test_runtime_paths(tmp_path),
+        current_config=current_config,
+        load_config=load_config_mock,
+    )
     lifecycle.config_update_lock = lock
 
     await lock.acquire()
@@ -1248,8 +1228,8 @@ async def test_reload_that_loses_to_a_dashboard_save_adopts_nothing_and_stays_pe
         return attempt
 
     monkeypatch.setattr(api_config_lifecycle, "load_config_attempt", load_then_lose_to_dashboard_save)
-    lifecycle = _make_lifecycle(
-        tmp_path,
+    lifecycle = make_config_reload_lifecycle(
+        runtime_paths,
         current_config=current_config,
         agent_bots={"router": MagicMock(), "agent1": MagicMock()},
         load_config=partial(api_config_lifecycle.load_config_into_app, runtime_paths, api_app),
@@ -1285,8 +1265,8 @@ async def test_one_edit_is_loaded_once_and_the_dashboard_holds_the_config_the_ru
         return real_load_attempt(paths)
 
     monkeypatch.setattr(api_config_lifecycle, "load_config_attempt", counted_load_attempt)
-    lifecycle = _make_lifecycle(
-        tmp_path,
+    lifecycle = make_config_reload_lifecycle(
+        runtime_paths,
         current_config=current_config,
         agent_bots={"router": MagicMock(), "agent1": MagicMock()},
         load_config=partial(api_config_lifecycle.load_config_into_app, runtime_paths, api_app),
@@ -1306,7 +1286,7 @@ async def test_one_edit_is_loaded_once_and_the_dashboard_holds_the_config_the_ru
 async def test_failed_reload_load_reports_failure_and_watches_files_it_read(tmp_path: Path) -> None:
     """A load that nothing superseded fails the reload with the files it read and no unproven fingerprint."""
     runtime_paths = test_runtime_paths(tmp_path)
-    lifecycle = _make_lifecycle(tmp_path, current_config=Config())
+    lifecycle = make_config_reload_lifecycle(runtime_paths, current_config=Config())
     runtime_paths.config_path.write_text("defaults: !include missing.yaml\n", encoding="utf-8")
 
     await lifecycle._apply_queued_config_reload()

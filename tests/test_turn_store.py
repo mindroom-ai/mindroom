@@ -29,7 +29,7 @@ from mindroom.history.storage import (
     read_scope_seen_event_ids,
     read_scope_state,
 )
-from mindroom.history.types import HistoryScope, HistoryScopeState, ScopeSummary
+from mindroom.history.types import HistoryScope, HistoryScopeState, ScopeSummary, owner_scope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.matrix.identity import MatrixID
@@ -210,11 +210,7 @@ def _seeded_storage(
     """
     if session is not None:
         write_agno_database(AgnoTableNames(name).database_path(tmp_path / name), session, usage=False)
-    owner = (
-        HistoryScope(kind=session.kind, scope_id=session.owner_id)
-        if session is not None
-        else HistoryScope(kind="agent", scope_id=name)
-    )
+    owner = owner_scope(session) if session is not None else HistoryScope(kind="agent", scope_id=name)
     return create_state_storage(name, tmp_path / name, owner)
 
 
@@ -978,7 +974,7 @@ async def test_editing_a_folded_turn_beside_a_redacted_one_leaves_no_runs_or_sum
     )
     stored = storage.load_session(target.session_id)
     assert stored is not None
-    compact_runs(storage, stored, scope, [run.run_id for run in stored.runs or [] if run.run_id], "summary of a and b")
+    compact_runs(storage, stored, [run.run_id for run in stored.runs or [] if run.run_id], "summary of a and b")
     store = await _store_with_storage(journal_store, storage)
     records = {
         event_id: TurnRecord.create(
@@ -1397,8 +1393,8 @@ async def test_prepare_redaction_invalidates_legacy_compacted_replay(
     stored = _stored(storage, session)
     assert stored.runs == []
     assert stored.summary is None
-    assert read_scope_seen_event_ids(storage, stored, scope) == set()
-    assert read_scope_state(stored, scope) == HistoryScopeState()
+    assert read_scope_seen_event_ids(storage, stored) == set()
+    assert read_scope_state(stored) == HistoryScopeState()
     assert summary_rows_of(storage, scope.key, target.session_id) == []
     assert stored_run_ids(storage, target.session_id) == []
 
@@ -1575,7 +1571,7 @@ async def test_redaction_cleanup_keeps_context_after_colliding_alias_projection(
     stored = _stored(storage, session)
     assert stored.runs == []
     assert stored.summary is None
-    assert read_scope_seen_event_ids(storage, stored, scope) == set()
+    assert read_scope_seen_event_ids(storage, stored) == set()
 
 
 @pytest.mark.asyncio
@@ -1720,7 +1716,7 @@ async def test_multi_bot_redaction_only_changes_the_history_that_read_the_source
     assert should_suppress is False
     stored_owner = _stored(owner_storage, owner_session)
     assert stored_owner.summary is None
-    assert read_scope_seen_event_ids(owner_storage, stored_owner, scope) == set()
+    assert read_scope_seen_event_ids(owner_storage, stored_owner) == set()
     assert _stored(unrelated_storage, unrelated_session).summary is not None
 
 
@@ -2643,7 +2639,6 @@ async def test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen(
         compact_runs(
             storage,
             reopened_session,
-            scope,
             [run.run_id for run in reopened_session.runs or [] if run.run_id],
             "DELETED_EDIT_MARKER and later",
         )

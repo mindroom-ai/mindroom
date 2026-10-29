@@ -49,7 +49,6 @@ from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.runtime import HistoryPreparationInputs, PreparedScopeHistory
 from mindroom.history.types import (
     HistoryPolicy,
-    HistoryScope,
     PreparedHistoryState,
     ResolvedReplayPlan,
 )
@@ -197,7 +196,6 @@ def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
         active_context_window=10_000,
         static_prompt_tokens=10,
     )
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
     session = ConversationSession(
         session_id="thread-session",
         kind="agent",
@@ -216,7 +214,6 @@ def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
         created_at=1,
     )
     return PreparedScopeHistory(
-        scope=scope,
         session=session,
         resolved_inputs=HistoryPreparationInputs(
             history_settings=history_settings,

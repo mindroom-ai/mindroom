@@ -126,7 +126,6 @@ async def _rewrite_single_run(
         storage=storage,
         persisted_session=working_session,
         working_session=working_session,
-        scope=HistoryScope(kind="agent", scope_id="test_agent"),
         summarizer=_summarizer(
             summary_model,
             summary_input_budget,
@@ -1179,7 +1178,6 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
     """Every chunk exposes its transcript before it is stored; compaction:after sees only the stored chunks'."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
     first_run = _completed_run(
         "run-1",
         messages=[
@@ -1274,7 +1272,6 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
         outcome = await compact_scope_history(
             storage=storage,
             session=session,
-            scope=scope,
             state=HistoryScopeState(),
             summarizer=_summarizer(input_budget_tokens=summary_input_budget, history_settings=history_settings),
             available_history_budget=1,
@@ -1413,7 +1410,7 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_when_rewri
         observed.append("after")
 
     registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [before, after])])
-    config, runtime_paths, storage, scope, runtime_context = _forced_compaction_context(
+    config, runtime_paths, storage, _scope, runtime_context = _forced_compaction_context(
         tmp_path,
         session=session,
         registry=registry,
@@ -1442,7 +1439,7 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_when_rewri
     assert persisted is not None
     assert persisted.summary is None
     assert len(persisted.runs) == 2
-    assert read_scope_state(persisted, scope).force_compact_before_next_run is False
+    assert read_scope_state(persisted).force_compact_before_next_run is False
     assert prepared.compaction_reply_outcome == "failed"
     assert observed == []
 
@@ -1694,7 +1691,6 @@ async def test_rewrite_working_session_for_compaction_keeps_the_remaining_runs_t
     """The run compaction kept keeps every turn's thinking, in memory and in the store."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
     remaining_run = _completed_run(
         "run-2",
         messages=[
@@ -1762,7 +1758,6 @@ async def test_rewrite_working_session_for_compaction_keeps_the_remaining_runs_t
             storage=storage,
             persisted_session=working_session,
             working_session=working_session,
-            scope=scope,
             summarizer=_summarizer(input_budget_tokens=summary_input_budget),
             runs=list(working_session.runs or []),
             before_persist=AsyncMock(),
@@ -1791,7 +1786,6 @@ async def test_compact_scope_history_persists_the_remaining_runs_as_they_were(tm
     """Final compaction persist keeps the remaining runs on the latest session, their stored thinking included."""
     config, _runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, _runtime_paths, execution_identity=None)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
     remaining_run = _completed_run(
         "run-2",
         messages=[
@@ -1862,7 +1856,6 @@ async def test_compact_scope_history_persists_the_remaining_runs_as_they_were(tm
         outcome = await compact_scope_history(
             storage=storage,
             session=session,
-            scope=scope,
             state=HistoryScopeState(),
             summarizer=_summarizer(input_budget_tokens=summary_input_budget),
             available_history_budget=1,
@@ -1893,7 +1886,6 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
     """Visible compaction should update progress after each durable non-final chunk."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
     first_run = _completed_run(
         "run-1",
         messages=[
@@ -1913,7 +1905,6 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
     history_settings = config.resolve_scope("test_agent").history_settings
     before_tokens = estimate_prompt_visible_history_tokens(
         session=working_session,
-        scope=scope,
         history_settings=history_settings,
         replay_estimator=None,
     )
@@ -1959,12 +1950,10 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
             storage=storage,
             session=working_session,
             summarizer=_summarizer(input_budget_tokens=summary_input_budget, history_settings=history_settings),
-            scope=scope,
             state=HistoryScopeState(),
             available_history_budget=1,
             before_tokens=estimate_prompt_visible_history_tokens(
                 session=working_session,
-                scope=scope,
                 history_settings=history_settings,
                 replay_estimator=replay_estimator,
             ),
@@ -2082,7 +2071,6 @@ async def test_a_fallback_chunk_that_was_not_stored_does_not_name_the_serving_mo
         outcome = await compact_scope_history(
             storage=storage,
             session=session,
-            scope=HistoryScope(kind="agent", scope_id="test_agent"),
             state=HistoryScopeState(force_compact_before_next_run=True),
             summarizer=_summarizer(input_budget_tokens=6_000, fallback=fallback),
             available_history_budget=None,
@@ -2119,7 +2107,6 @@ async def test_compact_scope_history_skips_unforced_history_that_fits(
         outcome = await compact_scope_history(
             storage=storage,
             session=session,
-            scope=HistoryScope(kind="agent", scope_id="test_agent"),
             state=HistoryScopeState(),
             summarizer=_summarizer(),
             available_history_budget=available_history_budget,
@@ -2213,7 +2200,7 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(
     persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.runs == []
-    assert read_scope_seen_event_ids(storage, persisted, scope) == {
+    assert read_scope_seen_event_ids(storage, persisted) == {
         "event-1",
         "event-2",
         "event-3",

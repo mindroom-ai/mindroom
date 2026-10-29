@@ -985,6 +985,11 @@ def encryption_keys_dir(runtime_paths: RuntimePaths) -> Path:
     return runtime_paths.storage_root / "encryption_keys"
 
 
+def subagent_sessions_dir(runtime_paths: RuntimePaths) -> Path:
+    """Return the primary-only directory that holds each subagent's session file, ``<subagent_id>.json``."""
+    return runtime_paths.storage_root / "subagent_sessions"
+
+
 def config_relative_path(
     raw_path: str | Path,
     runtime_paths: RuntimePaths,

@@ -24,10 +24,29 @@ ENDPOINT_VARIABLES: dict[ClaudeRouteKind, str] = {
     "vertexai_claude": "ANTHROPIC_VERTEX_BASE_URL",
 }
 
-# TODO(simplify): a Claude reply whose model config sets no ``max_tokens`` stops at this fixed cap, and a reply that
-# reaches it is answered as cut off instead of run (the loop's policy). Default to the model's maximum or a documented
-# per-model default (#3113). Users would notice longer Claude replies.
-_DEFAULT_MAX_TOKENS = 8192
+# The output cap of a reply whose model config sets no ``max_tokens``. The direct API counts only the output a reply
+# produces against its rate limit (https://platform.claude.com/docs/en/api/rate-limits), so a model there may write
+# its maximum. Bedrock deducts the input plus ``max_tokens`` from its quota when a request starts
+# (https://docs.aws.amazon.com/bedrock/latest/userguide/quotas-token-burndown.html), and Vertex AI estimates each
+# request's tokens and refunds the unused ones after it
+# (https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/partner-models/claude/quotas), so a large cap
+# there throttles requests; those routes, and a model the direct route does not list, keep this cap.
+_RESERVED_QUOTA_MAX_TOKENS = 8192
+# Each Claude model's maximum output on the synchronous Messages API, by the start of its direct API id, from
+# https://platform.claude.com/docs/en/about-claude/models/overview and each listed model's page (checked 2026-10-29).
+_MAX_OUTPUT_TOKENS: dict[str, int] = {
+    "claude-fable-5": 128_000,
+    "claude-mythos-5": 128_000,
+    "claude-opus-5": 128_000,
+    "claude-sonnet-5": 128_000,
+    "claude-haiku-5": 128_000,
+    "claude-opus-4-8": 128_000,
+    "claude-opus-4-7": 128_000,
+    "claude-opus-4-6": 128_000,
+    "claude-sonnet-4-6": 128_000,
+    "claude-opus-4-5": 64_000,
+    "claude-haiku-4-5": 64_000,
+}
 
 _COMMON_KEYS = frozenset(
     {
@@ -67,7 +86,8 @@ class ClaudeSettings:
     value there (or inside its ``extra_body``) wins over the top-level field.
     """
 
-    max_tokens: int | None = _DEFAULT_MAX_TOKENS
+    # ``parse_claude_settings`` fills the route's default (``_default_max_tokens``) unless the config sets one.
+    max_tokens: int | None
     thinking: Mapping[str, Any] | None = None
     output_config: Mapping[str, Any] | None = None
     temperature: float | None = None
@@ -119,13 +139,28 @@ class ClaudeSettings:
         return (request_params.get("extra_body") or {}).get(name, request_params.get(name, authored))
 
 
-def parse_claude_settings(route: ClaudeRouteKind, extra_kwargs: Mapping[str, Any] | None) -> ClaudeSettings:
+def _default_max_tokens(route: ClaudeRouteKind, model_id: str) -> int:
+    """Return the output cap of a reply whose model config sets no ``max_tokens``."""
+    if route == "anthropic":
+        for prefix, max_tokens in _MAX_OUTPUT_TOKENS.items():
+            if model_id.startswith(prefix):
+                return max_tokens
+    return _RESERVED_QUOTA_MAX_TOKENS
+
+
+def parse_claude_settings(
+    route: ClaudeRouteKind,
+    model_id: str,
+    extra_kwargs: Mapping[str, Any] | None,
+) -> ClaudeSettings:
     """Parse one route's resolved ``extra_kwargs``, rejecting keys the route does not accept.
 
-    Bedrock resolves ``aws_profile`` into ``session`` first, so the profile reaches no settings field.
+    Bedrock resolves ``aws_profile`` into ``session`` first, so the profile reaches no settings field. An authored
+    ``max_tokens`` replaces the route's default for ``model_id``.
     """
     reject_unsupported_extra_kwargs(extra_kwargs, ACCEPTED_KEYS[route], provider=route)
-    return settings_from_extra_kwargs(ClaudeSettings, extra_kwargs, provider=route)
+    authored = {"max_tokens": _default_max_tokens(route, model_id), **(extra_kwargs or {})}
+    return settings_from_extra_kwargs(ClaudeSettings, authored, provider=route)
 
 
 __all__ = [

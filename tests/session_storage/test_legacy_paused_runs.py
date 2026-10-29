@@ -1,4 +1,4 @@
-"""Paused runs earlier releases stored are rewritten once, when their database moves to layout version 5.
+"""Paused runs earlier releases stored are rewritten once, when their database moves to layout version 6.
 
 Each test writes rows as an earlier release's store left them into a database at layout version 4, opens it as the
 next store open does, and checks what the readers see: a paused notice no longer reads as the run's content, Agno's
@@ -201,11 +201,19 @@ def test_agno_s_summary_block_leaves_the_system_message_a_paused_run_stored(name
     assert sum(is_scope_summary(message) for message in resumed) == 1
 
 
-def test_a_message_that_only_mentions_the_summary_tag_stays_as_stored(tmp_path: Path) -> None:
-    """Only a system message's summary block leaves; a requester's message naming the tag is the requester's."""
+@pytest.mark.parametrize(
+    "content",
+    [
+        "What does <summary_of_previous_interactions> mean?\n\n",
+        f"Why did you get this?\n\n{_SYSTEM_MESSAGES['agent']['with_summary']}\n\n",
+    ],
+    ids=["tag", "pasted-block"],
+)
+def test_a_requester_s_message_holding_the_summary_block_stays_as_stored(content: str, tmp_path: Path) -> None:
+    """Only a system message's summary block leaves; a requester's message naming the tag or pasting it is theirs."""
     stored = deepcopy(_ROWS["agent_paused"])
     [*_, request] = [message for message in stored["messages"] if message["role"] == "user"]
-    request["content"] = "What does <summary_of_previous_interactions> mean?\n\n"
+    request["content"] = content
 
     upgraded = _upgraded_run(tmp_path, stored)
 
@@ -336,7 +344,7 @@ def test_calls_that_name_their_member_runs_stay_as_stored(tmp_path: Path) -> Non
 
 
 def test_the_rewrite_runs_once(tmp_path: Path) -> None:
-    """The upgrade records layout version 5, a second open changes nothing, and a database at it is not rewritten."""
+    """The upgrade records layout version 6, a second open changes nothing, and a database at it is not rewritten."""
     store = _agent_store(tmp_path)
     store_rows(store, _SESSION, [_ROWS["agent_paused"]])
     upgrade_from_layout_4(store, _AGENT)

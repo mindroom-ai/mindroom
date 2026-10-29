@@ -26,7 +26,7 @@ from mindroom.history.mid_turn_compaction import _carry_request_usage
 from mindroom.history.replay import current_summary_text
 from mindroom.history.request_messages import scope_history_messages
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY, replays_in_scope
-from mindroom.history.storage import first_scope_session, read_scope_state
+from mindroom.history.storage import new_scope_session, read_scope_state
 from mindroom.history.summary_message import compaction_summary_message, mark_summary_follows
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
@@ -335,7 +335,7 @@ class Driver(ABC):
             return "\n".join(connection.iterdump()) + "\n"
 
     def _stand_in(self) -> ConversationSession:
-        return first_scope_session(self.scope, SESSION_ID)
+        return new_scope_session(session_id=SESSION_ID, scope=self.scope)
 
     def _loaded_or_stand_in(self) -> ConversationSession:
         return self.load() or self._stand_in()
@@ -781,7 +781,7 @@ class Driver(ABC):
             return "stale-basis"
         self.chunk_summary_usage(session)
         appended = self.append_chunk(session, basis, chunk, _summary_text(summary_tokens(previous) | set(chunk)))
-        if appended and read_scope_state(session, self.scope).force_compact_before_next_run:
+        if appended and read_scope_state(session).force_compact_before_next_run:
             self.set_force(session, forced=False)
         return {"appended": appended, "chunk": chunk}
 

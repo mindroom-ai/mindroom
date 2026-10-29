@@ -126,7 +126,7 @@ def stored_run_record(data: Mapping[str, Any]) -> AnyRunRecord:
 
 
 def upgraded_run_record(data: Mapping[str, Any]) -> AnyRunRecord:
-    """Decode a run dict an earlier release stored as the store reads it once layout version 5 rewrote it.
+    """Decode a run dict an earlier release stored as the store reads it once layout version 6 rewrote it.
 
     A paused notice is no longer its content or its members', and a paused team run's waiting delegation call names
     the paused run of the member it names (see the ``LEGACY_COMPAT`` marker in

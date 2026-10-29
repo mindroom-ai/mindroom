@@ -66,7 +66,7 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from mindroom.config.main import Config
     from mindroom.tool_system.agno_toolkits import Function, Toolkit
@@ -576,7 +576,7 @@ class ScriptToolBroker:
             return
         await shielded_lifecycle(
             run_toolkit_lifecycle(toolkit.connect),
-            retain=lambda connecting: self._retain_toolkit_cleanup(connecting, toolkit),
+            retain=lambda connecting: self._retain_toolkit_cleanup([connecting], toolkit),
         )
 
     async def _connect_toolkit_owned(self, toolkit: Toolkit) -> None:
@@ -608,7 +608,7 @@ class ScriptToolBroker:
         toolkit = prepared.toolkit
         function = prepared.function
         completion_tracker = SyncToolCompletionTracker()
-        cleanup_transferred = False
+        cancelled = False
 
         async def execute_function() -> CallResult:
             with tool_runtime_context(context), track_sync_tool_completion(completion_tracker):
@@ -658,15 +658,15 @@ class ScriptToolBroker:
                 operation=execute_function,
             )
         except asyncio.CancelledError:
-            completion_task = completion_tracker.started_task()
-            if completion_task is not None and not completion_task.done():
-                self._retain_toolkit_cleanup(completion_task, toolkit)
-            else:
-                self._retain_toolkit_close(toolkit)
-            cleanup_transferred = True
+            cancelled = True
             raise
         finally:
-            if not cleanup_transferred:
+            # A body the call started that still runs, after a cancel or beside a failure, keeps the toolkit.
+            if pending := [task for task in completion_tracker.settle() if not task.done()]:
+                self._retain_toolkit_cleanup(pending, toolkit)
+            elif cancelled:
+                self._retain_toolkit_close(toolkit)
+            else:
                 await self._close_toolkit_owned(toolkit)
 
     async def _current_execution_decision(
@@ -750,15 +750,16 @@ class ScriptToolBroker:
 
     def _retain_toolkit_cleanup(
         self,
-        completion_task: asyncio.Task[object],
+        completion_tasks: Sequence[asyncio.Task[object]],
         toolkit: Toolkit,
     ) -> None:
         async def finish_lifecycle() -> None:
             completion_failure: BaseException | None = None
-            try:
-                await completion_task
-            except BaseException as exc:
-                completion_failure = exc
+            for completion_task in completion_tasks:
+                try:
+                    await completion_task
+                except BaseException as exc:
+                    completion_failure = completion_failure or exc
             await _close_toolkit(toolkit)
             if completion_failure is not None:
                 raise completion_failure

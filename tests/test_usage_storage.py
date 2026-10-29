@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
@@ -237,7 +236,7 @@ def test_reporting_keeps_usage_after_real_compaction_and_reopen(usage_db: Conver
     assert before[0].runs[0].metrics["total_tokens"] == 10
     session = usage_db.load_session("session")
     assert session is not None
-    compact_runs(usage_db, session, HistoryScope(kind="agent", scope_id="code"), ["run-1"], "summary")
+    compact_runs(usage_db, session, ["run-1"], "summary")
     assert session.runs == []
     assert list(iter_usage_storage_rows(source)) == before
 

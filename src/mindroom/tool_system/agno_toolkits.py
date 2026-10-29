@@ -113,8 +113,8 @@ _FUNCTION_FIELDS: Mapping[tuple[str, ...], Literal["mapped", "ignored"] | _Rejec
         sets=lambda function: bool(function.requires_user_input),
         error="sets Agno's requires_user_input, but MindRoom never pauses a run to ask its user for input",
     ),
-    # A toolkit's adapter hands them over as ``function_instructions`` instead, which tool search shows for a
-    # deferred toolkit and an agent refuses in an eager one.
+    # A toolkit's adapter hands them over as ``function_instructions`` instead, which a deferred toolkit moves to tool
+    # search or the function's description and an agent refuses in an eager one.
     ("instructions", "add_instructions"): _FUNCTION_INSTRUCTIONS,
     # Agno reads these only for a function that requires user input, which is rejected.
     ("user_input_fields", "user_input_schema"): "ignored",
@@ -272,7 +272,7 @@ def offered_refusal(toolkit: AdaptedToolkit) -> str | None:
     """Return why an agent cannot offer ``toolkit``: the first function it offers that sets a field MindRoom refuses.
 
     A function's prompt instructions count only while ``function_instructions`` holds them, which a deferred toolkit
-    hands to tool search instead.
+    moves to tool search or the function's description instead.
     """
     for function in toolkit.functions:
         if (refusal := toolkit.refused.get(function.name)) is not None:

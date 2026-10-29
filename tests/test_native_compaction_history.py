@@ -28,6 +28,7 @@ from mindroom.history.summary_message import compaction_summary_message
 from mindroom.history.types import HistoryScope, HistoryScopeState, ScopeSummary
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
+from mindroom.llm.runs import RunStatus
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import checkpoint_summary, replay_basis
 from mindroom.providers.openai.responses_wire import conversation_digest
@@ -567,7 +568,7 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
     )
     db = create_agent_state_storage("test_agent", tmp_path)
     seed_session(db, seeded)
-    compact_runs(db, seeded, _SCOPE, ["folded"], "Archived summary.")
+    compact_runs(db, seeded, ["folded"], "Archived summary.")
     session = db.load_session("session")
     assert session is not None
     resolved = _inputs(config)
@@ -791,7 +792,10 @@ def test_native_route_identity_hashes_the_rendered_summary(tmp_path: Path, summa
 
 
 def test_compaction_marker_names_the_newest_summary_and_native_checkpoint(tmp_path: Path) -> None:
-    """A provider compaction changes the marker as a text compaction does, so inlined memory reloads after either."""
+    """A provider compaction changes the marker as a text compaction does, so inlined memory reloads after either.
+
+    Only a run the scope replays counts: a stopped run's checkpoint never reaches a request.
+    """
     native = responses_adapter(tmp_path, store=False).native_compaction_settings(
         threshold=1024,
         history_generation="",
@@ -807,14 +811,18 @@ def test_compaction_marker_names_the_newest_summary_and_native_checkpoint(tmp_pa
     def run(run_id: str, reply: Message) -> RunRecord:
         return _completed_run(run_id, messages=[Message(role="user", content="question"), reply])
 
-    first, second = (answer([{"type": "compaction", "encrypted_content": name}]) for name in ("first", "second"))
+    first, second, stopped = (
+        answer([{"type": "compaction", "encrypted_content": name}]) for name in ("first", "second", "stopped")
+    )
     session = _session("session", runs=[run("plain", answer([]))])
-    assert compaction_marker(session, _SCOPE) == (None, None)
+    assert compaction_marker(session) == (None, None)
 
     # Every completed response records its route; only a compaction adds checkpoint items.
-    session.runs = [run("first", first), run("second", second), run("later", answer([]))]
+    cancelled = run("stopped", stopped)
+    cancelled.status = RunStatus.cancelled
+    session.runs = [run("first", first), run("second", second), run("later", answer([])), cancelled]
     session.summary = ScopeSummary(text=" Text summary. ", updated_at=datetime.now(UTC))
-    assert compaction_marker(session, _SCOPE) == ("Text summary.", second.id)
+    assert compaction_marker(session) == ("Text summary.", second.id)
 
 
 def test_history_reads_the_routes_native_settings_through_the_request_pipeline(tmp_path: Path) -> None:

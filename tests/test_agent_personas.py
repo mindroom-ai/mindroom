@@ -23,7 +23,6 @@ from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.personas import PersonaError, caller_toolkit_names, inline_persona, persona_tool_policy
 from mindroom.delegation.state import SubagentPersona
 from mindroom.history.summary_message import is_compaction_summary
-from mindroom.history.types import HistoryScope
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.llm.messages import Message, system_text
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -216,7 +215,7 @@ async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path, monke
         storage,
         ConversationSession(session_id="session-1", kind="agent", owner_id="helper", runs=[old_run]),
     )
-    compact_runs(storage, session, HistoryScope(kind="agent", scope_id="helper"), ["old-run"], "EARLIER-WORK")
+    compact_runs(storage, session, ["old-run"], "EARLIER-WORK")
 
     request = await _persona_request(runtime, monkeypatch, inline_persona("P", None, None, None), "task")
 

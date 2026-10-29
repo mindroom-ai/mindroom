@@ -1,4 +1,4 @@
-"""Conversation databases as a layout version 4 release left them, for the step that moves them to version 5."""
+"""Conversation databases as a layout version 4 release left them, for the steps that move them to the current one."""
 
 from __future__ import annotations
 

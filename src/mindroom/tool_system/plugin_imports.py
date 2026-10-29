@@ -62,12 +62,13 @@ class _PluginCacheEntry:
 @dataclass
 class _ModuleCacheEntry:
     mtime: float
-    module_name: str
     module: ModuleType
+    replaced_modules: tuple[ModuleType, ...]
 
 
 _PLUGIN_CACHE: dict[Path, _PluginCacheEntry] = {}
-_MODULE_IMPORT_CACHE: dict[Path, _ModuleCacheEntry] = {}
+# Keyed by module name, because nested plugin roots can import one file under several owners.
+_MODULE_IMPORT_CACHE: dict[str, _ModuleCacheEntry] = {}
 
 
 def _warn_once(message: str, *, path: Path) -> None:

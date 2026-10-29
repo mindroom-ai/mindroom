@@ -268,8 +268,11 @@ def test_a_paused_child_s_toolkit_owners_are_the_toolkits_its_sources_recorded(
         session_id="child-session",
         run_id="child-run",
         model_name="default",
+        requested_model_name="default",
         depth=1,
         execution_identity={},
+        agent_mode="standard",
+        persona=None,
     )
     state = DelegationState(
         pending_tools=[tool.to_dict()],

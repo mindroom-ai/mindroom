@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -162,9 +161,11 @@ def _self_child(
         session_id=session_id,
         run_id=uuid4().hex,
         model_name="default",
+        requested_model_name="default",
         depth=1,
         execution_identity=serialize_tool_execution_identity(replace(owner, session_id=session_id)),
         storage_bindings=freeze_delegation_storage(config, ("leader",)),
+        agent_mode="standard",
         persona=persona,
     )
 
@@ -173,7 +174,8 @@ def _self_child(
 @pytest.mark.parametrize("value", ["docs", [1]])
 def test_persona_snapshot_with_malformed_names_is_rejected(field: str, value: object) -> None:
     """A snapshot whose name lists are not lists of strings is refused rather than read as characters."""
-    snapshot = {"source_kind": "inline", "source_name": "", "system_prompt": "P", "tools": None, field: value}
+    names = {"tools": None, "skills": None, "knowledge": None}
+    snapshot = {"source_kind": "inline", "source_name": "", "system_prompt": "P", **names, field: value}
 
     with pytest.raises(TypeError, match="Invalid subagent persona snapshot"):
         SubagentPersona.from_dict(snapshot)
@@ -207,71 +209,3 @@ async def test_persona_round_trips_through_session_record(tmp_path: Path) -> Non
     ).children == [
         child,
     ]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("tools", "kept_knowledge"), [(("file",), ()), (None, None)])
-async def test_persona_snapshot_without_knowledge_follows_its_tool_list(
-    tmp_path: Path,
-    tools: tuple[str, ...] | None,
-    kept_knowledge: tuple[str, ...] | None,
-) -> None:
-    """A persona saved before authored knowledge existed keeps the knowledge it had: none beside a tool list, else all."""
-    paths = _runtime_paths(tmp_path)
-    config = Config(agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"])})
-    owner = _identity()
-    persona = SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=tools)
-    child = _self_child(config, owner, persona)
-    await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)
-    record = paths.storage_root / "subagent_sessions" / f"{child.delegation_id}.json"
-    payload = json.loads(record.read_text())
-    del payload["child"]["persona"]["knowledge"]
-    record.write_text(json.dumps(payload))
-
-    restored = await load_subagent(child.delegation_id, owner=owner, config=config, runtime_paths=paths, depth=0)
-
-    assert restored.persona is not None
-    assert restored.persona.knowledge is None
-    assert restored.persona.kept_knowledge == kept_knowledge
-
-
-@pytest.mark.asyncio
-async def test_persona_snapshot_without_skills_reads_as_skill_less(tmp_path: Path) -> None:
-    """A persona saved before authored skills existed keeps running without skills, as it did then."""
-    paths = _runtime_paths(tmp_path)
-    config = Config(agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"])})
-    owner = _identity()
-    child = _self_child(config, owner, SubagentPersona(source_kind="inline", source_name="", system_prompt="P"))
-    await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)
-    record = paths.storage_root / "subagent_sessions" / f"{child.delegation_id}.json"
-    payload = json.loads(record.read_text())
-    del payload["child"]["persona"]["skills"]
-    record.write_text(json.dumps(payload))
-
-    restored = await load_subagent(child.delegation_id, owner=owner, config=config, runtime_paths=paths, depth=0)
-    parent_state = DelegationState.from_metadata({DELEGATION_STATE_KEY: {"children": [payload["child"]]}})
-
-    assert restored.persona is not None
-    assert restored.persona.skills == ()
-    assert parent_state.children[0].persona == restored.persona
-
-
-@pytest.mark.asyncio
-async def test_child_snapshot_without_persona_reads_as_configured_child(tmp_path: Path) -> None:
-    """A session record or parent run state written before personas existed reads as a configured-agent child."""
-    paths = _runtime_paths(tmp_path)
-    config = Config(agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"])})
-    owner = _identity()
-    child = _self_child(config, owner, None)
-    await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)
-    record = paths.storage_root / "subagent_sessions" / f"{child.delegation_id}.json"
-    payload = json.loads(record.read_text())
-    del payload["child"]["persona"]
-    record.write_text(json.dumps(payload))
-
-    restored = await load_subagent(child.delegation_id, owner=owner, config=config, runtime_paths=paths, depth=0)
-    parent_state = DelegationState.from_metadata({DELEGATION_STATE_KEY: {"children": [payload["child"]]}})
-
-    assert restored.persona is None
-    assert restored.child_agent_name == "leader"
-    assert parent_state.children == [child]

@@ -178,7 +178,7 @@ async def test_a_streamed_team_reply_renders_the_members_and_the_consensus_and_s
     assert team.models["checker-model"].requests == []
     session = team.storage.load_session(SESSION_ID)
     assert session is not None
-    assert EVENT_ID in read_scope_seen_event_ids(team.storage, session, TEAM_SCOPE)
+    assert EVENT_ID in read_scope_seen_event_ids(team.storage, session)
 
 
 @pytest.mark.asyncio
@@ -217,7 +217,7 @@ async def test_a_team_turn_whose_attempts_all_came_back_empty_leaves_its_trigger
     session = team.storage.load_session(SESSION_ID)
     assert session is not None
     assert session.runs == []
-    assert read_scope_seen_event_ids(team.storage, session, TEAM_SCOPE) == set()
+    assert read_scope_seen_event_ids(team.storage, session) == set()
 
 
 @pytest.mark.asyncio
@@ -243,7 +243,7 @@ async def test_a_team_turn_that_only_ran_tools_marks_its_trigger_seen(
     assert ProbeToolkit.calls == ["a"]
     session = team.storage.load_session(SESSION_ID)
     assert session is not None
-    assert read_scope_seen_event_ids(team.storage, session, TEAM_SCOPE) == {EVENT_ID}
+    assert read_scope_seen_event_ids(team.storage, session) == {EVENT_ID}
     assert history_storage._read_preserved_scope_seen_event_ids(session.metadata, TEAM_SCOPE) == {EVENT_ID}
 
 
@@ -715,8 +715,8 @@ async def test_the_leader_runs_with_compaction_bound_to_the_team_scope(
     ]
     assert (len(hooks.after_tool_batch), len(hooks.on_resume_entry)) == (1, 1)
     assert hooks.tool_middleware == ()
-    [compaction] = [kwargs for kwargs in compactions if kwargs["is_team"]]
-    assert (compaction["scope_id"], compaction["entity_name"]) == ("squad", "squad")
+    [compaction] = [kwargs for kwargs in compactions if kwargs["scope"].kind == "team"]
+    assert (compaction["scope"], compaction["entity_name"]) == (TEAM_SCOPE, "squad")
     assert compaction["storage"].scope == TEAM_SCOPE
     assert compaction["model"] is team.models["default"]
     assert compaction["prompt_id"] is not None

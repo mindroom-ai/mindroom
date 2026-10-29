@@ -126,7 +126,7 @@ _ROUTE_SETTINGS: list[tuple[type[Any], dict[str, Any], frozenset[str]]] = [
     ),
     (
         ClaudeSettings,
-        {"temperature": 0.3},
+        {"max_tokens": 8192, "temperature": 0.3},
         frozenset(
             {
                 "api_key",
@@ -951,9 +951,9 @@ def test_a_retired_role_map_fails_config_load_with_its_reason(tmp_path: Path, pr
 
     assert str(exc_info.value) == (
         f"models.default: Unsupported extra_kwargs for provider '{provider}': role_map was removed; "
-        "Chat Completions requests send the system prompt as developer with provider openai and as system with every "
-        "other provider, so remove the setting, or use provider llama_cpp with the base_url of an OpenAI-compatible "
-        "server that rejects the developer role."
+        "Chat Completions requests send the system prompt as developer to OpenAI's own API and as system to every "
+        "other endpoint, an OpenAI-compatible server set as provider openai with its base_url included, so remove the "
+        "setting."
     )
 
 

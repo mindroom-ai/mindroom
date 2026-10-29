@@ -161,7 +161,7 @@ def observe(
         "request": _safely(lambda: _probe_request(session, scope)),
         "resume_requests": _safely(lambda: _resume_requests(session, scope)),
         "seen_event_ids": _safely(
-            lambda: sorted(read_scope_seen_event_ids(store, session, scope)) if session is not None else [],
+            lambda: sorted(read_scope_seen_event_ids(store, session)) if session is not None else [],
         ),
         "redaction_candidates": _safely(
             lambda: sorted(_read_scope_history_event_ids(store, session)) if session is not None else [],

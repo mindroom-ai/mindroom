@@ -58,12 +58,12 @@ from mindroom.delegation.state import (
     child_call_id,
     child_card_id,
     child_execution_identity,
+    child_scope,
     delegation_card_id,
     member_call_id,
 )
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.failure_text import failure_text
-from mindroom.history.types import HistoryScope
 from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
@@ -399,7 +399,7 @@ async def _execute_child(
         config=config,
         runtime_paths=runtime_paths,
         model_name=child.model_name,
-        storage=RunStorage(store, session, HistoryScope(kind="agent", scope_id=child.child_agent_name)),
+        storage=RunStorage(store, session, child_scope(child)),
         user_id=identity.requester_id,
     )
     with tool_runtime_context(child_context):

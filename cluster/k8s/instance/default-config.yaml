@@ -43,7 +43,7 @@ models:
     context_window: 1048576
   deepseek:
     provider: openrouter
-    id: deepseek/deepseek-v4.1-flash
+    id: deepseek/deepseek-v4.1-flash-1017
     context_window: 1048576
   glm:
     provider: openrouter
@@ -51,7 +51,7 @@ models:
     context_window: 1048576
   kimi:
     provider: openrouter
-    id: moonshotai/kimi-k3
+    id: moonshotai/kimi-k3.1-pro
     context_window: 1048576
   tencent_hy4:
     provider: openrouter
@@ -59,8 +59,8 @@ models:
     context_window: 1048576
   nemotron:
     provider: openrouter
-    id: nvidia/nemotron-3.5-lightning
-    context_window: 1000000
+    id: nvidia/nemotron-3.5-super-vl
+    context_window: 1048576
 agents:
   mind:
     display_name: Mind

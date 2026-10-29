@@ -72,14 +72,15 @@ Generated images are square (1:1).
 | `vertexai` | `boolean` | `false` | Use Vertex AI instead of the Gemini API. `GOOGLE_GENAI_USE_VERTEXAI=true` also enables it. Required for `generate_video()`. |
 | `project_id` | `text` | `null` | Vertex project, falling back to `GOOGLE_CLOUD_PROJECT`. |
 | `location` | `text` | `null` | Vertex location, falling back to `GOOGLE_CLOUD_LOCATION`. |
-| `image_generation_model` | `text` | `gemini-3.1-flash-image` | Model for `generate_image()` (Nano Banana 2). |
+| `image_generation_model` | `text` | `gemini-nano-banana-2.1` | Model for `generate_image()` (Nano Banana 2.1). |
 | `video_generation_model` | `text` | `veo-3.1-generate-001` | Model for `generate_video()` (Veo 3.1). |
 | `enable_generate_image` | `boolean` | `true` | Enable `generate_image()`. |
 | `enable_generate_video` | `boolean` | `true` | Enable `generate_video()`. |
 | `all` | `boolean` | `false` | Enable both functions. |
 
 One `gemini` toolkit uses a single Vertex location for both functions.
-Google lists `global`, `us`, and `eu` for [Gemini 3.1 Flash Image](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/3-1-flash-image) and `us-central1` for [Veo 3.1](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/veo/3-1-generate), with no shared location.
+Google lists only `global` for [Nano Banana 2.1](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/nano-banana-2-1), `global`, `us`, and `eu` for [Nano Banana 2](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/3-1-flash-image), and `us-central1` for [Veo 3.1](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/veo/3-1-generate), with no shared location.
+To generate images from a Vertex AI `us` or `eu` location, set `image_generation_model: gemini-3.1-flash-image`.
 To use both on Vertex AI, give each to a separate agent and disable the other function:
 
 ```yaml

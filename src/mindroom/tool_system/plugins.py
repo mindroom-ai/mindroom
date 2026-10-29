@@ -217,8 +217,7 @@ def isolated_plugin_runtime(
                 skip_broken_plugins=skip_broken_plugins,
             )
         finally:
-            current_package_roots = _cached_package_roots()
-            _cancel_plugin_module_tasks(current_package_roots)
+            _cancel_plugin_module_tasks()
             # This also restores _MODULE_IMPORT_CACHE and the prior synthetic modules.
             restore_tool_registry_snapshot(previous_snapshot)
             set_plugin_skill_roots(previous_skill_roots)
@@ -313,8 +312,8 @@ def apply_prepared_plugin_reload(
     """Commit one previously prepared plugin runtime snapshot."""
     with locked_tool_registry_state():
         if cancel_existing_tasks:
-            package_roots = _cached_package_roots()
-            cancelled_task_count = _cancel_plugin_module_tasks(package_roots)
+            # Preparing restored the live modules, so this cancels the generation being replaced, not the staged one.
+            cancelled_task_count = _cancel_plugin_module_tasks()
         restore_tool_registry_snapshot(prepared_reload.tool_registry_snapshot)
         set_plugin_skill_roots(prepared_reload.plugin_skill_roots)
     return PluginReloadResult(
@@ -331,42 +330,53 @@ def reload_plugins(
     skip_broken_plugins: bool = False,
 ) -> PluginReloadResult:
     """Tear down the live plugin runtime and rebuild it from the current config."""
-    package_roots = _cached_package_roots()
-    cancelled_task_count = _cancel_plugin_module_tasks(package_roots)
-    prepared_reload = prepare_plugin_reload(
-        config,
-        runtime_paths,
-        skip_broken_plugins=skip_broken_plugins,
-    )
-    return apply_prepared_plugin_reload(
-        prepared_reload,
-        cancelled_task_count=cancelled_task_count,
-    )
+    # A load replaces a module before it records the replaced one, so cancel only while no load runs.
+    with locked_tool_registry_state():
+        cancelled_task_count = _cancel_plugin_module_tasks()
+        prepared_reload = prepare_plugin_reload(
+            config,
+            runtime_paths,
+            skip_broken_plugins=skip_broken_plugins,
+        )
+        return apply_prepared_plugin_reload(
+            prepared_reload,
+            cancelled_task_count=cancelled_task_count,
+        )
 
 
 def _cached_package_roots() -> set[str]:
     """Return the synthetic top-level package of every plugin module imported so far."""
-    return {cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()}
+    return {module_name.split(".", 1)[0] for module_name in plugin_imports._MODULE_IMPORT_CACHE}
 
 
-def _cancel_plugin_module_tasks(package_roots: set[str]) -> int:
-    """Best-effort cancel module-global tasks owned by one synthetic plugin subtree."""
-    if not package_roots:
-        return 0
-
+def _cancel_plugin_module_tasks() -> int:
+    """Best-effort cancel module-global tasks owned by the cached plugin subtrees and the modules they replaced."""
+    package_roots = _cached_package_roots()
+    modules = [
+        module
+        for module_name, module in tuple(sys.modules.items())
+        if module is not None
+        and any(module_name == root or module_name.startswith(f"{root}.") for root in package_roots)
+    ]
+    modules.extend(
+        replaced_module
+        for cached in plugin_imports._MODULE_IMPORT_CACHE.values()
+        for replaced_module in cached.replaced_modules
+    )
     cancelled_task_ids: set[int] = set()
-    for module_name, module in tuple(sys.modules.items()):
-        if module is None or not any(
-            module_name == root or module_name.startswith(f"{root}.") for root in package_roots
-        ):
-            continue
-        for value in vars(module).values():
-            for task in _iter_module_tasks(value):
-                if task.done() or id(task) in cancelled_task_ids:
-                    continue
-                task.cancel()
-                cancelled_task_ids.add(id(task))
+    for module in modules:
+        for task in _module_tasks(module):
+            if task.done() or id(task) in cancelled_task_ids:
+                continue
+            task.cancel()
+            cancelled_task_ids.add(id(task))
     return len(cancelled_task_ids)
+
+
+def _module_tasks(module: ModuleType) -> tuple[asyncio.Task[Any], ...]:
+    """Return the tasks one plugin module holds in its globals or one level inside them."""
+    # Loads read these globals from worker threads while the event loop changes them, so this and _iter_module_tasks copy each container before iterating.
+    return tuple(task for value in tuple(vars(module).values()) for task in _iter_module_tasks(value))
 
 
 def _iter_module_tasks(value: object) -> tuple[asyncio.Task[Any], ...]:
@@ -374,12 +384,23 @@ def _iter_module_tasks(value: object) -> tuple[asyncio.Task[Any], ...]:
     if isinstance(value, asyncio.Task):
         return (value,)
     if isinstance(value, dict):
-        values = value.values()
+        values = tuple(value.values())
     elif isinstance(value, tuple | list | set):
-        values = value
+        values = tuple(value)
     else:
         return ()
     return tuple(item for item in values if isinstance(item, asyncio.Task))
+
+
+def _modules_kept_for_reload(replaced: plugin_imports._ModuleCacheEntry) -> tuple[ModuleType, ...]:
+    """Return the modules whose tasks the next reload must still cancel after a load replaces one cache entry.
+
+    The first module replaced since the last reload stays, because the bots run its hooks until that reload.
+    A later one stays only while it holds an unfinished task.
+    So in a process that never reloads, such as a sandbox runner, each plugin module keeps at most one idle replaced module.
+    """
+    first, *later = (*replaced.replaced_modules, replaced.module)
+    return (first, *(module for module in later if any(not task.done() for task in _module_tasks(module))))
 
 
 def _clear_plugin_reload_caches() -> None:
@@ -426,7 +447,6 @@ def _materialize_plugin(
 
 
 def _restore_failed_plugin_tool_module_reload(
-    module_path: Path,
     module_name: str,
     cached: plugin_imports._ModuleCacheEntry | None,
     previous_module: ModuleType | None,
@@ -439,9 +459,9 @@ def _restore_failed_plugin_tool_module_reload(
         sys.modules[module_name] = previous_module
     restore_plugin_tool_registrations(module_name, previous_registrations)
     if cached is not None:
-        plugin_imports._MODULE_IMPORT_CACHE[module_path] = cached
+        plugin_imports._MODULE_IMPORT_CACHE[module_name] = cached
     else:
-        plugin_imports._MODULE_IMPORT_CACHE.pop(module_path, None)
+        plugin_imports._MODULE_IMPORT_CACHE.pop(module_name, None)
 
 
 def load_plugin_module(
@@ -465,8 +485,8 @@ def load_plugin_module(
         raise plugin_imports.PluginValidationError(msg) from exc
 
     module_name = plugin_imports._module_name(plugin_name, plugin_root, module_path)
-    cached = plugin_imports._MODULE_IMPORT_CACHE.get(module_path)
-    if cached is not None and cached.mtime == mtime and cached.module_name == module_name:
+    cached = plugin_imports._MODULE_IMPORT_CACHE.get(module_name)
+    if cached is not None and cached.mtime == mtime:
         return cached.module
 
     # Nested plugin roots can import one physical file under different owners.
@@ -489,7 +509,6 @@ def load_plugin_module(
             _exec_plugin_source(module_path, module)
     except BaseException as exc:
         _restore_failed_plugin_tool_module_reload(
-            module_path,
             module_name,
             cached,
             previous_module,
@@ -501,10 +520,11 @@ def load_plugin_module(
         logger.exception("Plugin module execution failed", path=str(module_path), kind=kind, error=str(exc))
         raise plugin_imports.PluginValidationError(msg) from exc
 
-    plugin_imports._MODULE_IMPORT_CACHE[module_path] = plugin_imports._ModuleCacheEntry(
+    plugin_imports._MODULE_IMPORT_CACHE[module_name] = plugin_imports._ModuleCacheEntry(
         mtime=mtime,
-        module_name=module_name,
         module=module,
+        # A load outside a reload replaces an edited module, so the next reload must still reach the old one's tasks.
+        replaced_modules=() if cached is None else _modules_kept_for_reload(cached),
     )
     return module
 

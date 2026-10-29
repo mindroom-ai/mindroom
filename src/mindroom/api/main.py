@@ -62,6 +62,7 @@ from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.config.personal_agents import personal_agent_data
 from mindroom.credentials.legacy_tool_credentials import migrate_tool_credential_defaults
 from mindroom.credentials.sync import sync_env_to_credentials
+from mindroom.delegation.legacy_snapshots import migrate_subagent_sessions
 from mindroom.embeddings.embedder_health import get_embedder_failure
 from mindroom.integrations import integration_routers
 from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -510,6 +511,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         if standalone:
             await migrate_private_storage(runtime_paths)
             await migrate_state_root_records(runtime_paths)
+            await migrate_subagent_sessions(runtime_paths)
             await migrate_conversation_storage(runtime_paths)
             await migrate_tool_credential_defaults(runtime_paths)
             await asyncio.to_thread(

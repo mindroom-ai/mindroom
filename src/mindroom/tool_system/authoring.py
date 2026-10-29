@@ -207,7 +207,8 @@ def toolkit_functions(toolkit: Toolkit | _AgnoToolkit) -> dict[str, Callable[...
     """Return the callables of ``toolkit``'s functions by name, one per name, to call directly.
 
     For an Agno toolkit, such as one ``get_tool_by_name`` returns, a function's async variant wins where it has one,
-    as an agent runs it.
+    as an agent runs it. A call through one inside an async tool shares that call's ownership of the synchronous work it
+    starts, so the tool may call them any number of times, at once too; a tool that calls them must be async.
     """
     if isinstance(toolkit, Toolkit):
         return dict(toolkit.functions)

@@ -642,7 +642,7 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session("session-1", runs=[_completed_run("run-1"), _completed_run("run-2")])
     seed_session(storage, session)
-    update_scope_seen_event_ids(storage, session, _SCOPE, ["event-1"])
+    update_scope_seen_event_ids(storage, session, ["event-1"])
     seed_summary(storage, session, _SCOPE, "stored summary")
 
     scope_context = load_scope_session(

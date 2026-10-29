@@ -32,7 +32,7 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY,
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
-from mindroom.history.types import HistoryScope, ScopeSummary
+from mindroom.history.types import HistoryScope, ScopeSummary, owner_scope
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.llm.usage import ModelMetrics, RunMetrics, SessionMetrics, TokenCounts
 from mindroom.session_storage.codec import RunColumns, decode_json, run_columns, run_kind, run_record
@@ -187,7 +187,7 @@ class ConversationStore:
         ).fetchone()
         if row is None:
             return None
-        owner = _database_owner(connection, names)
+        owner = database_owner(connection, names)
         runs, summaries = quote_identifier(names.log_runs), quote_identifier(names.log_summaries)
         loaded = (
             f"run.session_id = ? AND ({_loads_sql('run', summaries)} OR run.parent_run_id IN "  # noqa: S608
@@ -591,7 +591,7 @@ def _session_state(raw_session_state: object) -> dict[str, Any]:
     return decoded_mapping(raw_session_state) or {}
 
 
-def _database_owner(connection: sqlite3.Connection, names: TableNames) -> HistoryScope:
+def database_owner(connection: sqlite3.Connection, names: TableNames) -> HistoryScope:
     """Return the agent, team scope, or system usage ledger that owns the database, as its meta row records it."""
     kind, scope_id = connection.execute(
         f"SELECT owner_kind, owner_id FROM {quote_identifier(names.log_meta)} WHERE id = 1",  # noqa: S608
@@ -658,11 +658,7 @@ def watch_session_row(scope: HistoryScope, session_id: str) -> Iterator[_Session
 def report_created_row(session: ConversationSession) -> None:
     """Tell the block watching this write that the write, now committed, created ``session``'s row."""
     watch = _SESSION_ROW_WATCH.get()
-    if watch is not None and (watch.session_id, watch.scope.kind, watch.scope.scope_id) == (
-        session.session_id,
-        session.kind,
-        session.owner_id,
-    ):
+    if watch is not None and (watch.session_id, watch.scope) == (session.session_id, owner_scope(session)):
         watch.created = True
 
 
@@ -1164,6 +1160,7 @@ __all__ = [
     "begun",
     "connect_by_name",
     "connect_conversation_database",
+    "database_owner",
     "decoded_mapping",
     "delete_runs_in_transaction",
     "ensure_session_row",

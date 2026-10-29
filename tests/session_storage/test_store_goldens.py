@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom.history.storage import new_scope_session
+from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import TeamRunRecord
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, run_from_row
@@ -299,8 +300,10 @@ def test_a_first_turns_session_row_stores_no_metadata_as_agno_stored_it(
     [golden_row] = _query(golden, f'SELECT * FROM "{store.names.sessions}" WHERE session_id = ?', session_id)  # noqa: S608
     session = new_scope_session(
         session_id=session_id,
-        scope_id=golden_row["team_id"] or golden_row["agent_id"],
-        is_team=golden_row["session_type"] == "team",
+        scope=HistoryScope(
+            kind="team" if golden_row["session_type"] == "team" else "agent",
+            scope_id=golden_row["team_id"] or golden_row["agent_id"],
+        ),
     )
     fresh = create_state_storage(store.names.storage_name, tmp_path / "fresh", named_owner(store.names))
 

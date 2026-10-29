@@ -631,7 +631,7 @@ def _scope_seen_event_ids(scope_context: ScopeSessionContext | None) -> set[str]
     """Return currently persisted seen IDs for one open prepared scope."""
     if scope_context is None or scope_context.session is None:
         return set()
-    return read_scope_seen_event_ids(scope_context.storage, scope_context.session, scope_context.scope)
+    return read_scope_seen_event_ids(scope_context.storage, scope_context.session)
 
 
 def _prepared_history_with_scheduled_limit(

@@ -2904,7 +2904,7 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
     )
 
     storage = runner.deps.state_writer.create_storage(identity)
-    session = new_scope_session(session_id="session-1", scope_id="general", is_team=False)
+    session = new_scope_session(session_id="session-1", scope=HistoryScope(kind="agent", scope_id="general"))
     session.runs = [
         RunRecord(
             run_id="run-1",
@@ -8742,7 +8742,7 @@ async def test_a_finished_approval_continuation_links_its_reply_event_onto_the_r
         execution_identity=identity,
     )
     storage = coordinator.deps.state_writer.create_storage(identity, scope=scope)
-    session = new_scope_session(session_id="session-1", scope_id=scope.scope_id, is_team=is_team)
+    session = new_scope_session(session_id="session-1", scope=scope)
     session.runs = [
         TeamRunRecord(run_id="run-1", team_id="crew", session_id="session-1", status=RunStatus.completed)
         if is_team

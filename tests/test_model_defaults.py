@@ -219,7 +219,7 @@ def test_current_google_and_openrouter_specialist_models() -> None:
     """Google media and OpenRouter specialist presets should use current IDs."""
     openrouter_alternatives = dict(model_defaults.CONFIG_INIT_MODEL_ALTERNATIVES["openrouter"])
 
-    assert model_defaults.GOOGLE_IMAGE == "gemini-3.1-flash-image"
+    assert model_defaults.GOOGLE_IMAGE == "gemini-nano-banana-2.1"
     assert model_defaults.GOOGLE_VEO == "veo-3.1-generate-001"
     assert model_defaults.GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES == (
         "gemini-3.8-flash",
@@ -251,7 +251,7 @@ def test_current_google_and_openrouter_specialist_models() -> None:
     )
     assert openrouter_alternatives["kimi"] == model_defaults.ModelPreset(
         "openrouter",
-        "moonshotai/kimi-k3",
+        "moonshotai/kimi-k3.1-pro",
         1_048_576,
     )
 

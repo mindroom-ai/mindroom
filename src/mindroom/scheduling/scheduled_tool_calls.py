@@ -209,7 +209,7 @@ async def run_scheduled_call(  # noqa: PLR0911 - one refusal per broken conditio
             return _refused(task_id, f"{_REFUSALS[claimed]}; it runs when its task fires")
         return _refused(task_id, _REFUSALS[claimed])
     # The approval is spent; a call interrupted from here leaves its outcome unknown and is never retried.
-    # The run's tool-call policy owns a synchronous body until it finishes.
+    # The run's tool-call policy owns every synchronous body the call starts until it finishes.
     async with owned_sync_tool_completion():
         result = await run_tool_call(
             function,

@@ -995,18 +995,39 @@ class TestCredentialsSync:
         credentials_manager.save_credentials("OPENROUTER_API_KEY", {"api_key": "env-named-openrouter-key"})
         assert get_api_key_for_service("openrouter", runtime_paths) == "env-named-openrouter-key"
 
-    def test_get_ollama_host(self, credentials_manager: CredentialsManager) -> None:
-        """Test getting Ollama host configuration."""
-        # Test when no Ollama config exists
+    @pytest.mark.parametrize(
+        ("saved_host", "configured_host", "saved_first", "reached_host"),
+        [
+            (None, None, False, "http://localhost:11434"),
+            (None, None, True, "http://localhost:11434"),
+            (None, "http://configured.example:11434", False, "http://configured.example:11434"),
+            (None, "http://configured.example:11434", True, "http://configured.example:11434"),
+            ("http://saved.example:11434", None, False, "http://saved.example:11434"),
+            ("http://saved.example:11434", "", False, "http://saved.example:11434"),
+            ("http://saved.example:11434", None, True, "http://saved.example:11434"),
+            ("http://saved.example:11434", "http://configured.example:11434", False, "http://configured.example:11434"),
+            ("http://saved.example:11434", "http://configured.example:11434", True, "http://saved.example:11434"),
+        ],
+    )
+    def test_get_ollama_host(
+        self,
+        credentials_manager: CredentialsManager,
+        saved_host: str | None,
+        configured_host: str | None,
+        saved_first: bool,
+        reached_host: str,
+    ) -> None:
+        """The configured and saved Ollama hosts are tried in the caller's order, then the local default."""
         runtime_paths = _runtime_paths(
             credentials_manager.storage_root,
             shared_credentials_dir=credentials_manager.base_path,
         )
-        assert get_ollama_host(runtime_paths=runtime_paths) is None
+        if saved_host is not None:
+            credentials_manager.save_credentials("ollama", {"host": saved_host})
 
-        # Set Ollama host
-        credentials_manager.save_credentials("ollama", {"host": "http://localhost:11434"})
-        assert get_ollama_host(runtime_paths=runtime_paths) == "http://localhost:11434"
+        reached = get_ollama_host(runtime_paths=runtime_paths, configured_host=configured_host, saved_first=saved_first)
+
+        assert reached == reached_host
 
     def test_all_env_vars_mapped(self) -> None:
         """All supported shared provider/bootstrap env vars should be mapped."""
