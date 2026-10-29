@@ -768,14 +768,11 @@ class _TaskRunner:
 
 async def _get_pending_task_record(
     client: nio.AsyncClient,
-    room_id: str | None,
+    room_id: str,
     task_id: str,
     runtime_paths: RuntimePaths,
 ) -> ScheduledTaskRecord | None:
     """Return the latest pending task state for a task id, if it still exists."""
-    if not room_id:
-        return None
-
     task_record = await get_scheduled_task(
         client=client,
         room_id=room_id,
@@ -828,7 +825,7 @@ async def _save_task_status(
     status: str,
     *,
     timezone: str,
-    writers: ScheduledTaskRuntime | None = None,
+    writers: ScheduledTaskRuntime,
 ) -> None:
     """Persist a task's new status, keeping its stored owner, without touching its runner."""
     await persist_scheduled_task_state(
