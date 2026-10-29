@@ -228,6 +228,15 @@ def test_an_error_event_without_a_status_is_classified_by_its_name_and_wording(
         ("This request would exceed the context window", None, ContextWindowExceeded),
         ("input length and `max_tokens` exceed context limit: 197000 + 8192 > 200000", None, ContextWindowExceeded),
         ("the request exceeds the available context size, try increasing it", None, ContextWindowExceeded),
+        (
+            "Unable to submit request because the input token count is 106244 but model only supports up to 65536.",
+            None,
+            ContextWindowExceeded,
+        ),
+        # Neither Vertex AI's empty-text rejection, which opens the same way, nor an invented limit that closes the same
+        # way is about the window.
+        ("Unable to submit request because it has an empty text parameter.", None, InvalidRequest),
+        ("This model only supports up to 3 images per request.", None, InvalidRequest),
         ("max_tokens must be positive", None, InvalidRequest),
         ("The context size of a slot must be a positive number", None, InvalidRequest),
     ],

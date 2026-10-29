@@ -119,7 +119,9 @@ _REQUEST_TOO_LARGE = "request too large"
 
 # Wording providers use when a request does not fit the model's context window, such as the payload-size wording of
 # OpenAI-compatible servers and Anthropic, older Claude models' "input length and `max_tokens` exceed context limit",
-# and llama.cpp's "the request exceeds the available context size". A bare ``max_tokens`` is too broad to count.
+# llama.cpp's "the request exceeds the available context size", and Vertex AI's "Unable to submit request because the
+# input token count is 106244 but model only supports up to 65536.", whose "only supports up to" alone also names
+# other limits, such as a number of images. A bare ``max_tokens`` is too broad to count.
 _CONTEXT_WINDOW_MARKERS = (
     "context_length_exceeded",
     "context window",
@@ -137,6 +139,7 @@ _CONTEXT_WINDOW_MARKERS = (
     "prompt too long",
     "exceeds the model",
     "available context size",
+    "because the input token count is",
 )
 # How a llama.cpp server words the 500 of an input it must take in one physical batch, such as an embedding, that is
 # larger than that batch: "input (9000 tokens) is too large to process. increase the physical batch size (current batch

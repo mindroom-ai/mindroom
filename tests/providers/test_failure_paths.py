@@ -1210,6 +1210,18 @@ _GEMINI_CASES = [
         CONTEXT_WINDOW,
         1,
     ),
+    # How Vertex AI, and at times the Gemini API, word an input over the model's window.
+    _Case(
+        "http_400_context_window_unable_to_submit",
+        _gemini_status(
+            400,
+            "Unable to submit request because the input token count is 106244 but model only supports up to 65536.",
+            "INVALID_ARGUMENT",
+        ),
+        ContextWindowExceeded,
+        CONTEXT_WINDOW,
+        1,
+    ),
     _Case(
         "http_400_api_key",
         _gemini_status(400, "API key not valid. Please pass a valid API key.", "INVALID_ARGUMENT"),
