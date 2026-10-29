@@ -58,9 +58,9 @@ The code shows what each owner does; this record keeps why, what was rejected, a
 - Room-less tombstones are dropped: they cannot be told apart from the pre-v2026.10.31 cross-room ones that wedged threads, and legitimate ones aged out within 30 days.
 - Outstanding non-AI final deliveries are bound to their converted turns: quiescence means no active response, not no outstanding transport work.
 
-### TeamBot
+### Edit regeneration
 
-- Edit regeneration takes its response action from the same policy normal turns use; a rejected team regeneration still edits and settles its existing reply through the reply's records.
+- Edit regeneration takes its response action from the same policy normal turns use, so no separate team bot class resolves teams a second time; a rejected team regeneration still edits and settles its existing reply through the reply's records.
 
 ## Rejected alternatives
 
