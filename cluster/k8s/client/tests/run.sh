@@ -68,13 +68,24 @@ assert_contains "$work_dir/enabled.yaml" 'new URL(\"authentication-recovery.js\"
 assert_contains "$work_dir/enabled.yaml" 'location = /authentication-recovery.js'
 assert_contains "$work_dir/enabled.yaml" 'location = /authentication-recovery-probe'
 
+printf '%s\n' \
+  'nginx:' \
+  '  httpSnippet: |' \
+  "    log_format test_json escape=json '{\"uri\":\"\$request_uri\",\"chart\":\"{{ .Chart.Name }}\"}';" \
+  '  serverSnippet: |' \
+  '    access_log /dev/stdout test_json;' \
+  > "$work_dir/access-log-values.yaml"
 render "$work_dir/custom.yaml" \
+  --values "$work_dir/access-log-values.yaml" \
   --set authenticationRecovery.enabled=true \
   --set-string 'authenticationRecovery.probeUrl=/session/check?next="chat"&source=<client>' \
   --set-string 'authenticationRecovery.navigationUrl=/chat/?next="room"&source=<client>' \
   --set authenticationRecovery.timeoutMs=1234
 assert_contains "$work_dir/custom.yaml" 'location = /authentication-recovery-probe'
 assert_not_contains "$work_dir/custom.yaml" 'location = /session/check'
+yq -r 'select(.data["default.conf"]) | .data["default.conf"]' "$work_dir/custom.yaml" \
+  | awk '/^log_format test_json / { seen = 1 } /^server \{/ { exit !seen }' \
+  || fail "expected nginx.httpSnippet above the server block"
 render "$work_dir/min-timeout.yaml" \
   --set authenticationRecovery.enabled=true \
   --set authenticationRecovery.timeoutMs=1000
@@ -106,6 +117,9 @@ expect_render_failure "authenticationRecovery requires the chart-managed nginx c
 expect_render_failure "authenticationRecovery.probeUrl must be a safe same-origin root-relative URL" \
   --set authenticationRecovery.enabled=true \
   --set-string authenticationRecovery.probeUrl=//example.com/check
+expect_render_failure "nginx.httpSnippet requires the chart-managed nginx config" \
+  --set-string nginx.httpSnippet=gzip_vary \
+  --set nginx.existingConfigMap=custom-nginx
 printf '%s\n' \
   'authenticationRecovery:' \
   '  enabled: true' \
@@ -177,6 +191,8 @@ curl --fail --silent --dump-header "$work_dir/asset.headers" \
 assert_contains "$work_dir/asset.headers" "Cache-Control: no-store"
 assert_contains "$work_dir/asset.headers" "Content-Type: application/javascript"
 cmp "$work_dir/html/authentication-recovery.js" "$work_dir/asset.js"
+docker logs "$container_name" 2>/dev/null > "$work_dir/access.log"
+assert_contains "$work_dir/access.log" '{"uri":"/authentication-recovery.js","chart":"mindroom-client"}'
 probe_status="$(curl --silent --output /dev/null --dump-header "$work_dir/probe.headers" \
   --write-out '%{http_code}' "$base_url/authentication-recovery-probe")"
 test "$probe_status" = 204 || fail "expected recovery probe status 204, got $probe_status"

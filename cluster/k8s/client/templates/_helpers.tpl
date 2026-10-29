@@ -158,6 +158,10 @@ runtime-config.js straight from nginx and the Deployment bypasses the entrypoint
 {{- if .Values.rootServiceWorkerCleanup.enabled -}}
 {{- $publicFiles = append $publicFiles (regexQuoteMeta "/sw.js") -}}
 {{- end -}}
+{{- with .Values.nginx.httpSnippet -}}
+# Additional http directives supplied through nginx.httpSnippet.
+{{ tpl . $ }}
+{{ end -}}
 server {
   listen {{ .Values.nginx.port }};
 {{- if .Values.nginx.ipv6 }}
