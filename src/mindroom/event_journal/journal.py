@@ -1212,7 +1212,7 @@ def pending_thread_events_after(
 
     Restricting it to ``TURN_BACKED_KINDS`` is the same argument one step
     further: pending means unfinished, not *will answer*. Thread membership is
-    derived from content for every kind alike -- ``inbound_event`` calls
+    derived from content for every kind alike -- ``_inbound_event`` calls
     ``thread_root`` regardless of kind -- so a reaction, an approval, or an
     ``m.room.encrypted`` event this bot could not decrypt can all sit pending
     in a thread under the requester's own sender. An interactive reaction can

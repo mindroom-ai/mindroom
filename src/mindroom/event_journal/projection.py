@@ -396,7 +396,7 @@ def _hold_unresolved_edit(
     and only one of them is the ordinary case. A target that is redacted before
     it ever arrives never lands afterwards -- ``project`` turns it away as
     already redacted -- so the arrival this row is waiting for is not coming,
-    and ``_project_redaction`` is the only thing left to collect it.
+    and ``scrub_redacted_projection`` is the only thing left to collect it.
 
     A target that neither arrives nor is redacted has no third ending, and the
     membership fence is the whole bound on it. That is deliberate: the row is

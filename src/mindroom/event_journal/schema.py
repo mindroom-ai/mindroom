@@ -545,7 +545,7 @@ _TABLES = (
     """,
     """
     CREATE TABLE IF NOT EXISTS reply_deletion_endings (
-        -- A reply a source deletion ended in the tombstone's commit, and the
+        -- A reply a source deletion ended in the deletion's own commit, and the
         -- span that deletion cancelled, until the bot stops that span and
         -- settles what the reply owes Matrix.
         principal_id TEXT NOT NULL,

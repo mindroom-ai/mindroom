@@ -11,7 +11,7 @@ import nio
 import pytest
 
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.delivery_gateway import (
@@ -77,7 +77,7 @@ if TYPE_CHECKING:
     from mindroom.reply_scope import SpanHandle
 
 
-def _config(tmp_path: Path) -> Config:
+def _config(tmp_path: Path, *, teams: dict[str, TeamConfig] | None = None) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
     return bind_runtime_paths(
         with_current_room_member_access(
@@ -85,6 +85,7 @@ def _config(tmp_path: Path) -> Config:
                 agents={
                     "code": AgentConfig(display_name="Code", rooms=["!room:localhost"]),
                 },
+                teams=teams or {},
             ),
         ),
         runtime_paths,
@@ -172,7 +173,12 @@ def _response_lifecycle(
 
 
 def _team_bot(tmp_path: Path) -> AgentBot:
-    config = _config(tmp_path)
+    config = _config(
+        tmp_path,
+        teams={
+            "team_bot": TeamConfig(display_name="Team Bot", role="Team", agents=["code"], rooms=["!room:localhost"]),
+        },
+    )
     runtime_paths = runtime_paths_for(config)
     team_user = AgentMatrixUser(
         agent_name="team_bot",
@@ -532,6 +538,7 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
         await finish_edit_regenerations(bot)
 
     mock_emit.assert_awaited_once()
+    assert mock_emit.await_args.kwargs["identity"].response_kind == "team"
 
 
 @pytest.mark.asyncio
