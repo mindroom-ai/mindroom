@@ -50,7 +50,7 @@ def _team_member_ids(state: Mapping[str, object]) -> list[str]:
     """Return the member ids, the members' config names, whose slots the live team document of a pause holds."""
     if state.get("kind") != "team_stream":
         return []
-    return [cast("dict[str, str]", member)["id"] for member in cast("list[object]", state["members"])]
+    return [member["id"] for member in cast("list[dict[str, str]]", state["members"])]
 
 
 def identify_approval_tools(
