@@ -236,6 +236,8 @@ def test_an_error_event_without_a_status_is_classified_by_its_name_and_wording(
             None,
             ContextWindowExceeded,
         ),
+        # Bedrock's ValidationException for input and requested output tokens above the model's quota.
+        ("Input is too long for requested model.", None, ContextWindowExceeded),
         # Neither Vertex AI's empty-text rejection, which opens the same way, nor an invented limit that closes the same
         # way is about the window.
         ("Unable to submit request because it has an empty text parameter.", None, InvalidRequest),

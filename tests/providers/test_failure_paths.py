@@ -1414,14 +1414,25 @@ _LLAMA_CPP_CASES = [
         1,
     ),
 ]
+# Bedrock rejects input and requested output tokens above the model's quota with a ValidationException of its own.
+_BEDROCK_CASES = [
+    _Case(
+        "http_400_input_too_long",
+        _json(400, {"message": "Input is too long for requested model."}),
+        ContextWindowExceeded,
+        CONTEXT_WINDOW,
+        1,
+    ),
+]
 
 # Vertex AI Claude, Bedrock Claude, and Vertex AI Gemini fail exactly as their family's direct route does, so they
-# run every row of that family; the other OpenAI-compatible Chat routes run the shared Chat rows, and llama.cpp its
-# own context-size wording too.
+# run every row of that family; the other OpenAI-compatible Chat routes run the shared Chat rows, and Bedrock and
+# llama.cpp their own context-window wording too.
 ROWS = [
     *_rows("anthropic", _CLAUDE_CASES),
     *_rows("vertexai_claude", _CLAUDE_CASES),
     *_rows("bedrock_claude", _CLAUDE_CASES),
+    *_rows("bedrock_claude", _BEDROCK_CASES),
     *_rows("openai_chat", _CHAT_CASES),
     *(
         row
