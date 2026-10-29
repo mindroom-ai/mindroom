@@ -3197,6 +3197,70 @@ async def test_reload_plugins_cancels_tasks_for_removed_plugins(tmp_path: Path) 
                 sys.modules.pop(module_name, None)
 
 
+def _write_import_task_plugin(plugin_root: Path) -> None:
+    """Write one plugin whose hooks module starts a task at import and keeps it in a module global."""
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "import-task", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "hooks.py").write_text(
+        "import asyncio\n"
+        "from mindroom.hooks import hook\n"
+        "\n"
+        "_BACKGROUND_TASK = asyncio.get_running_loop().create_task(asyncio.Event().wait())\n"
+        "\n"
+        "@hook('message:received')\n"
+        "async def audit(ctx):\n"
+        "    del ctx\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.asyncio
+async def test_staged_plugin_reload_cancels_only_the_live_generation_tasks_on_commit(tmp_path: Path) -> None:
+    """Staging leaves the live plugin tasks running; committing cancels them and keeps the staged generation's."""
+    plugin_root = tmp_path / "plugins" / "import-task"
+    _write_import_task_plugin(plugin_root)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/import-task"]), config_path)
+    edited_config = _bind_runtime_paths(
+        Config(plugins=[{"path": "./plugins/import-task", "settings": {"interval": 5}}]),
+        config_path,
+    )
+    runtime_paths = runtime_paths_for(config)
+    hooks_path = (plugin_root / "hooks.py").resolve()
+
+    tasks: list[asyncio.Task[None]] = []
+    with _preserved_plugin_loader_state():
+        try:
+            plugins_module.reload_plugins(config, runtime_paths)
+            live_task = plugin_module._MODULE_IMPORT_CACHE[hooks_path].module._BACKGROUND_TASK
+            tasks.append(live_task)
+
+            # A config reload that fails after staging never commits, so the live plugin must keep its task.
+            discarded = plugins_module.prepare_plugin_reload(edited_config, runtime_paths)
+            tasks.append(discarded.tool_registry_snapshot.module_import_cache[hooks_path].module._BACKGROUND_TASK)
+            await asyncio.sleep(0)
+            assert not live_task.done()
+
+            prepared = plugins_module.prepare_plugin_reload(edited_config, runtime_paths)
+            staged_task = prepared.tool_registry_snapshot.module_import_cache[hooks_path].module._BACKGROUND_TASK
+            tasks.append(staged_task)
+            result = plugins_module.apply_prepared_plugin_reload(prepared, cancel_existing_tasks=True)
+            await asyncio.sleep(0)
+
+            assert plugin_module._MODULE_IMPORT_CACHE[hooks_path].module._BACKGROUND_TASK is staged_task
+            assert result.cancelled_task_count == 1
+            assert live_task.cancelled()
+            assert not staged_task.done()
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
 def test_reload_plugins_raises_when_configured_plugin_becomes_invalid(tmp_path: Path) -> None:
     """Explicit reloads should fail closed when a configured plugin breaks."""
     plugin_root = tmp_path / "plugins" / "broken-reload"
