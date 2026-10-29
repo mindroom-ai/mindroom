@@ -5762,6 +5762,8 @@ def test_body_call_id_parses_only_canonical_prefixes() -> None:
         f"LIVE-FUZZ call=172\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\nLIVE-FUZZ call=175 segment-000 END call=175"
     )
     assert _body_call_id(continued) == 175
+    # An attempt cut short right after its ID still names its call.
+    assert _body_call_id(f"LIVE-FUZZ call=87\n\n{INTERRUPTED_RESPONSE_NOTE}") == 87
     assert _body_call_id("[Response interrupted by service restart]") is None
     assert _body_call_id("LIVE-FUZZ call=x END") is None
 

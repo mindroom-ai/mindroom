@@ -4802,13 +4802,13 @@ def _read_supersession_snapshot(path: Path, principal_id: str) -> _SupersessionS
 
 def _declined_edits(
     snapshot: _SupersessionSnapshot,
-    source_revision_markers: Mapping[str, Mapping[str, str]],
+    edits_by_source: Mapping[str, Mapping[str, str]],
 ) -> frozenset[str]:
     """Return the edits MindRoom settled without a completed regeneration answering them."""
     return frozenset(
         edit_id
-        for revisions in source_revision_markers.values()
-        for edit_id in revisions
+        for edits in edits_by_source.values()
+        for edit_id in edits
         if (row := snapshot.sources.get(edit_id)) is not None
         and row.state == "settled"
         and edit_id not in snapshot.regenerated_edits
