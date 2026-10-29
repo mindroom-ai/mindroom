@@ -2280,7 +2280,7 @@ defaults:
   thread_summary_model: luna
 ```
 
-Use `258000` as the context window: it is just under the 95% effective budget of the 272000-token Codex window of Astra and Luna, stays within the 500000-token Codex window of Sol and Terra, and is smaller than the OpenAI API windows.
+Use `258000` as the context window: it fits the Codex window of every model above, which is smaller than the OpenAI API window.
 Set reasoning effort with `extra_kwargs.reasoning_effort`; GPT-6.1 Sol, GPT-6 Astra, GPT-6.1 Terra, and GPT-6 Luna accept `low`, `medium`, `high`, `xhigh`, and `max`.
 Codex clients also offer Ultra for Sol, Astra, and Terra, but Ultra's Codex-managed subagents are not available through MindRoom.
 The provider supports text and image input with text output; transcription, text-to-speech, and realtime speech are not supported.

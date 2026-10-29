@@ -256,7 +256,7 @@ For Gemini API text and coding work, prefer `gemini-3.8-flash` as the standard s
 Use `gemini-4-argon` when you need the highest Gemini API intelligence tier.
 The Google rows above are for the Gemini API / AI Studio `google` provider, not for Vertex AI.
 For `vertexai`, verify the current Vertex AI docs instead of assuming Gemini API names or defaults carry over unchanged.
-Current [Vertex AI image docs](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/capabilities/image-generation) document `gemini-nano-banana-2.1`, `gemini-3-pro-image`, `gemini-3.1-flash-image`, and `gemini-3.1-flash-lite-image`; choose the tier that fits the task; `gemini-nano-banana-2.1` serves only the `global` location.
+Current [Vertex AI image docs](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/capabilities/image-generation) document `gemini-nano-banana-2.1`, `gemini-3-pro-image`, `gemini-3.1-flash-image`, and `gemini-3.1-flash-lite-image`; `gemini-nano-banana-2.1` serves only the `global` location.
 For Google image work, use the official product name from the docs for the provider surface you are editing.
 Gemini API docs call `gemini-nano-banana-2.1` Nano Banana 2.1, while Vertex AI docs use their own product naming and model tables.
 
