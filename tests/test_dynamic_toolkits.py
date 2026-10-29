@@ -1062,8 +1062,8 @@ def test_native_tool_search_keeps_deferred_toolkit_instructions_in_the_prompt(
     assert instruction_marker not in (function.description or "")
 
 
-def test_fully_deferred_toolkit_omits_function_instructions() -> None:
-    """A deferred toolkit should not leak instructions attached to its functions."""
+def test_portable_deferral_omits_function_instructions() -> None:
+    """A toolkit deferred behind portable search should not leak instructions attached to its functions."""
 
     def deferred_tool() -> str:
         return "deferred"
@@ -1102,14 +1102,20 @@ def test_native_deferral_keeps_toolkit_instructions_and_describes_function_instr
         instructions="DEFERRED_FUNCTION_INSTRUCTIONS",
         add_instructions=True,
     )
-    toolkit = Toolkit(name="deferred", tools=[function], instructions="DEFERRED_TOOLKIT_INSTRUCTIONS")
-    _deferral, deferred = defer_toolkit("deferred", "", adapt_toolkit(toolkit), portable_search=False)
+    plain = Function(name="plain_tool", description="Lists items.\n", entrypoint=deferred_tool)
+    toolkit = Toolkit(name="deferred", tools=[function, plain], instructions="DEFERRED_TOOLKIT_INSTRUCTIONS")
+    deferral, deferred = defer_toolkit("deferred", "", adapt_toolkit(toolkit), portable_search=False)
 
     assert deferred.instructions is not None
     assert "DEFERRED_TOOLKIT_INSTRUCTIONS" in deferred.instructions
-    (deferred_function,) = deferred.functions
-    assert deferred_function.description == "Do the deferred thing.\n\nDEFERRED_FUNCTION_INSTRUCTIONS"
+    descriptions = {function.name: function.description for function in deferred.functions}
+    assert descriptions["deferred_tool"] == "Do the deferred thing.\n\nDEFERRED_FUNCTION_INSTRUCTIONS"
+    # A function without instructions of its own goes out exactly as an eager toolkit sends it.
+    assert descriptions["plain_tool"] == "Lists items.\n"
     assert offered_refusal(deferred) is None
+    # Only portable search reads the deferral's instructions, and native search shows them already.
+    assert deferral.instructions is None
+    assert deferral.function_instructions == {}
 
 
 def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:

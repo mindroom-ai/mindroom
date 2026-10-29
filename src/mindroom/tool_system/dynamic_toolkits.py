@@ -49,21 +49,30 @@ def defer_toolkit(
     Native tool search expands only function definitions, so the toolkit keeps its instructions for the system
     prompt and each function's own instructions go in its description.
     """
+    if portable_search:
+        deferral = ToolDeferral(
+            domain_name=domain_name,
+            description=description,
+            instructions=toolkit.instructions,
+            function_instructions=toolkit.function_instructions,
+        )
+        return deferral, replace(toolkit, instructions=None, function_instructions={})
+    functions = tuple(
+        _with_own_instructions(function, toolkit.function_instructions[function.name])
+        if function.name in toolkit.function_instructions
+        else function
+        for function in toolkit.functions
+    )
     deferral = ToolDeferral(
         domain_name=domain_name,
         description=description,
-        instructions=toolkit.instructions,
-        function_instructions=toolkit.function_instructions,
-    )
-    if portable_search:
-        return deferral, replace(toolkit, instructions=None, function_instructions={})
-    functions = tuple(
-        replace(function, description=_joined(function.description, toolkit.function_instructions.get(function.name)))
-        for function in toolkit.functions
+        instructions=None,
+        function_instructions={},
     )
     return deferral, replace(toolkit, functions=functions, function_instructions={})
 
 
-def _joined(*parts: str | None) -> str | None:
-    """Return the non-empty parts joined by blank lines, or None when every part is empty."""
-    return "\n\n".join(part.strip() for part in parts if part and part.strip()) or None
+def _with_own_instructions(function: ToolFunction, instructions: str) -> ToolFunction:
+    """Return ``function`` with the instructions it asks the prompt to show after its description."""
+    description = f"{function.description}\n\n{instructions}" if function.description else instructions
+    return replace(function, description=description)
