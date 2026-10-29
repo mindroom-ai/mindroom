@@ -25,6 +25,7 @@ from mindroom.config.personal_agents import (
     read_personal_agent_roster,
     read_personal_agent_roster_file,
 )
+from mindroom.config.resolution import authored_tool_entries
 from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.constants import RESERVED_ENTITY_NAMES, runtime_matrix_homeserver
 from mindroom.durable_write import write_json_file_durable
@@ -362,7 +363,7 @@ def generated_agent_settings(
     """Return the current values an owner may edit, the tools they may choose from and, if created, the owners."""
     entry, _ = _owned_entry(config, runtime_paths, agent_name, requester_id)
     current = config.agents[agent_name].model_dump(include={"display_name", "role", "instructions"})
-    current["tools"] = [tool.name for tool in config.resolve_entity(agent_name).authored_tool_configs]
+    current["tools"] = [tool.name for tool in authored_tool_entries(config, agent_name)]
     settings = {"agent_name": agent_name, "edits": current, "allowed_tools": list(config.tool_ceiling(agent_name))}
     if isinstance(entry, CreatedAgentEntry):
         settings |= {"owner": entry.owner, "co_owners": entry.co_owners}

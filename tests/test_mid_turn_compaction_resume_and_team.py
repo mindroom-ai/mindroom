@@ -69,6 +69,7 @@ from tests.team_turn_helpers import (
     member_approval,
     squad_turn,
 )
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator, Sequence
@@ -196,7 +197,7 @@ def _resumable(
         history_storage=store,
         supports_native_tool_approval=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, paths, "test_agent"),
     )
     session = store.load_session("session-1", "agent") or new_scope_session(
         session_id="session-1",

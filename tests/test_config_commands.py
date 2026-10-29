@@ -2266,6 +2266,7 @@ async def test_apply_config_change_preserves_call_profile_authorship(tmp_path: P
                     "inherited": {"display_name": "Inherited"},
                     "cleared": {"display_name": "Cleared"},
                 },
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "calls": {
                     "enabled": True,
                     "profiles": {
@@ -2423,6 +2424,7 @@ class TestConfigCommandHandling:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_data = {
                 "agents": {"test_agent": {"display_name": "Test Agent", "role": "Testing"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
             }
             yaml.dump(config_data, f)
             config_path = Path(f.name)

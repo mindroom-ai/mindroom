@@ -43,7 +43,11 @@ def _client(
         },
     )
     main.initialize_api_app(main.app, paths)
-    _publish_config(main.app, paths, data.config.model_dump(mode="json"))
+    _publish_config(
+        main.app,
+        paths,
+        {**data.config.model_dump(mode="json"), "models": {"default": {"provider": "openai", "id": "test-model"}}},
+    )
     _use_runtime_auth_settings(main.app)
     headers = {
         name: {

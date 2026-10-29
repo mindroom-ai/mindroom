@@ -19,6 +19,7 @@ from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.authorization import responder_candidate_entities_from_cached_room
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.budgets.monitor import budget_model
+from mindroom.config.resolution import authored_tool_entries
 from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
@@ -58,6 +59,7 @@ from mindroom.llm.runs import RunRecord
 from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.run_storage import TerminalRecord
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.runtime_context import (
@@ -65,7 +67,9 @@ from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
 )
+from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.skills import SKILL_READ_FUNCTION_NAMES
+from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -490,11 +494,16 @@ def _build_room_agent_participant(
     session_id: str,
 ) -> tuple[ToolRuntimeContext, AgentBuild]:
     """Resolve a room agent's model and build it; both walk the filesystem, so callers run this off the event loop."""
-    active_model_name = _budgeted_model(context, _runtime_model_name(context, agent_name))
+    model = resolve_turn_model(
+        context.config,
+        context.runtime_paths,
+        _participant_scope(context, agent_name),
+        TurnBudget(monitor=context.budget_monitor, requester_id=context.requester_id),
+    )
     participant_context = replace(
         context,
         agent_name=agent_name,
-        active_model_name=active_model_name,
+        active_model_name=model.model_name,
         target=replace(context.target, session_id=session_id),
     )
     # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
@@ -507,7 +516,7 @@ def _build_room_agent_participant(
         execution_identity=build_execution_identity_from_runtime_context(participant_context),
         hook_registry=context.hook_registry,
         knowledge=None,
-        active_model_name=active_model_name,
+        model=model,
         include_interactive_questions=False,
         persist_runtime_state=False,
         disable_runtime_capabilities=True,
@@ -722,14 +731,13 @@ def _participant_available_toolkits(context: ToolRuntimeContext) -> list[str]:
     ]
 
 
-def _caller_workspace_root(context: ToolRuntimeContext) -> Path | None:
-    workspace = resolve_agent_runtime(
+def _caller_workspace_root(context: ToolRuntimeContext) -> Path:
+    return resolve_agent_runtime(
         context.agent_name,
         context.config,
         context.runtime_paths,
         execution_identity=build_execution_identity_from_runtime_context(context),
-    ).workspace
-    return workspace.root if workspace is not None else None
+    ).workspace.root
 
 
 def _participant_request(
@@ -788,29 +796,23 @@ def _resolve_participant_toolkits(context: ToolRuntimeContext, tool_names: list[
         return {}
     ensure_tool_registry_loaded(context.runtime_paths, context.config)
     # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
-    from mindroom.agents import build_agent_toolkit, resolve_runtime_worker_tools  # noqa: PLC0415
+    from mindroom.agents import build_agent_toolkit  # noqa: PLC0415
 
     execution_identity = build_execution_identity_from_runtime_context(context)
-    worker_tools = resolve_runtime_worker_tools(
-        context.agent_name,
-        context.config,
-        context.runtime_paths,
-        list(tool_names),
-        tool_registry_preloaded=True,
-    )
-    entity_view = context.config.resolve_entity(context.agent_name)
-    authored_overrides = {entry.name: entry.tool_config_overrides for entry in entity_view.tool_configs}
+    agent_tools = resolve_agent_tools(context.config, context.agent_name)
+    placement = tool_placement(context.runtime_paths)
+    authored_overrides = {entry.name: entry.tool_config_overrides for entry in agent_tools.candidates()}
+    workspace_in_worker = agent_tools.workspace_in_worker(tool_names, placement)
     toolkits: dict[str, Toolkit] = {}
     for tool_name in tool_names:
         toolkit = build_agent_toolkit(
             tool_name,
-            agent_name=context.agent_name,
-            config=context.config,
+            agent_tools=agent_tools,
+            placement=placement,
             runtime_paths=context.runtime_paths,
-            worker_tools=worker_tools,
-            runtime_overrides=entity_view.tool_runtime_overrides(tool_name),
             tool_config_overrides=authored_overrides.get(tool_name),
             execution_identity=execution_identity,
+            workspace_in_worker=workspace_in_worker,
         )
         if toolkit is None:
             msg = f"Dynamic Workflow participant tool '{tool_name}' is not available in this runtime."
@@ -871,7 +873,7 @@ def _workflow_allowed_tools(context: ToolRuntimeContext) -> frozenset[str]:
         )
         if scoped:
             values.update(scoped)
-    for entry in context.config.resolve_entity(context.agent_name).tool_configs:
+    for entry in authored_tool_entries(context.config, context.agent_name):
         if entry.name == "dynamic_workflow":
             values.update(entry.tool_config_overrides)
     raw_allowed = values.get("allowed_tools")
@@ -981,33 +983,33 @@ def _validate_workflow_policy_for_context(
     return requests
 
 
-def _budgeted_model(context: ToolRuntimeContext, model_name: str, *, log_fallback: bool = True) -> str:
-    return budget_model(
-        context.config,
-        context.runtime_paths,
-        context.budget_monitor,
-        context.requester_id,
-        model_name,
-        log_fallback=log_fallback,
-    )
-
-
 def _with_budget_substitutes(context: ToolRuntimeContext, model_refs: set[str]) -> set[str]:
     """Permit the fallback model wherever a permitted model would be swapped for it under the caller's budget."""
     substitutes = {
-        _budgeted_model(context, model_name, log_fallback=False)
+        budget_model(
+            context.config,
+            context.runtime_paths,
+            context.budget_monitor,
+            context.requester_id,
+            model_name,
+            log_fallback=False,
+        )
         for model_name in context.config.models
         if not _model_refs(context, model_name).isdisjoint(model_refs)
     }
     return model_refs.union(*(_model_refs(context, model_name) for model_name in substitutes))
 
 
+def _participant_scope(context: ToolRuntimeContext, agent_name: str) -> ModelScope:
+    return ModelScope(entity=agent_name, room_id=context.room_id, thread_id=context.resolved_thread_id)
+
+
 def _runtime_model_name(context: ToolRuntimeContext, agent_name: str) -> str:
-    return context.config.resolve_runtime_model(
-        entity_name=agent_name,
-        room_id=context.room_id,
-        thread_id=context.resolved_thread_id,
-        runtime_paths=context.runtime_paths,
+    return resolve_turn_model(
+        context.config,
+        context.runtime_paths,
+        _participant_scope(context, agent_name),
+        None,
     ).model_name
 
 

@@ -22,6 +22,7 @@ from mindroom.llm.runs import RunStatus
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.delegation_helpers import (
     ScriptedAgents,
     _deferred_call,
@@ -82,7 +83,14 @@ async def test_direct_subagent_success_keeps_real_terminal_outcome(
     entity_ids(config, paths)
     ScriptedAgents({"child": ScriptedModel([answer("Child completed the work.")])}).install(monkeypatch)
     identity = _identity()
-    toolkit = DelegateTools("leader", ["child"], paths, config, execution_identity=identity)
+    toolkit = DelegateTools(
+        "leader",
+        ["child"],
+        paths,
+        config,
+        agent_workspace_root_path(paths.storage_root, "leader"),
+        execution_identity=identity,
+    )
 
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
         result = await toolkit.run_subagent(agent_name="child", task="Do the work")
@@ -157,7 +165,14 @@ async def test_cancel_during_audit_creation_settles_record_and_receipt(  # noqa:
             execution_identity=identity,
         )
     else:
-        toolkit = DelegateTools("leader", ["child"], paths, config, execution_identity=identity)
+        toolkit = DelegateTools(
+            "leader",
+            ["child"],
+            paths,
+            config,
+            agent_workspace_root_path(paths.storage_root, "leader"),
+            execution_identity=identity,
+        )
         operation = toolkit.run_subagent(agent_name="child", task="Inspect")
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
         task = asyncio.create_task(operation)

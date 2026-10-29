@@ -30,7 +30,7 @@ from mindroom.llm.usage import MessageMetrics
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.token_budget import estimate_compaction_input_tokens
-from tests.conftest import install_model_providers, seed_session
+from tests.conftest import install_model_providers, runtime_paths_for, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
     RecordingCompactionLifecycle,
@@ -54,8 +54,9 @@ def _agent_inputs(config: Config) -> HistoryPreparationInputs:
     """Resolve the configured test agent's history inputs for a 100-token static prompt."""
     return resolve_entity_preparation_inputs(
         entity_name="test_agent",
-        history_settings=config.resolve_entity("test_agent").history_settings,
+        history_settings=config.resolve_scope("test_agent").history_settings,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         static_prompt_tokens=100,
         active_model_name=None,
         active_context_window=None,
@@ -292,8 +293,9 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
     original = deepcopy(session)
     resolved = resolve_entity_preparation_inputs(
         config=config,
+        runtime_paths=paths,
         entity_name="test_agent",
-        history_settings=config.resolve_entity("test_agent").history_settings,
+        history_settings=config.resolve_scope("test_agent").history_settings,
         static_prompt_tokens=100,
         active_model_name=None,
         active_context_window=None,

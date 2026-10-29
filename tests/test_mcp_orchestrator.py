@@ -36,6 +36,7 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
 def _config(tmp_path: Path, *, tool_name: str = "mcp_demo", command: str = "npx", required: bool = False) -> Config:
     return Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {
                 "demo": {
                     "transport": "stdio",
@@ -73,6 +74,7 @@ def _config_with_code_agent(
     external_trigger_policy: dict[str, object] | None = None,
 ) -> Config:
     payload: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "test-model"}},
         "agents": {
             "code": {
                 "display_name": "Code",
@@ -591,6 +593,7 @@ async def test_unreferenced_mcp_catalog_change_skips_response_drain(tmp_path: Pa
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {
                 "demo": {
                     "transport": "stdio",
@@ -626,6 +629,7 @@ async def test_handle_mcp_catalog_change_sets_up_rooms_before_trigger_runtime_re
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {
                 "demo": {
                     "transport": "stdio",
@@ -1187,6 +1191,7 @@ async def test_handle_mcp_catalog_change_serializes_overlapping_restarts(tmp_pat
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {
                 "demo": {
                     "transport": "stdio",
@@ -1255,6 +1260,7 @@ async def test_update_config_stops_mcp_entities_before_syncing_manager(tmp_path:
     }
     updated_config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "code": {
                     "display_name": "Code",

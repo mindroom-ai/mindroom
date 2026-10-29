@@ -40,6 +40,7 @@ def _runtime_config(
     )
     config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "assistant": {
                     "display_name": "Assistant",
@@ -74,6 +75,7 @@ def _current_room_runtime_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
     )
     config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "assistant": {
                     "display_name": "Assistant",

@@ -17,6 +17,7 @@ from mindroom.approval.tool_approval import (
 )
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.failure_text import failure_text
+from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.script_runs.models import (
     ScriptCallRecord,
     ScriptCallState,
@@ -920,13 +921,12 @@ def _validate_resolved_authority(
         execution_identity=durable_identity,
         runtime_paths=context.runtime_paths,
     )
-    expected_tool_worker_target = build_agent_toolkit_worker_target(
-        live_config.resolve_entity(context.agent_name).execution_scope,
+    expected_tool_worker_target = resolve_agent_execution(
         context.agent_name,
-        is_private=live_config.get_agent(context.agent_name).private is not None,
+        live_config,
+        context.runtime_paths,
         execution_identity=durable_identity,
-        runtime_paths=context.runtime_paths,
-    )
+    ).worker_target
     expected_durable_worker_key = (
         None
         if run.local_unsafe or expected_process_worker_target.worker_key is None

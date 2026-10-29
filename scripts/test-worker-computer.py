@@ -346,7 +346,7 @@ class Fixture:
                 self.paths,
                 runtime_config=self.config,
                 tool_config_overrides={"allow_private_networks": True},
-                worker_tools_override=["browser_mcp", "shell"],
+                runs_in_worker=True,
                 worker_target=target,
             )
             try:

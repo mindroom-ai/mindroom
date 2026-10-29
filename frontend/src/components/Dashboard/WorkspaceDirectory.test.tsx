@@ -371,46 +371,6 @@ describe("WorkspaceDirectory", () => {
     ).toBeVisible();
   });
 
-  it("shows an explicit null team model without indexing default metadata", () => {
-    seedWorkspaceDirectory({
-      config: {
-        ...config,
-        models: {
-          ...config.models,
-          default: {
-            provider: "ollama",
-            id: "qwen-reasoner",
-            display_name: "Local Reasoner",
-          },
-        },
-      },
-      teams: [{ ...teams[0], model: null }],
-    });
-    renderWorkspaceDirectory();
-
-    for (const term of [
-      "default",
-      "ollama",
-      "qwen-reasoner",
-      "LOCAL REASONER",
-    ]) {
-      fireEvent.change(screen.getByRole("searchbox"), {
-        target: { value: term },
-      });
-      expect(
-        screen.queryByRole("button", { name: /Builder Team/ }),
-      ).not.toBeInTheDocument();
-    }
-
-    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "" } });
-    const teamRow = screen.getByRole("button", { name: /Builder Team/ });
-    expect(within(teamRow).getByText(/No model set/i)).toBeVisible();
-    fireEvent.click(teamRow);
-    expect(
-      within(screen.getByRole("complementary")).getByText("No model set"),
-    ).toBeVisible();
-  });
-
   it("searches explicit team model alias, provider, ID, and display name", () => {
     seedWorkspaceDirectory({
       config: {

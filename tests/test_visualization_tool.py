@@ -96,7 +96,7 @@ def test_registry_injects_the_workspace_and_keeps_chart_schemas(
         "visualization",
         test_runtime_paths(tmp_path / "runtime"),
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         tool_output_workspace_root=workspace,
         worker_target=None,
     )

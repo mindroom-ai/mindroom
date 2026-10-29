@@ -31,6 +31,7 @@ from tests.conftest import make_conversation_reader_mock, unwrap_extracted_colla
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _plain_request
 from tests.test_agent_cli_authority import _runtime_context as _authority_runtime_context
+from tests.turn_model_helpers import turn_model
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
@@ -399,7 +400,7 @@ def test_selection_checks_effective_shell_permissions(
         identity,
         persist_runtime_state=False,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(context.config, paths, "helper"),
     )
     shell_functions = {
         function.name

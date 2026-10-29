@@ -298,7 +298,7 @@ async def test_registered_sync_tool_completes_through_the_loop(
         "coding",
         paths,
         worker_target=None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         tool_init_overrides={"base_dir": str(tmp_path)},
     )
     arguments: dict[str, object] = {"path": "input.txt"}
@@ -352,7 +352,7 @@ async def test_failed_shell_command_states_exit_code_inline_and_as_job(
         "shell",
         paths,
         worker_target=None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         tool_init_overrides={"base_dir": str(tmp_path)},
     )
     arguments: dict[str, object] = {"args": "echo partial; echo broken >&2; exit 7"}

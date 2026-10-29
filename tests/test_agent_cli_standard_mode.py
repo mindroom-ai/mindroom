@@ -34,6 +34,7 @@ from tests.minimal_agent_fixtures import ScriptedProvider, offered_tools
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
 from tests.test_agent_cli_shell_access import running_api  # noqa: F401 - pytest fixture
 from tests.tool_job_helpers import job_owner
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -326,7 +327,7 @@ def test_a_shell_that_needs_approval_gets_the_cli_only_as_a_job(tmp_path: Path, 
             agent_cli_in_shell=True,
             supports_native_tool_approval=True,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
         )
     finally:
         clear_api_server_address()
@@ -353,7 +354,7 @@ def test_a_shell_gets_the_cli_whether_or_not_it_runs_as_a_job(tmp_path: Path, *,
             agent_cli_in_shell=True,
             supports_native_tool_approval=True,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
         )
     finally:
         clear_api_server_address()
@@ -385,7 +386,7 @@ def test_cli_shell_agent_needs_a_matrix_response_turn_and_the_running_api(
             identity,
             agent_cli_in_shell=response_turn,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
         )
     finally:
         clear_api_server_address()
@@ -408,7 +409,7 @@ def test_a_subagent_gets_no_cli_of_its_own_or_its_callers(tmp_path: Path) -> Non
             agent_cli_in_shell=True,
             delegation_depth=1,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
         )
     finally:
         clear_api_server_address()

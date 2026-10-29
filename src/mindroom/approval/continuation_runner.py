@@ -111,7 +111,6 @@ from mindroom.response_runner import (
 )
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt
 from mindroom.streaming import PROGRESS_PLACEHOLDER
-from mindroom.teams.members import select_model_for_team
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.events import body_without_tool_markers
@@ -120,6 +119,7 @@ from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
     runtime_context_from_dispatch_context,
 )
+from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
@@ -1290,15 +1290,17 @@ class ApprovalContinuationRunner:
                         run_id=continuation.run_id,
                         user_id=continuation.requester_id,
                         configured_team_name=continuation.entity_name,
-                        model_name=select_model_for_team(
-                            continuation.entity_name,
-                            continuation.room_id,
+                        model_name=resolve_turn_model(
                             self.deps.runtime.config,
                             self.deps.runtime_paths,
-                            thread_id=continuation.thread_id,
-                        )
-                        if continuation.runtime_model_name is None
-                        else continuation.runtime_model_name,
+                            ModelScope(
+                                entity=continuation.entity_name,
+                                room_id=continuation.room_id,
+                                thread_id=continuation.thread_id,
+                                explicit=continuation.runtime_model_name,
+                            ),
+                            None,
+                        ).model_name,
                         decisions=decisions,
                         denial_reasons=denial_reasons,
                         refresh_scheduler=self.host.knowledge_refresh_scheduler(),

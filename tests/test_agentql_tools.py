@@ -212,7 +212,7 @@ def _tool(
             credentials_manager=credentials,
             tool_config_overrides={"agentql_query": query},
             worker_target=worker_target,
-            disable_sandbox_proxy=True,
+            runs_in_worker=False,
         ),
     )
 

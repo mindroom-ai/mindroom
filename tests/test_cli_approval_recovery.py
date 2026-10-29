@@ -89,6 +89,7 @@ from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a py
 )
 from tests.response_runner_helpers import _bot
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -107,7 +108,7 @@ def _minimal_build(runtime: ToolRuntimeContext, **options) -> AgentBuild:
         build_execution_identity_from_runtime_context(runtime),
         agent_mode="minimal",
         supports_native_tool_approval=True,
-        **({"knowledge": None, "active_model_name": None} | options),
+        **({"knowledge": None, "model": turn_model(runtime.config, runtime.runtime_paths, "helper")} | options),
     )
 
 
@@ -159,6 +160,7 @@ async def test_approval_tool_restore_requires_current_tool_search_assignment(tmp
         config=runtime.config,
         runtime_paths=runtime.runtime_paths,
         execution_identity=identity,
+        delegation_depth=0,
     )
     assert required == ("dynamic_tools",)
     runtime.config.agents["helper"].tools = ["shell"]
@@ -169,6 +171,7 @@ async def test_approval_tool_restore_requires_current_tool_search_assignment(tmp
             config=runtime.config,
             runtime_paths=runtime.runtime_paths,
             execution_identity=identity,
+            delegation_depth=0,
         )
 
 

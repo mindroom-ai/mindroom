@@ -55,7 +55,7 @@ class AgentSurface:
     minimal_instructions: tuple[str, ...] = ()
     interactive_prompt: str = ""
     skills: tuple[Skill, ...] = ()
-    output_file_policy: ToolOutputFilePolicy | None
+    output_file_policy: ToolOutputFilePolicy
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

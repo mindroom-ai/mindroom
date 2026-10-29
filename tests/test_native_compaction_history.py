@@ -33,7 +33,7 @@ from mindroom.native_compaction import checkpoint_summary, replay_basis
 from mindroom.providers.openai.responses_wire import conversation_digest
 from mindroom.providers.registry import build_model_provider
 from mindroom.session_storage.agent_storage import create_state_storage
-from tests.conftest import install_model_providers, seed_session
+from tests.conftest import install_model_providers, runtime_paths_for, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
     _completed_run,
@@ -73,8 +73,9 @@ def _inputs(config: Config) -> HistoryPreparationInputs:
     """Resolve the configured test agent's history inputs for a 100-token static prompt."""
     return resolve_entity_preparation_inputs(
         entity_name="test_agent",
-        history_settings=config.resolve_entity("test_agent").history_settings,
+        history_settings=config.resolve_scope("test_agent").history_settings,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         static_prompt_tokens=100,
         active_model_name=None,
         active_context_window=None,
@@ -630,7 +631,7 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
     prepared = await prepare_bound_scope_history(
         model=leader,
         team_name="team",
-        history_settings=config.resolve_entity("team").history_settings,
+        history_settings=config.resolve_scope("team").history_settings,
         config=config,
         runtime_paths=paths,
         scope_context=ScopeSessionContext(

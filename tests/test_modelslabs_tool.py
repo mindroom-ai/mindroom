@@ -416,7 +416,7 @@ def test_fractional_polling_settings_from_runtime_config(
             "add_to_eta": add_to_eta,
             "max_wait_time": max_wait_time,
         },
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
     )
     assert isinstance(tool, ModelsLabCompletionTools)

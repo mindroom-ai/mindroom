@@ -51,6 +51,7 @@ from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, make_turn_context
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.team_turn_helpers import collect_team_reply
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
@@ -412,7 +413,7 @@ async def pause_parent(
         history_storage=store,
         supports_native_tool_approval=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, agent_name),
     )
     session = new_scope_session(session_id=identity.session_id or "", scope_id=agent_name, is_team=False)
     request = [*prompt_for_turn(build), OwnedMessage(role="user", content=prompt)]

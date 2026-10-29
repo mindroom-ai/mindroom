@@ -10,13 +10,13 @@ from unittest.mock import MagicMock
 import pytest
 
 import mindroom.pre_model_preparation as pre_model_preparation_module
-from mindroom.config.main import ResolvedRuntimeModel
 from mindroom.memory import MemoryPromptParts
 from mindroom.pre_model_preparation import build_agent_off_loop, prepare_prompt_branches
 from mindroom.response_runner import ResponseRunner
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
+from mindroom.turn_model import TurnModel
 
-_RUNTIME_MODEL = ResolvedRuntimeModel(model_name="default", context_window=None)
+_RUNTIME_MODEL = TurnModel(model_name="default", requested_model_name="default", context_window=None, overridden=False)
 
 
 @pytest.mark.asyncio
@@ -42,7 +42,7 @@ async def test_prepare_prompt_branches_propagates_failure_directly(
             raise memory_error
         return MemoryPromptParts()
 
-    def agent_branch() -> tuple[ResolvedRuntimeModel, MagicMock]:
+    def agent_branch() -> tuple[TurnModel, MagicMock]:
         rendezvous.wait(5.0)
         if failing_branch in {"agent", "both"}:
             raise agent_error
@@ -81,7 +81,7 @@ async def test_prepare_prompt_branches_memory_failure_joins_agent_sibling() -> N
         memory_failed.set()
         raise memory_error
 
-    def blocked_agent() -> tuple[ResolvedRuntimeModel, MagicMock]:
+    def blocked_agent() -> tuple[TurnModel, MagicMock]:
         agent_started.set()
         if not agent_release.wait(5.0):
             msg = "timed out waiting to release agent construction"
@@ -135,7 +135,7 @@ async def test_prepare_prompt_branches_cancellation_discards_queued_agent_build(
         await asyncio.Event().wait()
         raise AssertionError
 
-    def queued_agent() -> tuple[ResolvedRuntimeModel, MagicMock]:
+    def queued_agent() -> tuple[TurnModel, MagicMock]:
         agent_started.set()
         return _RUNTIME_MODEL, MagicMock()
 
@@ -183,7 +183,7 @@ async def test_prepare_prompt_branches_cancellation_settles_agent_build(  # noqa
         finally:
             memory_cleaned.set()
 
-    def blocked_agent() -> tuple[ResolvedRuntimeModel, MagicMock]:
+    def blocked_agent() -> tuple[TurnModel, MagicMock]:
         agent_started.set()
         if agent_outcome == "finished":
             agent_finished.set()
@@ -251,7 +251,7 @@ async def test_blocked_agent_build_exposes_fixed_response_shutdown_phase() -> No
     async def prepared_memory() -> MemoryPromptParts:
         return MemoryPromptParts()
 
-    def blocked_agent() -> tuple[ResolvedRuntimeModel, MagicMock]:
+    def blocked_agent() -> tuple[TurnModel, MagicMock]:
         agent_started.set()
         if not agent_release.wait(5.0):
             msg = "timed out waiting to release diagnostic agent construction"
@@ -296,7 +296,7 @@ async def test_a_cancelled_off_loop_build_finishes_before_the_cancellation_propa
     agent_release = threading.Event()
     agent_finished = threading.Event()
 
-    def blocked_agent() -> tuple[ResolvedRuntimeModel, MagicMock]:
+    def blocked_agent() -> tuple[TurnModel, MagicMock]:
         agent_started.set()
         if not agent_release.wait(5.0):
             msg = "timed out waiting to release cancelled agent construction"

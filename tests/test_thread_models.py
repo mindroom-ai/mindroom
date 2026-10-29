@@ -33,6 +33,7 @@ from mindroom.thread_models import (
 )
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.turn_model import ModelScope, resolve_turn_model
 from tests.authorization_helpers import (
     isolated_membership_index,
     make_test_tool_runtime_context,
@@ -172,7 +173,7 @@ def test_store_invalidates_cached_records_when_mtime_changes(tmp_path: Path) -> 
     assert _stored_model(runtime_paths, THREAD_ID) == "default"
 
 
-def test_resolve_runtime_model_prefers_thread_override(tmp_path: Path) -> None:
+def test_resolve_turn_model_prefers_thread_override(tmp_path: Path) -> None:
     """A thread override should beat the agent's authored model."""
     config = _config_with_models(tmp_path)
     runtime_paths = runtime_paths_for(config)
@@ -184,18 +185,18 @@ def test_resolve_runtime_model_prefers_thread_override(tmp_path: Path) -> None:
         config=config,
     )
 
-    runtime_model = config.resolve_runtime_model(
-        entity_name="test_agent",
-        room_id=ROOM_ID,
-        thread_id=THREAD_ID,
-        runtime_paths=runtime_paths,
+    runtime_model = resolve_turn_model(
+        config,
+        runtime_paths,
+        ModelScope(entity="test_agent", room_id=ROOM_ID, thread_id=THREAD_ID),
+        None,
     )
 
     assert runtime_model.model_name == "large"
     assert runtime_model.context_window == 32_000
 
 
-def test_resolve_runtime_model_thread_override_beats_room_override(
+def test_resolve_turn_model_thread_override_beats_room_override(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -221,17 +222,17 @@ def test_resolve_runtime_model_thread_override_beats_room_override(
         config=config,
     )
 
-    runtime_model = config.resolve_runtime_model(
-        entity_name="test_agent",
-        room_id=ROOM_ID,
-        thread_id=THREAD_ID,
-        runtime_paths=runtime_paths,
+    runtime_model = resolve_turn_model(
+        config,
+        runtime_paths,
+        ModelScope(entity="test_agent", room_id=ROOM_ID, thread_id=THREAD_ID),
+        None,
     )
 
     assert runtime_model.model_name == "large"
 
 
-def test_resolve_runtime_model_active_model_beats_thread_override(tmp_path: Path) -> None:
+def test_resolve_turn_model_active_model_beats_thread_override(tmp_path: Path) -> None:
     """An explicit active model should beat the thread override."""
     config = _config_with_models(tmp_path)
     runtime_paths = runtime_paths_for(config)
@@ -243,18 +244,17 @@ def test_resolve_runtime_model_active_model_beats_thread_override(tmp_path: Path
         config=config,
     )
 
-    runtime_model = config.resolve_runtime_model(
-        entity_name="test_agent",
-        active_model_name="default",
-        room_id=ROOM_ID,
-        thread_id=THREAD_ID,
-        runtime_paths=runtime_paths,
+    runtime_model = resolve_turn_model(
+        config,
+        runtime_paths,
+        ModelScope(entity="test_agent", room_id=ROOM_ID, thread_id=THREAD_ID, explicit="default"),
+        None,
     )
 
     assert runtime_model.model_name == "default"
 
 
-def test_resolve_runtime_model_ignores_stale_thread_override(tmp_path: Path) -> None:
+def test_resolve_turn_model_ignores_stale_thread_override(tmp_path: Path) -> None:
     """An override naming a removed model should fall back to authored config."""
     config = _config_with_models(tmp_path)
     runtime_paths = runtime_paths_for(config)
@@ -266,17 +266,17 @@ def test_resolve_runtime_model_ignores_stale_thread_override(tmp_path: Path) -> 
         config=config,
     )
 
-    runtime_model = config.resolve_runtime_model(
-        entity_name="test_agent",
-        room_id=ROOM_ID,
-        thread_id=THREAD_ID,
-        runtime_paths=runtime_paths,
+    runtime_model = resolve_turn_model(
+        config,
+        runtime_paths,
+        ModelScope(entity="test_agent", room_id=ROOM_ID, thread_id=THREAD_ID),
+        None,
     )
 
     assert runtime_model.model_name == "default"
 
 
-def test_resolve_runtime_model_without_thread_id_keeps_authored_model(tmp_path: Path) -> None:
+def test_resolve_turn_model_without_thread_id_keeps_authored_model(tmp_path: Path) -> None:
     """Resolution without thread context should ignore thread overrides."""
     config = _config_with_models(tmp_path)
     runtime_paths = runtime_paths_for(config)
@@ -288,11 +288,7 @@ def test_resolve_runtime_model_without_thread_id_keeps_authored_model(tmp_path: 
         config=config,
     )
 
-    runtime_model = config.resolve_runtime_model(
-        entity_name="test_agent",
-        room_id=ROOM_ID,
-        runtime_paths=runtime_paths,
-    )
+    runtime_model = resolve_turn_model(config, runtime_paths, ModelScope(entity="test_agent", room_id=ROOM_ID), None)
 
     assert runtime_model.model_name == "default"
 
@@ -353,11 +349,11 @@ def test_model_command_set_and_reset(tmp_path: Path) -> None:
     assert "room-level model selection" in response
     assert _stored_model(runtime_paths, THREAD_ID) is None
     assert (
-        config.resolve_runtime_model(
-            entity_name="test_agent",
-            room_id=ROOM_ID,
-            thread_id=THREAD_ID,
-            runtime_paths=runtime_paths,
+        resolve_turn_model(
+            config,
+            runtime_paths,
+            ModelScope(entity="test_agent", room_id=ROOM_ID, thread_id=THREAD_ID),
+            None,
         ).model_name
         == "large"
     )
@@ -452,11 +448,11 @@ def test_model_command_ignores_overrides_of_removed_entities(tmp_path: Path, wri
     assert "`removed_agent`" not in model_command("")
     assert "✅" in model_command(write_args)
     assert "`removed_agent`" not in model_command("", readded_config)
-    runtime_model = readded_config.resolve_runtime_model(
-        entity_name="removed_agent",
-        room_id=ROOM_ID,
-        thread_id=THREAD_ID,
-        runtime_paths=runtime_paths,
+    runtime_model = resolve_turn_model(
+        readded_config,
+        runtime_paths,
+        ModelScope(entity="removed_agent", room_id=ROOM_ID, thread_id=THREAD_ID),
+        None,
     )
     assert runtime_model.model_name == "default"
 
@@ -541,14 +537,6 @@ def test_model_command_default_sets_model_instead_of_resetting(tmp_path: Path) -
     assert "✅" in response
     assert "`default`" in response
     assert _stored_model(runtime_paths, THREAD_ID) == "default"
-
-
-def test_resolve_runtime_model_requires_runtime_paths_for_thread_id(tmp_path: Path) -> None:
-    """Passing thread_id without runtime_paths must fail loudly, mirroring the room branch."""
-    config = _config_with_models(tmp_path)
-
-    with pytest.raises(ValueError, match="thread-specific runtime model"):
-        config.resolve_runtime_model(entity_name="test_agent", thread_id=THREAD_ID)
 
 
 def test_store_drops_records_with_corrupt_set_at(tmp_path: Path) -> None:
@@ -785,11 +773,11 @@ async def test_thread_model_tool_reports_stale_override_as_inactive() -> None:
     assert "no longer configured" in payload["note"]
     assert "room-level model selection" in payload["note"]
     assert (
-        context.config.resolve_runtime_model(
-            entity_name="test_agent",
-            room_id=ROOM_ID,
-            thread_id=THREAD_ID,
-            runtime_paths=context.runtime_paths,
+        resolve_turn_model(
+            context.config,
+            context.runtime_paths,
+            ModelScope(entity="test_agent", room_id=ROOM_ID, thread_id=THREAD_ID),
+            None,
         ).model_name
         == "large"
     )
@@ -857,11 +845,11 @@ def test_ai_run_metadata_uses_preparation_time_model(tmp_path: Path, display_nam
     config.models["default"].display_name = display_name
     config.models["large"].display_name = "Large Model"
     runtime_paths = runtime_paths_for(config)
-    prepared_model_name = config.resolve_runtime_model(
-        entity_name="test_agent",
-        room_id=ROOM_ID,
-        thread_id=THREAD_ID,
-        runtime_paths=runtime_paths,
+    prepared_model_name = resolve_turn_model(
+        config,
+        runtime_paths,
+        ModelScope(entity="test_agent", room_id=ROOM_ID, thread_id=THREAD_ID),
+        None,
     ).model_name
 
     # A mid-run switch_thread_model call persists a new override before the

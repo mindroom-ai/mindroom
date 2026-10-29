@@ -563,7 +563,7 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
-    history_settings = config.resolve_entity("test_agent").history_settings
+    history_settings = config.resolve_scope("test_agent").history_settings
     visible_runs = list(session.runs or [])
     first_summary_text = "first pass summary"
     second_summary_text = "final summary"
@@ -701,7 +701,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
         ],
     )
     seed_session(storage, session)
-    history_settings = config.resolve_entity("test_agent").history_settings
+    history_settings = config.resolve_scope("test_agent").history_settings
     visible_runs = list(session.runs or [])
     first_summary_text = "first pass summary"
     second_summary_text = "second pass summary"
@@ -847,6 +847,7 @@ async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_a
             entity_name="test_agent",
             history_settings=_ALL_HISTORY_SETTINGS,
             config=config,
+            runtime_paths=runtime_paths,
             static_prompt_tokens=0,
             active_model_name=None,
             active_context_window=None,
@@ -945,6 +946,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
             entity_name="test_agent",
             history_settings=_ALL_HISTORY_SETTINGS,
             config=config,
+            runtime_paths=runtime_paths,
             static_prompt_tokens=0,
             active_model_name=None,
             active_context_window=None,
@@ -1029,7 +1031,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     seed_session(storage, session)
-    history_settings = config.resolve_entity("test_agent").history_settings
+    history_settings = config.resolve_scope("test_agent").history_settings
     visible_runs = list(session.runs or [])
     first_summary_text = "first pass summary"
     summary_inputs: list[str] = []
@@ -1199,7 +1201,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
-    history_settings = config.resolve_entity("test_agent").history_settings
+    history_settings = config.resolve_scope("test_agent").history_settings
     visible_runs = list(session.runs or [])
     first_summary_text = "first pass summary"
 
@@ -2003,6 +2005,7 @@ async def _prepare_with_reported_usage(
             entity_name="test_agent",
             history_settings=history_settings,
             config=config,
+            runtime_paths=runtime_paths,
             static_prompt_tokens=0,
             active_model_name=None,
             active_context_window=None,

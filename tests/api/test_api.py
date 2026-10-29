@@ -3493,7 +3493,10 @@ def test_save_config(test_client: TestClient, temp_config_file: Path) -> None:
                 "config": {"model": "nomic-embed-text", "host": "http://localhost:11434"},
             },
         },
-        "models": {"default": {"provider": "openai", "id": "test-model-2"}},
+        "models": {
+            "default": {"provider": "openai", "id": "test-model-2"},
+            "ollama": {"provider": "ollama", "id": "test-model"},
+        },
         "agents": {
             "new_agent": {
                 "display_name": "New Agent",
@@ -4782,6 +4785,35 @@ def test_agent_policies_endpoint_uses_backend_policy(test_client: TestClient) ->
     }
 
 
+def test_agent_policies_endpoint_reports_draft_root_scope_and_team_eligibility(test_client: TestClient) -> None:
+    """Drafts keep their private root and scope fall-through, and each agent says why it cannot join a team."""
+    response = test_client.post(
+        "/api/config/agent-policies",
+        json={
+            "defaults": {"worker_scope": "user"},
+            "agents": {
+                "fanout": {"display_name": "Fanout", "delegate_to": ["mind", "notes", "ghost"]},
+                "caller": {"display_name": "Caller", "delegate_to": ["ghost"]},
+                "mind": {"display_name": "Mind", "private": {"per": "user_agent", "root": " workspace/mind "}},
+                "notes": {"display_name": "Notes", "private": {"knowledge": {"path": "kb"}}},
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    policies = response.json()["agent_policies"]
+    assert {name: policy["team_eligibility_reason"] for name, policy in policies.items()} == {
+        "fanout": "Delegates to private agents 'mind', 'notes', so it cannot participate in teams.",
+        "caller": None,
+        "mind": "Private agents cannot be configured as team members.",
+        "notes": "Private agents cannot be configured as team members.",
+    }
+    assert policies["mind"]["private_root"] == "workspace/mind"
+    assert policies["notes"]["scope_source"] == "defaults.worker_scope"
+    assert policies["notes"]["effective_execution_scope"] == "user"
+    assert policies["notes"]["private_knowledge_base_id"] == "__agent_private__:notes"
+
+
 def test_create_team(test_client: TestClient, temp_config_file: Path) -> None:
     """Test creating a new team."""
     test_client.post("/api/config/load")
@@ -4867,6 +4899,12 @@ def test_update_team(test_client: TestClient, temp_config_file: Path) -> None:
         "mode": "coordinate",
     }
     test_client.post("/api/config/teams", json=team_data)
+
+    model_response = test_client.put(
+        "/api/config/models/gpt-6-astra",
+        json={"provider": "openai", "id": "gpt-6-astra"},
+    )
+    assert model_response.status_code == 200
 
     # Update the team
     updated_data = {
@@ -4970,6 +5008,12 @@ def test_get_room_models(test_client: TestClient) -> None:
 def test_update_room_models(test_client: TestClient, temp_config_file: Path) -> None:
     """Test updating room-specific model overrides."""
     test_client.post("/api/config/load")
+
+    for model_name, model in {
+        "gpt-6-astra": {"provider": "openai", "id": "gpt-6-astra"},
+        "claude-sonnet-5": {"provider": "anthropic", "id": "claude-sonnet-5-5"},
+    }.items():
+        assert test_client.put(f"/api/config/models/{model_name}", json=model).status_code == 200
 
     room_models = {"lobby": "gpt-6-astra", "tech-room": "claude-sonnet-5", "general": "default"}
 

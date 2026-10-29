@@ -48,7 +48,7 @@ def chat_pairing_desktop_error(config: Config, agent_name: str) -> str | None:
     """Return why an agent cannot own requester-scoped Desktop pairing."""
     if agent_name not in config.agents:
         return "Run this command while talking directly to a configured agent."
-    if "desktop" not in config.resolve_entity(agent_name).available_tools:
+    if "desktop" not in config.resolve_agent(agent_name).tools.tool_names:
         return f"Agent '{agent_name}' does not declare the Desktop tool."
     return None
 

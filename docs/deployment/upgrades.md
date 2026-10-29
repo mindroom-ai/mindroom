@@ -8,6 +8,12 @@ Use this page when upgrading an existing deployment across a release that needs 
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
 
+## Upgrading to checked model references and per-agent workspaces
+
+A config whose agent, team, router, room, thread-summary, or enabled voice model names no model under `models` now fails to load instead of failing at the first reply, so run `mindroom config validate` before upgrading and add or rename the missing models; a config with agents and no `router.model` needs a model named `default`.
+Every agent now has its own workspace, and a shared agent whose `worker_scope` is `user` or `user_agent` works in it instead of each worker's own scratch directory, so files those workers kept in their scratch directories are no longer the agent's working directory.
+Make such an agent [`private`](../configuration/agents.md#private-instances) to keep each requester's files apart.
+
 ## Upgrading from `MCPTools` plugin toolkits
 
 MindRoom no longer runs plugin toolkits that subclass Agno `MCPTools` (see [MCP servers](../plugins.md#mcp-servers)).

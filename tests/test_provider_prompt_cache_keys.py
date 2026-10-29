@@ -20,6 +20,7 @@ from mindroom.providers.registry import build_model_provider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.identity_helpers import persist_entity_accounts
 from tests.providers.bare_adapter import bare_adapter
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -191,7 +192,7 @@ def test_materialized_agents_keep_distinct_cache_identity(
                 runtime_paths,
                 execution_identity=team_identity,
                 knowledge=None,
-                active_model_name=None,
+                model=turn_model(config, runtime_paths, name),
             ).spec.model,
         )
         for name in config.agents

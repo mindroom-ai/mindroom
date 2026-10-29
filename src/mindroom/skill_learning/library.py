@@ -271,7 +271,7 @@ def create_skill(skills_root: Path, name: str, content: str, *, reserved_names: 
         msg = f"A skill named {name!r} already exists; update it or choose a class-level name."
         raise SkillEditError(msg)
     now = datetime.now(UTC)
-    # Workspaces of shared agents without file memory exist only once something is written into them.
+    # A workspace resolved without creating it may not exist yet.
     skills_root.parent.mkdir(parents=True, exist_ok=True)
     with _open_skills_root(skills_root, create=True) as root_fd:
         # Like skill loading, any entry named SKILL.md counts, including a link.

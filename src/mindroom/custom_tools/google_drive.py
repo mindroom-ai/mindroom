@@ -183,7 +183,9 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         self.max_download_size = _DEFAULT_MAX_DOWNLOAD_SIZE if max_download_size is None else max_download_size
         if kwargs.get("download_file"):
             if tool_output_workspace_root is None:
-                logger.warning("Google Drive downloads are disabled because this agent has no workspace")
+                logger.warning(
+                    "Google Drive downloads are disabled because this toolkit was built without a workspace root",
+                )
                 kwargs["download_file"] = False
             else:
                 kwargs["download_dir"] = tool_output_workspace_root / "google-drive-downloads"

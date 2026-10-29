@@ -16,7 +16,7 @@ from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT, output_li
 from mindroom.ai import ai_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
+from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig, RouterConfig
 from mindroom.llm.errors import ModelOutputLimitError
 from mindroom.llm.messages import Message
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
@@ -135,6 +135,7 @@ def _coder_config(
             },
             defaults=DefaultsConfig(compaction=compaction),
             memory="none",
+            router=RouterConfig(model="claude"),
         ),
         test_runtime_paths(tmp_path),
     )

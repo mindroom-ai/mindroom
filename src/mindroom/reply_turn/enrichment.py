@@ -17,7 +17,6 @@ from mindroom.hooks import EnrichmentItem, render_enrichment_block
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.memory import strip_user_turn_time_prefix
 from mindroom.teams.presentation import strip_team_display
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.user_turn_time import prefix_user_turn_time
 
 if TYPE_CHECKING:
@@ -67,15 +66,6 @@ def _split_delivery_tool_trace(
         else:
             interrupted.append(trace_entry)
     return completed, interrupted
-
-
-def agent_has_matrix_messaging_tool(config: Config, agent_name: str) -> bool:
-    """Return whether one agent can issue Matrix message actions."""
-    try:
-        surface = visible_tool_surface(agent_name=agent_name, config=config)
-    except ValueError:
-        return False
-    return "matrix_message" in {entry.name for entry in surface.runtime_tool_configs}
 
 
 def _cached_room_display_name(runtime: BotRuntimeView, room_id: str) -> str | None:

@@ -372,7 +372,7 @@ Standard error is merged into standard output; redirect it with `2>file` to keep
 
 The bridge captures up to 10 MiB of output per command and reports `output_truncated: true` when more was dropped.
 Large output arrives as an encrypted Matrix attachment that the cloud tool downloads within its `timeout_seconds`.
-For agents with a workspace, MindRoom's normal [tool output files](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files) apply to large results.
+MindRoom's normal [tool output files](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files) apply to large results.
 
 ## Uncertain Outcomes
 

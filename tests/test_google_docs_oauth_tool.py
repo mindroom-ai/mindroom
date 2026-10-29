@@ -382,7 +382,7 @@ def test_google_docs_agent_config_accepts_inline_operation_flags() -> None:
         },
     )
 
-    docs_config = next(entry for entry in config.resolve_entity("writer").tool_configs if entry.name == "google_docs")
+    docs_config = next(entry for entry in config.resolve_agent("writer").tools.authored if entry.name == "google_docs")
 
     assert docs_config.tool_config_overrides == {
         "create_document": True,

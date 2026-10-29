@@ -20,6 +20,7 @@ from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.llm.errors import ProviderError
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.delegation_helpers import _call, _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls
 from tests.identity_helpers import entity_ids
@@ -281,7 +282,13 @@ async def test_participant_cannot_be_continued_outside_its_workflow(
     assert run["status"] == "completed", run
     [record] = (workflow.paths.storage_root / "subagent_sessions").glob("*.json")
     subagent_id = json.loads(record.read_text())["child"]["subagent_id"]
-    toolkit = DelegateTools("leader", ["leader"], workflow.paths, config)
+    toolkit = DelegateTools(
+        "leader",
+        ["leader"],
+        workflow.paths,
+        config,
+        agent_workspace_root_path(workflow.paths.storage_root, "leader"),
+    )
 
     with workflow.context():
         result = await toolkit.continue_subagent(subagent_id=subagent_id, message="Again")

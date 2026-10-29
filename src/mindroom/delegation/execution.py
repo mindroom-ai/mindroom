@@ -99,7 +99,6 @@ from mindroom.tool_system.output_files import (
     ToolOutputFilePolicy,
     ToolOutputFileRequest,
     finalize_tool_output_file,
-    normalize_output_path_argument,
     prepare_tool_output_file,
 )
 from mindroom.tool_system.runtime_context import current_budget_monitor, get_tool_runtime_context, tool_runtime_context
@@ -108,6 +107,7 @@ from mindroom.tool_system.worker_routing import (
     run_with_tool_execution_identity,
 )
 from mindroom.turn_continuation import continuation_decision_from_tools, stopped_calls
+from mindroom.turn_model import ModelScope, resolve_turn_model
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 logger = get_logger(__name__)
@@ -341,6 +341,7 @@ async def _execute_child(
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=identity,
+        delegation_depth=child.depth,
     )
     await settle_child_response(
         child,
@@ -371,7 +372,12 @@ async def _execute_child(
         config,
         runtime_paths,
         identity,
-        active_model_name=child.model_name,
+        model=resolve_turn_model(
+            config,
+            runtime_paths,
+            ModelScope(entity=child.child_agent_name, explicit=child.model_name),
+            None,
+        ),
         knowledge=knowledge.knowledge,
         history_storage=store,
         refresh_scheduler=refresh_scheduler,
@@ -591,7 +597,7 @@ def _prepare_delegation_output(
     identity: ToolExecutionIdentity,
     raw_path: object,
     tool_name: str,
-) -> ToolOutputFileRequest | dict[str, object] | None:
+) -> ToolOutputFileRequest | dict[str, object]:
     """Resolve the caller's output policy without scaffolding or reconciling its workspace."""
     storage = resolve_agent_storage(caller, config, runtime_paths, execution_identity=identity)
     workspace = resolve_agent_workspace_from_state_path(
@@ -601,12 +607,6 @@ def _prepare_delegation_output(
         state_storage_path=storage.state_root,
         use_state_storage_path=storage.execution.policy.private_workspace_enabled,
     )
-    if workspace is None:
-        if normalize_output_path_argument(raw_path) is not None:
-            return {
-                "mindroom_tool_output": {"status": "error", "error": "Output redirection requires an agent workspace."},
-            }
-        return None
     policy = ToolOutputFilePolicy.from_runtime(
         workspace.root,
         runtime_paths,
@@ -934,14 +934,13 @@ def _resolve_fresh_target(
         # A resumed call never rereads a profile the worker could have changed.
         return _DelegationTarget(child_name, task, model=model)
 
-    def caller_workspace_root() -> Path | None:
-        workspace = resolve_agent_runtime(
+    def caller_workspace_root() -> Path:
+        return resolve_agent_runtime(
             caller_identity.agent_name,
             config,
             runtime_paths,
             execution_identity=caller_identity,
-        ).workspace
-        return workspace.root if workspace is not None else None
+        ).workspace.root
 
     request = resolve_persona_request(
         caller_name=caller_identity.agent_name,
@@ -953,7 +952,7 @@ def _resolve_fresh_target(
         profile=args.get("profile"),
         model=model,
         minimal=bool(minimal),
-        workspace_root=caller_workspace_root() if args.get("profile") is not None else None,
+        workspace_root=caller_workspace_root,
         # The copy runs one level deeper, where delegate may no longer be offered.
         available_toolkits=lambda: caller_toolkit_names(
             caller_identity.agent_name,

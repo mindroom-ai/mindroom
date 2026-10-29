@@ -22,6 +22,7 @@ from mindroom.agents import agent_build_can_overlap_file_memory, create_agent
 from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepared_history_metadata_content
 from mindroom.approval.resume import resume_from_session
 from mindroom.budgets.pricing import model_prices
+from mindroom.config.resolution import memory_backend as agent_memory_backend
 from mindroom.delegation.execution import drive_delegation_stream
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
@@ -102,6 +103,7 @@ from mindroom.tool_system.events import (
 )
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
+from mindroom.turn_model import ModelScope, TurnModel, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -110,7 +112,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.model_loop import LoopHooks
     from mindroom.agent_loop.spec import AgentSpec
     from mindroom.approval.resume import ResumeDecisions
-    from mindroom.config.main import Config, ResolvedRuntimeModel
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
     from mindroom.history.request_messages import TurnMessages
@@ -655,7 +657,7 @@ def _memory_conversation(
         or scope_context is None
     ):
         return None
-    entity = config.resolve_entity(ctx.entity_label)
+    entity = config.resolve_scope(ctx.entity_label)
     settings = entity.history_settings
     if entity.memory_backend != "file" or not settings.replays_whole_history or not settings.automatic_compaction:
         return None
@@ -730,18 +732,17 @@ async def _prepare_agent_and_prompt(
     execution_identity = ctx.execution_identity
     pipeline_timing = ctx.pipeline_timing
 
-    def _resolve_model_and_build_agent() -> tuple[ResolvedRuntimeModel, AgentBuild]:
+    def _resolve_model_and_build_agent() -> tuple[TurnModel, AgentBuild]:
         """Resolve the runtime model and build the agent off the event loop (#1260).
 
         Both walk the filesystem per dispatch: thread-model overrides, workspace
         scaffolding, context-file reads, and session storage opens.
         """
-        runtime_model = config.resolve_runtime_model(
-            entity_name=agent_name,
-            active_model_name=ctx.active_model_name,
-            room_id=ctx.room_id,
-            thread_id=ctx.thread_id,
-            runtime_paths=runtime_paths,
+        runtime_model = resolve_turn_model(
+            config,
+            runtime_paths,
+            ModelScope(entity=agent_name, room_id=ctx.room_id, thread_id=ctx.thread_id, explicit=ctx.active_model_name),
+            None,
         )
         build = ctx.reusable_build
         if build is None:
@@ -750,7 +751,7 @@ async def _prepare_agent_and_prompt(
                 config,
                 runtime_paths,
                 history_storage=scope_context.storage if scope_context is not None else None,
-                active_model_name=runtime_model.model_name,
+                model=runtime_model,
                 knowledge=ctx.knowledge,
                 include_interactive_questions=ctx.include_interactive_questions,
                 tool_function_filter=ctx.tool_function_filter,
@@ -766,7 +767,7 @@ async def _prepare_agent_and_prompt(
             )
         return runtime_model, build
 
-    memory_backend = config.resolve_entity(agent_name).memory_backend
+    memory_backend = agent_memory_backend(config, agent_name)
     memory_conversation = _memory_conversation(ctx, config, scope_context)
     parallel_branches = memory_backend == "mem0"
     serial_reason: str | None = None

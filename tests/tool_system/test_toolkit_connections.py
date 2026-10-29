@@ -43,6 +43,7 @@ from tests.conftest import (
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.identity_helpers import persist_entity_accounts
 from tests.scripted_agent_helpers import raising, registered_toolkit, streamed_text
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -249,7 +250,7 @@ async def test_a_minimal_turn_s_catalog_connects_its_toolkits_until_it_closes(tm
             build_execution_identity_from_runtime_context(runtime),
             agent_mode="minimal",
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
         )
         session = ConversationSession(session_id=runtime.session_id, kind="agent", owner_id="helper")
         with tool_runtime_context(runtime):
@@ -305,7 +306,7 @@ def test_the_primary_does_not_connect_a_toolkit_a_worker_runs(tmp_path: Path) ->
             execution_identity=None,
             persist_runtime_state=False,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, runtime_paths, "worker"),
         )
 
     toolkits = {toolkit.name: toolkit for toolkit in build.spec.toolkits}

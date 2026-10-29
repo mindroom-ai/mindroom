@@ -1096,9 +1096,7 @@ async def _run_skill_review_fork(root: Path) -> ScenarioOutput:
     identity = await _agent_turn(turn, skill_review_capture=capture)
     assert capture.latest is not None
     skills_root = agent_workspace_skills_root(
-        turn.runtime_paths,
-        turn.agent_name,
-        workspace_root=agent_workspace_root_path(turn.runtime_paths.storage_root, turn.agent_name),
+        agent_workspace_root_path(turn.runtime_paths.storage_root, turn.agent_name),
     )
     review = review_conversation(
         config=turn.config,

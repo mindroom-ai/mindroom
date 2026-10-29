@@ -36,6 +36,7 @@ from tests.team_turn_helpers import (
     delegate,
     registered_probe,
 )
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -418,7 +419,7 @@ def test_members_built_without_a_resumable_driver_leave_out_their_approval_gated
             runtime_paths=team.runtime_paths,
             execution_identity=team.identity,
             refresh_scheduler=None,
-            active_model_names=None,
+            active_model_names={"general": turn_model(team.config, team.runtime_paths, "general").model_name},
             **kwargs,
         )
         return {name for _agent, name in tool_owners_by_agent(members.build("general", members.model_names["general"]))}

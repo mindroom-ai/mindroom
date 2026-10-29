@@ -54,6 +54,7 @@ from mindroom.teams.members import build_team_spec, resolve_team_members
 from mindroom.teams.presentation import TeamStreamPresentation, url_safe_member_id
 from mindroom.teams.spec import TeamMode
 from mindroom.timing import DispatchPipelineTiming
+from mindroom.turn_model import ModelScope, resolve_turn_model
 from tests.conftest import install_model_providers, make_visible_message, seed_session, unstored_team_scope_context
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.history_helpers import _completed_team_run, _team_session
@@ -973,7 +974,7 @@ async def test_preparing_a_team_turn_directly_recovers_an_earlier_reply_s_notice
         thread_history=[],
         config=team.config,
         runtime_paths=team.runtime_paths,
-        runtime_model=team.config.resolve_runtime_model(entity_name=None),
+        runtime_model=resolve_turn_model(team.config, team.runtime_paths, ModelScope(entity=None), None),
         response_sender_id=None,
         current_sender_id=None,
         configured_team_name=None,
