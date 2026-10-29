@@ -42,6 +42,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.matrix.durable_ingestion import validate_ingestion_batch
+from mindroom.matrix.invited_rooms_store import invited_rooms_path, remember_invited_room
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
@@ -1161,11 +1162,11 @@ async def test_room_membership_cleanup_registers_without_call_runtime(tmp_path: 
     client.add_to_device_callback.assert_not_called()
 
 
-def test_call_admission_reads_live_invites_from_managed_agents(tmp_path: Path) -> None:
-    """Call admission gets one live snapshot from each managed calls-enabled agent."""
+def test_call_admission_reads_each_call_agents_invited_room_record(tmp_path: Path) -> None:
+    """Call admission reads every calls-enabled agent's invited rooms from its own record."""
     bot = _agent_bot(tmp_path)
-    other = _agent_bot(tmp_path, agent_name="other")
-    bot.config.agents["other"] = AgentConfig(display_name="Other")
+    bot.config.agents["code"].accept_invites = True
+    bot.config.agents["other"] = AgentConfig(display_name="Other", accept_invites=True)
     bot.config.calls = CallsConfig(
         enabled=True,
         profiles={
@@ -1178,9 +1179,8 @@ def test_call_admission_reads_live_invites_from_managed_agents(tmp_path: Path) -
         },
         agents={"code": "voice", "other": "voice"},
     )
-    bot.orchestrator = MagicMock(agent_bots={"code": bot, "other": other})
-    bot._room_lifecycle.invited_rooms.add("!code-call:localhost")
-    other._room_lifecycle.invited_rooms.add("!other-call:localhost")
+    remember_invited_room(invited_rooms_path(bot.runtime_paths, "code"), "!code-call:localhost")
+    remember_invited_room(invited_rooms_path(bot.runtime_paths, "other"), "!other-call:localhost")
 
     assert bot._invited_call_rooms_by_agent() == {
         "code": frozenset({"!code-call:localhost"}),

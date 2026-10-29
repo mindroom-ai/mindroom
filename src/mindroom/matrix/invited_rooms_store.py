@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
@@ -13,6 +14,7 @@ from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.worker_routing import agent_state_root_path
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.config.access import InviteAcceptancePolicy
@@ -20,6 +22,10 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
+
+# These files are the only record of their state. Rewrites run in worker threads and in plugin code, so one lock keeps
+# two read-modify-writes from replacing each other's fresh read.
+_RECORDS_LOCK = threading.Lock()
 
 
 def invited_rooms_path(runtime_paths: RuntimePaths, agent_name: str) -> Path:
@@ -54,13 +60,24 @@ def load_invited_rooms(path: Path) -> set[str]:
     return set(cast("list[str]", raw))
 
 
-def save_invited_rooms(path: Path, room_ids: set[str]) -> bool:
-    """Replace invited rooms atomically for one eligible entity.
-
-    Callers replacing a cached set must first merge fresh durable state so a
-    stale in-memory snapshot cannot discard another runtime component's write.
-    """
+def _save_invited_rooms(path: Path, room_ids: set[str]) -> bool:
+    """Replace one entity's invited rooms atomically; read-modify-writes go through `remember_invited_room` and `forget_invited_room`."""
     return _save_json(path, sorted(room_ids))
+
+
+def _update_invited_rooms(path: Path, change: Callable[[set[str]], bool], failure_message: str) -> None:
+    """Apply one change to fresh durable state under the records lock, raising when its write fails."""
+    with _RECORDS_LOCK:
+        room_ids = load_invited_rooms(path)
+        if change(room_ids) and not _save_invited_rooms(path, room_ids):
+            raise OSError(failure_message)
+
+
+def read_invited_rooms(runtime_paths: RuntimePaths, config: Config, agent_name: str) -> frozenset[str]:
+    """Return the rooms one entity keeps across restarts because it accepted their invites."""
+    if not should_persist_invited_rooms(config, agent_name):
+        return frozenset()
+    return frozenset(load_invited_rooms(invited_rooms_path(runtime_paths, agent_name)))
 
 
 def load_pending_room_invites(path: Path) -> dict[str, str]:
@@ -83,9 +100,22 @@ def load_pending_room_invites(path: Path) -> dict[str, str]:
     return raw
 
 
-def save_pending_room_invites(path: Path, pending_invites: dict[str, str]) -> bool:
+def _save_pending_room_invites(path: Path, pending_invites: dict[str, str]) -> bool:
     """Atomically replace one agent's outstanding room invites, keeping them oldest first."""
     return _save_json(path, pending_invites)
+
+
+def update_pending_room_invites(
+    path: Path,
+    change: Callable[[dict[str, str]], bool],
+    failure_message: str,
+) -> dict[str, str]:
+    """Apply one change to fresh durable state under the records lock, returning the state it leaves."""
+    with _RECORDS_LOCK:
+        pending_invites = load_pending_room_invites(path)
+        if change(pending_invites) and not _save_pending_room_invites(path, pending_invites):
+            raise OSError(failure_message)
+        return pending_invites
 
 
 def _save_json(path: Path, value: object) -> bool:
@@ -107,14 +137,27 @@ def _save_json(path: Path, value: object) -> bool:
 
 
 def remember_invited_room(path: Path, room_id: str) -> None:
-    """Add one room using fresh durable state."""
-    room_ids = load_invited_rooms(path)
-    if room_id in room_ids:
-        return
-    room_ids.add(room_id)
-    if not save_invited_rooms(path, room_ids):
-        msg = f"Failed to retain invited room {room_id}"
-        raise OSError(msg)
+    """Keep one room across restarts."""
+
+    def remember(room_ids: set[str]) -> bool:
+        if room_id in room_ids:
+            return False
+        room_ids.add(room_id)
+        return True
+
+    _update_invited_rooms(path, remember, f"Failed to retain invited room {room_id}")
+
+
+def forget_invited_room(path: Path, room_id: str) -> None:
+    """Stop keeping one room across restarts."""
+
+    def forget(room_ids: set[str]) -> bool:
+        if room_id not in room_ids:
+            return False
+        room_ids.discard(room_id)
+        return True
+
+    _update_invited_rooms(path, forget, f"Failed to forget invited room {room_id}")
 
 
 def _invite_acceptance_policy(config: Config, agent_name: str) -> InviteAcceptancePolicy | None:

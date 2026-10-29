@@ -430,7 +430,7 @@ async def test_invite_authorization_is_rechecked_after_membership_waits(
             release.set()
             await asyncio.wait_for(task, 2)
             request.assert_not_awaited()
-            assert room.room_id not in bot._room_lifecycle.invited_rooms
+            assert room.room_id not in bot._room_lifecycle.invited_room_ids()
             assert not bot._room_lifecycle.decrypt_notice_is_fenced(room.room_id)
         finally:
             release.set()
@@ -482,7 +482,7 @@ async def test_joined_invitation_recovers_without_an_invite_cache(
         assert await bot._room_lifecycle._rooms_to_leave() == ([] if policy_allows_recovery else [room.room_id])
         welcome.assert_not_awaited()
         await bot._room_lifecycle.reconcile_pending_invites()
-        assert (room.room_id in bot._room_lifecycle.invited_rooms) is policy_allows_recovery
+        assert (room.room_id in bot._room_lifecycle.invited_room_ids()) is policy_allows_recovery
         assert welcome.await_count == int(policy_allows_recovery)
         assert (room.room_id not in _pending_room_invites(config, ROUTER_AGENT_NAME)) is policy_allows_recovery
         request.assert_not_awaited()

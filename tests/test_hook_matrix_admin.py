@@ -561,8 +561,31 @@ async def test_hook_matrix_admin_created_room_survives_lifecycle_cleanup(
 
     await bot.leave_unconfigured_rooms()
 
-    assert bot._room_lifecycle.invited_rooms == {"!private:localhost"}
+    assert bot._room_lifecycle.invited_room_ids() == {"!private:localhost"}
     assert left_room_ids == ["!old:localhost"]
+
+
+def test_a_room_a_plugin_retains_for_the_running_router_owns_its_approvals_at_once(tmp_path: Path) -> None:
+    """Approval transport sees a retained room as soon as it is retained, not at the next room setup."""
+    module = _matrix_admin_module()
+    config = _private_room_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    router_id = entity_ids(config, runtime_paths)[ROUTER_AGENT_NAME].full_id
+    bot = make_test_agent_bot(
+        agent_user=_router_user(router_id),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths,
+        rooms=[],
+    )
+    assert "!private:localhost" not in bot.approval_room_ids
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = router_id
+    admin = module.build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
+
+    admin.retain_room("!private:localhost")
+
+    assert "!private:localhost" in bot.approval_room_ids
 
 
 def test_hook_matrix_admin_retention_preserves_other_rooms(tmp_path: Path) -> None:
@@ -594,7 +617,7 @@ def test_hook_matrix_admin_retention_surfaces_storage_failure(tmp_path: Path) ->
     admin = module.build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
 
     with (
-        patch("mindroom.matrix.invited_rooms_store.save_invited_rooms", return_value=False),
+        patch("mindroom.matrix.invited_rooms_store._save_invited_rooms", return_value=False),
         pytest.raises(OSError, match="retain invited room"),
     ):
         admin.retain_room("!private:localhost")

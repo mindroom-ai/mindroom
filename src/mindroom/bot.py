@@ -48,6 +48,7 @@ from mindroom.matrix.health import (
     mark_matrix_sync_loop_started,
     mark_matrix_sync_success,
 )
+from mindroom.matrix.invited_rooms_store import read_invited_rooms
 from mindroom.matrix.personal_rooms import PersonalRoomService
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
@@ -1065,7 +1066,7 @@ class AgentBot:
     def approval_room_ids(self) -> frozenset[str]:
         """Return configured and durably invited rooms owned by approval transport."""
         return frozenset(
-            room_id for room_id in (*self.rooms, *self._room_lifecycle.invited_rooms) if room_id.startswith("!")
+            room_id for room_id in (*self.rooms, *self._room_lifecycle.invited_room_ids()) if room_id.startswith("!")
         )
 
     async def current_joined_room_ids(self) -> frozenset[str] | None:
@@ -1703,18 +1704,11 @@ class AgentBot:
         )
 
     def _invited_call_rooms_by_agent(self) -> dict[str, frozenset[str]]:
-        """Return live accepted-invite state for the configured call agents."""
-        orchestrator = self.orchestrator
-        if orchestrator is None:
-            return {self.agent_name: frozenset(self._room_lifecycle.invited_rooms)}
-        agent_bots = orchestrator.agent_bots
-
-        invited_rooms: dict[str, frozenset[str]] = {}
-        for agent_name in self.config.calls.agents:
-            bot = agent_bots.get(agent_name)
-            if bot is not None:
-                invited_rooms[agent_name] = frozenset(bot._room_lifecycle.invited_rooms)
-        return invited_rooms
+        """Return the accepted-invite rooms of each configured call agent."""
+        config = self.config
+        return {
+            agent_name: read_invited_rooms(self.runtime_paths, config, agent_name) for agent_name in config.calls.agents
+        }
 
     def _desktop_controller_identity(self, entity_name: str) -> DesktopControllerIdentity:
         """Resolve a Desktop pin through the current live-bot ownership boundary."""
