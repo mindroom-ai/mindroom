@@ -16,8 +16,11 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.media import image_mime_type
 from mindroom.providers.media_files import (
+    file_bytes,
     file_mime_type,
+    file_name,
     file_text,
+    has_file_bytes,
     is_text_mime_type,
     read_media_bytes,
     unreadable_file_note,
@@ -144,41 +147,25 @@ def chat_audio_part(audio: Audio, *, provider: str) -> dict[str, Any] | None:
     }
 
 
-def _has_bytes(file: File) -> bool:
-    return file.filepath is not None or file.content is not None
-
-
-def _content_bytes(file: File, provider: str) -> bytes | None:
-    """Return a file's bytes, or None for a file without any or an empty local file."""
-    if file.filepath is not None:
-        return read_media_bytes(file.filepath, kind="file", provider=provider)
-    return file.content.encode("utf-8") if isinstance(file.content, str) else file.content
-
-
-def _file_part_name(file: File, fallback: str) -> str:
-    """Return the name a file part carries: the attachment's original filename, else its stored file's name."""
-    return file.filename or file.name or (Path(file.filepath).name if file.filepath else None) or fallback
-
-
 def chat_file_part(file: File, *, provider: str) -> dict[str, Any] | None:
     """Return a Chat Completions ``file`` part for a PDF, a text part for a text file, or None.
 
     A text file goes as its text (``file_text``), and a file of another type as a text part noting it. None is for a
     file without bytes or an empty local file. A file part is named and typed as a Responses file part is.
     """
-    if not _has_bytes(file):
+    if not has_file_bytes(file):
         return None
     mime_type = file_mime_type(file)
     text_file = is_text_mime_type(mime_type)
     if mime_type != _PDF and not text_file:
         return {"type": "text", "text": unreadable_file_note(file, mime_type)}
-    if (data := _content_bytes(file, provider)) is None:
+    if (data := file_bytes(file, provider=provider)) is None:
         return None
     if text_file:
         return {"type": "text", "text": file_text(data)}
     return {
         "type": "file",
-        "file": {"filename": _file_part_name(file, "file"), "file_data": _data_url(mime_type, data)},
+        "file": {"filename": file_name(file, "file"), "file_data": _data_url(mime_type, data)},
     }
 
 
@@ -190,15 +177,15 @@ def responses_file_part(file: File, *, provider: str) -> dict[str, Any] | None:
     """
     if file.url:
         return {"type": "input_file", "file_url": file.url}
-    if not _has_bytes(file):
+    if not has_file_bytes(file):
         return None
     mime_type = file_mime_type(file)
     if mime_type not in _RESPONSES_FILE_TYPES and not mime_type.startswith("text/"):
         return {"type": "input_text", "text": unreadable_file_note(file, mime_type)}
-    if (data := _content_bytes(file, provider)) is None:
+    if (data := file_bytes(file, provider=provider)) is None:
         return None
     return {
         "type": "input_file",
-        "filename": _file_part_name(file, "document"),
+        "filename": file_name(file, "document"),
         "file_data": _data_url(mime_type, data),
     }

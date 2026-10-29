@@ -21,8 +21,11 @@ if TYPE_CHECKING:
     from mindroom.llm.media import File
 
 __all__ = [
+    "file_bytes",
     "file_mime_type",
+    "file_name",
     "file_text",
+    "has_file_bytes",
     "is_text_mime_type",
     "read_media_bytes",
     "read_media_file",
@@ -80,6 +83,26 @@ def read_media_bytes(path: str | Path, *, kind: str, provider: str) -> bytes | N
     return None if read is None else read[1]
 
 
+def file_name(file: File, fallback: str) -> str:
+    """Return the name a file goes by: its original filename, else its stored file's name, else ``fallback``.
+
+    A stored attachment file's name holds the attachment ID.
+    """
+    return file.filename or file.name or (PurePosixPath(file.filepath).name if file.filepath else None) or fallback
+
+
+def has_file_bytes(file: File) -> bool:
+    """Return whether a file carries bytes to send, as a local file or content, rather than only an id or a URL."""
+    return file.filepath is not None or file.content is not None
+
+
+def file_bytes(file: File, *, provider: str) -> bytes | None:
+    """Return a file's bytes, or None for a file without any or an empty local file (``read_media_file``)."""
+    if file.filepath is not None:
+        return read_media_bytes(file.filepath, kind="file", provider=provider)
+    return file.content.encode("utf-8") if isinstance(file.content, str) else file.content
+
+
 def file_mime_type(file: File) -> str:
     """Return a file's type: its declared one, else the one its original filename names, then its stored path or URL.
 
@@ -90,7 +113,7 @@ def file_mime_type(file: File) -> str:
     declared = canonical_mime_type(file.mime_type)
     if declared is not None and declared != _OCTET_STREAM:
         return declared
-    names = (file.filename or file.name, file.filepath, url_file_name(file.url) if file.url else None)
+    names = (file_name(file, ""), file.filepath, url_file_name(file.url) if file.url else None)
     return next((named for name in names if name and (named := named_mime_type(name)) is not None), _OCTET_STREAM)
 
 
@@ -109,12 +132,8 @@ def file_text(data: bytes) -> str:
 
 
 def unreadable_file_note(file: File, mime_type: str) -> str:
-    """Return the text a wire sends instead of a file of ``mime_type``, a type its API does not read.
-
-    The note names the file by its original filename, else its stored file's name, which holds the attachment ID.
-    """
-    name = file.filename or file.name or (PurePosixPath(file.filepath).name if file.filepath else None) or "file"
+    """Return the text a wire sends instead of a file of ``mime_type``, a type its API does not read."""
     return (
-        f"[Attachment omitted: {name} ({mime_type}) is a file type this model cannot read. Its content was not "
+        f"[Attachment omitted: {file_name(file, 'file')} ({mime_type}) is a file type this model cannot read. Its content was not "
         "inspected. Use get_attachment without view to inspect or save it, then use other available tools.]"
     )

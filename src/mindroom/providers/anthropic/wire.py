@@ -25,8 +25,10 @@ from mindroom.providers.anthropic.repairs import replay_safe_blocks
 from mindroom.providers.anthropic.stored_turns import replayed_blocks
 from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY, as_dict
 from mindroom.providers.media_files import (
+    file_bytes,
     file_mime_type,
     file_text,
+    has_file_bytes,
     is_text_mime_type,
     read_media_bytes,
     unreadable_file_note,
@@ -274,17 +276,13 @@ def _document_block(file: File, provider: str) -> dict[str, Any] | None:
 
     None is for a file without bytes or an empty local file; a file noted is never read.
     """
-    if file.filepath is None and file.content is None:
+    if not has_file_bytes(file):
         return None
     media_type = file_mime_type(file)
     text = is_text_mime_type(media_type)
     if not text and media_type != _PDF:
         return {"type": "text", "text": unreadable_file_note(file, media_type)}
-    if file.filepath is not None:
-        data = read_media_bytes(file.filepath, kind="file", provider=provider)
-    else:
-        data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content
-    if data is None:
+    if (data := file_bytes(file, provider=provider)) is None:
         return None
     if text:
         # The text document source accepts only text/plain; every text type is sent as plain text.
