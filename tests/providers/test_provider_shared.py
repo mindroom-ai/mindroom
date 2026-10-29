@@ -211,6 +211,46 @@ def test_a_payment_required_status_fails_at_once_as_a_billing_stop(
 
 
 @pytest.mark.parametrize(
+    ("code", "message", "expected", "marker"),
+    [
+        ("1113", "Insufficient balance or no resource package. Please recharge.", ProviderError, QUOTA_EXHAUSTED),
+        (
+            "1309",
+            "Your GLM Coding Plan package has expired and is temporarily unavailable. You can resume using it after "
+            "renewing the subscription on the official website. https://z.ai/subscribe",
+            ProviderError,
+            QUOTA_EXHAUSTED,
+        ),
+        # A limit that resets stays a rate limit, even once no balance or spend limit is left for extra usage.
+        (
+            "1316",
+            "Usage limit reached for the past 5 hours. Insufficient balance for extra usage. Resets at 2026-10-29 18:00:00.",
+            RateLimited,
+            None,
+        ),
+        (
+            "1321",
+            "Usage limit reached for the past 7 days. Extra usage is not available due to monthly spend limit. Resets at "
+            "2026-11-02 09:00:00.",
+            RateLimited,
+            None,
+        ),
+        ("1302", "Rate limit reached for requests", RateLimited, None),
+    ],
+)
+def test_a_z_ai_429_whose_code_says_the_account_cannot_pay_fails_at_once(
+    code: str,
+    message: str,
+    expected: type[ProviderError],
+    marker: str | None,
+) -> None:
+    """Z.ai sends every refusal of its account with a 429, and only its business code tells which a wait lets through."""
+    error = classify_provider_error(message, provider="ZAI", status_code=429, code=code)
+
+    assert (type(error), error.code, error.provider_code) == (expected, marker, code)
+
+
+@pytest.mark.parametrize(
     ("message", "code", "error_type", "expected"),
     [
         ("Slow down", None, "rate_limit_error", RateLimited),

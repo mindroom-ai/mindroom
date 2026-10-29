@@ -1078,6 +1078,22 @@ _DEEPSEEK_CASES = [
         code=QUOTA_EXHAUSTED,
     ),
 ]
+# Z.ai answers an account without balance or resource package with a 429 that only its business code tells apart from
+# a rate limit.
+_ZAI_NO_BALANCE = _json(
+    429,
+    {"error": {"code": "1113", "message": "Insufficient balance or no resource package. Please recharge."}},
+)
+_ZAI_CASES = [
+    _Case(
+        "http_429_insufficient_balance",
+        _ZAI_NO_BALANCE,
+        ProviderError,
+        f"{ERROR}Insufficient balance or no resource package",
+        1,
+        code=QUOTA_EXHAUSTED,
+    ),
+]
 
 _RESPONSES_CASES = [
     *_OPENAI_HTTP_CASES,
@@ -1454,7 +1470,7 @@ _BEDROCK_CASES = [
 
 # Vertex AI Claude, Bedrock Claude, and Vertex AI Gemini fail exactly as their family's direct route does, so they
 # run every row of that family; the other OpenAI-compatible Chat routes run the shared Chat rows, and Bedrock,
-# llama.cpp, OpenRouter, and DeepSeek their own wording or bodies too.
+# llama.cpp, OpenRouter, DeepSeek, and Z.ai their own wording or bodies too.
 ROWS = [
     *_rows("anthropic", _CLAUDE_CASES),
     *_rows("vertexai_claude", _CLAUDE_CASES),
@@ -1469,6 +1485,7 @@ ROWS = [
     *_rows("llama_cpp", _LLAMA_CPP_CASES),
     *_rows("openrouter", _OPENROUTER_CASES),
     *_rows("deepseek", _DEEPSEEK_CASES),
+    *_rows("zai", _ZAI_CASES),
     *_rows("openai_responses", _RESPONSES_CASES),
     *_rows("codex", _RESPONSES_CASES),
     *_rows("gemini", _GEMINI_CASES),
@@ -1507,6 +1524,7 @@ _BILLING_STOPS: dict[str, Reply] = {
     **dict.fromkeys(ROUTE_CONFIGS, _claude_status(400, "invalid_request_error", _CLAUDE_CREDIT_TOO_LOW)),
     "openrouter": _OPENROUTER_NO_CREDIT,
     "deepseek": _DEEPSEEK_NO_BALANCE,
+    "zai": _ZAI_NO_BALANCE,
 }
 
 
