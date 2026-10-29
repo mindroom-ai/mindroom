@@ -23,7 +23,7 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
   Runners outlive their owner's restarts instead of being cancelled and restored, because a restore races the replacement's own restore on join and a cancelled send has no safe replay; a stopping owner admits no new operation and its operations in flight drain, bounded, before its client closes.
 - A removed entity's scheduled tasks fail; they are never handed to another bot.
   The maintainer decided this: removal is deliberate, and a reminder that silently starts posting as a different agent, with that agent's room access, is worse than one that stops and says why.
-  The removed bot fails them while it still has its client, before it leaves its rooms, so it can explain in each task's thread; restarts never fail a task.
+  The removed bot fails every pending task it owns in the rooms it joined, running or not, while it still has its client and before it leaves its rooms, so it can explain in each task's thread; restarts never fail a task.
 - Under `mindroom run` the runtime loads each edit once and publishes that load to the embedded dashboard before it waits for any response drain, and also while MindRoom starts, before it can apply anything.
   A dashboard save rewrites the whole file from the config the dashboard holds, so a dashboard that lagged behind the file for a drain would erase the edit.
 
@@ -50,7 +50,6 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 - An edit made while MindRoom starts is loaded once for the dashboard after the reload debounce and again when startup applies it, because keeping the first load for later would need its own check that nothing superseded it.
 - A homeserver that does not answer within the stop budget while an agent is removed leaves that agent's unsettled schedules pending, or failed without their notice; withdrawing a scheduled tool call's approval card that is already sending still finishes first, because a started journal delivery always completes.
   A pending one fails only when a bot that may write schedule state restores its room later, which never happens in the removed agent's own DMs.
-- A one-time schedule whose final status write fails after it fired stays pending, as on main; removing its agent later neither fails it nor posts the removal notice, since only running schedules are settled at removal.
 - A schedule edit saved while its agent restarts, in the seconds before the schedule fires, can be overwritten: the runner fires the version it read before the restart and then writes its status over the edit, as on main within the milliseconds between its read and its send.
 - A removed entity that leaves no room, because its frozen FINAL recovery is still unresolved or it never started, is removed from its rooms by the next router start's orphan cleanup.
 - A file edit made while another reload applies, or a second file edit made while an MCP catalog restart drains responses, reaches the dashboard only after that step; a dashboard save in that window overwrites it.

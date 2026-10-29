@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -35,6 +35,7 @@ from tests.scheduling_helpers import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -296,26 +297,63 @@ async def test_status_write_cut_off_by_its_owners_stop_is_written_again_by_the_r
     assert writers == [old_bot.client, new_bot.client]
 
 
+def _serve_owned_tasks(client: AsyncMock, workflow: ScheduledWorkflow, rooms: dict[str, dict[str, str]]) -> None:
+    """Join ``client`` to each room, whose full state holds one pending task per task ID and owner given for it."""
+    content = {"workflow": workflow.model_dump_json(), "status": "pending"}
+    client.rooms = dict.fromkeys(rooms, MagicMock())
+    states = {
+        room_id: nio.RoomGetStateResponse.from_dict(
+            [
+                scheduled_task_state_event(
+                    task_id,
+                    {**content, "task_id": task_id, "owner": owner_id},
+                    room_id=room_id,
+                    sender=owner_id,
+                )
+                for task_id, owner_id in owners.items()
+            ],
+            room_id=room_id,
+        )
+        for room_id, owners in rooms.items()
+    }
+    client.room_get_state = AsyncMock(side_effect=lambda room_id: states[room_id])
+
+
+def _pending_record(workflow: ScheduledWorkflow) -> Callable[..., Awaitable[ScheduledTaskRecord]]:
+    async def read(_client: object, _room_id: str, task_id: str, _paths: object) -> ScheduledTaskRecord:
+        return ScheduledTaskRecord(task_id, ROOM_ID, "pending", None, workflow)
+
+    return read
+
+
 @pytest.mark.asyncio
-async def test_removed_agent_fails_its_tasks_and_says_so_where_they_post(tmp_path: Path) -> None:
-    """A removed agent's tasks are never handed to another bot: each ends, fails, and the agent explains why."""
-    config, runtime_paths, _ids = _config_and_ids(tmp_path)
-    removed_bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
-    router_bot = scheduling_bot(_client("@router:localhost"))
+async def test_removed_agent_fails_every_pending_task_it_owns_and_says_so_where_they_post(tmp_path: Path) -> None:
+    """A removed agent's tasks are never handed to another bot, and one without a running runner fails too."""
+    config, runtime_paths, ids = _config_and_ids(tmp_path)
+    removed_bot = scheduling_bot(_client(ids["general"]), agent_name="general")
+    router_bot = scheduling_bot(_client(ids["router"]))
     runtime = _runtime(runtime_paths, config, _Bots(general=removed_bot, router=router_bot))
     workflow = _workflow(due=False)
-    router_workflow = workflow.model_copy(update={"description": "Router task"})
+    # "idle_task" has no runner in a room the agent joined, as when a restart's restore was cut short by this reload.
+    _serve_owned_tasks(
+        removed_bot.client,
+        workflow,
+        {
+            ROOM_ID: {TASK_ID: ids["general"], "router_task": ids["router"]},
+            "!idle:localhost": {"idle_task": ids["general"]},
+        },
+    )
 
     async def wait_forever(*_args: object) -> None:
         await asyncio.Event().wait()
 
     with patch.object(scheduling_runtime._TaskRunner, "run_once", wait_forever):
         assert runtime._start_runner("general", TASK_ID, workflow)
-        assert runtime._start_runner("router", "router_task", router_workflow)
+        assert runtime._start_runner("router", "router_task", workflow)
     _runner, removed_task = runtime._runners[TASK_ID]
 
     with (
-        patch("mindroom.scheduling.runtime._get_pending_task_record", new=AsyncMock(return_value=_record(workflow))),
+        patch("mindroom.scheduling.runtime._get_pending_task_record", new=_pending_record(workflow)),
         patch("mindroom.scheduling.runtime._save_task_status", new=AsyncMock()) as save_status,
         patch("mindroom.scheduling.executor.send_scheduled_failure_notice", new=AsyncMock()) as notice,
     ):
@@ -323,11 +361,10 @@ async def test_removed_agent_fails_its_tasks_and_says_so_where_they_post(tmp_pat
 
     assert removed_task.cancelled()
     assert list(runtime._runners) == ["router_task"]
-    save_status.assert_awaited_once()
-    assert save_status.await_args.args[0] is removed_bot.client
-    assert save_status.await_args.args[2] == "failed"
-    notice.assert_awaited_once()
-    assert notice.await_args.args[0] is removed_bot.client
+    assert sorted(call.args[1].task_id for call in save_status.await_args_list) == ["idle_task", TASK_ID]
+    assert all(call.args[0] is removed_bot.client and call.args[2] == "failed" for call in save_status.await_args_list)
+    assert notice.await_count == 2
+    assert all(call.args[0] is removed_bot.client for call in notice.await_args_list)
     assert notice.await_args.args[2].resolved_thread_id == "$thread"
     assert "cancelled because its agent was removed" in notice.await_args.args[3]
     await runtime.stop()
@@ -336,23 +373,18 @@ async def test_removed_agent_fails_its_tasks_and_says_so_where_they_post(tmp_pat
 @pytest.mark.asyncio
 async def test_removal_settles_every_task_within_one_bound_however_many_the_agent_owns(tmp_path: Path) -> None:
     """Ordinary homeserver latency per task must not leave a removed agent's later tasks pending without a notice."""
-    config, runtime_paths, _ids = _config_and_ids(tmp_path)
-    removed_bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
+    config, runtime_paths, ids = _config_and_ids(tmp_path)
+    removed_bot = scheduling_bot(_client(ids["general"]), agent_name="general")
     runtime = _runtime(runtime_paths, config, _Bots(general=removed_bot))
     workflow = _workflow(due=False)
     task_ids = [f"task_{index}" for index in range(4)]
+    _serve_owned_tasks(removed_bot.client, workflow, {ROOM_ID: dict.fromkeys(task_ids, ids["general"])})
+    read = _pending_record(workflow)
 
-    async def wait_forever(*_args: object, **_kwargs: object) -> None:
-        await asyncio.Event().wait()
-
-    with patch.object(scheduling_runtime._TaskRunner, "run_once", wait_forever):
-        for task_id in task_ids:
-            assert runtime._start_runner("general", task_id, workflow)
-
-    async def slow_read(_client: object, _room_id: str, task_id: str, _paths: object) -> object:
+    async def slow_read(client: object, room_id: str, task_id: str, paths: object) -> ScheduledTaskRecord:
         # Each settlement takes well over a quarter of the bound, so settling one after another would overrun it.
         await asyncio.sleep(0.15)
-        return ScheduledTaskRecord(task_id, ROOM_ID, "pending", None, workflow)
+        return await read(client, room_id, task_id, paths)
 
     with (
         patch.object(scheduling_runtime, "SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.4),

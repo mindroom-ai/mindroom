@@ -137,18 +137,32 @@ class ScheduledTaskRuntime:
             logger.info("restored_scheduled_tasks", agent=bot.agent_name, room_id=room_id, restored_task_count=restored)
         return restored
 
-    async def _restore_room(self, bot: _Bot, client: nio.AsyncClient, room_id: str) -> int:
+    async def _room_pending_tasks(
+        self,
+        client: nio.AsyncClient,
+        room_id: str,
+    ) -> tuple[nio.MatrixRoom, list[tuple[ScheduledTaskRecord, str, str | None]]] | None:
+        """Return a room's full-state view and each pending task with its owner's Matrix ID and entity name."""
         response = await client.room_get_state(room_id)
         if not isinstance(response, nio.RoomGetStateResponse):
-            return 0
-        config = self._config()
-        registry = entity_identity_registry(config, self.runtime_paths)
+            return None
+        registry = entity_identity_registry(self._config(), self.runtime_paths)
         router_id = registry.current_id(ROUTER_AGENT_NAME).full_id
         room = room_from_state(room_id, client.user_id, response.events)
-        restored = 0
+        tasks: list[tuple[ScheduledTaskRecord, str, str | None]] = []
         for task, writer_id in task_records_with_writers(room_id, response, self.runtime_paths):
             owner_id = task.owner_id or legacy_task_owner(room, task.workflow, sender=writer_id, router_id=router_id)
-            owner = registry.current_entity_name_for_user_id(owner_id)
+            tasks.append((task, owner_id, registry.current_entity_name_for_user_id(owner_id)))
+        return room, tasks
+
+    async def _restore_room(self, bot: _Bot, client: nio.AsyncClient, room_id: str) -> int:
+        read = await self._room_pending_tasks(client, room_id)
+        if read is None:
+            return 0
+        room, tasks = read
+        config = self._config()
+        restored = 0
+        for task, owner_id, owner in tasks:
             if owner is None:
                 if not room.power_levels.can_user_send_state(client.user_id, SCHEDULED_TASK_EVENT_TYPE):
                     logger.warning(
@@ -199,12 +213,13 @@ class ScheduledTaskRuntime:
         return self._start_runner(bot.agent_name, task.task_id, workflow)
 
     async def fail_removed(self, entity_names: set[str]) -> None:
-        """Fail every task an entity removed from the config owns, while its bot still has its client.
+        """Fail every pending task an entity removed from the config owns, while its bot still has its client.
 
-        A removed entity's tasks are never handed to another bot: each runner
-        ends, its task is marked failed, and the removed bot says so where the
-        task posts. The reload waits here with response admission closed, so
-        all tasks settle concurrently within the stop budget; a homeserver that
+        A removed entity's tasks are never handed to another bot: its runners
+        end, and every pending task it owns in the rooms it joined, running or
+        not, is marked failed while the removed bot says so where the task
+        posts. The reload waits here with response admission closed, so all
+        rooms settle concurrently within the stop budget; a homeserver that
         stalls past it leaves the rest pending or failed without their notice.
         """
         removed = {
@@ -215,23 +230,44 @@ class ScheduledTaskRuntime:
             task.cancel()
         await asyncio.gather(*cancelled, return_exceptions=True)
         bots = self.bots()
-        settled: set[str] = set()
-
-        async def settle(task_id: str, runner: _TaskRunner) -> None:
-            bot = bots.get(runner.owner)
+        rooms: list[tuple[str, _Bot, str]] = []
+        for name in sorted(entity_names):
+            runner_rooms = {runner.room_id for runner in removed.values() if runner.owner == name}
+            bot = bots.get(name)
             if bot is None or bot.client is None:
-                logger.warning("scheduled_task_of_removed_owner_left_pending", task_id=task_id, owner=runner.owner)
-            else:
-                await self._fail_owner_removed_task(bot, runner.room_id, task_id, runner.owner)
-            settled.add(task_id)
+                if runner_rooms:
+                    logger.warning(
+                        "scheduled_tasks_of_removed_owner_left_pending",
+                        owner=name,
+                        room_ids=sorted(runner_rooms),
+                    )
+                continue
+            rooms.extend((name, bot, room_id) for room_id in sorted(runner_rooms | set(bot.client.rooms)))
+        settled: set[tuple[str, str]] = set()
+
+        async def settle(name: str, bot: _Bot, room_id: str) -> None:
+            client = bot.client
+            assert client is not None
+            try:
+                read = await self._room_pending_tasks(client, room_id)
+            except Exception:
+                logger.exception("scheduled_tasks_of_removed_owner_unread", owner=name, room_id=room_id)
+                read = None
+            owned = [
+                (task, owner_id) for task, owner_id, owner in (read[1] if read is not None else ()) if owner == name
+            ]
+            await asyncio.gather(
+                *(self._fail_owner_removed_task(bot, room_id, task.task_id, owner_id) for task, owner_id in owned),
+            )
+            settled.add((name, room_id))
 
         try:
             async with asyncio.timeout(SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS):
-                await asyncio.gather(*(settle(task_id, runner) for task_id, runner in sorted(removed.items())))
+                await asyncio.gather(*(settle(name, bot, room_id) for name, bot, room_id in rooms))
         except TimeoutError:
             logger.warning(
                 "scheduled_tasks_of_removed_owner_unsettled",
-                task_ids=sorted(removed.keys() - settled),
+                rooms=sorted(f"{name} {room_id}" for name, _bot, room_id in rooms if (name, room_id) not in settled),
                 timeout_seconds=SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS,
             )
 
