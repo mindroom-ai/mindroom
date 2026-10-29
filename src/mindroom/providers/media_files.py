@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from mindroom.llm.media import File
 
 __all__ = [
+    "OPENAI_TEXT_TYPES",
     "file_bytes",
     "file_mime_type",
     "file_name",
@@ -35,11 +36,9 @@ __all__ = [
 logger = get_logger(__name__)
 
 _OCTET_STREAM = "application/octet-stream"
-# Text types outside ``text/``: those OpenAI's file inputs guide lists as text, code, spreadsheets, and rich documents
-# (https://developers.openai.com/api/docs/guides/pdf-files), and common declared types for XML, JavaScript, Python, and
-# shell scripts. The guide's ``application/x-protobuf`` is left out, since it usually names a binary payload; a
-# ``.proto`` source file is typed as text by its name.
-_TEXT_MIME_TYPES = frozenset(
+# The types outside ``text/`` that OpenAI's file inputs guide (https://developers.openai.com/api/docs/guides/pdf-files)
+# lists as text, code, spreadsheets, and rich documents; Responses takes each as declared.
+OPENAI_TEXT_TYPES = frozenset(
     {
         "application/csv",
         "application/graphql",
@@ -55,27 +54,33 @@ _TEXT_MIME_TYPES = frozenset(
         "application/x-httpd-php",
         "application/x-httpd-php-source",
         "application/x-iif",
-        "application/x-javascript",
         "application/x-json5",
         "application/x-ndjson",
         "application/x-patch",
         "application/x-php",
         "application/x-powershell",
-        "application/x-python",
+        "application/x-protobuf",
         "application/x-rust",
         "application/x-scala",
-        "application/x-sh",
-        "application/x-shellscript",
         "application/x-sql",
         "application/x-subrip",
         "application/x-terraform",
         "application/x-toml",
         "application/x-yaml",
-        "application/xml",
         "application/yaml",
         "message/rfc822",
     },
 )
+# Text types outside ``text/``: OpenAI's, without ``application/x-protobuf``, which usually names a binary payload (a
+# ``.proto`` source file is typed as text by its name), and common declared types for XML, JavaScript, Python, and
+# shell scripts.
+_TEXT_MIME_TYPES = (OPENAI_TEXT_TYPES - {"application/x-protobuf"}) | {
+    "application/xml",
+    "application/x-javascript",
+    "application/x-python",
+    "application/x-sh",
+    "application/x-shellscript",
+}
 
 
 def read_media_file(

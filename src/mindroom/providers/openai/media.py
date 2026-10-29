@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.media import image_mime_type
 from mindroom.providers.media_files import (
+    OPENAI_TEXT_TYPES,
     file_bytes,
     file_mime_type,
     file_name,
@@ -39,60 +40,28 @@ __all__ = [
 
 # OpenAI's file inputs guide (https://developers.openai.com/api/docs/guides/pdf-files): "Chat Completions accepts only
 # PDF files as ``file`` content parts", and the guide sends another file's text as a ``text`` part. Responses reads the
-# types of the guide's "Full list of accepted file types": PDF, spreadsheets, documents, presentations, and text and
-# code, which are any ``text/*`` type, covering the ones the list names, and the types below outside ``text/``.
+# types of the guide's "Full list of accepted file types": PDF, the Office and other document formats below, and text,
+# which is any ``text/*`` type, covering the ones the list names, and the list's text types outside ``text/``.
 _PDF = "application/pdf"
-_RESPONSES_FILE_TYPES = frozenset(
-    {
-        _PDF,
-        # Spreadsheets.
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "application/vnd.ms-excel",
-        "application/csv",
-        "application/x-iif",
-        "application/vnd.google-apps.spreadsheet",
-        # Word and rich documents.
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/msword",
-        "application/rtf",
-        "application/vnd.oasis.opendocument.text",
-        "application/vnd.apple.pages",
-        "application/vnd.google-apps.document",
-        "application/vnd.apple.iwork",
-        # Presentations.
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "application/vnd.ms-powerpoint",
-        "application/vnd.apple.keynote",
-        "application/vnd.google-apps.presentation",
-        # Text and code.
-        "application/graphql",
-        "application/javascript",
-        "application/json",
-        "application/json5",
-        "application/toml",
-        "application/typescript",
-        "application/x-awk",
-        "application/x-bash",
-        "application/x-graphql",
-        "application/x-httpd-php",
-        "application/x-httpd-php-source",
-        "application/x-json5",
-        "application/x-ndjson",
-        "application/x-patch",
-        "application/x-php",
-        "application/x-powershell",
-        "application/x-protobuf",
-        "application/x-rust",
-        "application/x-scala",
-        "application/x-sql",
-        "application/x-subrip",
-        "application/x-terraform",
-        "application/x-toml",
-        "application/x-yaml",
-        "application/yaml",
-        "message/rfc822",
-    },
-)
+_RESPONSES_FILE_TYPES = OPENAI_TEXT_TYPES | {
+    _PDF,
+    # Spreadsheets.
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-excel",
+    "application/vnd.google-apps.spreadsheet",
+    # Word and rich documents.
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/msword",
+    "application/vnd.oasis.opendocument.text",
+    "application/vnd.apple.pages",
+    "application/vnd.google-apps.document",
+    "application/vnd.apple.iwork",
+    # Presentations.
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.apple.keynote",
+    "application/vnd.google-apps.presentation",
+}
 
 
 def _data_url(mime_type: str, data: bytes) -> str:
