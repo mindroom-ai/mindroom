@@ -24,7 +24,7 @@ from mindroom.history.types import ResolvedReplayPlan
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.media_inputs import MediaInputs
-from mindroom.usage.storage import quote_identifier
+from mindroom.session_storage.schema import quote_identifier
 from tests.history_helpers import replay_settings
 
 if TYPE_CHECKING:
@@ -161,7 +161,7 @@ def observe(
         "request": _safely(lambda: _probe_request(session, scope)),
         "resume_requests": _safely(lambda: _resume_requests(session, scope)),
         "seen_event_ids": _safely(
-            lambda: sorted(read_scope_seen_event_ids(store, session, scope)) if session is not None else [],
+            lambda: sorted(read_scope_seen_event_ids(store, session)) if session is not None else [],
         ),
         "redaction_candidates": _safely(
             lambda: sorted(_read_scope_history_event_ids(store, session)) if session is not None else [],

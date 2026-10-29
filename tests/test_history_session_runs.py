@@ -8,7 +8,6 @@ import pytest
 
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY
 from mindroom.history.session_runs import session_runs, unredacted_runs, updated_sessions
-from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage.agent_storage import create_agent_state_storage
@@ -60,7 +59,7 @@ def _seed(storage: ConversationStore, runs: list[RunRecord], session_id: str = S
 def test_session_runs_read_compacted_and_later_runs_in_order(storage: ConversationStore) -> None:
     """Runs a summary folded are still read, in time order with the later ones, each once."""
     session = _seed(storage, [_run("r1", 100), _run("r2", 200), _run("r3", 300)])
-    compact_runs(storage, session, HistoryScope(kind="agent", scope_id="mind"), ["r1", "r2"], "summary")
+    compact_runs(storage, session, ["r1", "r2"], "summary")
     loaded = storage.load_session(SESSION)
     assert loaded is not None
     assert [run.run_id for run in loaded.runs or []] == ["r3"]

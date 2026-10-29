@@ -31,8 +31,6 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import TURN_INTENT_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.custom_tools.skill_manage import SkillManageTools
-from mindroom.history import summary_rows
-from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
     Capabilities,
@@ -53,6 +51,7 @@ from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.registry import build_model_provider
 from mindroom.providers.tool_policy import disables_tools
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.session_storage import summary_rows
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning import library
@@ -245,9 +244,6 @@ def _seed(
 def _stored(session_id: str, *runs: RunRecord | TeamRunRecord) -> ConversationSession:
     """Return the agent session that holds ``runs``."""
     return ConversationSession(session_id=session_id, kind="agent", owner_id="mind", runs=list(runs))
-
-
-_MIND = HistoryScope(kind="agent", scope_id="mind")
 
 
 def _skills_root(config: Config, paths: RuntimePaths, identity: ToolExecutionIdentity | None = None) -> Path:
@@ -593,7 +589,7 @@ def _transcript(*runs: RunRecord, summary: str | None = None, budget_chars: int)
     for run in runs:
         run.user_id = "@alice:x"
     return render_transcript(
-        conversation_messages(_stored("session", *runs), _MIND),
+        conversation_messages(_stored("session", *runs)),
         summary=summary,
         budget_chars=budget_chars,
     )
@@ -641,7 +637,7 @@ def test_a_replayed_review_reads_the_turns_a_request_of_the_agent_replays() -> N
         RunRecord(run_id="stopped", agent_id="mind", status=RunStatus.cancelled, messages=exchange("stopped")),
     )
 
-    said = [part.unredacted for message in conversation_messages(session, _MIND) for part in message]
+    said = [part.unredacted for message in conversation_messages(session) for part in message]
 
     assert said == ["own question", "own answer"]
 

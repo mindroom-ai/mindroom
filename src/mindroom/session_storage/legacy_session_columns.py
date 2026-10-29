@@ -23,10 +23,10 @@ from mindroom.session_storage.schema import (
     TableNames,
     index_name,
     meta_version,
+    quote_identifier,
     table_names,
 )
 from mindroom.session_storage.store import begun, decoded_mapping
-from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:
     import sqlite3

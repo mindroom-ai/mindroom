@@ -43,6 +43,8 @@ from mindroom.services.systemd import _start_service as _start_systemd_service
 from mindroom.services.systemd import _stop_service as _stop_systemd_service
 from tests.conftest import normalize_console_output
 
+pytestmark = pytest.mark.usefixtures("wide_cli_consoles")
+
 runner = CliRunner()
 
 

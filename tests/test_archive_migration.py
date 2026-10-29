@@ -14,11 +14,11 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom import constants
-from mindroom.history import summary_rows
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
+from mindroom.session_storage import summary_rows
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.legacy_conversion_backup import ConversionSpaceError
 from mindroom.session_storage.store import ConversationStore
@@ -168,7 +168,7 @@ def _replay(tmp_path: Path) -> _Replay:
     return _Replay(
         loaded=[run.run_id or "" for run in session.runs or []],
         summary=session.summary.text if session.summary is not None else None,
-        seen=read_scope_seen_event_ids(storage, session, _SCOPE),
+        seen=read_scope_seen_event_ids(storage, session),
         stored=stored_run_ids(storage, "s1"),
         folded=folded_run_ids(storage, "s1"),
     )

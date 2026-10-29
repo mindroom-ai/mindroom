@@ -22,8 +22,9 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.delegation.state import DELEGATION_STATE_KEY
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
-from mindroom.history import session_context, summary_rows
+from mindroom.history import session_context
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
+from mindroom.session_storage import summary_rows
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import ConversationStore, delete_runs_in_transaction, persist_to
 from mindroom.session_storage.types import ConversationSession

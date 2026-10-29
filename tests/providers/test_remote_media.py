@@ -204,11 +204,11 @@ async def test_chat_fetches_image_urls_and_receives_downloaded_files_and_audio(
     await complete(_provider("openai_chat", tmp_path, wire), ModelRequest(messages=[message]))
 
     assert wire.body()["messages"][-1]["content"] == [
-        {"type": "file", "file": {"filename": "table.csv", "file_data": f"data:text/csv;base64,{_b64(b'a,b')}"}},
-        {"type": "file", "file": {"filename": "notes.txt", "file_data": f"data:text/plain;base64,{_b64(b'notes')}"}},
         {"type": "text", "text": "Use these"},
         {"type": "image_url", "image_url": {"url": "https://media.test/photo.png"}},
         {"type": "input_audio", "input_audio": {"data": _b64(b"RIFF-speech"), "format": "wav"}},
+        {"type": "file", "file": {"filename": "notes.txt", "file_data": f"data:text/plain;base64,{_b64(b'notes')}"}},
+        {"type": "file", "file": {"filename": "table.csv", "file_data": f"data:text/csv;base64,{_b64(b'a,b')}"}},
     ]
     assert downloaded == ["https://media.test/speech", "https://media.test/notes", "https://media.test/table.csv"]
 
@@ -440,7 +440,7 @@ async def test_a_downloaded_file_the_server_calls_octet_stream_is_typed_and_name
 
     await complete(_provider("openai_chat", tmp_path, wire), ModelRequest(messages=[message]))
 
-    assert wire.body()["messages"][-1]["content"][0] == {
+    assert wire.body()["messages"][-1]["content"][1] == {
         "type": "file",
         "file": {"filename": "report.pdf", "file_data": f"data:application/pdf;base64,{_b64(_PDF)}"},
     }

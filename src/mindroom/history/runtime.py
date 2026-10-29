@@ -35,7 +35,7 @@ from mindroom.history.replay import (
     scope_visible_runs,
 )
 from mindroom.history.storage import (
-    first_scope_session,
+    new_scope_session,
     read_scope_state,
     set_force_compaction,
 )
@@ -53,6 +53,7 @@ from mindroom.history.types import (
     PreparedHistoryState,
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
+    owner_scope,
 )
 from mindroom.llm.messages import is_own_model_message
 from mindroom.logging_config import get_logger
@@ -69,13 +70,13 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.storage import FoldBasis
-    from mindroom.history.summary_rows import Fold
     from mindroom.history.types import CompactionLifecycle, CompactionOutcome, NativeHistory
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelIdentity, ModelProvider, PortableReplayEstimator
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
     from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.summary_rows import Fold
     from mindroom.session_storage.types import ConversationSession
     from mindroom.timing import DispatchPipelineTiming
 
@@ -129,9 +130,8 @@ class _ScopeCompactionLifecycleResult:
 
 @dataclass(frozen=True)
 class PreparedScopeHistory:
-    """Durable history preparation result before final replay planning."""
+    """Durable history preparation result before final replay planning; ``session`` names its scope."""
 
-    scope: HistoryScope | None
     session: ConversationSession | None
     resolved_inputs: HistoryPreparationInputs
     compaction_decision: CompactionDecision = field(
@@ -161,7 +161,6 @@ async def prepare_scope_history(
     replay_estimator = model.replay_estimator
     if scope_context is None or scope_context.session is None:
         return PreparedScopeHistory(
-            scope=None,
             session=None,
             resolved_inputs=resolved_inputs,
             compaction_decision=CompactionDecision(mode="none", reason="missing_session"),
@@ -184,14 +183,9 @@ async def prepare_scope_history(
     # other writes, and an in-flight write finishes before cancellation propagates.
     state = await run_session_storage_operation(
         lambda: scope_context.storage,
-        partial(
-            _prepare_scope_state_for_run,
-            session=session,
-            scope=scope_context.scope,
-            execution_plan=execution_plan,
-        ),
+        partial(_prepare_scope_state_for_run, session=session, execution_plan=execution_plan),
     )
-    visible_runs = scope_visible_runs(session, scope_context.scope)
+    visible_runs = scope_visible_runs(session)
     native_history = configure_native_history(
         model,
         plan=execution_plan,
@@ -207,7 +201,6 @@ async def prepare_scope_history(
     estimate_history_tokens = partial(
         estimate_prompt_visible_history_tokens,
         session=session,
-        scope=scope_context.scope,
         history_settings=resolved_inputs.history_settings,
         replay_estimator=replay_estimator,
     )
@@ -290,7 +283,6 @@ async def prepare_scope_history(
                 _compact_before_reply,
                 storage=scope_context.storage,
                 session=session,
-                scope=scope_context.scope,
                 state=state,
                 resolved_inputs=resolved_inputs,
                 history_budget=compaction_budget,
@@ -315,7 +307,6 @@ async def prepare_scope_history(
             pipeline_timing.mark("required_compaction_ready")
             pipeline_timing.note(compaction_reply_outcome=compaction_reply_outcome)
     return PreparedScopeHistory(
-        scope=scope_context.scope,
         session=scope_context.session,
         resolved_inputs=resolved_inputs,
         compaction_decision=compaction_decision,
@@ -511,7 +502,6 @@ async def _compact_before_reply(
     *,
     storage: ConversationStore,
     session: ConversationSession,
-    scope: HistoryScope,
     state: HistoryScopeState,
     resolved_inputs: HistoryPreparationInputs,
     history_budget: int | None,
@@ -524,7 +514,6 @@ async def _compact_before_reply(
         return await compact_scope_history(
             storage=storage,
             session=session,
-            scope=scope,
             state=state,
             summarizer=load_summarizer(
                 resolved_inputs.execution_plan,
@@ -532,7 +521,7 @@ async def _compact_before_reply(
                 config=config,
                 runtime_paths=runtime_paths,
                 session_id=session.session_id,
-                scope=scope,
+                scope=owner_scope(session),
                 on_usage=scope_usage_recorder(storage, session.session_id),
             ),
             available_history_budget=history_budget,
@@ -551,7 +540,6 @@ async def _compact_before_reply(
         await clear_manual_compaction_request(
             storage=storage,
             session=session,
-            scope=scope,
             state=state,
             keep_concurrent_request=False,
         )
@@ -586,7 +574,6 @@ async def compact_scope_mid_turn(
     *,
     storage: ConversationStore,
     session: ConversationSession,
-    scope: HistoryScope,
     resolved_inputs: HistoryPreparationInputs,
     basis: FoldBasis,
     fold: Fold,
@@ -598,8 +585,9 @@ async def compact_scope_mid_turn(
     on_commit: Callable[[str], None],
     rewritten_request_tokens: Callable[[], int],
 ) -> CompactionOutcome | None:
-    """Fold the stored runs after the latest summary row and the running turn into one summary row."""
+    """Fold the stored runs after ``session``'s latest summary row and the running turn into one summary row."""
     execution_plan = resolved_inputs.execution_plan
+    scope = owner_scope(session)
 
     async def compact(
         _progress: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None,
@@ -609,7 +597,6 @@ async def compact_scope_mid_turn(
         return await compact_running_turn(
             storage=storage,
             session=session,
-            scope=scope,
             basis=basis,
             fold=fold,
             snapshots=snapshots,
@@ -624,7 +611,7 @@ async def compact_scope_mid_turn(
                 on_usage=scope_usage_recorder(
                     storage,
                     session.session_id,
-                    initial_session=first_scope_session(scope, session.session_id),
+                    initial_session=new_scope_session(session_id=session.session_id, scope=scope),
                 ),
             ),
             before_tokens=before_tokens,
@@ -677,17 +664,16 @@ def finalize_history_preparation(
             reason=describe_compaction_unavailability(execution_plan),
         )
 
-    session, scope = prepared_scope_history.session, prepared_scope_history.scope
+    session = prepared_scope_history.session
     native_history = prepared_scope_history.native_history
     replay_estimator = prepared_scope_history.replay_estimator
-    if scope is None or session is None:
+    if session is None:
         replay_plan = configured_replay_plan(history_settings=history_settings, estimated_tokens=0)
         replays_persisted_history = False
     else:
         estimate_history_tokens = partial(
             estimate_prompt_visible_history_tokens,
             session=session,
-            scope=scope,
             history_settings=history_settings,
             replay_estimator=replay_estimator,
         )
@@ -701,7 +687,6 @@ def finalize_history_preparation(
         if history_budget is not None:
             replay_plan = plan_replay_that_fits(
                 session=session,
-                scope=scope,
                 history_settings=history_settings,
                 available_history_budget=history_budget,
                 current_history_tokens=current_history_tokens,
@@ -709,7 +694,7 @@ def finalize_history_preparation(
             )
             log_replay_plan(
                 replay_plan=replay_plan,
-                scope=scope,
+                scope=owner_scope(session),
                 available_history_budget=history_budget,
                 current_history_tokens=current_history_tokens,
             )
@@ -718,11 +703,7 @@ def finalize_history_preparation(
                 history_settings=history_settings,
                 estimated_tokens=current_history_tokens,
             )
-        replays_persisted_history = has_effective_persisted_replay(
-            session=session,
-            scope=scope,
-            replay_plan=replay_plan,
-        )
+        replays_persisted_history = has_effective_persisted_replay(session=session, replay_plan=replay_plan)
 
     prepared_context_tokens = static_prompt_tokens + replay_plan.estimated_tokens
     if pipeline_timing is not None:
@@ -830,16 +811,15 @@ def _prepare_scope_state_for_run(
     storage: ConversationStore,
     *,
     session: ConversationSession,
-    scope: HistoryScope,
     execution_plan: ResolvedHistoryExecutionPlan,
 ) -> HistoryScopeState:
-    state = read_scope_state(session, scope)
+    state = read_scope_state(session)
     if state.force_compact_before_next_run and not execution_plan.text_compaction_available:
-        state = set_force_compaction(storage, session=session, scope=scope, forced=False)
+        state = set_force_compaction(storage, session=session, forced=False)
         logger.warning(
             "Forced compaction skipped because text compaction is unavailable",
             session_id=session.session_id,
-            scope=scope.key,
+            scope=owner_scope(session).key,
             reason=describe_compaction_unavailability(execution_plan),
         )
     return state

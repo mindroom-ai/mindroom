@@ -183,7 +183,7 @@ async def _resume(
         knowledge=None,
         model=turn_model(config, paths, "general"),
     )
-    session = new_scope_session(session_id="session-1", scope_id="general", is_team=False)
+    session = new_scope_session(session_id="session-1", scope=HistoryScope(kind="agent", scope_id="general"))
     for run in (*history, paused):
         store.save_run(session, run, record_usage=False)
     runner = ResumeRunner(

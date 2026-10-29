@@ -29,6 +29,7 @@ from mindroom.delegation.records import DelegationRecordLocator, DelegationRecor
 from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState, child_execution_identity
 from mindroom.history.storage import new_scope_session
+from mindroom.history.types import HistoryScope
 from mindroom.llm.errors import ModelOutputLimitError, ProviderError
 from mindroom.llm.events import ToolCompleted
 from mindroom.llm.provider import TurnCompleted
@@ -37,11 +38,11 @@ from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
+from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.tool_system.progress import tool_progress_reporter
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
-from mindroom.usage.storage import quote_identifier
 from tests.access_schema_support import with_responder_access
 from tests.approval_continuation_helpers import approval_continuation, repeats_each_request
 from tests.delegation_helpers import (
@@ -1161,7 +1162,7 @@ async def test_the_driver_saves_the_parent_as_it_was_handed_over(tmp_path: Path)
     """The driver saves the parent as it was handed over; a change made while the lane is busy never lands in that write."""
     paths = _runtime_paths(tmp_path)
     store = create_session_storage("leader", _config(paths), paths, _leader_identity())
-    session = new_scope_session(session_id="parent", scope_id="leader", is_team=False)
+    session = new_scope_session(session_id="parent", scope=HistoryScope(kind="agent", scope_id="leader"))
     parent = RunRecord(run_id="parent-run", session_id="parent", status=RunStatus.paused, content="as handed over")
     lane_held = threading.Event()
     release = threading.Event()
@@ -1192,7 +1193,7 @@ async def test_the_driver_rewrites_the_parent_without_touching_its_recorded_usag
     """The loop records a paused run's usage when it stores the pause, so the driver's rewrite leaves that record."""
     paths = _runtime_paths(tmp_path)
     store = create_session_storage("leader", _config(paths), paths, _leader_identity())
-    session = new_scope_session(session_id="parent", scope_id="leader", is_team=False)
+    session = new_scope_session(session_id="parent", scope=HistoryScope(kind="agent", scope_id="leader"))
     recorded = RunRecord(
         run_id="parent-run",
         session_id="parent",

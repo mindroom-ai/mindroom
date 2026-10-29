@@ -26,6 +26,7 @@ from mindroom.memory.auto_flush import _MemoryAutoFlushWorker
 from mindroom.memory.functions import append_agent_daily_memory
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -35,7 +36,6 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_key,
     tool_execution_identity,
 )
-from mindroom.usage.storage import quote_identifier
 from tests.conftest import bind_runtime_paths, install_model_providers, runtime_paths_for, seed_session
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
 

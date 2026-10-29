@@ -146,7 +146,6 @@ async def test_history_sizing_allows_loop_progress(
             outcome = await compact_scope_history(
                 storage=storage,
                 session=session,
-                scope=scope,
                 state=HistoryScopeState(force_compact_before_next_run=True),
                 summarizer=_summarizer(summary_model(model_id="summary"), 1000, name="summary"),
                 available_history_budget=1000,
@@ -180,7 +179,6 @@ async def test_history_storage_work_allows_loop_progress(
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
     storage = create_agent_state_storage("test_agent", tmp_path)
     seed_session(storage, session)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
     loop = asyncio.get_running_loop()
     entered = asyncio.Event()
     released = threading.Event()
@@ -210,7 +208,6 @@ async def test_history_storage_work_allows_loop_progress(
         outcome = await compact_scope_history(
             storage=storage,
             session=session,
-            scope=scope,
             state=HistoryScopeState(force_compact_before_next_run=True),
             summarizer=_summarizer(summary_model(model_id="summary"), 1000, name="summary"),
             available_history_budget=1000,
@@ -337,7 +334,6 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
                 _compact_before_reply,
                 storage=storage,
                 session=session,
-                scope=HistoryScope(kind="agent", scope_id="test_agent"),
                 state=HistoryScopeState(force_compact_before_next_run=True),
                 resolved_inputs=resolved,
                 history_budget=1000,

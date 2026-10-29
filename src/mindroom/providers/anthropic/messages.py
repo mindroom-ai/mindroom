@@ -568,20 +568,23 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
     """Return the shared error for an SDK, transport, or Google token failure; any other exception propagates.
 
     The Vertex client mints its Google access token inside the request. An ``error`` event inside the stream arrives
-    with the stream's committed 200 status, so its error type classifies it. The SDK finds a client's credentials
-    only when it sends, so a client without any fails then, as the missing key it is.
+    with the stream's committed 200 status, so it is classified without a status. The body's error type and
+    ``details.error_code`` name the failure for the classifier, and the error keeps the SDK's text, which repeats the
+    whole body. The SDK finds a client's credentials only when it sends, so a client without any fails then, as the
+    missing key it is.
     """
     if isinstance(error, TypeError) and str(error).startswith(_NO_CREDENTIALS_ERROR):
         return missing_api_key_error(PROVIDER_ENV_KEYS["anthropic"], provider=provider)
     if (failure := provider_failure(error, provider=provider)) is not None:
         return failure
-    if isinstance(error, anthropic.APIStatusError) and error.status_code == _COMMITTED_STREAM_STATUS:
-        return classify_provider_error(error.message, provider=provider, error_type=_event_error_type(error.body))
     if isinstance(error, anthropic.APIStatusError):
+        body = _ErrorBody.of(error.body)
         return classify_provider_error(
             error.message,
             provider=provider,
-            status_code=error.status_code,
+            status_code=None if error.status_code == _COMMITTED_STREAM_STATUS else error.status_code,
+            code=body.code,
+            error_type=body.type,
             retry_after_seconds=retry_after_seconds(error.response.headers),
         )
     if isinstance(error, anthropic.APIError):
@@ -589,11 +592,25 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
     raise error
 
 
-def _event_error_type(body: object) -> str | None:
-    """Return the error type of a stream's ``error`` event body, ``{"type": "error", "error": {"type": ...}}``."""
-    error = as_dict((as_dict(body) or {}).get("error")) or {}
-    error_type = error.get("type")
-    return error_type if isinstance(error_type, str) else None
+@dataclass(frozen=True, slots=True)
+class _ErrorBody:
+    """The names of an error response's or a stream ``error`` event's ``error`` object, ``{"type": "error", ...}``.
+
+    ``code`` is the ``details.error_code`` that tells apart failures sharing a type.
+    """
+
+    type: str | None
+    code: str | None
+
+    @classmethod
+    def of(cls, body: object) -> _ErrorBody:
+        error = as_dict((as_dict(body) or {}).get("error")) or {}
+        details = as_dict(error.get("details")) or {}
+        error_type, code = error.get("type"), details.get("error_code")
+        return cls(
+            type=error_type if isinstance(error_type, str) else None,
+            code=code if isinstance(code, str) else None,
+        )
 
 
 def _output_event(event: object) -> TextDelta | ReasoningDelta | ToolCallReady | None:

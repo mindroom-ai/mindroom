@@ -7,7 +7,7 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.constants import resolve_session_state_root
-from mindroom.history.storage import first_scope_session
+from mindroom.history.storage import new_scope_session
 from mindroom.history.team_scope import ad_hoc_team_scope_id
 from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
@@ -47,7 +47,7 @@ class ScopeSessionContext:
 
     def first_session(self) -> ConversationSession:
         """Return a new session of this scope under ``session_id``, as the scope's first run starts it."""
-        return first_scope_session(self.scope, self.session_id)
+        return new_scope_session(session_id=self.session_id, scope=self.scope)
 
     def stored_or_first_session(self) -> ConversationSession:
         """Return the session a run of this scope is saved into: the stored one, else the scope's first."""

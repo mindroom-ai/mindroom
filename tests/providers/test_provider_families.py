@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.config.models import ModelConfig
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
@@ -440,6 +441,111 @@ async def test_every_family_notes_an_attachment_file_it_cannot_read(family: str,
 
     assert (turn.content, len(wire.requests)) == ("ok", 1)
     assert spec.user_text(wire.body()) == f"Look\n\n{FALLBACK_MARKER}\n{INLINE_MEDIA_FALLBACK_PROMPT}"
+
+
+# Keys that only a media part of some wire carries.
+_MEDIA_PART_MARKERS = (
+    '"type": "image',
+    '"type": "input_image"',
+    '"type": "input_file"',
+    '"type": "input_audio"',
+    '"type": "file"',
+    '"type": "document"',
+    '"inlineData"',
+    '"fileData"',
+    '"images"',
+)
+
+
+def _empty_media(kind: str, root: Path) -> dict[str, Any]:
+    path = root / f"empty-{kind}"
+    path.write_bytes(b"")
+    media = {
+        "image": Image(filepath=str(path), mime_type="image/png"),
+        "file": File(filepath=str(path), mime_type="application/pdf", filename="empty.pdf"),
+        "audio": Audio(filepath=str(path), format="wav"),
+    }
+    return {{"image": "images", "file": "files", "audio": "audio"}[kind]: [media[kind]]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["image", "file", "audio"])
+@pytest.mark.parametrize("family", sorted(FAMILIES))
+async def test_every_family_leaves_out_an_empty_attachment_file_with_one_warning(
+    family: str,
+    kind: str,
+    tmp_path: Path,
+) -> None:
+    """An empty attachment file adds no part on any route, and a route that reads it logs one warning.
+
+    A route that omits the kind replaces it up front with the media fallback's note and never reads it.
+    """
+    spec = FAMILIES[family]
+    wire = Wire(spec.reply())
+    adapter = spec.adapter(tmp_path, wire)
+    message = Message(role="user", content="Look", **_empty_media(kind, tmp_path))
+
+    with capture_logs() as logs:
+        turn = await complete(pipeline_provider(adapter), ModelRequest(messages=[message]))
+
+    assert (turn.content, len(wire.requests)) == ("ok", 1)
+    sent = json.dumps(wire.body())
+    assert not [marker for marker in _MEDIA_PART_MARKERS if marker in sent]
+    omitted = kind in adapter.capabilities.omitted_media
+    assert (FALLBACK_MARKER in sent) is omitted
+    warnings = [log["event"] for log in logs if log["log_level"] == "warning"]
+    assert warnings == ([] if omitted else ["media_file_empty"])
+
+
+# The media kind of each part type a wire's user content holds.
+_PART_KINDS = {
+    "text": "text",
+    "input_text": "text",
+    "image": "image",
+    "image_url": "image",
+    "input_image": "image",
+    "input_audio": "audio",
+    "document": "file",
+    "file": "file",
+    "input_file": "file",
+}
+
+
+def _user_part_kinds(body: dict[str, Any]) -> list[str]:
+    """Return the media kind of each part of the request's last user content, in order."""
+    if "contents" in body:
+        # The SDK spells the inline type ``mimeType`` on the Gemini API and ``mime_type`` on Vertex AI.
+        inline = [part.get("inlineData", {}) for part in body["contents"][-1]["parts"]]
+        kinds = [(data.get("mimeType") or data.get("mime_type") or "text").split("/")[0] for data in inline]
+        return [kind.replace("application", "file") for kind in kinds]
+    message = body["messages"][-1] if "messages" in body else body["input"][-1]
+    return [_PART_KINDS[part["type"]] for part in message["content"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", ["anthropic", "gemini", "gemini_vertexai", "openai_chat", "openai_responses"])
+async def test_every_family_sends_the_text_first_then_images_audio_video_and_files(family: str, tmp_path: Path) -> None:
+    """One order on every wire: the text, then each kind of media the route takes, each in the order it came."""
+    spec = FAMILIES[family]
+    wire = Wire(spec.reply())
+    adapter = spec.adapter(tmp_path, wire)
+    omitted = adapter.capabilities.omitted_media
+    png = b"\x89PNG\r\n\x1a\n" + bytes(8)
+    message = Message(
+        role="user",
+        content="Compare",
+        images=[Image(content=png, mime_type="image/png"), Image(content=png, mime_type="image/png")],
+        audio=None if "audio" in omitted else [Audio(content=b"RIFF", format="wav", mime_type="audio/wav")],
+        videos=None if "video" in omitted else [Video(content=b"mp4", mime_type="video/mp4")],
+        files=[File(content=b"%PDF-1", filename="first.pdf"), File(content=b"%PDF-2", filename="second.pdf")],
+    )
+
+    await complete(pipeline_provider(adapter), ModelRequest(messages=[message]))
+
+    expected = ["text", "image", "image"]
+    expected += [] if "audio" in omitted else ["audio"]
+    expected += [] if "video" in omitted else ["video"]
+    assert _user_part_kinds(wire.body()) == [*expected, "file", "file"]
 
 
 @pytest.mark.asyncio

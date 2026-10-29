@@ -55,6 +55,7 @@ from mindroom.response_turn import (
     TurnSinks,
 )
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.types import session_state_snapshot
 from mindroom.teams.envelope import TeamTurnSpec
 from mindroom.teams.resume import continue_paused_team_run
@@ -66,7 +67,6 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.usage.stats import collect_admin_usage, collect_self_usage
-from mindroom.usage.storage import quote_identifier
 from tests.ai_user_id_helpers import team_orchestrator
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import (

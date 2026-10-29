@@ -250,7 +250,7 @@ def test_a_turns_transcript_reads_converted_calls_as_replay_does(tmp_path: Path)
     session = store.load_session(SESSION_ID)
     assert session is not None
 
-    said = [utterance for parts in conversation_messages(session, _SCOPE) for utterance in parts]
+    said = [utterance for parts in conversation_messages(session) for utterance in parts]
 
     assert [utterance.unredacted for utterance in said if utterance.kind == "tool_result"] == ["[]", "sunny"]
     reply = next(utterance.message for utterance in said if utterance.kind == "reply")

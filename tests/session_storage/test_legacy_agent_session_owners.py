@@ -19,9 +19,9 @@ from mindroom.llm.runs import RunRecord
 from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
 from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
-from mindroom.session_storage.schema import LOG_VERSION, TableNames
+from mindroom.session_storage.schema import LOG_VERSION, TableNames, quote_identifier
 from mindroom.session_storage.types import ConversationSession
-from mindroom.usage.storage import SYSTEM_USAGE_ENTITY, SYSTEM_USAGE_OWNER, SYSTEM_USAGE_STORAGE_NAME, quote_identifier
+from mindroom.usage.storage import SYSTEM_USAGE_ENTITY, SYSTEM_USAGE_OWNER, SYSTEM_USAGE_STORAGE_NAME
 from tests.conftest import seed_session
 from tests.history_helpers import compact_runs, stored_run_ids, summary_rows_of
 from tests.session_storage.agno_layout import write_agno_database
@@ -190,7 +190,7 @@ def test_a_compaction_after_the_adoption_replays_its_summary(tmp_path: Path) -> 
     )
     store.save_run(session, new_run, record_usage=False)
 
-    compact_runs(store, session, _SCOPE, ["new"], "summary of new")
+    compact_runs(store, session, ["new"], "summary of new")
 
     reloaded = store.load_session("session")
     assert reloaded is not None
@@ -252,15 +252,16 @@ def test_a_summary_converted_under_the_display_name_id_still_replays(tmp_path: P
 
 def test_a_summary_stored_under_the_display_name_id_still_replays_after_the_upgrade(tmp_path: Path) -> None:
     """A version 2 database's summary rows under the row's old owner move to the agent, in their order."""
-    old_scope = HistoryScope(kind="agent", scope_id=_DISPLAY_NAME_ID)
     session = _session("session", _DISPLAY_NAME_ID)
     session.runs.append(_run("later"))
     stored = create_agent_state_storage("code", tmp_path / "code")
     seed_session(stored, session)
     loaded = stored.load_session("session")
     assert loaded is not None
-    compact_runs(stored, loaded, old_scope, ["session-run"], "first summary")
-    compact_runs(stored, loaded, old_scope, ["later"], "second summary")
+    # The rows go under the old owner's scope, where a version 2 database whose row named it stored them.
+    under_old_owner = replace(loaded, owner_id=_DISPLAY_NAME_ID)
+    compact_runs(stored, under_old_owner, ["session-run"], "first summary")
+    compact_runs(stored, under_old_owner, ["later"], "second summary")
     _as_layout_2(stored, session)
 
     store = create_agent_state_storage("code", tmp_path / "code")

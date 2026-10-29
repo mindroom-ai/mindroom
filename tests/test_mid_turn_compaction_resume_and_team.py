@@ -29,7 +29,6 @@ from mindroom.history.replay import configured_replay_plan
 from mindroom.history.request_messages import TurnMessages, build_request, replayed_history
 from mindroom.history.storage import new_scope_session
 from mindroom.history.summary_message import is_compaction_summary
-from mindroom.history.summary_rows import folded_tool_call_ids
 from mindroom.history.types import CompactionOutcome
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
@@ -42,6 +41,7 @@ from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApprov
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import persist_to
+from mindroom.session_storage.summary_rows import folded_tool_call_ids
 from mindroom.usage.stats import collect_admin_usage
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_usage
 from tests.conftest import bind_runtime_paths, install_model_providers, seed_session, test_runtime_paths
@@ -199,11 +199,7 @@ def _resumable(
         knowledge=None,
         model=turn_model(config, paths, "test_agent"),
     )
-    session = store.load_session("session-1") or new_scope_session(
-        session_id="session-1",
-        scope_id="test_agent",
-        is_team=False,
-    )
+    session = store.load_session("session-1") or new_scope_session(session_id="session-1", scope=TEST_AGENT_SCOPE)
     return _Resumable(build, model, config, paths, store, session, replays_history)
 
 

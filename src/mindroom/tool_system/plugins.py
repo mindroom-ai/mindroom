@@ -312,6 +312,7 @@ def apply_prepared_plugin_reload(
     """Commit one previously prepared plugin runtime snapshot."""
     with locked_tool_registry_state():
         if cancel_existing_tasks:
+            # Preparing restored the live modules, so this cancels the generation being replaced, not the staged one.
             cancelled_task_count = _cancel_plugin_module_tasks()
         restore_tool_registry_snapshot(prepared_reload.tool_registry_snapshot)
         set_plugin_skill_roots(prepared_reload.plugin_skill_roots)

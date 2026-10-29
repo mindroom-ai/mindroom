@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from mindroom import loop_hooks
 from mindroom.agent_loop.build import AgentBuild, AgentSurface
 from mindroom.agent_loop.prompt import PromptSpec
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.config.main import Config
+from mindroom.history.types import HistoryScope
 from mindroom.llm.provider import DeferredTools, ModelRequest
 from mindroom.llm.tool_search import resolve_call_tool_calls
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks, leader_loop_hooks
@@ -24,6 +26,9 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
+    import pytest
+
+    from mindroom.agent_loop.model_loop import BeforeRequestHook
     from mindroom.tool_system.invocation import ToolCall, ToolNext
 
 
@@ -36,27 +41,15 @@ def _stages(hooks: Sequence[object]) -> list[str]:
     return [hook.__qualname__.split(".")[0] for hook in hooks]
 
 
-def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> None:
-    """Both runs share one policy; the leader has no gate, job definitions, tool search, or skill capture.
-
-    The job definitions project first, so the participation decision and mid-turn compaction see the definitions the
-    request sends. The approval receipt hook comes right after mid-turn compaction on every run.
-    """
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config.model_validate({"agents": {"general": {"display_name": "General"}}}),
-        runtime_paths,
-    )
-    model = ScriptedModel([])
-    settings = replay_settings()
-    build = AgentBuild(
+def _agent_build(model: ScriptedModel) -> AgentBuild:
+    return AgentBuild(
         spec=AgentSpec(id="general", name="General", model=model, system_messages=(), toolkits=()),
         prompt=PromptSpec(role="test", instructions=()),
         request_template=ModelRequest(
             messages=(),
             deferred_tools=DeferredTools(names=frozenset({"deferred_tool"}), portable=True),
         ),
-        history_settings=settings,
+        history_settings=replay_settings(),
         store=None,
         surface=AgentSurface(
             mode="standard",
@@ -71,6 +64,30 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
         tool_jobs=JobActor(name="general", team=False, depth=0, tools={}),
     )
 
+
+def _built_team(model: ScriptedModel) -> BuiltTeam:
+    return BuiltTeam(
+        spec=team_spec("squad", "Squad", model, "You lead the squad.", ()),
+        history_settings=replay_settings(),
+        timezone="UTC",
+        leader_middleware=(_middleware,),
+        leader_jobs=JobActor(name="squad", team=True, depth=0, tools={}),
+    )
+
+
+def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> None:
+    """Both runs share one policy; the leader has no gate, job definitions, tool search, or skill capture.
+
+    The job definitions project first, so the participation decision and mid-turn compaction see the definitions the
+    request sends. The approval receipt hook comes right after mid-turn compaction on every run.
+    """
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config.model_validate({"agents": {"general": {"display_name": "General"}}}),
+        runtime_paths,
+    )
+    model = ScriptedModel([])
+    build = _agent_build(model)
     turn = HookTurn(
         config=config,
         runtime_paths=runtime_paths,
@@ -86,14 +103,7 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
         participation=ParticipationGate(),
         skill_review_capture=SkillReviewCapture(),
     )
-    team = BuiltTeam(
-        spec=team_spec("squad", "Squad", model, "You lead the squad.", ()),
-        history_settings=settings,
-        timezone="UTC",
-        leader_middleware=(_middleware,),
-        leader_jobs=JobActor(name="squad", team=True, depth=0, tools={}),
-    )
-    leader = leader_loop_hooks(team, turn, entity_name=None)
+    leader = leader_loop_hooks(_built_team(model), turn, entity_name=None)
 
     assert _stages(agent.before_request) == [
         "job_definitions_hook",
@@ -114,3 +124,38 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
         assert _stages(hooks.on_resume_entry) == ["queued_notice_on_resume_entry"]
     assert agent.on_loop_end is not None
     assert leader.on_loop_end is None
+
+
+def test_each_run_compacts_as_its_history_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An agent's run compacts as the agent, and a leader's as its team."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config.model_validate({"agents": {"general": {"display_name": "General"}}}),
+        runtime_paths,
+    )
+    model = ScriptedModel([])
+    scopes: list[HistoryScope] = []
+    real_compaction_hook = loop_hooks.mid_turn_compaction_hook
+
+    def capture_compaction_hook(**kwargs: Any) -> BeforeRequestHook:  # noqa: ANN401
+        scopes.append(kwargs["scope"])
+        return real_compaction_hook(**kwargs)
+
+    monkeypatch.setattr(loop_hooks, "mid_turn_compaction_hook", capture_compaction_hook)
+    turn = HookTurn(
+        config=config,
+        runtime_paths=runtime_paths,
+        model_name="default",
+        storage=None,
+        replay_plan=None,
+        prompt_id=None,
+    )
+    team = _built_team(model)
+
+    agent_loop_hooks(_agent_build(model), turn)
+    leader_loop_hooks(team, turn, entity_name=None)
+
+    assert scopes == [
+        HistoryScope(kind="agent", scope_id="general"),
+        HistoryScope(kind="team", scope_id=team.spec.leader.id),
+    ]

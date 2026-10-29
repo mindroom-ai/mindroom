@@ -70,11 +70,12 @@ from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import ResponsePausedForApproval, TurnSinks
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
-from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, quote_identifier
+from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 from tests.access_schema_support import with_current_room_member_access
 from tests.approval_continuation_helpers import RECEIPT_CALLS, RECEIPT_TEXT
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -639,7 +640,7 @@ async def test_an_error_record_never_repeats_an_earlier_answer(
             Message(role="assistant", content="The image is one green pixel."),
         ],
     )
-    session = new_scope_session(session_id=SESSION_ID, scope_id="assistant", is_team=False)
+    session = new_scope_session(session_id=SESSION_ID, scope=HistoryScope(kind="agent", scope_id="assistant"))
     session.runs = [earlier]
     seed_session(reply.storage, session)
     replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)

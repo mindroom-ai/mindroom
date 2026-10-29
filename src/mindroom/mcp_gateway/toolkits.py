@@ -34,8 +34,9 @@ _CLEANUP_TASKS: set[asyncio.Task[None]] = set()
 # Toolkit construction, connect, and close, synchronous tool bodies, and the worker proxy requests of
 # async ones hold their thread until they return, even after a timeout or cancel. A separate pool keeps
 # them off the default executor that authentication, OAuth storage, and the Matrix runtime share; chat
-# tool calls give each worker proxy request its own thread instead. The default per-user call limit stays
-# below this pool's size.
+# tool calls give each worker proxy request its own thread instead. A call holds one thread for each such
+# body or request it runs at once, its own and those of tools it calls, so the per-user call limit bounds a
+# user's threads only for calls that run one at a time.
 _TOOL_EXECUTOR = ThreadPoolExecutor(max_workers=32, thread_name_prefix="mindroom-mcp-gateway-tool")
 logger = get_logger(__name__)
 
@@ -82,7 +83,7 @@ async def drain_gateway_tool_cleanup() -> None:
         await asyncio.gather(*(asyncio.shield(task) for task in tuple(_CLEANUP_TASKS)), return_exceptions=True)
 
 
-async def _close_after(pending: asyncio.Task[Any], toolkit: Toolkit | None = None) -> None:
+async def _close_after(pending: asyncio.Future[Any], toolkit: Toolkit | None = None) -> None:
     with suppress(BaseException):
         result = await pending
         if toolkit is None:
@@ -220,8 +221,10 @@ async def run_toolkit_operation[T](
         cancelled = True
         raise
     finally:
-        pending = pending or tracker.started_task()
-        cleanup = _close_after(pending, toolkit) if pending is not None else _close(toolkit)
+        settled = tracker.settle()
+        leaves = [pending] if pending is not None else settled
+        waiting = asyncio.gather(*leaves, return_exceptions=True) if leaves else None
+        cleanup = _close_after(waiting, toolkit) if waiting is not None else _close(toolkit)
         close_task = _retain(cleanup)
-        if not cancelled and (pending is None or pending.done()):
+        if not cancelled and all(leaf.done() for leaf in leaves):
             await asyncio.shield(close_task)

@@ -25,7 +25,7 @@ from mindroom.model_defaults import CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES, CLAUDE
 from mindroom.providers.anthropic.repairs import replay_safe_blocks
 from mindroom.providers.anthropic.stored_turns import replayed_blocks
 from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY, as_dict
-from mindroom.providers.media_files import read_media_file
+from mindroom.providers.media_files import read_media_bytes
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -264,7 +264,10 @@ def _image_media_type(image: Image, data: bytes | None) -> str | None:
 def _image_block(image: Image, provider: str) -> dict[str, Any] | None:
     data = image.content
     if data is None and image.filepath is not None:
-        _, data = read_media_file(image.filepath, kind="image", provider=provider)
+        data = read_media_bytes(image.filepath, kind="image", provider=provider)
+        if data is None:
+            # The file is empty, which its reader already logged.
+            return None
     media_type = _image_media_type(image, data)
     if data is None or media_type is None:
         logger.warning("claude_image_type_unknown", image_id=image.id)
@@ -277,7 +280,10 @@ def _image_block(image: Image, provider: str) -> dict[str, Any] | None:
 
 def _document_block(file: File, provider: str) -> dict[str, Any] | None:
     if file.filepath is not None:
-        _, data = read_media_file(file.filepath, kind="file", provider=provider)
+        data = read_media_bytes(file.filepath, kind="file", provider=provider)
+        if data is None:
+            # The file is empty, which its reader already logged.
+            return None
         media_type = file.mime_type or mimetypes.guess_type(file.filepath)[0] or "application/pdf"
     elif file.content is not None:
         data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content

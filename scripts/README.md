@@ -136,10 +136,11 @@ The run fails if the child ignores the signal until the harness has to kill it, 
 - `crash_mindroom` sends SIGKILL, so nothing drains and every committed, unsettled obligation is owed to durable recovery.
   There is no shutdown verdict to check here; each interrupted source must have exact response attribution or independently proven deliberate supersession.
 
-Supersession requires an exact positive replay-guard log, a matching admitted and settled principal-scoped journal source, and its named newer same-requester/thread source anchored in completed durable generation with a canonical visible response covering its current marker.
+Supersession requires an exact positive replay-guard log, a matching admitted and settled principal-scoped journal source, and its named newer same-requester/thread source anchored in completed durable generation with a canonical visible response whose model call saw one of that source's revisions; the source-revision audit checks which revision.
 An old visible reply must retain exact durable attribution and terminal restart-interruption metadata; superseded work is counted separately from completed generation and cannot waive delivery, edit, redaction, or source-revision debt.
 No router message ever resumes interrupted work: replay continues an interrupted reply in that same Matrix message, and an agent reply to any event other than a required source fails the reply invariant.
 `ledger_superseded_sources` and `superseded_interrupted_bodies` count superseded outcomes separately, while `completed_final_bodies` counts completed responses and the original generation remains unchanged.
+`dropped_interrupted_regenerations` counts replies left on a regeneration a restart cut short, whose edit MindRoom then declined because a later message followed.
 
 A run whose interruptions all found an idle journal fails instead of reporting the count as coverage.
 `restarts`, `crashes`, and `interruptions_with_work_outstanding` are all in the result JSON, and the third must equal the sum of the first two.

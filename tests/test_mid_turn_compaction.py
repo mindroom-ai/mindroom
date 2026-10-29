@@ -65,14 +65,15 @@ from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
-from mindroom.session_storage.store import persist_to
+from mindroom.session_storage.schema import quote_identifier
+from mindroom.session_storage.store import persist_to, watch_session_row
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.runtime_context import (
     DetachedRequesterContext,
     detached_requester_context,
     tool_runtime_context,
 )
-from mindroom.usage.storage import project_usage, quote_identifier
+from mindroom.usage.storage import project_usage
 from tests.conftest import install_model_providers, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
@@ -222,8 +223,7 @@ async def _run(
     store = agent.store
     session = (store.load_session(session_id) if store is not None else None) or new_scope_session(
         session_id=session_id,
-        scope_id="test_agent",
-        is_team=False,
+        scope=TEST_AGENT_SCOPE,
     )
     settings = agent.config.resolve_scope("test_agent").history_settings
     history = (
@@ -241,8 +241,7 @@ async def _run(
         config=agent.config,
         runtime_paths=agent.runtime_paths,
         entity_name="test_agent",
-        scope_id="test_agent",
-        is_team=False,
+        scope=TEST_AGENT_SCOPE,
         model_name="default",
         model=agent.model,
         history_settings=settings,
@@ -1017,11 +1016,14 @@ async def test_unscoped_first_request_without_foldable_messages_is_sent_as_is(
 
 @pytest.mark.asyncio
 async def test_run_local_summary_usage_is_recorded(tmp_path: Path, summary_calls: SummaryCalls) -> None:
+    """A first turn's summary usage creates the session row, which it reports to the reply watching its session."""
     config, paths = _config(tmp_path)
     storage = create_session_storage("test_agent", config, paths, execution_identity=None)
 
-    await _run(_agent(ToolLoopModel(tool_rounds=5), config, paths, store=storage), "Do the task")
+    with watch_session_row(TEST_AGENT_SCOPE, "session-1") as watch:
+        await _run(_agent(ToolLoopModel(tool_rounds=5), config, paths, store=storage), "Do the task")
 
+    assert watch.created
     summaries = _summary_usage(storage)
     assert len(summaries) == len(summary_calls.inputs) >= 1
     assert all(usage["metrics"]["input_tokens"] == 7 for _session_id, usage in summaries)
@@ -1065,7 +1067,7 @@ async def test_run_local_summary_usage_goes_to_the_replys_usage_owner(
     owner = HelperUsageOwner(
         storage_factory=lambda: owner_storage,
         session_id="owner-session",
-        initial_session=new_scope_session(session_id="owner-session", scope_id="crew", is_team=True),
+        initial_session=new_scope_session(session_id="owner-session", scope=HistoryScope(kind="team", scope_id="crew")),
     )
     token = helper_usage._HELPER_USAGE_OWNER.set(owner)
     try:
@@ -1157,11 +1159,14 @@ async def test_a_first_turn_compacts_mid_turn_before_its_session_row_exists(
     tmp_path: Path,
     summary_calls: SummaryCalls,
 ) -> None:
+    """The fold's summary usage creates the session row, which it reports to the reply watching its session."""
     config, paths = _config(tmp_path)
     storage = create_session_storage("test_agent", config, paths, execution_identity=None)
 
-    output = await _run(_scoped_agent(ToolLoopModel(tool_rounds=5), config, paths, storage), "Do the task")
+    with watch_session_row(TEST_AGENT_SCOPE, "session-1") as watch:
+        output = await _run(_scoped_agent(ToolLoopModel(tool_rounds=5), config, paths, storage), "Do the task")
 
+    assert watch.created
     assert summary_calls.inputs
     rows = summary_rows_of(storage, TEST_AGENT_SCOPE.key)
     assert rows
@@ -1410,7 +1415,7 @@ async def test_force_flag_survives_mid_turn_compaction(tmp_path: Path, summary_c
     assert summary_calls.inputs
     after = storage.load_session("session-1")
     assert after is not None
-    assert read_scope_state(after, TEST_AGENT_SCOPE).force_compact_before_next_run is True
+    assert read_scope_state(after).force_compact_before_next_run is True
 
 
 @pytest.mark.asyncio
@@ -1542,7 +1547,10 @@ async def test_mid_turn_compaction_builds_no_transcript_without_hooks(
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("summary_calls")
 async def test_mid_turn_compaction_hooks_see_who_said_each_line_without_what_mindroom_added(tmp_path: Path) -> None:
-    """The stored runs and the running turn's folded part each name their senders, without enrichment or tool calls."""
+    """The stored runs and the running turn's folded part each name their senders, without enrichment or tool calls.
+
+    Both hooks name the scope the fold lands in.
+    """
     config, paths = _config(tmp_path)
     storage = create_session_storage("test_agent", config, paths, execution_identity=None)
     asked = RunRecord(
@@ -1598,6 +1606,7 @@ async def test_mid_turn_compaction_hooks_see_who_said_each_line_without_what_min
         for number in range(1, len(steps) + 1)
     )
     assert [ctx.event_name for ctx in observed[:2]] == [EVENT_COMPACTION_BEFORE, EVENT_COMPACTION_AFTER]
+    assert [ctx.scope for ctx in observed[:2]] == [TEST_AGENT_SCOPE, TEST_AGENT_SCOPE]
     assert observed[1].transcript == transcript
 
 

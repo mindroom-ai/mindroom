@@ -10,15 +10,15 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom import constants
-from mindroom.history import summary_rows
 from mindroom.history.mid_turn_compaction import _folded_calls
 from mindroom.history.storage import read_chunk_basis
-from mindroom.history.summary_rows import CoveredRun, Fold
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.session_storage import summary_rows
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import watch_session_row
+from mindroom.session_storage.summary_rows import CoveredRun, Fold
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session_row
 
@@ -32,7 +32,6 @@ if TYPE_CHECKING:
 
 _AGENT = "agent:code"
 _TEAM = "team:crew"
-_SCOPE = HistoryScope(kind="agent", scope_id="code")
 _NON_VISIBLE = {RunStatus.paused, RunStatus.cancelled, RunStatus.error}
 
 
@@ -365,7 +364,7 @@ def test_a_chunk_refuses_history_that_changed_after_the_session_loaded(store: Co
     else:
         assert store.save_interrupted_record(_session(), _run("r2", RunStatus.cancelled)) == "written"
 
-    assert read_chunk_basis(store, session, _SCOPE, ["r1", "r2", "r3"], previous_summary="S1") is None
+    assert read_chunk_basis(store, session, ["r1", "r2", "r3"], previous_summary="S1") is None
 
 
 def test_a_chunk_builds_on_the_summary_it_loaded(store: ConversationStore) -> None:
@@ -374,7 +373,7 @@ def test_a_chunk_builds_on_the_summary_it_loaded(store: ConversationStore) -> No
     assert _chunk(store, ["r0"], "S1") is not None
     session = _loaded(store)
 
-    basis = read_chunk_basis(store, session, _SCOPE, ["r1", "r2"], previous_summary="S1")
+    basis = read_chunk_basis(store, session, ["r1", "r2"], previous_summary="S1")
 
     assert basis is not None
     assert [run.run_id for run in basis.covered] == ["r1", "r2"]
@@ -1025,6 +1024,24 @@ def test_retiring_writes_a_barrier_and_removes_every_run_that_folded_mid_turn(st
     # The retired folds' provenance holds nothing any more.
     assert not _redact(store, "$done")
     assert not _redact(store, "$live")
+
+
+def test_a_barrier_is_a_row_without_text_events_or_provenance(
+    store: ConversationStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retirement's barrier records when it was written, through the latest row, with empty event sets."""
+    _save(store, _run("r1"))
+    assert _chunk(store, ["r1"], "S1") is not None
+    monkeypatch.setattr(summary_rows, "time", lambda: 1_750_000_000.5)
+
+    summary_rows.retire(store, session=_session(), scope_key=_AGENT)
+
+    assert _query(
+        store,
+        "SELECT through, summary, legacy, created_at, event_ids, seen_event_ids, fold_run_id, fold_event_ids, "
+        "fold_seen_event_ids FROM code_sessions_log_summaries WHERE summary IS NULL",
+    ) == [(1, None, 0, 1_750_000_000, "[]", "[]", None, None, None)]
 
 
 def test_a_barrier_hides_what_it_retired_from_replay_seen_ids_and_cuts(store: ConversationStore) -> None:

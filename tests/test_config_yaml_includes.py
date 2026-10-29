@@ -5,11 +5,9 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import yaml
@@ -20,12 +18,11 @@ from yaml.scanner import Scanner
 
 from mindroom import file_watcher
 from mindroom.cli.main import app
-from mindroom.config.main import Config, iter_config_validation_messages, load_config
+from mindroom.config.main import iter_config_validation_messages, load_config
 from mindroom.config.yaml_includes import ConfigIncludeError, load_yaml_config_source, partial_source_files
 from mindroom.constants import resolve_runtime_paths
-from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle, load_published_config
 from mindroom.orchestrator import _watch_config_task
-from mindroom.response_admission import ResponseAdmissionGate
+from tests.conftest import make_config_reload_lifecycle
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -854,23 +851,6 @@ class TestWatchPaths:
         assert callbacks == []
 
 
-def _reload_lifecycle(config_path: Path) -> ConfigReloadLifecycle:
-    """Build one reload lifecycle that loads fresh configs and stubs out applying their plans."""
-    runtime_paths = resolve_runtime_paths(config_path=config_path)
-    return ConfigReloadLifecycle(
-        runtime_paths=runtime_paths,
-        is_running=lambda: True,
-        current_config=Config,
-        agent_bots=dict,
-        load_config=partial(load_published_config, runtime_paths, api_enabled=False),
-        apply_update_plan=AsyncMock(return_value=False),
-        response_admission_gate=ResponseAdmissionGate(),
-        before_runtime_replacement=AsyncMock(),
-        rebind_published_config_consumers=MagicMock(),
-        finish_reload=AsyncMock(),
-    )
-
-
 class TestFailedReloadWatchSet:
     """A failed orchestrator reload keeps its own include files reachable by the watcher."""
 
@@ -882,7 +862,7 @@ class TestFailedReloadWatchSet:
             "agents: !include agents.yaml\nmodels:\n  default:\n    provider: ollama\n    id: test-model\n",
         )
         agents_path = _write(tmp_path / "agents.yaml", "broken: [not, a, mapping]\n")
-        lifecycle = _reload_lifecycle(config_path)
+        lifecycle = make_config_reload_lifecycle(resolve_runtime_paths(config_path=config_path))
 
         await lifecycle._apply_queued_config_reload()
 
@@ -923,7 +903,7 @@ class TestFailedReloadWatchSet:
             tmp_path / "config.yaml",
             "models:\n  default:\n    provider: ollama\n    id: test-model\n",
         )
-        lifecycle = _reload_lifecycle(config_path)
+        lifecycle = make_config_reload_lifecycle(resolve_runtime_paths(config_path=config_path))
         await lifecycle._apply_queued_config_reload()
         assert lifecycle.watched_source_files == frozenset({config_path.resolve()})
 
@@ -957,7 +937,7 @@ class TestFailedReloadWatchSet:
             tmp_path / "config.yaml",
             "models:\n  default:\n    provider: ollama\n    id: test-model\n",
         )
-        lifecycle = _reload_lifecycle(config_path)
+        lifecycle = make_config_reload_lifecycle(resolve_runtime_paths(config_path=config_path))
         await lifecycle._apply_queued_config_reload()
         reloads = asyncio.Event()
         stop_event = asyncio.Event()

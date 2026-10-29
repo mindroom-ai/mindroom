@@ -72,6 +72,8 @@ from tests.providers.golden_support import httpx2_transport, streamed_reply
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+pytestmark = pytest.mark.usefixtures("wide_cli_consoles")
+
 runner = CliRunner()
 
 

@@ -17,11 +17,11 @@ from structlog.testing import capture_logs
 
 from mindroom.constants import resolve_runtime_paths
 from mindroom.history.types import HistoryScope
+from mindroom.session_storage import legacy_usage_ledger
 from mindroom.session_storage.agent_storage import prepare_conversation_database
 from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
 from mindroom.session_storage.schema import TableNames
-from mindroom.usage import legacy_usage_storage
 from mindroom.usage.stats_storage import UsageSessionRow, UsageStorageSource, iter_usage_storage_rows
 from tests.conftest import create_agno_2_sessions_db
 from tests.session_storage.agno_layout import recorded_owner
@@ -47,7 +47,7 @@ def _team_agno_2_sessions_db(teams: Path) -> Path:
     names = TableNames.of_team(HistoryScope(kind="team", scope_id="crew"))
     database = names.database_path(teams / names.storage_name)
     database.parent.mkdir(parents=True)
-    fixture = Path(__file__).parent / "fixtures" / "agno_2_6_12_code_sessions.sql"
+    fixture = Path(__file__).resolve().parents[1] / "fixtures" / "agno_2_6_12_code_sessions.sql"
     with closing(sqlite3.connect(database)) as connection, connection:
         connection.executescript(fixture.read_text(encoding="utf-8").replace("code_sessions", names.sessions))
         connection.execute(
@@ -153,7 +153,7 @@ def test_a_blob_run_with_an_unusable_timestamp_keeps_its_usage(tmp_path: Path, c
 def test_migration_rolls_back_schema_and_seed_on_interruption(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A failed first import cannot publish an empty or partially seeded usage table."""
     path = create_agno_2_sessions_db(_NAMES.database_path(tmp_path))
-    project = legacy_usage_storage.project_usage
+    project = legacy_usage_ledger.project_usage
     calls = 0
 
     def interrupt(run: dict[str, object]) -> dict[str, object]:
@@ -165,7 +165,7 @@ def test_migration_rolls_back_schema_and_seed_on_interruption(tmp_path: Path, mo
         return project(run)
 
     with monkeypatch.context() as patch:
-        patch.setattr(legacy_usage_storage, "project_usage", interrupt)
+        patch.setattr(legacy_usage_ledger, "project_usage", interrupt)
         with pytest.raises(RuntimeError, match="interrupted seed"):
             _convert(path)
     with sqlite3.connect(path) as connection:
@@ -330,7 +330,7 @@ def test_migration_keeps_invalid_parent_as_a_gap(tmp_path: Path) -> None:
         )
     # The seeding step alone: the blob-to-rows step after it cannot store a parent that is not text.
     with closing(sqlite3.connect(path)) as connection, connection:
-        legacy_usage_storage.seed_usage_ledger(connection, _NAMES)
+        legacy_usage_ledger.seed_usage_ledger(connection, _NAMES)
     payload = _usage(path)[0][1]
     assert payload["parent_run_id"] is False
     assert "private" not in json.dumps(payload)

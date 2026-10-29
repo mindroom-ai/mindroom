@@ -55,8 +55,8 @@ async def test_seen_event_ids_are_written_onto_the_stored_row_not_the_pre_run_sn
     )
     reloaded = storage.load_session("t1")
     assert reloaded is not None
-    seen_event_ids = read_scope_seen_event_ids(storage, reloaded, scope)
+    seen_event_ids = read_scope_seen_event_ids(storage, reloaded)
 
     assert reloaded.session_state == {"phase": "after"}
-    assert read_scope_state(reloaded, scope).force_compact_before_next_run is True
+    assert read_scope_state(reloaded).force_compact_before_next_run is True
     assert seen_event_ids == {"$reply", "$unseen"}

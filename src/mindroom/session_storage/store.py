@@ -32,7 +32,7 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY,
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
-from mindroom.history.types import HistoryScope, ScopeSummary
+from mindroom.history.types import HistoryScope, ScopeSummary, owner_scope
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.llm.usage import ModelMetrics, RunMetrics, SessionMetrics, TokenCounts
 from mindroom.session_storage.codec import RunColumns, decode_json, run_columns, run_kind, run_record
@@ -41,9 +41,11 @@ from mindroom.session_storage.schema import (
     NON_VISIBLE_RUN_STATUS_SQL,
     NON_VISIBLE_RUN_STATUS_VALUES,
     TableNames,
+    quote_identifier,
+    usage_upsert_sql,
 )
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
-from mindroom.usage.storage import project_helper_usage, project_usage, quote_identifier, usage_upsert_sql
+from mindroom.usage.storage import project_helper_usage, project_usage
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, Sequence
@@ -460,7 +462,7 @@ class ConversationStore:
         with self.transaction(write=True) as connection:
             if initial_session is not None and ensure_session_row(connection, self.names, initial_session) is not None:
                 created = initial_session
-            connection.execute(usage_upsert_sql(self.names.sessions), (session_id, usage_id, json.dumps(snapshot)))
+            connection.execute(usage_upsert_sql(self.names), (session_id, usage_id, json.dumps(snapshot)))
         if created is not None:
             report_created_row(created)
 
@@ -656,11 +658,7 @@ def watch_session_row(scope: HistoryScope, session_id: str) -> Iterator[_Session
 def report_created_row(session: ConversationSession) -> None:
     """Tell the block watching this write that the write, now committed, created ``session``'s row."""
     watch = _SESSION_ROW_WATCH.get()
-    if watch is not None and (watch.session_id, watch.scope.kind, watch.scope.scope_id) == (
-        session.session_id,
-        session.kind,
-        session.owner_id,
-    ):
+    if watch is not None and (watch.session_id, watch.scope) == (session.session_id, owner_scope(session)):
         watch.created = True
 
 
@@ -1104,7 +1102,7 @@ def _record_run_usage(
         f"SELECT usage_data FROM {usage} WHERE session_id = ? AND run_id = ?",  # noqa: S608
         (session_id, run_id),
     ).fetchone()
-    connection.execute(usage_upsert_sql(names.sessions), (session_id, run_id, json.dumps(snapshot)))
+    connection.execute(usage_upsert_sql(names), (session_id, run_id, json.dumps(snapshot)))
     (raw_session_data,) = connection.execute(
         f"SELECT session_data FROM {sessions} WHERE session_id = ?",  # noqa: S608
         (session_id,),

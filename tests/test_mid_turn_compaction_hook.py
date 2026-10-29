@@ -21,7 +21,7 @@ from tests.agent_loop.helpers import collect, context, spec, toolkit
 from tests.conftest import install_model_providers
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.fakes.summary_model import summary_model
-from tests.history_helpers import BIG_TOOL, _make_config
+from tests.history_helpers import BIG_TOOL, TEST_AGENT_SCOPE, _make_config
 from tests.providers.openai_family_support import responses_adapter
 
 if TYPE_CHECKING:
@@ -75,8 +75,7 @@ async def test_a_text_fallback_on_a_native_route_stops_asking_the_provider_to_co
         config=config,
         runtime_paths=runtime_paths,
         entity_name="test_agent",
-        scope_id="test_agent",
-        is_team=False,
+        scope=TEST_AGENT_SCOPE,
         model_name="default",
         model=model,
         history_settings=config.resolve_scope("test_agent").history_settings,
@@ -140,8 +139,7 @@ async def test_a_later_loop_of_the_run_sizes_and_falls_back_by_its_own_request_s
         config=config,
         runtime_paths=runtime_paths,
         entity_name="test_agent",
-        scope_id="test_agent",
-        is_team=False,
+        scope=TEST_AGENT_SCOPE,
         model_name="default",
         model=model,
         history_settings=config.resolve_scope("test_agent").history_settings,
@@ -196,8 +194,7 @@ def _run_local_hook(config: Config, runtime_paths: RuntimePaths, model: ModelPro
         config=config,
         runtime_paths=runtime_paths,
         entity_name="test_agent",
-        scope_id="test_agent",
-        is_team=False,
+        scope=TEST_AGENT_SCOPE,
         model_name="default",
         model=model,
         history_settings=config.resolve_scope("test_agent").history_settings,

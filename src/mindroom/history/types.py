@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import CompactionConfig
     from mindroom.llm.provider import NativeCompactionReplay
+    from mindroom.session_storage.types import ConversationSession
 
 COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS = 1_000
 
@@ -76,6 +77,11 @@ class HistoryScope:
         return cls(kind=cast("_ScopeKind", kind), scope_id=scope_id)
 
 
+def owner_scope(session: ConversationSession) -> HistoryScope:
+    """Return the history scope that owns ``session``: its kind and owner, which a load takes from its database's."""
+    return HistoryScope(kind=session.kind, scope_id=session.owner_id)
+
+
 @dataclass(frozen=True)
 class HistoryPolicy:
     """Authored raw-history selection policy for one run."""
@@ -136,7 +142,7 @@ class HistoryScopeState:
     """Persisted compaction control state stored in session metadata.
 
     Compaction history itself lives in the summary rows beside the runs table,
-    owned by ``history/summary_rows.py``.
+    owned by ``session_storage/summary_rows.py``.
     """
 
     force_compact_before_next_run: bool = False

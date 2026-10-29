@@ -94,7 +94,6 @@ async def test_summary_cost_survives_success_or_rejected_output(  # noqa: PLR091
         operation = compact_scope_history(
             storage=storage,
             session=session,
-            scope=scope,
             state=HistoryScopeState(force_compact_before_next_run=True),
             summarizer=_summarizer(
                 model,

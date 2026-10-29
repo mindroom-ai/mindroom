@@ -24,7 +24,6 @@ from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
 from mindroom import constants
-from mindroom.history import summary_rows
 from mindroom.history.replay import current_summary_text
 from mindroom.history.storage import (
     _remove_redacted_event_from_history,
@@ -37,6 +36,7 @@ from mindroom.history.storage import (
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.session_storage import summary_rows
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
@@ -225,7 +225,6 @@ class _Runner:
         return append_compaction_chunk(
             storage=self._storage,
             session=session,
-            scope=_SCOPE,
             basis=basis,  # type: ignore[arg-type]
             included_run_ids=chunk,
             summary=summary,
@@ -235,7 +234,6 @@ class _Runner:
         return read_chunk_basis(
             self._storage,
             session,
-            _SCOPE,
             run_ids,
             previous_summary=current_summary_text(session),
         )
@@ -291,7 +289,7 @@ class _Runner:
         if run_id in self._fold_stopped:
             return
         session = ConversationSession(kind="agent", session_id=_SESSION, owner_id="code")
-        basis = read_fold_basis(self._storage, session, _SCOPE)
+        basis = read_fold_basis(self._storage, session)
         assert basis is not None
         previous = set(basis.summary.split("|")) if basis.summary is not None else set()
         summary = _summary_of(previous | {run.run_id for run in basis.runs if run.run_id} | {f"{run_id}~"})
@@ -301,7 +299,6 @@ class _Runner:
         appended = append_fold(
             self._storage,
             session=session,
-            scope=_SCOPE,
             basis=basis,
             summary=summary,
             fold=summary_rows.Fold(
@@ -477,7 +474,7 @@ class _Runner:
         self._seqs = seqs
         # Seen ids are exactly the events replay represents, so nothing is repeated or dropped.
         expected_seen = {_event(run_id) for run_id in visible | (covered - {f"{owner}~" for owner in owners}) | owners}
-        assert read_scope_seen_event_ids(self._storage, session, _SCOPE) == expected_seen
+        assert read_scope_seen_event_ids(self._storage, session) == expected_seen
 
 
 _ACTIONS = st.builds(
