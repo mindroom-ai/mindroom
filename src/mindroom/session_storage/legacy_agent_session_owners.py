@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 # owner it was created with, because Agno loaded a stored session with its stored owner and saved that back, and storage
 # v2 copied the row as it found it; a run keeps the id it was saved under; and storage v2 stored a row's Agno summary
 # under the scope of its owner. A row or run without an owner, which no release wrote, is selected too.
-# Last legacy release: v2026.10.634, which still saves such rows with their creation owner; replacement: the next
+# Last legacy release: v2026.10.660, which still saves such rows with their creation owner; replacement: the next
 # release, whose layout version 3 makes them name the agent.
 # Handling: The agent's store open and the startup sweep set their agent to `<name>` once: in the conversion of an
 # Agno-layout database, or when a storage v2 database moves to layout version 3. The session's owner is then its
