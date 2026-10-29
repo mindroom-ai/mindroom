@@ -1924,6 +1924,18 @@ async def test_ollama_native_settings_reach_the_chat_request(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_ollama_request_params_cannot_replace_the_model_messages_or_streaming(tmp_path: Path) -> None:
+    """The model, the conversation, and streaming are MindRoom's, as on the other routes."""
+    config = _config(OLLAMA, request_params={"model": "other", "messages": [], "stream": False})
+
+    request, _ = await run_adapter(config, _request(), tmp_path, ollama_ndjson(_ollama_done()))
+
+    body = request["body"]
+    assert (body["model"], body["stream"]) == (OLLAMA["id"], True)
+    assert [message["content"] for message in body["messages"]] == ["Be brief.", "Hi"]
+
+
+@pytest.mark.asyncio
 async def test_ollama_api_key_and_timeout_reach_the_http_client(tmp_path: Path) -> None:
     """An API key authenticates against Ollama's hosted endpoint, and ``timeout`` bounds every HTTP phase."""
     seen: list[httpx.Request] = []

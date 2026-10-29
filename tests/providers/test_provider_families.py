@@ -490,7 +490,7 @@ async def test_a_gemini_decision_request_logs_its_validated_config_in_the_same_f
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("family", ["anthropic", "openai_chat"])
+@pytest.mark.parametrize("family", ["anthropic", "openai_chat", "openai_responses"])
 async def test_the_request_record_leaves_out_the_request_options(family: str, tmp_path: Path) -> None:
     """Headers, query parameters, the timeout, and Claude's betas are request options, so the body leaves them out.
 

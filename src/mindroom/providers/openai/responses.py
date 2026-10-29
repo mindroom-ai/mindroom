@@ -10,9 +10,9 @@ from mindroom.llm.errors import InvalidRequest
 from mindroom.llm.provider import NativeCompactionReplay
 from mindroom.native_compaction import native_compaction_route
 from mindroom.providers.assistant_turn import TurnTimer, finished_turn
-from mindroom.providers.extra_kwargs import settings_params
+from mindroom.providers.extra_kwargs import sdk_request_body, settings_params
 from mindroom.providers.openai.adapter_common import SDKClients, request_settings
-from mindroom.providers.openai.chat_wire import sdk_request_body
+from mindroom.providers.openai.chat_wire import SDK_OPTION_KEYS
 from mindroom.providers.openai.errors import provider_error, sdk_failures
 from mindroom.providers.openai.replay_estimate import (
     estimate_responses_replay_tokens,
@@ -148,7 +148,7 @@ class ResponsesAdapter:
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one Responses request and yield its deltas, usage, and finished turn."""
         timer = TurnTimer()
-        kwargs = {**await asyncio.to_thread(self._request_kwargs, request), "stream": True}
+        kwargs = await asyncio.to_thread(self._request_kwargs, request)
         accumulator = ResponsesStream(
             provider=self.identity.provider_name,
             store=request_store(self.wire, request),
@@ -158,7 +158,7 @@ class ResponsesAdapter:
         )
         try:
             client = await self.clients.client()
-            await request.on_send(sdk_request_body(kwargs))
+            await request.on_send(sdk_request_body(kwargs, SDK_OPTION_KEYS))
             events = self._streamed(client, kwargs, accumulator, timer)
             async with closing_async_stream(events):
                 async for event in events:

@@ -88,14 +88,19 @@ class OllamaProvider:
             await _format_message(message, self.identity.provider_name)
             for message in with_joined_system(request.messages)
         ]
-        model = self.identity.id.strip()
-        chat_kwargs = self._chat_kwargs(request)
+        # MindRoom's own fields win over authored ``request_params``, as on the other routes.
+        call: dict[str, Any] = {
+            **self._chat_kwargs(request),
+            "model": self.identity.id.strip(),
+            "messages": messages,
+            "stream": True,
+        }
         reply = _OllamaReply()
         timer = TurnTimer()
         try:
             client = self._sdk_client()
-            await request.on_send({"model": model, "messages": messages, "stream": True, **chat_kwargs})
-            chunks = await client.chat(model=model, messages=messages, stream=True, **chat_kwargs)
+            await request.on_send(call)
+            chunks = await client.chat(**call)
             async with aclosing(cast("AsyncGenerator[ChatResponse]", chunks)) as responses:
                 async for chunk in responses:
                     for event in timer.chunk(_read_chunk(reply, chunk)):
