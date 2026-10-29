@@ -321,7 +321,8 @@ class ResponseTurnContext:
     reads the result. For agent turns ``entity_label`` is the configured agent
     name; team turns arrive named by the entity whose bot runs them, whose
     timezone dates the turn, and refine it to the materialized team label.
-    What the turn writes back (its recorder and collectors) crosses in ``TurnSinks`` instead.
+    What the turn writes back (its recorder and collectors) crosses in ``TurnSinks`` instead, except
+    ``skill_review_capture``, which the run fills with its final request for the skill review.
     """
 
     entity_label: str
@@ -803,6 +804,8 @@ def _interrupted_run_metadata(ctx: ResponseTurnContext, run: TurnRunState) -> di
     )
 
 
+# TODO(simplify): a stopped turn records the running attempt's partial output. Build an interrupted turn's record from
+# the loop's terminal record instead (#3108). Models would notice previews in replayed stopped turns.
 async def _record_interrupted(
     ctx: ResponseTurnContext,
     adapter: TurnAdapter[Any],
