@@ -7,6 +7,8 @@ import json
 import os
 import re
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -17,6 +19,7 @@ import pytest
 import mindroom.tool_system.metadata as metadata_module
 import mindroom.tool_system.plugin_imports as plugin_module
 import mindroom.tool_system.plugins as plugins_module
+import mindroom.tool_system.registry_state as registry_state_module
 import mindroom.tool_system.skills as skills_module
 import mindroom.tools  # noqa: F401
 from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
@@ -31,6 +34,7 @@ from tests.conftest import bind_runtime_paths, cached_plugin_module, runtime_pat
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from types import ModuleType
 
 
 def _bind_runtime_paths(config: Config, config_path: Path) -> Config:
@@ -3394,6 +3398,66 @@ async def test_plugin_rename_between_an_edit_and_its_reload_does_not_orphan_modu
             assert task.cancelled()
             assert old_module.__name__ not in sys.modules
             assert cached_plugin_module(hooks_path).__name__ != old_module.__name__
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+class _ContendedRLock:
+    """A re-entrant lock that reports when a thread first has to wait for it."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self.contended = threading.Event()
+
+    def __enter__(self) -> None:
+        if not self._lock.acquire(blocking=False):
+            self.contended.set()
+            self._lock.acquire()
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._lock.release()
+
+
+@pytest.mark.asyncio
+async def test_plugin_reload_during_a_load_still_cancels_the_replaced_modules_tasks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reload that starts while an agent build has replaced an edited module but not yet recorded it must cancel the old module's tasks."""
+    hooks_path = _write_task_hooks_plugin(tmp_path / "plugins" / "edited-task-plugin", plugin_name="edited-task-plugin")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/edited-task-plugin"]), config_path)
+    runtime_paths = runtime_paths_for(config)
+    lock = _ContendedRLock()
+    monkeypatch.setattr(registry_state_module, "_TOOL_REGISTRY_STATE_LOCK", lock)
+    exec_plugin_source = plugins_module._exec_plugin_source
+    edited_module_installed = threading.Event()
+
+    def exec_then_wait_for_the_reload(module_path: Path, module: ModuleType) -> None:
+        exec_plugin_source(module_path, module)
+        if not edited_module_installed.is_set():
+            edited_module_installed.set()
+            # Hold the load between installing the new module and recording the old one until the reload waits.
+            assert lock.contended.wait(timeout=30)
+
+    task = asyncio.create_task(asyncio.Event().wait())
+    with _preserved_plugin_loader_state(), ThreadPoolExecutor(max_workers=1) as executor:
+        try:
+            reload_plugins(config, runtime_paths)
+            cached_plugin_module(hooks_path)._AUTO_POKE_TASK = task
+            _set_hooks_version(hooks_path, 2)
+            monkeypatch.setattr(plugins_module, "_exec_plugin_source", exec_then_wait_for_the_reload)
+
+            load = executor.submit(load_plugins, config, runtime_paths)
+            assert edited_module_installed.wait(timeout=30)
+            result = reload_plugins(config, runtime_paths)
+            load.result(timeout=30)
+            await asyncio.sleep(0)
+
+            assert result.cancelled_task_count == 1
+            assert task.cancelled()
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)

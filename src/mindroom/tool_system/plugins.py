@@ -329,16 +329,18 @@ def reload_plugins(
     skip_broken_plugins: bool = False,
 ) -> PluginReloadResult:
     """Tear down the live plugin runtime and rebuild it from the current config."""
-    cancelled_task_count = _cancel_plugin_module_tasks()
-    prepared_reload = prepare_plugin_reload(
-        config,
-        runtime_paths,
-        skip_broken_plugins=skip_broken_plugins,
-    )
-    return apply_prepared_plugin_reload(
-        prepared_reload,
-        cancelled_task_count=cancelled_task_count,
-    )
+    # A load replaces a module before it records the replaced one, so cancel only while no load runs.
+    with locked_tool_registry_state():
+        cancelled_task_count = _cancel_plugin_module_tasks()
+        prepared_reload = prepare_plugin_reload(
+            config,
+            runtime_paths,
+            skip_broken_plugins=skip_broken_plugins,
+        )
+        return apply_prepared_plugin_reload(
+            prepared_reload,
+            cancelled_task_count=cancelled_task_count,
+        )
 
 
 def _cached_package_roots() -> set[str]:
@@ -372,6 +374,7 @@ def _cancel_plugin_module_tasks() -> int:
 
 def _module_tasks(module: ModuleType) -> tuple[asyncio.Task[Any], ...]:
     """Return the tasks one plugin module holds in its globals or one level inside them."""
+    # Loads read these globals from worker threads while the event loop changes them, so this and _iter_module_tasks copy each container before iterating.
     return tuple(task for value in tuple(vars(module).values()) for task in _iter_module_tasks(value))
 
 
