@@ -268,11 +268,7 @@ def test_update_scope_state_on_latest_skips_write_when_update_is_a_no_op(
 
     monkeypatch.setattr(store_module, "connect_conversation_database", traced_connect)
 
-    returned_state = update_scope_state_on_latest(
-        storage,
-        session=stale_session,
-        update=lambda latest: latest,
-    )
+    returned_state = update_scope_state_on_latest(storage, session=stale_session, update=lambda latest: latest)
 
     assert statements
     assert not [statement for statement in statements if statement.lstrip().upper().startswith("UPDATE")]

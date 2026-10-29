@@ -1134,8 +1134,6 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
         execution_identity=identity,
     )
     assert reloaded_scope_context.session is not None
-    agent_state = read_scope_state(
-        reloaded_scope_context.session,
-    )
+    agent_state = read_scope_state(reloaded_scope_context.session)
     assert agent_state.force_compact_before_next_run is True
     assert result == COMPACT_CONTEXT_SUCCESS
