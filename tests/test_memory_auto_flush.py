@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.history.session_runs import RedactedEventIds
+    from mindroom.session_storage.store import ConversationStore
 
 T0 = 1_760_000_000
 ROOM = "!room:example.org"
@@ -838,9 +839,9 @@ async def test_budgets_cap_each_pass_and_each_agent_and_passes_take_turns(
     listed: list[str] = []
     real_updated_sessions = auto_flush.updated_sessions
 
-    def updated_sessions(storage: object, agent_name: str, *, since: int) -> list[tuple[str, int]]:
-        listed.append(agent_name)
-        return real_updated_sessions(storage, agent_name, since=since)
+    def updated_sessions(storage: ConversationStore, *, since: int) -> list[tuple[str, int]]:
+        listed.append(storage.names.storage_name)
+        return real_updated_sessions(storage, since=since)
 
     monkeypatch.setattr(auto_flush, "updated_sessions", updated_sessions)
     await worker._run_cycle(config)

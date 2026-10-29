@@ -62,7 +62,7 @@ def _updated_sessions(store: ConversationStore, owner: HistoryScope) -> object:
     """Return the sessions the background readers of an agent's conversations see updated."""
     if owner.kind != "agent":
         return None
-    return store.list_updated_sessions(owner.scope_id, since=0)
+    return store.list_updated_sessions(since=0)
 
 
 def observe_database(store: ConversationStore, owner: HistoryScope) -> dict[str, object]:

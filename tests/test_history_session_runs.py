@@ -88,10 +88,10 @@ def test_updated_sessions_lists_sessions_changed_after_the_cursor(storage: Conve
     _seed(storage, [_run("r1", 100)], session_id="!a:x:$t1")
     _seed(storage, [_run("r2", 100)], session_id="!a:x:$t1:dynamic_workflow:w:p")
 
-    listed = updated_sessions(storage, "mind", since=0)
+    listed = updated_sessions(storage, since=0)
 
     assert [session_id for session_id, _ in listed] == ["!a:x:$t1"]
-    assert updated_sessions(storage, "mind", since=listed[0][1]) == []
+    assert updated_sessions(storage, since=listed[0][1]) == []
 
 
 @pytest.mark.asyncio

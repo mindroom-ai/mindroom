@@ -922,7 +922,7 @@ def test_a_new_database_reads_as_empty(store: ConversationStore) -> None:
     assert store.read_session_metadata("s1") is None
     assert store.list_runs("s1") == []
     assert store.get_run("r1") is None
-    assert store.list_updated_sessions("code", since=0) == []
+    assert store.list_updated_sessions(since=0) == []
 
 
 def test_get_run_returns_a_paused_team_run_with_the_members_its_requirements_name(
@@ -1811,16 +1811,10 @@ def test_independent_usage_needs_its_conversation_row(store: ConversationStore) 
         )
 
 
-def test_list_updated_sessions_returns_an_agents_sessions_updated_after_the_cursor(
-    store: ConversationStore,
-    team_store: ConversationStore,
-) -> None:
-    """An agent's sessions are listed oldest update first, strictly after the cursor; another owner's database has none."""
+def test_list_updated_sessions_returns_the_sessions_updated_after_the_cursor(store: ConversationStore) -> None:
+    """The database's sessions are listed oldest update first, strictly after the cursor."""
     for session_id, updated_at in (("a", 10), ("b", 30), ("c", 20)):
         seed_session_row(store, _session(session_id))
         _execute(store, "UPDATE code_sessions SET updated_at = ? WHERE session_id = ?", updated_at, session_id)
-    seed_session_row(team_store, _team())
 
-    assert store.list_updated_sessions("code", since=10) == [("c", 20), ("b", 30)]
-    assert store.list_updated_sessions("other", since=0) == []
-    assert team_store.list_updated_sessions("crew", since=0) == []
+    assert store.list_updated_sessions(since=10) == [("c", 20), ("b", 30)]

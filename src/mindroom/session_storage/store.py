@@ -426,16 +426,13 @@ class ConversationStore:
         if created is not None:
             report_created_row(session)
 
-    def list_updated_sessions(self, agent_id: str, *, since: int) -> list[tuple[str, int]]:
-        """Return ``(session_id, updated_at)`` of agent ``agent_id``'s sessions updated after ``since``, oldest first.
+    def list_updated_sessions(self, *, since: int) -> list[tuple[str, int]]:
+        """Return ``(session_id, updated_at)`` of the sessions updated after ``since``, oldest first.
 
-        Every session of a database belongs to its owner, so another owner's database lists none. A session's update
-        time moves when its row is written: a changed state a run save carries, a metadata change, or a run save that
-        records its usage, as a run's terminal save through ``persist_to`` does.
+        A session's update time moves when its row is written: a changed state a run save carries, a metadata change,
+        or a run save that records its usage, as a run's terminal save through ``persist_to`` does.
         """
         with self.transaction(write=False) as connection:
-            if _database_owner(connection, self.names) != HistoryScope(kind="agent", scope_id=agent_id):
-                return []
             return connection.execute(
                 "SELECT session_id, COALESCE(updated_at, created_at) AS updated "  # noqa: S608
                 f"FROM {quote_identifier(self.names.sessions)} WHERE COALESCE(updated_at, created_at) > ? "
