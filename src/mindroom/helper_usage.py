@@ -14,11 +14,7 @@ from mindroom.llm.usage import HelperUsage, RequestUsage
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
-from mindroom.usage.storage import (
-    SYSTEM_USAGE_ENTITY,
-    SYSTEM_USAGE_OWNER,
-    SYSTEM_USAGE_STORAGE_NAME,
-)
+from mindroom.usage.storage import SYSTEM_USAGE_OWNER, SYSTEM_USAGE_STORAGE_NAME
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -142,7 +138,7 @@ async def record_system_usage(
                 SYSTEM_USAGE_OWNER,
             ),
             session_id=kind,
-            initial_session=new_scope_session(session_id=kind, scope_id=SYSTEM_USAGE_ENTITY, is_team=False),
+            initial_session=new_scope_session(session_id=kind, scope=SYSTEM_USAGE_OWNER),
         )
         await record_helper_usage(usage, owner=owner, kind=kind, requester_id=None)
     except Exception as exc:

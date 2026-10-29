@@ -28,7 +28,7 @@ from mindroom.history.interrupted_replay import persist_interrupted_replay_snaps
 from mindroom.history.storage import (
     append_compaction_chunk,
     append_fold,
-    first_scope_session,
+    new_scope_session,
     read_chunk_basis,
     read_fold_basis,
     remove_history_of_redacted_events,
@@ -391,7 +391,7 @@ class StoreBackend(Driver):
     @override
     def fold_summary_usage(self, session: ConversationSession) -> None:
         # The fold's usage recorder creates the session row a first turn's summary usage needs (spec 3.4).
-        self._summary_usage(session, first_scope_session(self.scope, session.session_id))
+        self._summary_usage(session, new_scope_session(session_id=session.session_id, scope=self.scope))
 
     @override
     def append_fold(self, session: ConversationSession, basis: FoldBasisView, summary: str, fold: FoldInput) -> bool:
@@ -439,7 +439,7 @@ class StoreBackend(Driver):
         del session
         set_force_compaction(
             self.store,
-            session=first_scope_session(self.scope, SESSION_ID),
+            session=new_scope_session(session_id=SESSION_ID, scope=self.scope),
             scope=self.scope,
             forced=True,
         )

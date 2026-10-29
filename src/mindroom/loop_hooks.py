@@ -24,6 +24,7 @@ from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.agent_loop.output_limit import output_limit_policy
 from mindroom.approval.receipt import approval_receipt_hook
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
+from mindroom.history.types import HistoryScope
 from mindroom.llm.provider import DeferredTools
 from mindroom.llm.tool_search import resolve_call_tool_calls
 from mindroom.participation_hook import participation_hook
@@ -89,8 +90,7 @@ def agent_loop_hooks(
         turn,
         model=build.spec.model,
         entity_name=agent_name,
-        scope_id=scope.scope_id if scope is not None else agent_name,
-        is_team=False,
+        scope=scope if scope is not None else HistoryScope(kind="agent", scope_id=agent_name),
         history_settings=build.history_settings,
         deferred_tools=build.request_template.deferred_tools,
         tool_middleware=agent_tool_middleware(build),
@@ -121,8 +121,7 @@ def leader_loop_hooks(
         turn,
         model=built.spec.leader.model,
         entity_name=entity_name,
-        scope_id=built.spec.leader.id,
-        is_team=True,
+        scope=HistoryScope(kind="team", scope_id=built.spec.leader.id),
         history_settings=built.history_settings,
         deferred_tools=DeferredTools(),
         tool_middleware=built.leader_middleware,
@@ -139,8 +138,7 @@ def _loop_hooks(
     *,
     model: ModelProvider,
     entity_name: str | None,
-    scope_id: str,
-    is_team: bool,
+    scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
     deferred_tools: DeferredTools,
     tool_middleware: tuple[ToolMiddleware, ...],
@@ -171,8 +169,7 @@ def _loop_hooks(
             config=turn.config,
             runtime_paths=turn.runtime_paths,
             entity_name=entity_name,
-            scope_id=scope_id,
-            is_team=is_team,
+            scope=scope,
             model_name=turn.model_name,
             model=model,
             history_settings=history_settings,

@@ -83,13 +83,13 @@ async def record_summary_usage(
     )
 
 
-def new_scope_session(*, session_id: str, scope_id: str, is_team: bool) -> ConversationSession:
-    """Return one empty session row for a scope with no stored session yet."""
+def new_scope_session(*, session_id: str, scope: HistoryScope) -> ConversationSession:
+    """Return the empty session row the first run of ``session_id`` in ``scope`` starts from."""
     created_at = int(datetime.now(UTC).timestamp())
     return ConversationSession(
         session_id=session_id,
-        kind="team" if is_team else "agent",
-        owner_id=scope_id,
+        kind=scope.kind,
+        owner_id=scope.scope_id,
         created_at=created_at,
     )
 
@@ -476,7 +476,7 @@ def append_fold(
         summary=summary,
         fold=fold,
         session=session,
-        initial_session=first_scope_session(scope, session.session_id),
+        initial_session=new_scope_session(session_id=session.session_id, scope=scope),
     )
     return row_id is not None
 
@@ -484,11 +484,6 @@ def append_fold(
 def run_folded_tool_call_ids(storage: ConversationStore, *, session_id: str, run_id: str) -> set[str]:
     """Return the tool calls the run's mid-turn folds summarized, from the rows they flagged."""
     return summary_rows.folded_tool_call_ids(storage, session_id=session_id, run_id=run_id)
-
-
-def first_scope_session(scope: HistoryScope, session_id: str) -> ConversationSession:
-    """Return the empty session row the first run of ``session_id`` in ``scope`` starts from."""
-    return new_scope_session(session_id=session_id, scope_id=scope.scope_id, is_team=scope.kind == "team")
 
 
 def _owner_scope(session: ConversationSession) -> HistoryScope:

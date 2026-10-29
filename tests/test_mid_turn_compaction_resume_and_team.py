@@ -199,11 +199,7 @@ def _resumable(
         knowledge=None,
         model=turn_model(config, paths, "test_agent"),
     )
-    session = store.load_session("session-1") or new_scope_session(
-        session_id="session-1",
-        scope_id="test_agent",
-        is_team=False,
-    )
+    session = store.load_session("session-1") or new_scope_session(session_id="session-1", scope=TEST_AGENT_SCOPE)
     return _Resumable(build, model, config, paths, store, session, replays_history)
 
 

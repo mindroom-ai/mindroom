@@ -35,7 +35,7 @@ from mindroom.history.replay import (
     scope_visible_runs,
 )
 from mindroom.history.storage import (
-    first_scope_session,
+    new_scope_session,
     read_scope_state,
     set_force_compaction,
 )
@@ -624,7 +624,7 @@ async def compact_scope_mid_turn(
                 on_usage=scope_usage_recorder(
                     storage,
                     session.session_id,
-                    initial_session=first_scope_session(scope, session.session_id),
+                    initial_session=new_scope_session(session_id=session.session_id, scope=scope),
                 ),
             ),
             before_tokens=before_tokens,

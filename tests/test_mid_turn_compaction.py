@@ -222,8 +222,7 @@ async def _run(
     store = agent.store
     session = (store.load_session(session_id) if store is not None else None) or new_scope_session(
         session_id=session_id,
-        scope_id="test_agent",
-        is_team=False,
+        scope=TEST_AGENT_SCOPE,
     )
     settings = agent.config.resolve_scope("test_agent").history_settings
     history = (
@@ -241,8 +240,7 @@ async def _run(
         config=agent.config,
         runtime_paths=agent.runtime_paths,
         entity_name="test_agent",
-        scope_id="test_agent",
-        is_team=False,
+        scope=TEST_AGENT_SCOPE,
         model_name="default",
         model=agent.model,
         history_settings=settings,
@@ -1065,7 +1063,7 @@ async def test_run_local_summary_usage_goes_to_the_replys_usage_owner(
     owner = HelperUsageOwner(
         storage_factory=lambda: owner_storage,
         session_id="owner-session",
-        initial_session=new_scope_session(session_id="owner-session", scope_id="crew", is_team=True),
+        initial_session=new_scope_session(session_id="owner-session", scope=HistoryScope(kind="team", scope_id="crew")),
     )
     token = helper_usage._HELPER_USAGE_OWNER.set(owner)
     try:

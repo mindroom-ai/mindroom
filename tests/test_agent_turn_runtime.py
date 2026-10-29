@@ -639,7 +639,7 @@ async def test_an_error_record_never_repeats_an_earlier_answer(
             Message(role="assistant", content="The image is one green pixel."),
         ],
     )
-    session = new_scope_session(session_id=SESSION_ID, scope_id="assistant", is_team=False)
+    session = new_scope_session(session_id=SESSION_ID, scope=HistoryScope(kind="agent", scope_id="assistant"))
     session.runs = [earlier]
     seed_session(reply.storage, session)
     replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)

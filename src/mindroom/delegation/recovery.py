@@ -160,7 +160,10 @@ async def interrupt_child(
 
         def persist() -> None:
             # The run exists; this rewrites its row without touching the usage ledger, through a stand-in session.
-            stand_in = new_scope_session(session_id=child.session_id, scope_id=child.child_agent_name, is_team=False)
+            stand_in = new_scope_session(
+                session_id=child.session_id,
+                scope=HistoryScope(kind="agent", scope_id=child.child_agent_name),
+            )
             _child_storage(child, config, runtime_paths).save_run(stand_in, response, record_usage=False)
 
         await asyncio.to_thread(persist)
