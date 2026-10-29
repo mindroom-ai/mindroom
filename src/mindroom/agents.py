@@ -1277,7 +1277,12 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         # initial deferred tools stay in the rendered prompt prefix as plain non-deferred tools.
         if wire_deferred_tools and tool_entry.defer and not tool_entry.initial:
             metadata = TOOL_METADATA.get(authored_name)
-            deferral, adapted = defer_toolkit(authored_name, metadata.description if metadata else "", adapted)
+            deferral, adapted = defer_toolkit(
+                authored_name,
+                metadata.description if metadata else "",
+                adapted,
+                portable_search=portable_deferred_tools,
+            )
         # Refused only now, so a function the filters and the approval policy left out costs its toolkit nothing.
         if (refusal := offered_refusal(adapted)) is not None:
             raise ValueError(refusal)
