@@ -2567,13 +2567,12 @@ class TestMultiAgentOrchestrator:
                 new=AsyncMock(return_value="!space:localhost"),
             ) as ensure,
             patch("mindroom.orchestration.rooms.get_room_members", new=AsyncMock(return_value=set())),
-            patch.object(orchestrator._rooms, "_invite_user_if_missing", new=AsyncMock()) as invite,
+            patch("mindroom.orchestration.rooms.invite_to_room", new=AsyncMock(return_value=True)) as invite,
         ):
             await orchestrator._rooms.link_root_space({"one": "!one:localhost"})
 
         assert ensure.await_args.kwargs["admin_user_ids"] == set()
-        invite.assert_awaited_once()
-        assert invite.await_args.args[1] == "@member:localhost"
+        invite.assert_awaited_once_with(router_bot.client, "!space:localhost", "@member:localhost")
 
     @pytest.mark.asyncio
     async def test_ensure_room_invitations_does_not_expand_responder_access_grants(

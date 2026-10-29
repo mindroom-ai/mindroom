@@ -462,7 +462,7 @@ class _MultiAgentOrchestrator:
         self._rooms = RoomSetup(
             runtime_paths=self.runtime_paths,
             config_provider=self._require_config,
-            router_bot=self._router_bot,
+            router_client=self._router_client,
             refresh_agent_reply_memberships=lambda: self.refresh_agent_reply_memberships(),
         )
         self._startup_maintenance = StartupMaintenanceController(
@@ -1346,11 +1346,11 @@ class _MultiAgentOrchestrator:
     async def refresh_agent_reply_memberships(self) -> None:
         """Refresh room-backed reply grants through the router's Matrix client."""
         config = self._require_config()
-        router_bot = self._router_bot()
-        if router_bot is None or router_bot.client is None:
+        router_client = self._router_client()
+        if router_client is None:
             self.invalidate_agent_reply_memberships(reason="router_unavailable")
             return
-        await self.agent_reply_memberships.refresh(config, self.runtime_paths, router_bot.client)
+        await self.agent_reply_memberships.refresh(config, self.runtime_paths, router_client)
         self.agent_reply_membership_sync.record_authoritative_refresh(config)
         self._schedule_ready_turn_dispatch_recovery()
         for bot in self.agent_bots.values():
@@ -1688,16 +1688,13 @@ class _MultiAgentOrchestrator:
         finally:
             await self._script_runtime.reopen_script_calls()
 
-    def _router_bot(self) -> AgentBot | TeamBot | None:
-        """Return the router bot when it exists and has an active client."""
+    def _router_client(self) -> nio.AsyncClient | None:
+        """Return the router's Matrix client when the router runs one."""
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        if router_bot is None:
-            logger.warning("Router not available")
-            return None
-        if router_bot.client is None:
+        client = None if router_bot is None else router_bot.client
+        if client is None:
             logger.warning("Router client not available")
-            return None
-        return router_bot
+        return client
 
     async def _bind_event_journal(self) -> None:
         """Refuse startup unless the configured database is this install's journal.
