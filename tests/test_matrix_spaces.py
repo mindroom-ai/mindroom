@@ -863,7 +863,7 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
     ):
         updated = await orchestrator.config_reload._update_config()
 
-    assert updated is True
+    assert updated is False
     assert general_bot.config == updated_config
     assert router_bot.config == updated_config
     mock_setup.assert_not_awaited()

@@ -164,7 +164,10 @@ class EntityFleet:
 
     async def start(self, entity_names: Iterable[str]) -> EntityStartResults:
         """Start entities once, run sync for the started ones, retry the rest, and publish the outcome."""
-        results = await self.try_start(entity_names)
+        names = set(entity_names)
+        if not names:
+            return EntityStartResults()
+        results = await self.try_start(names)
         self.start_sync(results.started_bots)
         self.schedule_retries(results.retryable_entities)
         await self._hooks.entities_started(results)
@@ -214,19 +217,15 @@ class EntityFleet:
                     retry_in_seconds=retry_in_seconds,
                 )
                 await asyncio.sleep(retry_in_seconds)
-                if entity_name in self._hooks.start_blocked({entity_name}):
+                results = await self.try_start([entity_name])
+                if results.retryable_entities:
                     continue
-                outcome = await _start_once(entity_name, slot.bot)
-                if outcome is False:
-                    continue
-                slot.disabled = outcome is None
-                if outcome is None:
-                    await self._hooks.entities_started(EntityStartResults(permanently_failed_entities=[entity_name]))
-                    return
-                logger.info("Bot recovered after startup failure", agent_name=entity_name)
-                self.start_sync([slot.bot])
-                await self._hooks.entities_started(EntityStartResults(started_bots=[slot.bot]))
-                await self._hooks.setup_rooms_after_retry(entity_name)
+                if results.started_bots:
+                    logger.info("Bot recovered after startup failure", agent_name=entity_name)
+                    self.start_sync(results.started_bots)
+                await self._hooks.entities_started(results)
+                if results.started_bots:
+                    await self._hooks.setup_rooms_after_retry(entity_name)
                 return
         finally:
             if slot.retry_task is asyncio.current_task():

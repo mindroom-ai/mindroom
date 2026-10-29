@@ -454,7 +454,7 @@ class TestDynamicConfigUpdate:
         ):
             updated = await orchestrator.config_reload._update_config()
 
-        assert updated is True
+        assert updated is False
         assert general_bot.config == updated_config
         assert router_bot.config == updated_config
         mock_setup.assert_awaited_once_with([])
@@ -505,7 +505,7 @@ class TestDynamicConfigUpdate:
         ):
             updated = await orchestrator.config_reload._update_config()
 
-        assert updated is True
+        assert updated is False
         assert general_bot.config == updated_config
         assert router_bot.config == updated_config
         mock_setup.assert_awaited_once_with([])
@@ -573,7 +573,7 @@ class TestDynamicConfigUpdate:
         ):
             updated = await orchestrator.config_reload._update_config()
 
-        assert updated is True
+        assert updated is False
         assert orchestrator.agent_reply_memberships.is_allowed(
             "@alice:example.com",
             ["lobby"],
@@ -644,7 +644,7 @@ class TestDynamicConfigUpdate:
         ):
             updated = await orchestrator.config_reload._update_config()
 
-        assert updated is True
+        assert updated is False
         plan = reconcile_rooms.await_args.args[0]
         assert plan.restart == set()
         assert set(orchestrator.agent_bots) == {ROUTER_AGENT_NAME, "general"}
@@ -705,7 +705,7 @@ class TestDynamicConfigUpdate:
         ):
             updated = await orchestrator.config_reload._update_config()
 
-        assert updated is True
+        assert updated is False
         assert orchestrator.config == updated_config
         assert router_bot.config == updated_config
         mock_ensure_user.assert_awaited_once_with(updated_config)

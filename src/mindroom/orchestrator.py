@@ -1499,15 +1499,7 @@ class _MultiAgentOrchestrator:
                 logger.exception("bot_presence_update_failed", agent=entity_name)
             logger.debug("bot_config_updated", agent=entity_name)
 
-    async def _emit_config_reloaded(
-        self,
-        *,
-        new_config: Config,
-        changed_entities: set[str],
-        added_entities: set[str],
-        removed_entities: set[str],
-        plugin_changes: tuple[str, ...],
-    ) -> None:
+    async def _emit_config_reloaded(self, plan: ConfigUpdatePlan, changed_entities: set[str]) -> None:
         """Emit the config:reloaded observer event after applying a new snapshot."""
         if not self.hook_registry.has_hooks(EVENT_CONFIG_RELOADED):
             return
@@ -1515,7 +1507,7 @@ class _MultiAgentOrchestrator:
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
         context = ConfigReloadedContext(
             event_name=EVENT_CONFIG_RELOADED,
-            config=new_config,
+            config=plan.new_config,
             runtime_paths=self.runtime_paths,
             correlation_id=f"config-reload:{uuid4().hex}",
             runtime_started_at=(router_bot.runtime_started_at if isinstance(router_bot, AgentBot) else time.time()),
@@ -1528,9 +1520,9 @@ class _MultiAgentOrchestrator:
             room_state_putter=self.hook_room_state_putter(),
             _hook_registry_state=self._hook_registry_state,
             changed_entities=tuple(sorted(changed_entities)),
-            added_entities=tuple(sorted(added_entities)),
-            removed_entities=tuple(sorted(removed_entities)),
-            plugin_changes=plugin_changes,
+            added_entities=tuple(sorted(plan.start)),
+            removed_entities=tuple(sorted(plan.remove)),
+            plugin_changes=plan.plugin_changes,
         )
         await emit(self.hook_registry, EVENT_CONFIG_RELOADED, context)
 
@@ -1611,11 +1603,8 @@ class _MultiAgentOrchestrator:
         bots_to_setup = self._running_bots_for_entities(changed_entities | plan.reconcile_rooms)
         if bots_to_setup or plan.mindroom_user_changed or plan.room_access_changed or plan.authorization_changed:
             await self._rooms.setup(bots_to_setup)
-        elif plan.matrix_space_changed or plan.room_metadata_changed:
-            room_ids = await self._rooms.ensure_rooms_exist()
-            if plan.room_metadata_changed:
-                await self._rooms.reconcile_room_policies(room_ids)
-            await self._rooms.link_root_space(room_ids)
+        elif plan.matrix_space_changed:
+            await self._rooms.link_root_space(await self._rooms.ensure_rooms_exist())
 
     async def _prepare_accounts_for_config_update(self, new_config: Config, plan: ConfigUpdatePlan) -> None:
         """Prepare or validate managed Matrix accounts before publishing a reloaded config."""
@@ -1634,26 +1623,16 @@ class _MultiAgentOrchestrator:
 
     async def _finalize_config_reload(
         self,
-        *,
-        new_config: Config,
         current_config: Config,
+        plan: ConfigUpdatePlan,
         changed_entities: set[str],
-        added_entities: set[str],
-        removed_entities: set[str],
-        plugin_changes: tuple[str, ...],
     ) -> None:
         """Publish post-reload runtime services and external trigger delivery binding."""
-        handle_embedder_config_reload(current_config, new_config, self.runtime_paths)
-        await self._sync_runtime_support_services(new_config, previous_config=current_config)
+        handle_embedder_config_reload(current_config, plan.new_config, self.runtime_paths)
+        await self._sync_runtime_support_services(plan.new_config, previous_config=current_config)
         await self._approval_recovery.mark_startup_runtime_support_ready()
         self._bind_trigger_runtimes()
-        await self._emit_config_reloaded(
-            new_config=new_config,
-            changed_entities=changed_entities,
-            added_entities=added_entities,
-            removed_entities=removed_entities,
-            plugin_changes=plugin_changes,
-        )
+        await self._emit_config_reloaded(plan, changed_entities)
 
     async def _apply_config_update_plan(self, current_config: Config, plan: ConfigUpdatePlan) -> bool:
         """Apply one computed config update plan: stop what changes, publish the new config, then start."""
@@ -1693,17 +1672,6 @@ class _MultiAgentOrchestrator:
                     if router_bot is not None:
                         router_bot.schedule_pending_invite_reconciliation()
 
-                if plan.only_support_service_changes and not catalog_restarts:
-                    await self._finalize_config_reload(
-                        new_config=new_config,
-                        current_config=current_config,
-                        changed_entities=set(plan.live_updated),
-                        added_entities=set(plan.start),
-                        removed_entities=set(plan.remove),
-                        plugin_changes=plan.plugin_changes,
-                    )
-                    return False
-
                 changed_entities = set(plan.restart | plan.start | catalog_restarts)
                 await self.fleet.create(changed_entities, new_config)
                 start_results = await self.fleet.start(changed_entities)
@@ -1714,16 +1682,9 @@ class _MultiAgentOrchestrator:
                         agent_names=start_results.permanently_failed_entities,
                     )
 
-                await self._finalize_config_reload(
-                    new_config=new_config,
-                    current_config=current_config,
-                    changed_entities=changed_entities | plan.live_updated,
-                    added_entities=set(plan.start),
-                    removed_entities=set(plan.remove),
-                    plugin_changes=plan.plugin_changes,
-                )
+                await self._finalize_config_reload(current_config, plan, changed_entities | plan.live_updated)
                 logger.info("configuration_update_complete", affected_bot_count=len(changed_entities))
-                return True
+                return bool(changed_entities)
         finally:
             await self._script_runtime.reopen_script_calls()
 

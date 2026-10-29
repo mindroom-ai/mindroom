@@ -136,7 +136,6 @@ class ConfigUpdatePlan:
     room_access_changed: bool = False
     matrix_space_changed: bool = False
     authorization_changed: bool = False
-    room_metadata_changed: bool = False
     # Any input reply, invite, or trigger authorization reads changed, so publication waits for replies.
     reply_authorization_changed: bool = False
     # A continuing agent's responder access changed, so background scripts it runs must be re-authorized.
@@ -152,23 +151,8 @@ class ConfigUpdatePlan:
         A plan that touches no entity and no reply-authorization input only
         replaces config that responses read live, so it can publish while they run.
         """
-        return self.reply_authorization_changed or self._has_entity_changes
-
-    @property
-    def _has_entity_changes(self) -> bool:
-        """Return whether any bots must be created, restarted, removed, or reconciled."""
-        return bool(self.restart or self.start or self.remove or self.reconcile_rooms)
-
-    @property
-    def only_support_service_changes(self) -> bool:
-        """Return whether only non-bot support services changed."""
-        return not (
-            self._has_entity_changes
-            or self.mindroom_user_changed
-            or self.room_access_changed
-            or self.matrix_space_changed
-            or self.authorization_changed
-            or self.room_metadata_changed
+        return self.reply_authorization_changed or bool(
+            self.restart or self.start or self.remove or self.reconcile_rooms,
         )
 
 
@@ -390,11 +374,6 @@ def _reply_authorization_inputs_changed(config: Config, new_config: Config) -> b
     )
 
 
-def _room_metadata_changed(config: Config, new_config: Config) -> bool:
-    """Return whether managed room metadata changed without implying bot reconstruction."""
-    return config.rooms != new_config.rooms
-
-
 def _changed_mcp_servers(config: Config, new_config: Config) -> frozenset[str]:
     """Return MCP server ids whose config changed across a reload."""
     all_server_ids = set(config.mcp_servers) | set(new_config.mcp_servers)
@@ -541,7 +520,6 @@ def build_config_update_plan(
         or current_config.rooms != new_config.rooms,
         matrix_space_changed=current_config.matrix_space != new_config.matrix_space,
         authorization_changed=current_config.authorization != new_config.authorization,
-        room_metadata_changed=_room_metadata_changed(current_config, new_config),
         reply_authorization_changed=_reply_authorization_inputs_changed(current_config, new_config),
         responder_access_changed=_responder_access_changed(current_config, new_config),
         reply_membership_policy_changed=agent_reply_membership_policy_changed(current_config, new_config),

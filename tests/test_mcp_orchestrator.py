@@ -149,7 +149,6 @@ def test_external_trigger_policy_change_does_not_restart_entities(tmp_path: Path
     )
 
     assert plan.restart == set()
-    assert plan.only_support_service_changes is True
 
 
 def _manager_with_failed_server(*, required: bool) -> MagicMock:
@@ -393,8 +392,6 @@ async def test_trigger_support_only_reload_rebinds_external_trigger_runtime(tmp_
         new_config=new_config,
         bots=orchestrator.agent_bots,
     )
-
-    assert plan.only_support_service_changes is True
 
     with (
         patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
@@ -1036,4 +1033,4 @@ async def test_reload_restarts_refreshed_mcp_dependents_inline_only_after_a_drai
     else:
         mock_notify.assert_awaited_once_with("demo")
         assert mock_stop.await_args.args[0] == set()
-        mock_start.assert_not_awaited()
+        mock_start.assert_awaited_once_with(set())

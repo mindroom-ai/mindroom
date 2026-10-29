@@ -141,7 +141,7 @@ class RoomSetup:
         for bot in bots:
             if bot.agent_name == ROUTER_AGENT_NAME:
                 await bot.ensure_rooms()
-        snapshots = await self.reconcile_room_policies(room_ids)
+        snapshots = await self._reconcile_room_policies(room_ids)
         await self._ensure_room_invitations(snapshots)
         await _ensure_internal_user_memberships()
 
@@ -166,7 +166,7 @@ class RoomSetup:
         logger.info("ensured_room_existence", room_count=len(room_ids))
         return room_ids
 
-    async def reconcile_room_policies(self, room_ids: dict[str, str]) -> dict[str, RoomStateSnapshot]:
+    async def _reconcile_room_policies(self, room_ids: dict[str, str]) -> dict[str, RoomStateSnapshot]:
         """Wire the router's fresh policy reconciliation into startup and reload."""
         router = self.router_bot()
         if router is None or router.client is None:

@@ -334,14 +334,10 @@ async def _noop_setup_rooms_and_memberships(
 
 async def _noop_emit_config_reloaded(
     self: _MultiAgentOrchestrator,
-    *,
-    new_config: Config,
+    plan: ConfigUpdatePlan,
     changed_entities: set[str],
-    added_entities: set[str],
-    removed_entities: set[str],
-    plugin_changes: tuple[str, ...],
 ) -> None:
-    del self, new_config, changed_entities, added_entities, removed_entities, plugin_changes
+    del self, plan, changed_entities
 
 
 def _noop_start_sync(self: EntityFleet, bots: Iterable[AgentBot]) -> None:
@@ -1639,7 +1635,7 @@ async def test_initialize_and_reload_warn_about_foreign_homeserver_authorities(
     with capture_logs() as reload_logs:
         updated = await orchestrator.config_reload._update_config()
 
-    assert updated is True
+    assert updated is False
     assert [log["user_ids"] for log in startup_logs if log["event"] == warning] == [["@test:m-test-4.mindroom.chat"]]
     assert [log["user_ids"] for log in reload_logs if log["event"] == warning] == [["@admin:remote.example"]]
 
@@ -2200,7 +2196,6 @@ def test_config_update_plan_restarts_running_entities_when_construction_prompts_
     )
 
     assert plan.restart == running_entities
-    assert plan.only_support_service_changes is False
 
 
 def test_config_update_plan_does_not_restart_for_request_time_prompt_change() -> None:
@@ -2241,7 +2236,6 @@ def test_config_update_plan_does_not_restart_for_request_time_prompt_change() ->
     )
 
     assert plan.restart == set()
-    assert plan.only_support_service_changes is True
 
 
 def test_config_update_plan_reconciles_room_metadata_without_restarting_bots() -> None:
@@ -2269,8 +2263,7 @@ def test_config_update_plan_reconciles_room_metadata_without_restarting_bots() -
     )
 
     assert plan.restart == set()
-    assert plan.room_metadata_changed is True
-    assert plan.only_support_service_changes is False
+    assert plan.room_access_changed is True
 
 
 @pytest.mark.parametrize(
@@ -2356,7 +2349,6 @@ def test_config_update_plan_restarts_agents_when_tool_output_threshold_changes()
     )
 
     assert plan.restart == {"general", "team1"}
-    assert plan.only_support_service_changes is False
 
 
 def test_config_update_plan_restarts_old_and_new_call_agents_when_calls_change() -> None:
@@ -2888,7 +2880,6 @@ def test_config_update_plan_reconciles_agent_and_router_room_changes_without_res
 
     assert plan.restart == set()
     assert plan.reconcile_rooms == {ROUTER_AGENT_NAME, "general", "editors"}
-    assert plan.only_support_service_changes is False
 
 
 def test_config_update_plan_stops_call_agents_when_calls_are_disabled() -> None:

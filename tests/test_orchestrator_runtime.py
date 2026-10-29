@@ -2942,7 +2942,7 @@ class TestMultiAgentOrchestrator:
             ),
             patch.object(
                 orchestrator._rooms,
-                "reconcile_room_policies",
+                "_reconcile_room_policies",
                 new=AsyncMock(side_effect=record_room_reconciliation),
             ),
             patch.object(orchestrator._rooms, "_ensure_room_invitations", new=AsyncMock()),
@@ -2961,28 +2961,15 @@ class TestMultiAgentOrchestrator:
         assert general_bot.ensure_rooms.await_count == 1
 
     @pytest.mark.asyncio
-    async def test_reconcile_post_update_rooms_runs_for_room_metadata_changes(
+    async def test_reconcile_post_update_rooms_links_the_root_space_after_a_space_change(
         self,
         tmp_path: Path,
     ) -> None:
-        """Display-name-only room edits should run room reconciliation without bot restarts."""
-        config = _runtime_bound_config(
-            Config(rooms={"lobby": {"display_name": "Project Lobby"}}),
-            tmp_path,
-        )
+        """A root-space edit alone links the managed rooms into the space without room setup or bot restarts."""
+        config = _runtime_bound_config(Config(), tmp_path)
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
         orchestrator.config = config
-        plan = ConfigUpdatePlan(
-            new_config=config,
-            restart=set(),
-            start=set(),
-            remove=set(),
-            mindroom_user_changed=False,
-            room_access_changed=False,
-            matrix_space_changed=False,
-            authorization_changed=False,
-            room_metadata_changed=True,
-        )
+        plan = ConfigUpdatePlan(new_config=config, matrix_space_changed=True)
 
         with (
             patch.object(
