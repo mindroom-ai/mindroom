@@ -5,16 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION
+
 if TYPE_CHECKING:
     import httpx
-
-# 2: workers mount only agent workspaces and never write private-instance identity records.
-# 3: /execute streams progress and keep-alive lines before its result line, and job calls have no time limit.
-# 4: a shell call's set and removed variables (execution_env_set, execution_env_unset) apply over the worker's own
-#    environment and workspace script, so a worker that ignored them would hand commands what a plugin removed.
-# 5: a shell call's PATH directories (execution_path_prepend) go first on the command's PATH, so a worker that ignored
-#    them would run a configured program in place of a plugin's wrapper.
-_WORKER_PROTOCOL_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -31,18 +25,26 @@ def worker_health_payload(*, mindroom_version: str) -> _WorkerHealthPayload:
     return _WorkerHealthPayload(
         status="ok",
         mindroom_version=mindroom_version,
-        worker_protocol=_WORKER_PROTOCOL_VERSION,
+        worker_protocol=WORKER_PROTOCOL_VERSION,
     )
 
 
-def worker_health_compatibility_error(
+@dataclass(frozen=True, slots=True)
+class WorkerProtocolMismatch:
+    """A ready worker that answered its health check with another worker protocol."""
+
+    error: str
+    worker_is_newer: bool
+
+
+def ready_worker_protocol_mismatch(
     response: httpx.Response,
     *,
     worker: str,
     older_worker_hint: str | None = None,
     newer_worker_hint: str | None = None,
-) -> str | None:
-    """Return an actionable error when a ready worker's health check reports another protocol.
+) -> WorkerProtocolMismatch | None:
+    """Return why a ready worker speaks another protocol, or None when it speaks this runtime's.
 
     ``worker`` names the worker in the error, such as ``Docker worker image 'mindroom:dev'``.
     ``older_worker_hint`` is appended only when the worker reports an older or no protocol,
@@ -62,12 +64,12 @@ def worker_health_compatibility_error(
 
     newer_worker = False
     if isinstance(reported_protocol, int) and not isinstance(reported_protocol, bool):
-        if reported_protocol == _WORKER_PROTOCOL_VERSION:
+        if reported_protocol == WORKER_PROTOCOL_VERSION:
             return None
-        newer_worker = reported_protocol > _WORKER_PROTOCOL_VERSION
+        newer_worker = reported_protocol > WORKER_PROTOCOL_VERSION
     mismatch = (
         f"{worker} is incompatible with this MindRoom runtime: "
-        f"expected worker protocol {_WORKER_PROTOCOL_VERSION}, got {reported_protocol} "
+        f"expected worker protocol {WORKER_PROTOCOL_VERSION}, got {reported_protocol} "
         f"(worker MindRoom version {reported_version})."
     )
     if newer_worker:
@@ -79,4 +81,5 @@ def worker_health_compatibility_error(
     else:
         advice = f"{mismatch} Use a worker image built for this MindRoom release."
         hint = older_worker_hint
-    return advice if hint is None else f"{advice} {hint}"
+    error = advice if hint is None else f"{advice} {hint}"
+    return WorkerProtocolMismatch(error=error, worker_is_newer=newer_worker)

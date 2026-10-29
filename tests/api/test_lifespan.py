@@ -15,7 +15,11 @@ from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.workers.backends import docker as docker_backend_module
 from mindroom.workers.backends.docker import DockerWorkerBackend
 from mindroom.workers.models import WorkerSpec
-from mindroom.workers.runtime import get_primary_worker_manager, shutdown_primary_worker_manager
+from mindroom.workers.runtime import (
+    bind_worker_launch_config_source,
+    lease_primary_worker_manager,
+    shutdown_primary_worker_manager,
+)
 from tests.test_docker_worker_backend import _FakeDockerClient, _FakeDockerError, _FakeImage, _FakeNotFoundError
 
 if TYPE_CHECKING:
@@ -101,15 +105,15 @@ def _containers(docker_daemon: _FakeDockerClient) -> list[tuple[str, str]]:
 
 
 def _start_docker_worker(api_app: FastAPI) -> WorkerHandle:
-    """Start one worker the way a worker-routed tool call does."""
+    """Start one worker the way a worker-routed tool call does, launching from the process's applied config."""
     runtime_paths = main._app_runtime_paths(api_app)
-    worker_manager = get_primary_worker_manager(
+    with lease_primary_worker_manager(
         runtime_paths,
         proxy_url=None,
         proxy_token="test-token",  # noqa: S106
         storage_root=runtime_paths.storage_root,
-    )
-    return worker_manager.ensure_worker(WorkerSpec("v1:default:unscoped:code"))
+    ) as worker_manager:
+        return worker_manager.ensure_worker(WorkerSpec("v1:default:unscoped:code"))
 
 
 @pytest.mark.asyncio
@@ -117,7 +121,10 @@ async def test_standalone_api_shutdown_removes_its_docker_worker_containers(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """An API served without `mindroom run` must not leave its Docker worker containers running after it stops."""
+    """An API served without `mindroom run` launches its workers from its own loaded config and removes them when it stops.
+
+    It owns that config until its worker manager has shut down, and then no longer.
+    """
     api_app, docker_daemon = _docker_worker_api_app(monkeypatch, tmp_path)
 
     async with main._lifespan(api_app):
@@ -125,6 +132,9 @@ async def test_standalone_api_shutdown_removes_its_docker_worker_containers(
         assert _containers(docker_daemon) == [(worker.worker_id, "running")]
 
     assert _containers(docker_daemon) == []
+    # Its binding ended with it, so the process is free to bind another source.
+    with bind_worker_launch_config_source(lambda: None):
+        pass
 
 
 @pytest.mark.asyncio
@@ -157,8 +167,10 @@ async def test_embedded_api_shutdown_leaves_workers_to_the_orchestrator(
     config_lifecycle.app_state(api_app).orchestrator_knowledge_refresh_scheduler = KnowledgeRefreshScheduler()
 
     try:
-        async with main._lifespan(api_app):
-            worker = _start_docker_worker(api_app)
+        # `mindroom run` owns the applied config there, so the embedded API binds none of its own.
+        with bind_worker_launch_config_source(lambda: main._app_context(api_app).runtime_config):
+            async with main._lifespan(api_app):
+                worker = _start_docker_worker(api_app)
 
         assert _containers(docker_daemon) == [(worker.worker_id, "running")]
     finally:

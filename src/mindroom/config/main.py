@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 from collections import deque
-from copy import deepcopy
 from dataclasses import dataclass
 from functools import cache
 from itertools import pairwise
@@ -1383,10 +1382,6 @@ class Config(BaseModel):
     def generated_agent(self, agent_name: str) -> GeneratedAgentInfo | None:
         """Return whether one personal or created agent was created and its allowed tools, or None for an authored one."""
         return self._generated_agents.get(agent_name)
-
-    def generated_agent_data(self) -> dict[str, dict[str, Any]]:
-        """Return the raw entries of the personal and created agents as this config loaded them."""
-        return deepcopy(self._generated_agent_dumps)
 
     def tool_ceiling(self, agent_name: str) -> tuple[str, ...]:
         """Return the tools this agent's edits, or the agents it creates, may choose from; pass one's if generated."""

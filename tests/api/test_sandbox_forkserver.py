@@ -27,6 +27,8 @@ from mindroom.api.sandbox_forkserver import (
     _SandboxForkserver,
 )
 from mindroom.constants import resolve_primary_runtime_paths
+from mindroom.workers.protocol import ExecuteResponse
+from tests.api.sandbox_runner_support import execute_call
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -636,14 +638,14 @@ def test_forkserver_mode_reuses_one_template_across_tool_calls(
     try:
         for _ in range(2):
             response = sandbox_runner_module._execute_request_subprocess_sync(
-                sandbox_runner_module.SandboxRunnerExecuteRequest(
+                execute_call(
+                    runtime_paths,
+                    config,
                     tool_name="calculator",
                     function_name="add",
                     args=[1, 2],
                     kwargs={},
                 ),
-                runtime_paths,
-                config,
             )
             assert response.ok is True
             assert '"result": 3' in str(response.result)
@@ -651,28 +653,28 @@ def test_forkserver_mode_reuses_one_template_across_tool_calls(
         workdir = tmp_path / "files"
         workdir.mkdir()
         response = sandbox_runner_module._execute_request_subprocess_sync(
-            sandbox_runner_module.SandboxRunnerExecuteRequest(
+            execute_call(
+                runtime_paths,
+                config,
                 tool_name="file",
                 function_name="save_file",
                 kwargs={"contents": "hello forkserver", "file_name": "out.txt"},
-                tool_init_overrides={"base_dir": str(workdir)},
+                base_dir=str(workdir),
             ),
-            runtime_paths,
-            config,
         )
         assert response.ok is True
         assert (workdir / "out.txt").read_text(encoding="utf-8") == "hello forkserver"
 
         response = sandbox_runner_module._execute_request_subprocess_sync(
-            sandbox_runner_module.SandboxRunnerExecuteRequest(
+            execute_call(
+                runtime_paths,
+                config,
                 tool_name="python",
                 function_name="run_python_code",
                 args=['import os\nresult = os.environ.get("TEST_EXECUTION_ENV")', "result"],
                 kwargs={},
                 execution_env={"TEST_EXECUTION_ENV": "explicit-value"},
             ),
-            runtime_paths,
-            config,
         )
         assert response.ok is True
         assert response.result == "explicit-value"
@@ -681,7 +683,9 @@ def test_forkserver_mode_reuses_one_template_across_tool_calls(
         # only follows installed modules on sys.path.
         (workdir / "helper.py").write_text('VALUE = "helper-value"\n', encoding="utf-8")
         response = sandbox_runner_module._execute_request_subprocess_sync(
-            sandbox_runner_module.SandboxRunnerExecuteRequest(
+            execute_call(
+                runtime_paths,
+                config,
                 tool_name="python",
                 function_name="run_python_code",
                 args=[
@@ -692,10 +696,8 @@ def test_forkserver_mode_reuses_one_template_across_tool_calls(
                     "result",
                 ],
                 kwargs={},
-                execution_env={"MINDROOM_AGENT_WORKSPACE": str(workdir)},
+                base_dir=str(workdir),
             ),
-            runtime_paths,
-            config,
         )
         assert response.ok is True
         assert response.result == "helper-value|True|False"
@@ -723,14 +725,7 @@ def test_forkserver_template_ignores_package_planted_in_its_cwd(
     monkeypatch.setattr(sandbox_forkserver_module, "get_sandbox_forkserver", lambda: manager)
     try:
         response = sandbox_runner_module._execute_request_subprocess_sync(
-            sandbox_runner_module.SandboxRunnerExecuteRequest(
-                tool_name="calculator",
-                function_name="add",
-                args=[1, 2],
-                kwargs={},
-            ),
-            runtime_paths,
-            config,
+            execute_call(runtime_paths, config, tool_name="calculator", function_name="add", args=[1, 2], kwargs={}),
         )
     finally:
         manager.shutdown()
@@ -754,14 +749,7 @@ def test_forkserver_timeout_maps_to_worker_failure(
     monkeypatch.setattr(sandbox_forkserver_module, "get_sandbox_forkserver", lambda: _TimeoutForkserver())
 
     response = sandbox_runner_module._execute_request_subprocess_sync(
-        sandbox_runner_module.SandboxRunnerExecuteRequest(
-            tool_name="calculator",
-            function_name="add",
-            args=[1, 2],
-            kwargs={},
-        ),
-        runtime_paths,
-        config,
+        execute_call(runtime_paths, config, tool_name="calculator", function_name="add", args=[1, 2], kwargs={}),
     )
 
     assert response.ok is False
@@ -785,7 +773,7 @@ def test_forkserver_startup_failure_falls_back_to_spawn_per_call(
 
     def _fake_run(*_args: object, **run_kwargs: object) -> subprocess.CompletedProcess[str]:
         assert json.loads(str(run_kwargs["input"]))["request"]["tool_name"] == "calculator"
-        response = sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="spawned")
+        response = ExecuteResponse(ok=True, result="spawned")
         return subprocess.CompletedProcess(
             args=[],
             returncode=0,
@@ -796,14 +784,7 @@ def test_forkserver_startup_failure_falls_back_to_spawn_per_call(
     monkeypatch.setattr(sandbox_runner_module, "_run_request_subprocess", _fake_run)
 
     response = sandbox_runner_module._execute_request_subprocess_sync(
-        sandbox_runner_module.SandboxRunnerExecuteRequest(
-            tool_name="calculator",
-            function_name="add",
-            args=[1, 2],
-            kwargs={},
-        ),
-        runtime_paths,
-        config,
+        execute_call(runtime_paths, config, tool_name="calculator", function_name="add", args=[1, 2], kwargs={}),
     )
 
     assert response.ok is True

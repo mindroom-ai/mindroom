@@ -30,7 +30,6 @@ from mindroom.config.personal_agents import (
 )
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.personal_agents import (
     _append_personal_agent_roster_entry,
     _GeneratedAgentError,
@@ -43,7 +42,7 @@ from mindroom.personal_agents import (
     update_generated_agent,
 )
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
-from mindroom.workers.backends import docker_projection
+from mindroom.workers.runtime import build_worker_launch_config
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -446,19 +445,13 @@ def test_authored_dump_leaves_out_created_agents(tmp_path: Path) -> None:
     assert revalidated.agents == config.agents
 
 
-def test_the_runtime_hands_docker_workers_the_generated_agents_of_each_config_it_commits(tmp_path: Path) -> None:
-    """Docker workers project created agents from the one config the runtime runs, not from the file on disk."""
+def test_dedicated_workers_launch_with_the_generated_agents_of_the_applied_config(tmp_path: Path) -> None:
+    """Docker and Kubernetes workers project created agents from the config the runtime applied, not the file."""
     config = _load(tmp_path, created=[_created()])
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path))
 
-    orchestrator._commit_config(config)
+    agents = build_worker_launch_config(config, tool_validation_snapshot={}).config_data["agents"]
 
-    assert orchestrator.config is config
-    published = docker_projection._COMMITTED_GENERATED_AGENTS[
-        personal_agent_roster_path(test_runtime_paths(tmp_path)).resolve()
-    ]
-    assert published == config.generated_agent_data()
-    assert "creator_research" in published
+    assert {"creator", "creator_research"} <= set(agents)
 
 
 @pytest.mark.parametrize("change", ["edit", "remove"])

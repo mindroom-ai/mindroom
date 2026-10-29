@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import threading
 import time
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Never, cast
 
-from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS
+from mindroom.config.worker_projection import worker_config_data
 from mindroom.runtime_env_policy import KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.docker import DockerWorkerBackend
@@ -28,17 +30,22 @@ from mindroom.workers.backends.kubernetes_config import (
     kubernetes_backend_config_signature,
 )
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend, normalize_static_runner_api_root
+from mindroom.workers.models import WorkerLaunchConfig
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.workers.backend import WorkerBackend
 
 __all__ = [
     "PrimaryWorkerManagerLease",
+    "bind_worker_launch_config_source",
+    "build_worker_launch_config",
     "clear_worker_validation_snapshot_cache",
     "configured_primary_worker_manager_identity",
-    "get_primary_worker_manager",
+    "current_worker_launch_config",
     "lease_configured_primary_worker_manager",
     "lease_primary_worker_manager",
     "primary_worker_backend_available",
@@ -46,8 +53,8 @@ __all__ = [
     "primary_worker_backend_name",
     "reset_primary_worker_manager",
     "serialized_dedicated_worker_validation_snapshot",
-    "serialized_kubernetes_worker_config_snapshot",
     "shutdown_primary_worker_manager",
+    "worker_config_snapshot",
     "worker_visible_storage_root",
 ]
 
@@ -100,14 +107,22 @@ class PrimaryWorkerManagerLease:
 
 @dataclass(frozen=True, slots=True)
 class _ConfiguredPrimaryWorkerManagerInputs:
-    """One committed input projection shared by manager construction and identity."""
+    """The backend settings that identify the primary worker manager; config never enters them."""
 
     proxy_url: str | None
     proxy_token: str | None
     storage_root: Path
-    dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None
-    kubernetes_config_snapshot: dict[str, object] | None
-    worker_grantable_credentials: frozenset[str] | None
+
+
+@dataclass(slots=True)
+class _WorkerLaunchConfigSource:
+    """The one source of the applied config that dedicated workers launch from, and its last derived launch."""
+
+    read_config: Callable[[], Config | None] | None = None
+    launch: WorkerLaunchConfig | None = None
+    launch_runtime_paths: RuntimePaths | None = None
+    # Raised by every invalidation, so a launch derived before it is never stored after it.
+    epoch: int = 0
 
 
 _PRIMARY_WORKER_MANAGER_ENTRY: _WorkerManagerEntry | None = None
@@ -115,6 +130,8 @@ _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES: list[_WorkerManagerEntry] = []
 _PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES: set[tuple[str, ...]] = set()
 _PRIMARY_WORKER_MANAGER_EPOCH = 0
 _PRIMARY_WORKER_MANAGER_ACCEPTING_BUILDS = True
+_WORKER_LAUNCH_CONFIG_SOURCE = _WorkerLaunchConfigSource()
+_WORKER_LAUNCH_CONFIG_LOCK = threading.Lock()
 
 
 def _stable_json_digest(payload: object) -> str:
@@ -143,29 +160,25 @@ def _worker_validation_snapshot_cache_key(
 
 
 def clear_worker_validation_snapshot_cache() -> None:
-    """Clear cached worker validation snapshots and per-config resolved tool state."""
+    """Clear cached worker validation snapshots, the launch derived from them, and per-config resolved tool state."""
     from mindroom.tool_system.catalog import clear_resolved_tool_state_cache  # noqa: PLC0415
 
     with _WORKER_VALIDATION_SNAPSHOT_CACHE_LOCK:
         _WORKER_VALIDATION_SNAPSHOT_CACHE.clear()
+    with _WORKER_LAUNCH_CONFIG_LOCK:
+        _WORKER_LAUNCH_CONFIG_SOURCE.launch = None
+        _WORKER_LAUNCH_CONFIG_SOURCE.epoch += 1
     clear_resolved_tool_state_cache()
 
 
 def serialized_dedicated_worker_validation_snapshot(
     runtime_paths: RuntimePaths,
     *,
-    runtime_config: Config | None = None,
+    runtime_config: Config,
 ) -> dict[str, dict[str, object]]:
-    """Build the authoritative worker validation snapshot in the primary runtime."""
-    if runtime_config is None:
-        from mindroom.config.main import load_config  # noqa: PLC0415
-
-        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
-    else:
-        config = runtime_config
-
+    """Build the authoritative worker validation snapshot for one applied config in the primary runtime."""
     with _WORKER_VALIDATION_SNAPSHOT_CACHE_LOCK:
-        cache_key = _worker_validation_snapshot_cache_key(runtime_paths, config)
+        cache_key = _worker_validation_snapshot_cache_key(runtime_paths, runtime_config)
         cached_snapshot = _WORKER_VALIDATION_SNAPSHOT_CACHE.get(cache_key)
         if cached_snapshot is None:
             from mindroom.tool_system.catalog import (  # noqa: PLC0415
@@ -175,7 +188,7 @@ def serialized_dedicated_worker_validation_snapshot(
 
             snapshot = resolved_tool_validation_snapshot_for_runtime(
                 runtime_paths,
-                config,
+                runtime_config,
                 tolerate_plugin_load_errors=True,
             )
             cached_snapshot = serialize_tool_validation_snapshot(snapshot)
@@ -183,24 +196,78 @@ def serialized_dedicated_worker_validation_snapshot(
         return deepcopy(cached_snapshot)
 
 
-def serialized_kubernetes_worker_config_snapshot(runtime_config: Config) -> dict[str, object]:
-    """Project committed config fields used to plan Kubernetes worker storage."""
-    return {
-        "defaults": {"worker_scope": runtime_config.defaults.worker_scope},
-        "agents": {
-            agent_name: {
-                "delegate_to": list(agent_config.delegate_to),
-                "private": (agent_config.private.model_dump(mode="json") if agent_config.private is not None else None),
-                "worker_scope": agent_config.worker_scope,
-                "knowledge_bases": list(agent_config.knowledge_bases),
-            }
-            for agent_name, agent_config in sorted(runtime_config.agents.items())
-        },
-        "knowledge_bases": {
-            base_id: {"path": base_config.path}
-            for base_id, base_config in sorted(runtime_config.knowledge_bases.items())
-        },
-    }
+def worker_config_snapshot(runtime_config: Config) -> dict[str, object]:
+    """Return the JSON form of the config fields runners and dedicated workers resolve, and nothing else."""
+    from mindroom.tool_system.worker_proxy_client import to_json_compatible  # noqa: PLC0415
+
+    return cast("dict[str, object]", to_json_compatible(worker_config_data(runtime_config.runtime_model_dump())))
+
+
+@contextmanager
+def bind_worker_launch_config_source(read_config: Callable[[], Config | None]) -> Iterator[None]:
+    """Make ``read_config`` this process's one source of the applied config dedicated workers launch from.
+
+    The process that owns the applied config binds it for its whole lifetime; a second source is refused,
+    so no other config can reach a worker launch.
+    """
+    with _WORKER_LAUNCH_CONFIG_LOCK:
+        if _WORKER_LAUNCH_CONFIG_SOURCE.read_config is not None:
+            msg = "A worker launch config source is already bound in this process."
+            raise RuntimeError(msg)
+        _WORKER_LAUNCH_CONFIG_SOURCE.read_config = read_config
+    try:
+        yield
+    finally:
+        with _WORKER_LAUNCH_CONFIG_LOCK:
+            _WORKER_LAUNCH_CONFIG_SOURCE.read_config = None
+            _WORKER_LAUNCH_CONFIG_SOURCE.launch = None
+            _WORKER_LAUNCH_CONFIG_SOURCE.epoch += 1
+
+
+def current_worker_launch_config(runtime_paths: RuntimePaths) -> WorkerLaunchConfig:
+    """Return what dedicated workers launch with now, derived once per applied config."""
+    with _WORKER_LAUNCH_CONFIG_LOCK:
+        read_config = _WORKER_LAUNCH_CONFIG_SOURCE.read_config
+    config = read_config() if read_config is not None else None
+    if config is None:
+        msg = "Dedicated workers need the applied config, and none is available yet."
+        raise WorkerBackendError(msg)
+    with _WORKER_LAUNCH_CONFIG_LOCK:
+        cached = _WORKER_LAUNCH_CONFIG_SOURCE.launch
+        if (
+            cached is not None
+            and cached.config is config
+            and _WORKER_LAUNCH_CONFIG_SOURCE.launch_runtime_paths == runtime_paths
+        ):
+            return cached
+        epoch = _WORKER_LAUNCH_CONFIG_SOURCE.epoch
+    launch = build_worker_launch_config(
+        config,
+        tool_validation_snapshot=serialized_dedicated_worker_validation_snapshot(runtime_paths, runtime_config=config),
+    )
+    with _WORKER_LAUNCH_CONFIG_LOCK:
+        if _WORKER_LAUNCH_CONFIG_SOURCE.epoch == epoch:
+            _WORKER_LAUNCH_CONFIG_SOURCE.launch = launch
+            _WORKER_LAUNCH_CONFIG_SOURCE.launch_runtime_paths = runtime_paths
+    return launch
+
+
+def build_worker_launch_config(
+    config: Config,
+    *,
+    tool_validation_snapshot: dict[str, dict[str, object]],
+) -> WorkerLaunchConfig:
+    """Derive one launch config from a validated config and the tool validation snapshot built for it."""
+    config_data = worker_config_snapshot(config)
+    tool_snapshot_digest = _stable_json_digest(tool_validation_snapshot)
+    return WorkerLaunchConfig(
+        config=config,
+        config_data=config_data,
+        agent_policies=config.get_agent_policies(),
+        tool_validation_snapshot=tool_validation_snapshot,
+        grantable_credentials=config.get_worker_grantable_credentials(),
+        digest=_stable_json_digest({"config": config_data, "tools": tool_snapshot_digest}),
+    )
 
 
 def _normalize_backend_name(raw_value: str | None) -> str:
@@ -271,42 +338,27 @@ def primary_worker_backend_available(
 def lease_configured_primary_worker_manager(
     runtime_paths: RuntimePaths,
     *,
-    runtime_config: Config | None,
     required_backend_locator: str | None = None,
 ) -> PrimaryWorkerManagerLease | None:
     """Lease the current worker manager when it owns the requested durable identity."""
-    inputs = _configured_primary_worker_manager_inputs(runtime_paths, runtime_config)
+    inputs = _configured_primary_worker_manager_inputs(runtime_paths)
     if inputs is None:
         return None
-    lease = _lease_configured_primary_worker_manager(runtime_paths, inputs)
+    lease = lease_primary_worker_manager(
+        runtime_paths,
+        proxy_url=inputs.proxy_url,
+        proxy_token=inputs.proxy_token,
+        storage_root=inputs.storage_root,
+    )
     if required_backend_locator is None or lease.manager.cleanup_locator == required_backend_locator:
         return lease
     lease.release()
     return None
 
 
-def _lease_configured_primary_worker_manager(
-    runtime_paths: RuntimePaths,
-    inputs: _ConfiguredPrimaryWorkerManagerInputs,
-) -> PrimaryWorkerManagerLease:
-    """Lease one already-resolved exact worker-manager configuration."""
-    return lease_primary_worker_manager(
-        runtime_paths,
-        proxy_url=inputs.proxy_url,
-        proxy_token=inputs.proxy_token,
-        storage_root=inputs.storage_root,
-        dedicated_worker_validation_snapshot=inputs.dedicated_worker_validation_snapshot,
-        kubernetes_config_snapshot=inputs.kubernetes_config_snapshot,
-        worker_grantable_credentials=inputs.worker_grantable_credentials,
-    )
-
-
-def configured_primary_worker_manager_identity(
-    runtime_paths: RuntimePaths,
-    runtime_config: Config | None,
-) -> str | None:
+def configured_primary_worker_manager_identity(runtime_paths: RuntimePaths) -> str | None:
     """Return the opaque identity of the currently configured primary worker manager."""
-    inputs = _configured_primary_worker_manager_inputs(runtime_paths, runtime_config)
+    inputs = _configured_primary_worker_manager_inputs(runtime_paths)
     if inputs is None:
         return None
     signature = _primary_worker_backend_config_signature(
@@ -314,18 +366,14 @@ def configured_primary_worker_manager_identity(
         proxy_url=inputs.proxy_url,
         proxy_token=inputs.proxy_token,
         storage_root=inputs.storage_root,
-        dedicated_worker_validation_snapshot=inputs.dedicated_worker_validation_snapshot,
-        kubernetes_config_snapshot=inputs.kubernetes_config_snapshot,
-        worker_grantable_credentials=inputs.worker_grantable_credentials,
     )
     return _stable_json_digest(signature)
 
 
 def _configured_primary_worker_manager_inputs(
     runtime_paths: RuntimePaths,
-    runtime_config: Config | None,
 ) -> _ConfiguredPrimaryWorkerManagerInputs | None:
-    """Resolve the exact committed inputs required to construct the primary manager."""
+    """Resolve the backend settings the primary manager is built from."""
     from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config  # noqa: PLC0415
 
     proxy_config = sandbox_proxy_config(runtime_paths)
@@ -335,55 +383,11 @@ def _configured_primary_worker_manager_inputs(
         proxy_token=proxy_config.proxy_token,
     ):
         return None
-    backend_name = primary_worker_backend_name(runtime_paths)
-    if runtime_config is None and backend_name == "kubernetes":
-        return None
-    dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None = None
-    kubernetes_config_snapshot: dict[str, object] | None = None
-    worker_grantable_credentials: frozenset[str] | None = None
-    if runtime_config is not None:
-        worker_grantable_credentials = runtime_config.get_worker_grantable_credentials()
-        if backend_name in _DEDICATED_WORKER_BACKENDS:
-            dedicated_worker_validation_snapshot = serialized_dedicated_worker_validation_snapshot(
-                runtime_paths,
-                runtime_config=runtime_config,
-            )
-        if backend_name == "kubernetes":
-            kubernetes_config_snapshot = serialized_kubernetes_worker_config_snapshot(runtime_config)
     return _ConfiguredPrimaryWorkerManagerInputs(
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,
         storage_root=runtime_paths.storage_root,
-        dedicated_worker_validation_snapshot=dedicated_worker_validation_snapshot,
-        kubernetes_config_snapshot=kubernetes_config_snapshot,
-        worker_grantable_credentials=worker_grantable_credentials,
     )
-
-
-def _require_kubernetes_tool_validation_snapshot(
-    dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None,
-) -> dict[str, dict[str, object]]:
-    if dedicated_worker_validation_snapshot is None:
-        msg = "Kubernetes worker backend requires an explicit tool validation snapshot."
-        raise WorkerBackendError(msg)
-    return dedicated_worker_validation_snapshot
-
-
-def _require_kubernetes_config_snapshot(
-    kubernetes_config_snapshot: dict[str, object] | None,
-) -> dict[str, object]:
-    if kubernetes_config_snapshot is None:
-        msg = "Kubernetes worker backend requires an explicit committed config snapshot."
-        raise WorkerBackendError(msg)
-    return kubernetes_config_snapshot
-
-
-def _resolve_worker_grantable_credentials(
-    worker_grantable_credentials: frozenset[str] | None,
-) -> frozenset[str]:
-    if worker_grantable_credentials is None:
-        return DEFAULT_WORKER_GRANTABLE_CREDENTIALS
-    return worker_grantable_credentials
 
 
 def _static_runner_backend_config_signature(
@@ -404,53 +408,22 @@ def _primary_worker_backend_config_signature(
     proxy_url: str | None,
     proxy_token: str | None,
     storage_root: Path | None,
-    dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None = None,
-    kubernetes_config_snapshot: dict[str, object] | None = None,
-    worker_grantable_credentials: frozenset[str] | None = None,
 ) -> tuple[str, ...]:
     backend_name = primary_worker_backend_name(runtime_paths)
     resolved_storage_root = (storage_root or runtime_paths.storage_root).expanduser().resolve()
     if backend_name == "static_runner":
         return _static_runner_backend_config_signature(proxy_url=proxy_url, proxy_token=proxy_token)
     if backend_name == "docker":
-        backend_signature = docker_backend_config_signature(
+        return docker_backend_config_signature(
             runtime_paths,
             auth_token=proxy_token,
             storage_path=resolved_storage_root,
-            worker_grantable_credentials=_resolve_worker_grantable_credentials(
-                worker_grantable_credentials,
-            ),
-        )
-        if dedicated_worker_validation_snapshot is None:
-            return backend_signature
-        return (
-            *backend_signature,
-            "__tool_validation_snapshot__",
-            json.dumps(dedicated_worker_validation_snapshot, separators=(",", ":"), sort_keys=True),
         )
     if backend_name == "kubernetes":
-        backend_signature = kubernetes_backend_config_signature(
+        return kubernetes_backend_config_signature(
             runtime_paths,
             auth_token=proxy_token,
             storage_root=resolved_storage_root,
-        )
-        resolved_worker_grantable_credentials = _resolve_worker_grantable_credentials(
-            worker_grantable_credentials,
-        )
-        return (
-            *backend_signature,
-            json.dumps(
-                _require_kubernetes_tool_validation_snapshot(dedicated_worker_validation_snapshot),
-                separators=(",", ":"),
-                sort_keys=True,
-            ),
-            json.dumps(
-                _require_kubernetes_config_snapshot(kubernetes_config_snapshot),
-                separators=(",", ":"),
-                sort_keys=True,
-            ),
-            "__worker_grantable_credentials__",
-            *sorted(resolved_worker_grantable_credentials),
         )
     msg = f"Unsupported worker backend: {backend_name}"
     raise WorkerBackendError(msg)
@@ -482,50 +455,33 @@ def _build_primary_worker_manager(
     proxy_url: str | None,
     proxy_token: str | None,
     storage_root: Path | None,
-    dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None = None,
-    kubernetes_config_snapshot: dict[str, object] | None = None,
-    worker_grantable_credentials: frozenset[str] | None = None,
 ) -> WorkerBackend:
     backend_name = primary_worker_backend_name(runtime_paths)
     resolved_storage_root = (storage_root or runtime_paths.storage_root).expanduser().resolve()
     if backend_name == "static_runner":
-        manager = StaticSandboxRunnerBackend(
+        return StaticSandboxRunnerBackend(
             api_root=normalize_static_runner_api_root(proxy_url or ""),
             auth_token=proxy_token,
         )
-    elif backend_name == "docker":
-        manager = cast(
+    if backend_name == "docker":
+        return cast(
             "WorkerBackend",
             DockerWorkerBackend.from_runtime(
                 runtime_paths,
                 auth_token=proxy_token,
+                current_launch=functools.partial(current_worker_launch_config, runtime_paths),
                 storage_path=resolved_storage_root,
-                tool_validation_snapshot=dedicated_worker_validation_snapshot,
-                worker_grantable_credentials=_resolve_worker_grantable_credentials(
-                    worker_grantable_credentials,
-                ),
             ),
         )
-    elif backend_name == "kubernetes":
-        if storage_root is None:
-            msg = "Kubernetes worker backend requires an explicit runtime storage root."
-            raise WorkerBackendError(msg)
-        manager = KubernetesWorkerBackend.from_runtime(
+    if backend_name == "kubernetes":
+        return KubernetesWorkerBackend.from_runtime(
             runtime_paths,
             auth_token=proxy_token,
             storage_root=resolved_storage_root,
-            tool_validation_snapshot=_require_kubernetes_tool_validation_snapshot(
-                dedicated_worker_validation_snapshot,
-            ),
-            config_snapshot=_require_kubernetes_config_snapshot(kubernetes_config_snapshot),
-            worker_grantable_credentials=_resolve_worker_grantable_credentials(
-                worker_grantable_credentials,
-            ),
+            current_launch=functools.partial(current_worker_launch_config, runtime_paths),
         )
-    else:
-        msg = f"Unsupported worker backend: {backend_name}"
-        raise WorkerBackendError(msg)
-    return manager
+    msg = f"Unsupported worker backend: {backend_name}"
+    raise WorkerBackendError(msg)
 
 
 def _shutdown_worker_manager_now(
@@ -576,15 +532,13 @@ def _reserve_primary_worker_manager_build(
     config_signature: tuple[str, ...],
     *,
     acquisition_epoch: int,
-    acquire_lease: bool,
 ) -> _WorkerManagerEntry | None:
     with _PRIMARY_WORKER_MANAGER_CONDITION:
         while True:
             _require_primary_worker_manager_epoch_locked(acquisition_epoch)
             active_entry = _PRIMARY_WORKER_MANAGER_ENTRY
             if active_entry is not None and active_entry.config_signature == config_signature:
-                if acquire_lease:
-                    active_entry.active_leases += 1
+                active_entry.active_leases += 1
                 return active_entry
             if config_signature not in _PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES:
                 _PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES.add(config_signature)
@@ -597,7 +551,6 @@ def _publish_primary_worker_manager_build(
     config_signature: tuple[str, ...],
     *,
     acquisition_epoch: int,
-    acquire_lease: bool,
 ) -> tuple[_WorkerManagerEntry, list[WorkerBackend]] | None:
     global _PRIMARY_WORKER_MANAGER_ENTRY
 
@@ -607,8 +560,7 @@ def _publish_primary_worker_manager_build(
         _PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES.discard(config_signature)
         active_entry = _PRIMARY_WORKER_MANAGER_ENTRY
         if active_entry is not None and active_entry.config_signature == config_signature:
-            if acquire_lease:
-                active_entry.active_leases += 1
+            active_entry.active_leases += 1
             duplicate_entry = _WorkerManagerEntry(
                 manager=built_manager,
                 config_signature=config_signature,
@@ -622,7 +574,7 @@ def _publish_primary_worker_manager_build(
         new_entry = _WorkerManagerEntry(
             manager=built_manager,
             config_signature=config_signature,
-            active_leases=1 if acquire_lease else 0,
+            active_leases=1,
         )
         _PRIMARY_WORKER_MANAGER_ENTRY = new_entry
         if previous_entry is not None:
@@ -659,10 +611,6 @@ def _resolve_primary_worker_manager_entry(
     proxy_url: str | None,
     proxy_token: str | None,
     storage_root: Path | None,
-    acquire_lease: bool,
-    dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None = None,
-    kubernetes_config_snapshot: dict[str, object] | None = None,
-    worker_grantable_credentials: frozenset[str] | None = None,
 ) -> tuple[_WorkerManagerEntry, list[WorkerBackend]]:
     acquisition_epoch = _capture_primary_worker_manager_epoch()
     config_signature = _primary_worker_backend_config_signature(
@@ -670,20 +618,13 @@ def _resolve_primary_worker_manager_entry(
         proxy_url=proxy_url,
         proxy_token=proxy_token,
         storage_root=storage_root,
-        dedicated_worker_validation_snapshot=dedicated_worker_validation_snapshot,
-        kubernetes_config_snapshot=kubernetes_config_snapshot,
-        worker_grantable_credentials=worker_grantable_credentials,
     )
     cleanup_signature = _primary_worker_backend_cleanup_signature(
         runtime_paths,
         storage_root=storage_root,
         config_signature=config_signature,
     )
-    active_entry = _reserve_primary_worker_manager_build(
-        config_signature,
-        acquisition_epoch=acquisition_epoch,
-        acquire_lease=acquire_lease,
-    )
+    active_entry = _reserve_primary_worker_manager_build(config_signature, acquisition_epoch=acquisition_epoch)
     if active_entry is not None:
         return active_entry, []
 
@@ -693,9 +634,6 @@ def _resolve_primary_worker_manager_entry(
             proxy_url=proxy_url,
             proxy_token=proxy_token,
             storage_root=storage_root,
-            dedicated_worker_validation_snapshot=dedicated_worker_validation_snapshot,
-            kubernetes_config_snapshot=kubernetes_config_snapshot,
-            worker_grantable_credentials=worker_grantable_credentials,
         )
         built_manager.cleanup_locator = _stable_json_digest(cleanup_signature)
     except Exception:
@@ -708,7 +646,6 @@ def _resolve_primary_worker_manager_entry(
         built_manager,
         config_signature,
         acquisition_epoch=acquisition_epoch,
-        acquire_lease=acquire_lease,
     )
     if published is not None:
         return published
@@ -731,45 +668,12 @@ def _release_primary_worker_manager_entry(entry: _WorkerManagerEntry) -> None:
         )
 
 
-def get_primary_worker_manager(
-    runtime_paths: RuntimePaths,
-    *,
-    proxy_url: str | None,
-    proxy_token: str | None,
-    storage_root: Path | None = None,
-    dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None = None,
-    kubernetes_config_snapshot: dict[str, object] | None = None,
-    worker_grantable_credentials: frozenset[str] | None = None,
-) -> WorkerBackend:
-    """Return the current primary worker manager snapshot for the current backend config."""
-    entry, managers_to_shutdown = _resolve_primary_worker_manager_entry(
-        runtime_paths,
-        proxy_url=proxy_url,
-        proxy_token=proxy_token,
-        storage_root=storage_root,
-        acquire_lease=False,
-        dedicated_worker_validation_snapshot=dedicated_worker_validation_snapshot,
-        kubernetes_config_snapshot=kubernetes_config_snapshot,
-        worker_grantable_credentials=worker_grantable_credentials,
-    )
-    for manager in managers_to_shutdown:
-        _shutdown_worker_manager_now(
-            manager,
-            suppress_errors=True,
-            log_message="Failed to shut down retired primary worker manager",
-        )
-    return entry.manager
-
-
 def lease_primary_worker_manager(
     runtime_paths: RuntimePaths,
     *,
     proxy_url: str | None,
     proxy_token: str | None,
     storage_root: Path | None = None,
-    dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None = None,
-    kubernetes_config_snapshot: dict[str, object] | None = None,
-    worker_grantable_credentials: frozenset[str] | None = None,
 ) -> PrimaryWorkerManagerLease:
     """Borrow the active primary worker manager for one request-scoped operation."""
     entry, managers_to_shutdown = _resolve_primary_worker_manager_entry(
@@ -777,10 +681,6 @@ def lease_primary_worker_manager(
         proxy_url=proxy_url,
         proxy_token=proxy_token,
         storage_root=storage_root,
-        acquire_lease=True,
-        dedicated_worker_validation_snapshot=dedicated_worker_validation_snapshot,
-        kubernetes_config_snapshot=kubernetes_config_snapshot,
-        worker_grantable_credentials=worker_grantable_credentials,
     )
     for manager in managers_to_shutdown:
         _shutdown_worker_manager_now(

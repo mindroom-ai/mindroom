@@ -25,7 +25,6 @@ from typing import TYPE_CHECKING, Protocol, cast
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_execution_identity_from_runtime_context,
-    execution_identity_matches_tool_runtime_context,
 )
 
 if TYPE_CHECKING:
@@ -100,12 +99,8 @@ def cli_turn_owner(
         if not value:
             msg = f"CLI turn owner requires a non-empty {label} identity"
             raise ValueError(msg)
-    identity = build_execution_identity_from_runtime_context(runtime_context)
-    if not execution_identity_matches_tool_runtime_context(identity, runtime_context):
-        msg = "CLI turn owner execution identity does not match its runtime"
-        raise ValueError(msg)
     return CliTurnOwner(
-        execution_identity=identity,
+        execution_identity=build_execution_identity_from_runtime_context(runtime_context),
         turn_id=cast("str", runtime_context.membership_turn_id),
         generation=cast("str", turn_context.run_id),
     )

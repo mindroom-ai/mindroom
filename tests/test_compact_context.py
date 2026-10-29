@@ -169,7 +169,7 @@ async def _compact_as_team_member(tool: CompactContextTools, team_scope: History
     """Call ``compact_context`` as the team runtime runs a member's call: with the team scope on its context."""
     [function] = adapt_toolkit(tool).functions
     context = ToolCallContext(run_id="member-run", session_id="session-1", history_scope=team_scope, user_id=None)
-    return await run_tool_call(function, {}, context, middleware=())
+    return (await run_tool_call(function, {}, context, middleware=())).value
 
 
 def _load_scope_context(
