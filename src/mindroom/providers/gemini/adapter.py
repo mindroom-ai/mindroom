@@ -291,7 +291,7 @@ def _sent_body(call: Mapping[str, Any]) -> dict[str, Any]:
     """
     config = call["config"] or {}
     if not isinstance(config, dict):
-        config = cast("GenerateContentConfig", config).model_dump(exclude_none=True)
+        config = cast("GenerateContentConfig", config).model_dump(mode="json", exclude_none=True)
     return {**call, "config": {key: value for key, value in config.items() if key != "http_options"}}
 
 

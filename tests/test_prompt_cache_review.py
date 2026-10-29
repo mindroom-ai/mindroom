@@ -56,14 +56,20 @@ def _claude_row(second: int, messages: list[dict[str, object]]) -> dict[str, obj
 
 
 _CACHE_MARKER = {"type": "ephemeral", "ttl": "1h"}
+_TOOLS = [{"name": "lookup_order"}]
 _SENT_BODIES = {
     "claude": {
         "system": [{"type": "text", "text": "S", "cache_control": _CACHE_MARKER}],
         "messages": [{"role": "user", "content": [{"type": "text", "text": "hi", "cache_control": _CACHE_MARKER}]}],
+        "tools": _TOOLS,
     },
-    "chat": {"messages": [{"role": "system", "content": "S"}, {"role": "user", "content": "hi"}]},
-    "responses": {"input": [{"role": "developer", "content": "S"}, {"role": "user", "content": "hi"}]},
-    "gemini": {"contents": [{"role": "user", "parts": [{"text": "hi"}]}], "config": {"system_instruction": "S"}},
+    "chat": {"messages": [{"role": "system", "content": "S"}, {"role": "user", "content": "hi"}], "tools": _TOOLS},
+    "responses": {"input": [{"role": "developer", "content": "S"}, {"role": "user", "content": "hi"}], "tools": _TOOLS},
+    "codex": {"instructions": "S", "input": [{"role": "user", "content": "hi"}], "tools": _TOOLS},
+    "gemini": {
+        "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+        "config": {"system_instruction": "S", "tools": [{"function_declarations": _TOOLS}]},
+    },
 }
 
 
@@ -77,6 +83,7 @@ def test_request_rows_read_the_conversation_and_system_text_where_each_route_sen
 
     assert (row.system_prompt, row.preview, row.message_count) == ("S", "hi", 1)
     assert "cache_control" not in row.normalized_message_blobs[0]
+    assert "lookup_order" in row.tools_blob
 
 
 def test_request_rows_keep_the_cache_markers_the_body_sent() -> None:

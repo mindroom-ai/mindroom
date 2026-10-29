@@ -1152,6 +1152,8 @@ async def test_a_failing_request_log_neither_fails_the_request_nor_hides_its_err
         for entry in logs
         if entry["event"] == "Failed to persist LLM request log"
     ] == [("default", None)] * 2
+    # A response record joins only a logged request, so none is attempted after its request record failed.
+    assert not [entry for entry in logs if entry["event"] == "Failed to emit LLM response telemetry"]
 
 
 @pytest.mark.asyncio
