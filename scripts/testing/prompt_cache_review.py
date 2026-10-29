@@ -51,8 +51,6 @@ class JsonlParseStats:
     document_count: int
     concatenated_document_count: int
     decode_error_count: int
-    unparseable_row_count: int = 0
-    unparseable_row_errors: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -353,8 +351,6 @@ def load_request_rows(
     document_count = 0
     concatenated_document_count = 0
     decode_error_count = 0
-    unparseable_row_count = 0
-    unparseable_row_errors: list[str] = []
 
     with jsonl_path.open(encoding="utf-8", errors="replace") as handle:
         for _line_count, raw_line in enumerate(handle, start=1):
@@ -377,10 +373,7 @@ def load_request_rows(
                 parsed_documents += 1
                 document_count += 1
                 position = end_position
-                row_error = _append_request_row(rows, payload, session_id_filter, usage_by_request_log_id)
-                if row_error is not None:
-                    unparseable_row_count += 1
-                    unparseable_row_errors.append(row_error)
+                _append_request_row(rows, payload, session_id_filter, usage_by_request_log_id)
             if parsed_documents > 1:
                 concatenated_document_count += parsed_documents - 1
 
@@ -396,8 +389,6 @@ def load_request_rows(
         document_count=document_count,
         concatenated_document_count=concatenated_document_count,
         decode_error_count=decode_error_count,
-        unparseable_row_count=unparseable_row_count,
-        unparseable_row_errors=tuple(dict.fromkeys(unparseable_row_errors))[:3],
     )
 
 
@@ -406,33 +397,24 @@ def _append_request_row(
     payload: object,
     session_id_filter: str | None,
     usage_by_request_log_id: dict[str, dict[str, int]],
-) -> str | None:
-    """Parse one logged payload into ``rows``; return an error summary when it cannot be rebuilt.
+) -> None:
+    """Parse one logged payload into ``rows``.
 
     Response records (compact usage lines written after each provider call) are
     collected into ``usage_by_request_log_id`` before any session filtering:
     they carry no session id and are joined to request rows by request_log_id.
-
-    Corrupt logged rows can fail anywhere in the provider-format rebuild (JSON
-    decoding, message decoding, Claude message formatting), and one bad row
-    must never kill an offline review, so this deliberately catches everything
-    and reports the failure instead.
     """
     payload_dict = object_dict(payload)
     usage_record = parse_response_usage_record(payload_dict)
     if usage_record is not None:
         request_log_id, usage = usage_record
         usage_by_request_log_id[request_log_id] = usage
-        return None
+        return
     if session_id_filter is not None and (payload_dict is None or payload_dict.get("session_id") != session_id_filter):
-        return None
-    try:
-        row = parse_request_row(payload)
-    except Exception as error:
-        return f"{type(error).__name__}: {error}"
+        return
+    row = parse_request_row(payload)
     if row is not None:
         rows.append(row)
-    return None
 
 
 def parse_response_usage_record(payload_dict: JsonDict | None) -> tuple[str, dict[str, int]] | None:
@@ -447,44 +429,35 @@ def parse_response_usage_record(payload_dict: JsonDict | None) -> tuple[str, dic
 
 
 def parse_request_row(payload: object) -> RequestRow | None:
-    """Parse one logged request payload into a normalized request row."""
+    """Parse one logged request record, which holds the body its route sent, into a normalized request row."""
     payload_dict = object_dict(payload)
     if payload_dict is None or payload_dict.get("record") == "response":
         return None
+    body = object_dict(payload_dict.get("body"))
     timestamp_raw = payload_dict.get("timestamp")
-    if not isinstance(timestamp_raw, str):
+    if body is None or not isinstance(timestamp_raw, str):
         return None
     try:
         timestamp = datetime.fromisoformat(timestamp_raw)
     except ValueError:
         return None
 
-    system_prompt = payload_dict.get("system_prompt")
-    if not isinstance(system_prompt, str):
-        system_prompt = ""
-
-    messages_raw = payload_dict.get("messages")
     model_id_raw = payload_dict.get("model_id")
     model_id = model_id_raw if isinstance(model_id_raw, str) else str(model_id_raw or "")
-    model_params = payload_dict.get("model_params")
-    message_blobs, normalized_message_blobs, preview = build_provider_message_blobs(
-        messages_raw,
-        model_id,
-        model_params,
-    )
+    message_blobs, normalized_message_blobs, preview = body_message_blobs(body)
     session_id_raw = payload_dict.get("session_id")
     room_id_raw = payload_dict.get("room_id")
     agent_name_raw = payload_dict.get("agent_id")
-    tools_raw = payload_dict.get("tools")
+    tools_raw = body.get("tools", (object_dict(body.get("config")) or {}).get("tools"))
     request_log_id_raw = payload_dict.get("request_log_id")
-    model_params_dict = object_dict(model_params)
+    model_params_dict = object_dict(payload_dict.get("model_params"))
     return RequestRow(
         timestamp=timestamp,
         session_id=session_id_raw if isinstance(session_id_raw, str) else None,
         room_id=room_id_raw if isinstance(room_id_raw, str) else None,
         agent_name=agent_name_raw if isinstance(agent_name_raw, str) else str(agent_name_raw or ""),
         model_id=model_id,
-        system_prompt=system_prompt,
+        system_prompt=body_system_text(body),
         message_count=len(message_blobs),
         message_blobs=message_blobs,
         normalized_message_blobs=normalized_message_blobs,
@@ -495,14 +468,42 @@ def parse_request_row(payload: object) -> RequestRow | None:
     )
 
 
-def build_provider_message_blobs(
-    messages_raw: object,
-    model_id: str,
-    model_params: object,
-) -> tuple[tuple[str, ...], tuple[str, ...], str]:
-    """Serialize logged messages into provider-specific cache comparison blobs."""
-    prompt_messages = parse_logged_messages(messages_raw)
-    return build_provider_message_blobs_from_messages(prompt_messages, model_id, model_params)
+def body_messages(body: JsonDict) -> list[object]:
+    """Return the conversation a logged body sent: ``messages``, Responses ``input``, or Gemini ``contents``."""
+    for key in ("messages", "input", "contents"):
+        if isinstance(value := body.get(key), list):
+            return cast("list[object]", value)
+    return []
+
+
+def is_system_message(message: object) -> bool:
+    """Return whether a logged body's message carries system text, as Chat, Ollama, and Responses send it."""
+    message_dict = object_dict(message)
+    return message_dict is not None and message_dict.get("role") in ("system", "developer")
+
+
+def message_text(message: object) -> str:
+    """Return the text of one logged body's message, a Gemini content's parts included."""
+    message_dict = object_dict(message) or {}
+    return extract_text(message_dict.get("content", message_dict.get("parts")))
+
+
+def body_system_text(body: JsonDict) -> str:
+    """Return the system text a logged body sent, wherever its route puts it."""
+    config = object_dict(body.get("config")) or {}
+    parts = [extract_text(body.get(key)) for key in ("system", "instructions")]
+    parts.append(extract_text(config.get("system_instruction")))
+    parts.extend(message_text(message) for message in body_messages(body) if is_system_message(message))
+    return "\n\n".join(part for part in parts if part)
+
+
+def body_message_blobs(body: JsonDict) -> tuple[tuple[str, ...], tuple[str, ...], str]:
+    """Serialize a logged body's conversation into raw and cache-marker-free comparison blobs, with a preview."""
+    messages = [message for message in body_messages(body) if not is_system_message(message)]
+    preview = shorten_text(message_text(messages[0]), 110) if messages else ""
+    raw_blobs = tuple(stable_json(message) for message in messages)
+    normalized_blobs = tuple(stable_json(strip_cache_control(message)) for message in messages)
+    return raw_blobs, normalized_blobs, preview
 
 
 def build_provider_message_blobs_from_messages(
@@ -546,13 +547,6 @@ def build_provider_message_blobs_from_messages(
     ]
     serialized_messages = tuple(stable_json(message) for message in normalized_messages)
     return serialized_messages, serialized_messages, preview
-
-
-def parse_logged_messages(messages_raw: object) -> list[Message]:
-    """Parse logged message payloads, which the request log writes as ``Message.to_dict()``, for comparison."""
-    if not isinstance(messages_raw, list):
-        return []
-    return [Message.from_dict(fields) for message in messages_raw if (fields := object_dict(message)) is not None]
 
 
 def ladder_cache_control(model_params: object) -> dict[str, str] | None:
@@ -1250,10 +1244,6 @@ def print_overview(
         f"{parse_stats.document_count} JSON documents from {parse_stats.line_count} lines "
         f"(concatenated docs: {parse_stats.concatenated_document_count}, decode errors: {parse_stats.decode_error_count}).",
     )
-    if parse_stats.unparseable_row_count:
-        print(f"Skipped {parse_stats.unparseable_row_count} rows whose logged payload could not be rebuilt.")
-        for row_error in parse_stats.unparseable_row_errors:
-            print(f"  {shorten_text(row_error, 140)}")
     print(f"Rows with session_id: {len(rows) - missing_session_rows}; rows without session_id: {missing_session_rows}")
     print("Comparisons ignore moving `cache_control` markers and focus on the reusable content prefix.")
     print()

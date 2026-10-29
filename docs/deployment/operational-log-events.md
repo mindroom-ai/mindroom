@@ -312,7 +312,7 @@ debug:
 - `log_llm_requests` (bool, default `false`): write provider requests as JSONL, and record successful tool calls with timing in `<storage>/tracking/tool_calls.jsonl`, where `<storage>` is `MINDROOM_STORAGE_PATH` or the default `mindroom_data` (tool failures are always recorded there).
 - `llm_request_log_dir` (string, default `null`, meaning `<storage>/logs/llm_requests`): directory for the request logs.
 
-Request logs include prompts, messages, the tools sent to the provider, model parameters, and requester and source Matrix event metadata.
+Request logs hold the body of each request MindRoom sends a provider, with its prompts, messages, tools, and attachments, beside the model parameters and requester and source Matrix event metadata.
 Credentials such as tokens, cookies, passwords, API keys, authorization headers, and PEM private keys are redacted, but these files can still contain sensitive prompt, argument, and result data, so leave the flag disabled unless you are actively debugging.
 
 Export `MINDROOM_TIMING=1` before startup to log timing for tool calls and one INFO-level `Dispatch pipeline timing` summary per turn, including `time_to_model_request_ms` and context, queue, payload, agent-build, and model spans.

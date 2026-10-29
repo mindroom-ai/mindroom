@@ -94,6 +94,7 @@ class OllamaProvider:
         timer = TurnTimer()
         try:
             client = self._sdk_client()
+            await request.on_send({"model": model, "messages": messages, "stream": True, **chat_kwargs})
             chunks = await client.chat(model=model, messages=messages, stream=True, **chat_kwargs)
             async with aclosing(cast("AsyncGenerator[ChatResponse]", chunks)) as responses:
                 async for chunk in responses:

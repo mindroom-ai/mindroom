@@ -51,6 +51,7 @@ __all__ = [
     "deepseek_request_thinks",
     "function_definition",
     "sdk_call_kwargs",
+    "sdk_request_body",
 ]
 
 # The two SDK endpoints the OpenAI family calls: ``chat.completions.create`` and ``responses.create``.
@@ -332,6 +333,12 @@ def sdk_call_kwargs(params: Mapping[str, Any], endpoint: _SDKEndpoint) -> dict[s
     if body := {**unnamed, **(kwargs.pop("extra_body", None) or {})}:
         kwargs["extra_body"] = body
     return kwargs
+
+
+def sdk_request_body(kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the JSON body the SDK sends for ``create(**kwargs)``: the body keywords, ``extra_body`` merged over them."""
+    body = {key: value for key, value in kwargs.items() if key not in _SDK_OPTION_KEYS}
+    return {**body, **(kwargs.get("extra_body") or {})}
 
 
 def chat_request_kwargs(

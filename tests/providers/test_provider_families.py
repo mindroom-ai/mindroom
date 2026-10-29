@@ -9,6 +9,7 @@ prove is what the registry runs. The OpenAI family's idle-limit and server-tool 
 
 from __future__ import annotations
 
+import base64
 import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -29,6 +30,7 @@ from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_GUIDANCE
 from mindroom.providers.pipeline.media import FALLBACK_MARKER
+from mindroom.providers.pipeline.wrapped import WrappedProvider
 from mindroom.providers.synthetic_adapter import SHELL_TOOL
 from mindroom.providers.synthetic_adapter import build_provider as build_synthetic_provider
 from mindroom.session_storage.schema import TableNames
@@ -53,8 +55,10 @@ from tests.providers.golden_support import (
 from tests.session_storage.agno_layout import converted_store
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
+
+    from mindroom.llm.provider import ModelProvider, StreamEvent
 
 pytestmark = pytest.mark.filterwarnings(CLAUDE_DEPRECATION_FILTER)
 
@@ -64,6 +68,11 @@ _IDLE_LIMIT_SECONDS = 0.5
 _EVENT_PAUSE_SECONDS = 0.04
 _SILENT_EVENTS = 25
 _OVERLOADED = "The model is overloaded"
+_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+    "1f15c4890000000d49444154789c636001000000050001a5f645400000000049454e44ae426082",
+)
+_PNG_BASE64 = base64.b64encode(_PNG).decode("ascii")
 
 
 @pytest.fixture(autouse=True)
@@ -378,7 +387,7 @@ async def test_composed_pipeline_recovers_logs_and_projects_for_every_family(fam
     Media the route omits is replaced by the fallback note up front; media the adapter cannot send (an unreadable
     image on Gemini and on Vertex AI) is removed with the same note after its rejection. The deferred tool leaves
     the tool list and the request is reissued after the transient failure, with the request log recording every
-    attempt.
+    attempt that reached the wire.
     """
     spec = FAMILIES[family]
     wire = Wire(_error_reply(family), spec.reply())
@@ -404,10 +413,10 @@ async def test_composed_pipeline_recovers_logs_and_projects_for_every_family(fam
     records = [json.loads(line) for line in log_file.read_text().splitlines()]
     requests = [record for record in records if record.get("record") != "response"]
     (response,) = [record for record in records if record.get("record") == "response"]
-    # Gemini's rejected image is one more logged attempt, which never reaches the wire.
-    assert len(requests) == (3 if family.startswith("gemini") else 2)
-    assert [tool["name"] for tool in requests[-1]["tools"]] == ["call_tool", "tool_search"]
-    assert FALLBACK_MARKER in json.dumps(requests[-1]["messages"])
+    # Gemini's attempt with the unreadable image never reaches the wire, so it logs no record.
+    assert len(requests) == 2
+    assert FALLBACK_MARKER in json.dumps(requests[-1]["body"])
+    assert "lookup_order" not in json.dumps(requests[-1]["body"])
     assert response["usage"] == {
         "input_tokens": 40,
         "output_tokens": 9,
@@ -415,6 +424,75 @@ async def test_composed_pipeline_recovers_logs_and_projects_for_every_family(fam
         "cache_write_tokens": 0,
     }
     assert turn.usage.tokens.input_tokens == 40
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", sorted(FAMILIES))
+async def test_the_request_record_holds_the_body_each_family_sent(family: str, tmp_path: Path) -> None:
+    """The record holds the body the route handed its SDK, media bytes as the base64 the SDKs send.
+
+    The OpenAI-family and Ollama SDKs send that body as it is and the Claude SDK adds its ``stream`` flag;
+    google-genai builds its REST body from the arguments, which keep its own field names, without ``http_options``.
+    """
+    spec = FAMILIES[family]
+    wire = Wire(spec.reply())
+    log_dir = tmp_path / "logs"
+    provider = pipeline_provider(spec.adapter(tmp_path, wire), log_dir=log_dir)
+    image = Image(content=_PNG, mime_type="image/png")
+    request = ModelRequest(
+        messages=[Message(role="system", content="Be brief."), Message(role="user", content="Look", images=[image])],
+        tools=[_tool("lookup_order")],
+    )
+
+    await complete(provider, request)
+
+    (log_file,) = log_dir.glob("llm-requests-*.jsonl")
+    record, _response = (json.loads(line) for line in log_file.read_text().splitlines())
+    logged, sent = record["body"], wire.body()
+    if not family.startswith("gemini"):
+        assert logged == {key: value for key, value in sent.items() if (key, family) != ("stream", "anthropic")}
+        return
+    image_part = {"inline_data": {"mime_type": "image/png", "data": _PNG_BASE64}}
+    assert logged["contents"] == [{"role": "user", "parts": [{"text": "Look"}, image_part]}]
+    assert logged["config"]["system_instruction"] == "Be brief."
+    assert [tool["name"] for tool in logged["config"]["tools"][0]["function_declarations"]] == ["lookup_order"]
+    assert "http_options" not in logged["config"]
+    assert _PNG_BASE64 in json.dumps(sent["contents"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", ["anthropic", "openai_chat"])
+async def test_the_request_record_leaves_out_the_request_options(family: str, tmp_path: Path) -> None:
+    """Headers, query parameters, the timeout, and Claude's betas are request options, so the body leaves them out.
+
+    An authored ``extra_body`` is part of the body the SDK sends, so the body holds it merged; the key never appears.
+    The record's ``model_params`` still list the authored settings, as before.
+    """
+    options: dict[str, Any] = {
+        "extra_headers": {"X-Trace": "header-value"},
+        "extra_query": {"trace": "query-value"},
+        "timeout": 30,
+        "extra_body": {"metadata": {"user_id": "u1"}},
+    }
+    if family == "anthropic":
+        options["betas"] = ["beta-value"]
+    spec = FAMILIES[family]
+    spec = replace(spec, config={**spec.config, "extra_kwargs": {"request_params": options}})
+    wire = Wire(spec.reply())
+    log_dir = tmp_path / "logs"
+    provider = pipeline_provider(spec.adapter(tmp_path, wire), log_dir=log_dir)
+
+    await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")]))
+
+    [sent] = wire.requests
+    assert (sent.headers["x-trace"], sent.url.params["trace"]) == ("header-value", "query-value")
+    (log_file,) = log_dir.glob("llm-requests-*.jsonl")
+    logged = log_file.read_text()
+    body = json.loads(logged.splitlines()[0])["body"]
+    assert body["metadata"] == {"user_id": "u1"}
+    assert not {"extra_headers", "extra_query", "extra_body", "timeout", "betas"} & set(body)
+    assert not [value for value in ("header-value", "query-value", "beta-value") if value in json.dumps(body)]
+    assert spec.config["api_key"] not in logged
 
 
 def _unreadable_media(kind: str, root: Path) -> dict[str, Any]:
@@ -552,17 +630,28 @@ async def test_every_family_sends_the_text_first_then_images_audio_video_and_fil
 async def test_composed_pipeline_serves_the_synthetic_family(tmp_path: Path) -> None:
     """The synthetic model has no wire, but every stage still applies to it as the registry composes it.
 
-    The deferred tool leaves the tool list, the shell call and the continuation after its result pass through
-    the media, retry, and logging stages, and each request is logged; a synthetic reply reports no usage, so,
-    as on the Agno path, no response record follows.
+    The deferred tool leaves the tool list, and the shell call and the continuation after its result pass through
+    the media, retry, and logging stages. The model sends no request body and reports no usage, so the request log
+    writes no record for it.
     """
     settings = {"min_response_chars": 200, "max_response_chars": 200, "chars_per_second": 0, "tool_call_probability": 1}
     adapter = build_synthetic_provider(
         ModelConfig(provider="synthetic", id="lorem-ipsum", extra_kwargs=settings),
         runtime_paths_for(tmp_path),
     )
+    received: list[ModelRequest] = []
+
+    async def receiving(inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        received.append(request)
+        async for event in inner.stream(request):
+            yield event
+
     log_dir = tmp_path / "logs"
-    provider = pipeline_provider(adapter, log_dir=log_dir, idle_timeout_seconds=_IDLE_LIMIT_SECONDS)
+    provider = pipeline_provider(
+        WrappedProvider(adapter, receiving),
+        log_dir=log_dir,
+        idle_timeout_seconds=_IDLE_LIMIT_SECONDS,
+    )
     request = ModelRequest(
         messages=[Message(role="user", content="Hi")],
         tools=[_tool("call_tool"), _tool("lookup_order"), _tool(SHELL_TOOL), _tool("tool_search")],
@@ -576,13 +665,9 @@ async def test_composed_pipeline_serves_the_synthetic_family(tmp_path: Path) -> 
 
     assert (calling.stop_reason, call["function"]["name"], answer.stop_reason) == ("tool_use", SHELL_TOOL, "end")
     assert len(calling.content + answer.content) == 200
-    (log_file,) = log_dir.glob("llm-requests-*.jsonl")
-    records = [json.loads(line) for line in log_file.read_text().splitlines()]
-    assert [record.get("record") for record in records] == [None, None]
-    assert [[tool["name"] for tool in record["tools"]] for record in records] == [
-        ["call_tool", SHELL_TOOL, "tool_search"],
-    ] * 2
-    assert records[1]["messages"][-1]["tool_call_id"] == call["id"]
+    assert [[tool.name for tool in sent.tools] for sent in received] == [["call_tool", SHELL_TOOL, "tool_search"]] * 2
+    assert received[1].messages[-1].tool_call_id == call["id"]
+    assert not log_dir.exists()
 
 
 # --- Timings ------------------------------------------------------------------------------------------------------

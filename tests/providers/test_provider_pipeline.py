@@ -60,7 +60,7 @@ from mindroom.providers.pipeline.refusal import refusal_stream
 from mindroom.providers.pipeline.request_log import RequestLog, logged_stream
 from mindroom.providers.pipeline.retry import retrying_stream
 from mindroom.providers.pipeline.wrapped import WrappedProvider
-from tests.fakes.scripted_model import Await
+from tests.fakes.scripted_model import Await, scripted_body
 from tests.providers.golden_support import pipeline_provider
 
 if TYPE_CHECKING:
@@ -81,7 +81,11 @@ _CAPABILITIES = Capabilities()
 
 @dataclass
 class _ScriptedProvider:
-    """Answer each request with the next scripted attempt; an exception step raises, a float or ``Await`` step waits."""
+    """Answer each request with the next scripted attempt; an exception step raises, a float or ``Await`` step waits.
+
+    Unless ``sends`` is off, each attempt first reports its ``scripted_body`` as sent, so a failing step fails a
+    request that was sent.
+    """
 
     attempts: list[list[_Step]]
     identity: ModelIdentity = _IDENTITY
@@ -91,10 +95,13 @@ class _ScriptedProvider:
     model_params: dict[str, object] = field(default_factory=dict)
     requests: list[ModelRequest] = field(default_factory=list)
     closed: int = 0
+    sends: bool = True
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         self.requests.append(request)
         steps = self.attempts[len(self.requests) - 1]
+        if self.sends:
+            await request.on_send(scripted_body(self.identity, request))
         try:
             for step in steps:
                 if isinstance(step, Exception):
@@ -839,9 +846,7 @@ async def test_request_log_records_the_request_and_its_usage(tmp_path: Path) -> 
 
     (log_file,) = tmp_path.glob("llm-requests-*.jsonl")
     request_record, response_record = (json.loads(line) for line in log_file.read_text().splitlines())
-    assert request_record["system_prompt"] == "Be brief."
-    assert request_record["message_count"] == 2
-    assert [tool["name"] for tool in request_record["tools"]] == ["search"]
+    assert request_record["body"] == scripted_body(_IDENTITY, request)
     assert request_record["model_params"] == {"temperature": 0.2}
     assert response_record["request_log_id"] == request_record["request_log_id"]
     assert response_record["usage"] == {
@@ -853,47 +858,31 @@ async def test_request_log_records_the_request_and_its_usage(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_request_log_keeps_the_fields_a_wire_sends(tmp_path: Path) -> None:
-    """A tool result's name and failure flag, and replayed reasoning, are in the record, since wires send them."""
-    inner = _ScriptedProvider([[_turn()]])
-    request = ModelRequest(
-        messages=[
-            _user(),
-            Message(role="assistant", content="", reasoning_content="Check the city first."),
-            Message(
-                role="tool",
-                tool_call_id="call_1",
-                tool_name="get_weather",
-                content="No city",
-                tool_call_error=True,
-            ),
-        ],
-    )
+async def test_the_request_record_is_written_before_the_request_is_sent(tmp_path: Path) -> None:
+    """The adapter sends only once its record is on disk, so a request that hangs or crashes is still logged."""
+    seen_before_reply: list[dict[str, object]] = []
 
-    await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), request)
+    async def read_log() -> None:
+        seen_before_reply.extend(_log_records(tmp_path))
 
-    [record] = _log_records(tmp_path)
-    assistant, tool = record["messages"][1:]
-    assert assistant["reasoning_content"] == "Check the city first."
-    assert (tool["tool_name"], tool["tool_call_error"]) == ("get_weather", True)
+    inner = _ScriptedProvider([[Await(read_log), _turn()]])
+
+    await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), _request())
+
+    assert seen_before_reply == _log_records(tmp_path)
+    assert [record["body"] for record in seen_before_reply] == [scripted_body(_IDENTITY, _request())]
 
 
 @pytest.mark.asyncio
-async def test_request_log_leaves_out_the_fields_no_wire_sends(tmp_path: Path) -> None:
-    """A replayed message's and turn context's storage flags stay out of the record, as their ids do."""
-    inner = _ScriptedProvider([[_turn()]])
-    request = ModelRequest(
-        messages=[
-            Message(role="user", content="Earlier.", from_history=True),
-            _user(),
-            Message(role="user", content="<memory>likes tea</memory>", add_to_agent_memory=False),
-        ],
-    )
+async def test_a_request_that_is_never_sent_logs_only_its_usage_line(tmp_path: Path) -> None:
+    """An attempt that fails before its adapter sends a body, such as one with an unreadable file, writes no record."""
+    unsent = _ScriptedProvider([[InvalidRequest("unreadable file", provider="Scripted Chat")]], sends=False)
 
-    await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), request)
+    with capture_logs() as logs, pytest.raises(InvalidRequest, match="unreadable file"):
+        await _drain(WrappedProvider(unsent, partial(logged_stream, log=_request_log(tmp_path))), _request())
 
-    [record] = _log_records(tmp_path)
-    assert [sorted(message) for message in record["messages"]] == [["content", "created_at", "role"]] * 3
+    assert not list(tmp_path.glob("llm-requests-*.jsonl"))
+    assert [entry["usage_available"] for entry in logs if entry["event"] == "LLM usage"] == [False]
 
 
 @pytest.mark.asyncio
@@ -907,7 +896,7 @@ async def test_request_log_names_the_deferred_tools(
     deferred: frozenset[str],
     expected: list[str],
 ) -> None:
-    """The record lists the deferred tool names, sorted, beside the provider-neutral specs of every tool."""
+    """The record lists the deferred tool names, sorted, beside the body the route sent."""
     inner = _ScriptedProvider([[_turn()]])
     request = ModelRequest(
         messages=[_user()],
@@ -919,8 +908,6 @@ async def test_request_log_names_the_deferred_tools(
 
     [record] = _log_records(tmp_path)
     assert record["deferred_tool_names"] == expected
-    assert [tool["name"] for tool in record["tools"]] == ["search", "lookup_order", "archive_order"]
-    assert record["tool_count"] == 3
 
 
 @pytest.mark.asyncio
@@ -943,8 +930,7 @@ async def test_request_log_builds_the_record_off_the_event_loop(
     await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), request)
 
     [record] = _log_records(tmp_path)
-    assert [(message["role"], message["content"]) for message in record["messages"]] == [("user", "hi")]
-    assert [tool["name"] for tool in record["tools"]] == ["search"]
+    assert record["body"] == scripted_body(_IDENTITY, request)
     assert len(build_threads) == 1
     assert build_threads[0] != threading.get_ident()
 
@@ -973,7 +959,7 @@ async def test_request_log_masks_credentials_before_writing(tmp_path: Path) -> N
         await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), request)
 
     [record] = _log_records(tmp_path)
-    assert record["messages"][0]["content"] == (
+    assert record["body"]["messages"][0]["content"] == (
         "call failed with Authorization: Bearer ***redacted*** and api_key=***redacted***"
     )
     assert record["callback_url"] == "https://example.test/cb?code=***redacted***&keep=1"

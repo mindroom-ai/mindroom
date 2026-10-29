@@ -17,7 +17,13 @@ from mindroom.llm.provider import ToolCallReady
 from mindroom.providers.assistant_turn import TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.openai.adapter_common import SDKClients, request_settings
-from mindroom.providers.openai.chat_wire import ChatStream, ChatWire, chat_request_kwargs, chat_stop_reason
+from mindroom.providers.openai.chat_wire import (
+    ChatStream,
+    ChatWire,
+    chat_request_kwargs,
+    chat_stop_reason,
+    sdk_request_body,
+)
 from mindroom.providers.openai.errors import provider_error, sdk_failures
 from mindroom.providers.openai.openrouter_cache import openrouter_prompt_cache_control, request_kwargs_with_prompt_cache
 
@@ -106,6 +112,7 @@ class ChatAdapter:
         accumulator = ChatStream(self.wire)
         try:
             client = await self.clients.client()
+            await request.on_send(sdk_request_body(kwargs))
             sdk_stream = await client.chat.completions.create(**kwargs)
             # The SDK's chunks end alike at the ``[DONE]`` sentinel and where the body just ends, but the SDK
             # stops decoding at the sentinel, so a body decoded to its end never sent one.
