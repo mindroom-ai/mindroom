@@ -15,8 +15,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, TeamRunRecord
-from mindroom.session_storage.agent_storage import create_agent_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
 from mindroom.session_storage.preflight import session_storage_preflight
 from mindroom.session_storage.schema import TableNames, table_names
@@ -30,8 +31,8 @@ if TYPE_CHECKING:
     from mindroom.session_storage.types import SessionKind
 
 
-def _storage(state_root: Path) -> ConversationStore:
-    return create_agent_state_storage("general", state_root)
+def _storage(state_root: Path, kind: SessionKind = "agent") -> ConversationStore:
+    return create_state_storage("general", state_root, HistoryScope(kind=kind, scope_id="general"))
 
 
 def _row(session_id: str, *, kind: SessionKind = "agent", owner: str = "general") -> ConversationSession:
@@ -77,7 +78,7 @@ def test_incompatible_session_schema_is_archived_before_real_session_use(tmp_pat
     (older_archive / "retained").write_text("keep this archive")
     session = _row("new-session", kind=kind)
 
-    storage = _storage(state_root)
+    storage = _storage(state_root, kind)
     seed_session_row(storage, session)
     if kind == "team":
         # A member's run is saved when it ends, before its team run's.
@@ -90,7 +91,7 @@ def test_incompatible_session_schema_is_archived_before_real_session_use(tmp_pat
     )
     storage.save_run(session, run, record_usage=False)
 
-    storage = _storage(state_root)
+    storage = _storage(state_root, kind)
     loaded = storage.load_session(session.session_id, kind)
     assert loaded is not None
     expected_runs = [("new-run", "saved answer")]

@@ -82,7 +82,7 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
 )
 from mindroom.response_sources import ResponseSources
-from mindroom.session_storage.agent_storage import create_agent_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
 from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.session_storage.types import ConversationSession, SessionKind
 from mindroom.turn_controller import _PrecheckedEvent
@@ -462,8 +462,14 @@ class _RecordingStore(ConversationStore):
         ConversationStore.rewrite_run_messages(self, session_id, kind, recorded, session=session)
 
 
-def _recording_store(tmp_path: Path, name: str, *, held: threading.Event | None = None) -> _RecordingStore:
-    store = create_agent_state_storage(name, tmp_path)
+def _recording_store(
+    tmp_path: Path,
+    name: str,
+    *,
+    held: threading.Event | None = None,
+    kind: SessionKind = "agent",
+) -> _RecordingStore:
+    store = create_state_storage(name, tmp_path, HistoryScope(kind=kind, scope_id=name))
     return _RecordingStore(store.path, held=held)
 
 
@@ -3277,7 +3283,7 @@ async def test_notice_follows_a_tool_batch_media_follow_up_message() -> None:
 @pytest.mark.asyncio
 async def test_response_finalization_collapses_a_team_runs_current_notice_state(tmp_path: Path) -> None:
     """Outer finalization should leave one exact notice in the top-level completed run; its members hold none."""
-    store = _recording_store(tmp_path, "queued-notice-team")
+    store = _recording_store(tmp_path, "queued-notice-team", kind="team")
 
     with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
         messages: list[OwnedMessage] = []

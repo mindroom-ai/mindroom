@@ -25,7 +25,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.prompt_message_tags import render_msg_tag
-from mindroom.session_storage.agent_storage import create_agent_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import persist_runs, seed_session, stored_session_state
@@ -501,7 +501,7 @@ def test_an_interrupted_replay_is_saved_as_the_session_its_scope_context_names(t
 
 def test_a_team_scopes_first_interrupted_replay_is_a_team_run(tmp_path: Path) -> None:
     """The scope context's kind decides whether a scope's first session, and so its replay run, is a team's."""
-    storage = create_agent_state_storage("test_scope", tmp_path)
+    storage = create_state_storage("test_scope", tmp_path, HistoryScope(kind="team", scope_id="squad"))
     context = ScopeSessionContext(
         scope=HistoryScope(kind="team", scope_id="squad"),
         storage=storage,
@@ -530,7 +530,7 @@ def test_a_team_scopes_first_interrupted_replay_is_a_team_run(tmp_path: Path) ->
 
 def test_a_team_sessions_interrupted_replay_is_a_team_run(tmp_path: Path) -> None:
     """The session's kind, not a flag beside it, decides whether the replay run is a team's."""
-    storage = create_agent_state_storage("test_scope", tmp_path)
+    storage = create_state_storage("test_scope", tmp_path, HistoryScope(kind="team", scope_id="squad"))
     snapshot = build_interrupted_replay_snapshot(
         user_message="Please continue",
         user_message_is_structured=False,
@@ -616,7 +616,8 @@ def test_an_interrupted_replay_and_the_session_state_it_carries_commit_together_
 @pytest.mark.parametrize("is_team", [False, True], ids=["agent", "team"])
 def test_interrupted_replay_preserves_independent_usage(tmp_path: Path, *, is_team: bool) -> None:
     """Replay and later metadata edits must retain the provider's durable usage snapshot."""
-    storage = create_agent_state_storage("test_scope", tmp_path)
+    owner = HistoryScope(kind="team" if is_team else "agent", scope_id="test_scope")
+    storage = create_state_storage("test_scope", tmp_path, owner)
     db_path = tmp_path / "sessions" / "test_scope.db"
     kind: SessionKind = "team" if is_team else "agent"
     session = (
@@ -679,7 +680,7 @@ def test_interrupted_replay_preserves_independent_usage(tmp_path: Path, *, is_te
     # The reply link is the one metadata edit a later delivery makes.
     assert storage.patch_run_metadata("session-1", persisted.runs[0].run_id, {"matrix_response_event_id": "$reply"})
 
-    storage = create_agent_state_storage("test_scope", tmp_path)
+    storage = create_state_storage("test_scope", tmp_path, owner)
     persisted = storage.load_session("session-1", kind)
     assert persisted is not None
     assert persisted.runs

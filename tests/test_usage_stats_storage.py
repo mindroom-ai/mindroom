@@ -14,9 +14,14 @@ import pytest
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
-from mindroom.llm.usage import ModelMetrics, RunMetrics, TokenCounts
-from mindroom.session_storage.agent_storage import create_agent_state_storage, prepare_conversation_database
+from mindroom.llm.usage import HelperUsage, ModelMetrics, RunMetrics, TokenCounts
+from mindroom.session_storage.agent_storage import (
+    create_agent_state_storage,
+    create_state_storage,
+    prepare_conversation_database,
+)
 from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
@@ -29,6 +34,7 @@ from mindroom.usage.stats_storage import (
     discover_self_usage_sources,
     iter_usage_storage_rows,
 )
+from mindroom.usage.storage import SYSTEM_USAGE_ENTITY, SYSTEM_USAGE_STORAGE_NAME
 from tests.conftest import create_agno_2_sessions_db, persist_runs, persist_session
 from tests.session_storage.agno_layout import recorded_owner
 
@@ -584,6 +590,36 @@ def test_reader_does_not_change_database_bytes(tmp_path: Path) -> None:
 
     assert len(result) == 1
     assert database.read_bytes() == before
+
+
+def test_a_system_source_another_owner_owns_reads_as_malformed(tmp_path: Path) -> None:
+    """The system scope reads only rows of the database the system usage ledger owns, whatever the rows say."""
+    storage = create_state_storage(
+        SYSTEM_USAGE_STORAGE_NAME,
+        tmp_path / SYSTEM_USAGE_STORAGE_NAME,
+        HistoryScope(kind="agent", scope_id="code"),
+    )
+    storage.save_independent_usage(
+        session_id="routing",
+        usage_id="routing:1",
+        kind="routing",
+        requester_id=None,
+        usage=HelperUsage(run_id="1", model=None, provider=None, metrics=RunMetrics()),
+        initial_session=ConversationSession(session_id="routing", kind="agent", owner_id=SYSTEM_USAGE_ENTITY),
+    )
+    source = UsageStorageSource(
+        path=storage.path,
+        path_label=storage.path.name,
+        scope="system",
+        source_agent_id=None,
+        allowed_agent_ids=frozenset(),
+        requester_isolated=False,
+    )
+
+    [result] = iter_usage_storage_rows(source)
+
+    assert isinstance(result, UsageStorageDiagnostic)
+    assert (result.status, result.detail) == ("partial", "malformed retained session")
 
 
 def test_malformed_runs_return_content_free_diagnostic(tmp_path: Path) -> None:

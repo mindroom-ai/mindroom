@@ -27,7 +27,7 @@ from structlog.testing import capture_logs
 from mindroom.constants import resolve_runtime_paths
 from mindroom.history.types import HistoryScope
 from mindroom.session_storage import legacy_session_columns, preflight
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_state_storage, prepare_conversation_database
 from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
 from mindroom.session_storage.legacy_conversion_backup import ConversionSpaceError
 from mindroom.session_storage.legacy_session_columns import BACKUP_SUFFIX
@@ -189,7 +189,8 @@ def test_a_converted_database_records_its_owner_and_keeps_state_in_its_own_colum
     ):
         old = json.loads(states[session_id])
         assert json.loads(state) == old.pop("session_state")
-        assert (json.loads(data) if data is not None else {}) == old
+        # Nothing left is no session data, as a new row stores it.
+        assert data == (json.dumps(old) if old else None)
 
 
 @pytest.mark.parametrize("name", sorted(_OWNERS))
@@ -242,6 +243,28 @@ def test_a_conversion_killed_midway_is_rolled_back_and_converted_on_the_next_ope
     expected = tmp_path / "expected"
     _restore("team_crew", expected)
     assert _observed("team_crew", tmp_path) == _observed("team_crew", expected)
+
+
+def test_the_version_is_read_again_under_the_write_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An opener that read an older version before another one converted the file leaves it, and its backup, alone."""
+    database = _restore("agent_code", tmp_path)
+    original = database.read_bytes()
+    names = TableNames.of_database(database)
+    leave = legacy_session_columns.leave_write_ahead_log
+    converted: list[str] = []
+
+    def other_opener_converts_first(connection: sqlite3.Connection, path: Path) -> None:
+        monkeypatch.setattr(legacy_session_columns, "leave_write_ahead_log", leave)
+        prepare_conversation_database(path, names, _OWNERS["agent_code"])
+        converted.append(_dump(database))
+        leave(connection, path)
+
+    monkeypatch.setattr(legacy_session_columns, "leave_write_ahead_log", other_opener_converts_first)
+
+    prepare_conversation_database(database, names, _OWNERS["agent_code"])
+
+    assert _dump(database) == converted[0]
+    assert database.with_name(f"{database.name}{BACKUP_SUFFIX}").read_bytes() == original
 
 
 # The startup sweep.
@@ -346,12 +369,16 @@ async def test_the_startup_sweep_takes_a_team_databases_owner_from_the_rows_its_
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state", process_env={})
     database = _restore("team_crew", paths.storage_root / "teams" / _storage_name("team_crew"))
     names = TableNames.of_database(database)
+    sessions = f'"{names.sessions}"'
     with closing(sqlite3.connect(database)) as connection, connection:
-        connection.execute(f"DELETE FROM \"{names.sessions}\" WHERE session_id = 'team-turns'")  # noqa: S608
+        # The other team's row comes first, so a sweep that took the first team its rows name would take it.
+        connection.execute(f"CREATE TEMP TABLE kept AS SELECT * FROM {sessions} WHERE session_id = 'agent-path'")  # noqa: S608
+        connection.execute(f"DELETE FROM {sessions}")  # noqa: S608
         connection.execute(
-            f'INSERT INTO "{names.sessions}" (session_id, session_type, team_id, created_at) '  # noqa: S608
+            f"INSERT INTO {sessions} (session_id, session_type, team_id, created_at) "  # noqa: S608
             "VALUES ('elsewhere', 'team', 'another-team', 1)",
         )
+        connection.execute(f"INSERT INTO {sessions} SELECT * FROM kept")  # noqa: S608
 
     with capture_logs() as logs:
         await migrate_conversation_storage(paths)

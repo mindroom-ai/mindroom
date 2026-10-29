@@ -10,7 +10,7 @@ import pytest
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import _with_scope_state, read_scope_seen_event_ids, read_scope_state
 from mindroom.history.types import HistoryScope, HistoryScopeState
-from mindroom.session_storage.agent_storage import create_agent_state_storage
+from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from mindroom.teams.envelope import _persist_bound_seen_event_ids
 from tests.conftest import seed_session_row, seed_session_state
@@ -22,8 +22,8 @@ if TYPE_CHECKING:
 @pytest.mark.asyncio
 async def test_seen_event_ids_are_written_onto_the_stored_row_not_the_pre_run_snapshot(tmp_path: Path) -> None:
     """The post-run write merges into the row, so the state the run wrote back and a compaction request survive."""
-    storage = create_agent_state_storage("eng", tmp_path)
     scope = HistoryScope(kind="team", scope_id="eng")
+    storage = create_state_storage("eng", tmp_path, scope)
     stored = ConversationSession(
         session_id="t1",
         kind="team",

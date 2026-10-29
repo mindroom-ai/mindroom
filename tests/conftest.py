@@ -174,7 +174,7 @@ from mindroom.response_runner import (
 )
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedAttempt
-from mindroom.session_storage.agent_storage import create_agent_state_storage
+from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import _session_state, _write_session_state, ensure_session_row, persist_to
 from mindroom.thread_utils import decide_agent_response
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
@@ -3868,7 +3868,7 @@ def unstored_team_scope_context(
 @pytest.fixture
 def store(tmp_path: Path) -> "ConversationStore":
     """Open the conversation database ``code`` under ``tmp_path`` as production opens one, with every table."""
-    return create_agent_state_storage("code", tmp_path)
+    return create_state_storage("code", tmp_path, HistoryScope(kind="agent", scope_id="code"))
 
 
 def seed_session_row(storage: "ConversationStore", session: "ConversationSession") -> None:

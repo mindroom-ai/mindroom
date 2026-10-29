@@ -9,13 +9,14 @@ import os
 import sqlite3
 import time
 from contextlib import closing
-from typing import TYPE_CHECKING
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 from structlog.testing import capture_logs
 
 from mindroom.constants import resolve_runtime_paths
+from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import prepare_conversation_database
 from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
@@ -25,9 +26,6 @@ from mindroom.usage.stats_storage import UsageSessionRow, UsageStorageSource, it
 from tests.conftest import create_agno_2_sessions_db
 from tests.session_storage.agno_layout import recorded_owner
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
 _NAMES = AgnoTableNames("code")
 
 
@@ -36,11 +34,26 @@ def _convert(path: Path) -> None:
 
 
 def _usage(path: Path) -> list[tuple[str | None, object]]:
+    usage = TableNames.of_database(path).usage
     with sqlite3.connect(path) as connection:
         return [
             (run_id, json.loads(data) if data is not None else None)
-            for run_id, data in connection.execute("SELECT run_id, usage_data FROM code_sessions_usage ORDER BY id")
+            for run_id, data in connection.execute(f'SELECT run_id, usage_data FROM "{usage}" ORDER BY id')  # noqa: S608
         ]
+
+
+def _team_agno_2_sessions_db(teams: Path) -> Path:
+    """Write the Agno 2 fixture database as team ``crew``'s, in its directory under ``teams``, its sessions the team's."""
+    names = TableNames.of_team(HistoryScope(kind="team", scope_id="crew"))
+    database = names.database_path(teams / names.storage_name)
+    database.parent.mkdir(parents=True)
+    fixture = Path(__file__).parent / "fixtures" / "agno_2_6_12_code_sessions.sql"
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.executescript(fixture.read_text(encoding="utf-8").replace("code_sessions", names.sessions))
+        connection.execute(
+            f"UPDATE \"{names.sessions}\" SET session_type = 'team', team_id = 'crew', agent_id = NULL",  # noqa: S608
+        )
+    return database
 
 
 def _skipped_paths(logs: list[dict[str, object]]) -> list[object]:
@@ -193,12 +206,11 @@ async def test_startup_migrates_dormant_stores_and_skips_aliases(tmp_path: Path)
         process_env={"MINDROOM_SESSION_STORAGE_PATH": "sessions"},
     )
     stores = [
-        create_agno_2_sessions_db(root / relative / "code.db")
-        for relative in (
-            "agents/code/sessions",
-            "private_instances/dormant/code/sessions",
-            "teams/code/sessions",
-        )
+        *(
+            create_agno_2_sessions_db(root / relative / "code.db")
+            for relative in ("agents/code/sessions", "private_instances/dormant/code/sessions")
+        ),
+        _team_agno_2_sessions_db(root / "teams"),
     ]
     untouched = create_agno_2_sessions_db(tmp_path / "state/agents/code/sessions/code.db")
     outside = create_agno_2_sessions_db(tmp_path / "outside/code/sessions/code.db")
