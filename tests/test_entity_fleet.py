@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.orchestration import entity_fleet
 from mindroom.orchestration.entity_fleet import EntityFleet, EntityFleetHooks, EntityStartResults
 from mindroom.runtime_shutdown import ENTITY_REMOVED_SHUTDOWN, SYNC_RESTART_SHUTDOWN, ResponseShutdownTimeoutError
@@ -27,9 +28,14 @@ class _Bot:
     agent_name: str
     order: list[str]
     start_errors: list[BaseException] = field(default_factory=list)
+    quiesce_error: BaseException | None = None
     prepare_error: BaseException | None = None
     leave_error: BaseException | None = None
     stop_error: BaseException | None = None
+    # Raised by the stand-in sync loop when it is cancelled.
+    sync_cancel_error: BaseException | None = None
+    # The arguments of the cancellation that ended the stand-in sync loop, once it ended.
+    sync_cancel_args: tuple[object, ...] | None = None
     running: bool = False
     client: object | None = None
     deferred_stop_required: bool = False
@@ -46,6 +52,8 @@ class _Bot:
 
     async def _quiesce_matrix_ingestion(self) -> None:
         self.order.append(f"quiesce:{self.agent_name}")
+        if self.quiesce_error is not None:
+            raise self.quiesce_error
 
     async def prepare_for_sync_shutdown(self, *, shutdown_intent: object) -> None:
         self.order.append(f"prepare:{self.agent_name}:{shutdown_intent}")
@@ -125,15 +133,19 @@ class _Harness:
 
 @pytest.fixture
 def fake_sync(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Replace the Matrix sync loop with one that runs until cancelled and records its stop."""
+    """Replace the Matrix sync loop with one that runs until cancelled and records its cancellation."""
     events: list[str] = []
 
     async def sync_forever(bot: _Bot) -> None:
         events.append(f"sync:{bot.agent_name}")
         try:
             await asyncio.Event().wait()
-        finally:
+        except asyncio.CancelledError as exc:
             bot.order.append(f"cancel_sync:{bot.agent_name}")
+            bot.sync_cancel_args = exc.args
+            if bot.sync_cancel_error is not None:
+                raise bot.sync_cancel_error from None
+            raise
 
     monkeypatch.setattr(entity_fleet, "sync_forever_with_restart", sync_forever)
     return events
@@ -214,24 +226,139 @@ async def test_failed_removal_preparation_never_leaves_stops_or_ends_replies(fak
 
 
 @pytest.mark.asyncio
-async def test_restart_stop_quiesces_then_cancels_sync_before_preparing(fake_sync: list[str]) -> None:
+async def test_restart_stop_quiesces_and_cancels_every_sync_loop_before_preparing_any_bot(fake_sync: list[str]) -> None:
     """Sync loops stop before callback drains are certified, so no callback appears after the decision."""
-    del fake_sync
     harness = _Harness()
-    harness.add("agent")
-    await harness.fleet.start({"agent"})
+    harness.add("agent1")
+    harness.add("agent2")
+    await harness.fleet.start({"agent1", "agent2"})
+    await _settle(lambda: len(fake_sync) == 2)
     harness.order.clear()
 
-    await harness.fleet.stop({"agent"})
+    await harness.fleet.stop({"agent1", "agent2"})
 
-    assert harness.order == [
-        "changing:agent",
-        "quiesce:agent",
-        "cancel_sync:agent",
-        f"prepare:agent:{SYNC_RESTART_SHUTDOWN}",
-        f"stop:agent:{SYNC_RESTART_SHUTDOWN}",
+    phases = [entry.split(":", 1)[0] for entry in harness.order]
+    assert phases == [
+        "changing",
+        "quiesce",
+        "quiesce",
+        "cancel_sync",
+        "cancel_sync",
+        "prepare",
+        "prepare",
+        "stop",
+        "stop",
     ]
+    assert f"prepare:agent1:{SYNC_RESTART_SHUTDOWN}" in harness.order
+    assert f"stop:agent1:{SYNC_RESTART_SHUTDOWN}" in harness.order
     assert not harness.fleet.bots
+
+
+@pytest.mark.asyncio
+async def test_only_a_restart_marks_its_sync_cancellation_and_other_entities_keep_running(fake_sync: list[str]) -> None:
+    """A restart's sync cancellation carries the restart marker that queues resume work; a removal's never does."""
+    harness = _Harness()
+    restarted = harness.add("restarted")
+    removed = harness.add("removed")
+    kept = harness.add("kept")
+    await harness.fleet.start({"restarted", "removed", "kept"})
+    await _settle(lambda: len(fake_sync) == 3)
+
+    await harness.fleet.stop({"restarted"})
+    await harness.fleet.remove({"removed"})
+
+    assert restarted.sync_cancel_args == (SYNC_RESTART_CANCEL_MSG,)
+    assert removed.sync_cancel_args == ()
+    assert kept.sync_cancel_args is None
+    assert harness.fleet.names == {"kept"}
+
+
+@pytest.mark.asyncio
+async def test_restart_stop_quiesces_every_source_concurrently() -> None:
+    """One slow source barrier does not hold back another's."""
+    harness = _Harness()
+    entered: set[str] = set()
+    both_entered = asyncio.Event()
+    release = asyncio.Event()
+    for name in ("agent1", "agent2"):
+        bot = harness.add(name)
+
+        async def hold_quiesce(name: str = name) -> None:
+            entered.add(name)
+            if len(entered) == 2:
+                both_entered.set()
+            await release.wait()
+
+        bot._quiesce_matrix_ingestion = hold_quiesce
+
+    stopping = asyncio.create_task(harness.fleet.stop({"agent1", "agent2"}))
+    await asyncio.wait_for(both_entered.wait(), timeout=2.0)
+    release.set()
+    await asyncio.wait_for(stopping, timeout=2.0)
+
+    assert not harness.fleet.bots
+
+
+@pytest.mark.asyncio
+async def test_restart_stop_cancelled_during_quiesce_releases_the_bot_before_raising(fake_sync: list[str]) -> None:
+    """Caller cancellation is reported only after the bot's sync loop and stores are released."""
+    harness = _Harness()
+    bot = harness.add("agent1")
+    await harness.fleet.start({"agent1"})
+    await _settle(lambda: fake_sync == ["sync:agent1"])
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hold_quiesce() -> None:
+        entered.set()
+        await release.wait()
+
+    bot._quiesce_matrix_ingestion = hold_quiesce
+    stopping = asyncio.create_task(harness.fleet.stop({"agent1"}))
+    await asyncio.wait_for(entered.wait(), timeout=2.0)
+    stopping.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+
+    assert "cancel_sync:agent1" in harness.order
+    assert harness.order.count(f"prepare:agent1:{SYNC_RESTART_SHUTDOWN}") == 1
+    assert harness.order.count(f"stop:agent1:{SYNC_RESTART_SHUTDOWN}") == 1
+    assert dict(harness.fleet.bots) == {"agent1": bot}
+
+
+@pytest.mark.asyncio
+async def test_restart_stop_runs_every_cleanup_step_and_reports_the_quiesce_failure_first(
+    fake_sync: list[str],
+) -> None:
+    """A failed source barrier strands no sync loop or store, and stays the reported error over later failures."""
+    quiesce_failure = RuntimeError("source quiesce failed")
+    cleanup_failure = RuntimeError("cleanup failed")
+    harness = _Harness()
+    bot = harness.add(
+        "agent1",
+        quiesce_error=quiesce_failure,
+        sync_cancel_error=cleanup_failure,
+        prepare_error=cleanup_failure,
+        stop_error=cleanup_failure,
+    )
+    await harness.fleet.start({"agent1"})
+    await _settle(lambda: fake_sync == ["sync:agent1"])
+    harness.order.clear()
+
+    with pytest.raises(RuntimeError) as raised:
+        await harness.fleet.stop({"agent1"})
+
+    assert raised.value is quiesce_failure
+    assert harness.order == [
+        "changing:agent1",
+        "quiesce:agent1",
+        "cancel_sync:agent1",
+        f"prepare:agent1:{SYNC_RESTART_SHUTDOWN}",
+        f"stop:agent1:{SYNC_RESTART_SHUTDOWN}",
+    ]
+    assert dict(harness.fleet.bots) == {"agent1": bot}
 
 
 @pytest.mark.asyncio
