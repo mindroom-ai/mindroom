@@ -612,7 +612,9 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
 class _ErrorBody:
     """The ``error`` object of an error response or a stream's ``error`` event, ``{"type": "error", "error": {...}}``.
 
-    ``code`` is the ``details.error_code`` that tells apart failures sharing a type.
+    ``code`` is the ``details.error_code`` that tells apart failures sharing a type. Any other body, such as the
+    Google error a Vertex AI route can answer with, whose details say why it failed, gives no fields, so the error
+    keeps the SDK's text, which repeats the whole body.
     """
 
     type: str | None
@@ -621,7 +623,8 @@ class _ErrorBody:
 
     @classmethod
     def of(cls, body: object) -> _ErrorBody:
-        error = as_dict((as_dict(body) or {}).get("error")) or {}
+        envelope = as_dict(body) or {}
+        error = (as_dict(envelope.get("error")) if envelope.get("type") == "error" else None) or {}
         details = as_dict(error.get("details")) or {}
         error_type, message, code = error.get("type"), error.get("message"), details.get("error_code")
         return cls(
