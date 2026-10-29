@@ -996,17 +996,20 @@ class TestCredentialsSync:
         assert get_api_key_for_service("openrouter", runtime_paths) == "env-named-openrouter-key"
 
     def test_get_ollama_host(self, credentials_manager: CredentialsManager) -> None:
-        """Test getting Ollama host configuration."""
-        # Test when no Ollama config exists
+        """A configured Ollama host wins, then the saved ``OLLAMA_HOST``, then the local default."""
         runtime_paths = _runtime_paths(
             credentials_manager.storage_root,
             shared_credentials_dir=credentials_manager.base_path,
         )
-        assert get_ollama_host(runtime_paths=runtime_paths) is None
+        assert get_ollama_host(runtime_paths=runtime_paths, configured_host=None) == "http://localhost:11434"
 
-        # Set Ollama host
-        credentials_manager.save_credentials("ollama", {"host": "http://localhost:11434"})
-        assert get_ollama_host(runtime_paths=runtime_paths) == "http://localhost:11434"
+        credentials_manager.save_credentials("ollama", {"host": "http://saved.example:11434"})
+        assert get_ollama_host(runtime_paths=runtime_paths, configured_host=None) == "http://saved.example:11434"
+        assert get_ollama_host(runtime_paths=runtime_paths, configured_host="") == "http://saved.example:11434"
+        assert (
+            get_ollama_host(runtime_paths=runtime_paths, configured_host="http://configured.example:11434")
+            == "http://configured.example:11434"
+        )
 
     def test_all_env_vars_mapped(self) -> None:
         """All supported shared provider/bootstrap env vars should be mapped."""

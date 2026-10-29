@@ -23,6 +23,7 @@ from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_env_path
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager, validate_service_name
 from mindroom.credentials.policy import is_oauth_token_service
 from mindroom.logging_config import get_logger
+from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.providers.names import provider_route
 from mindroom.runtime_env_policy import CREDENTIAL_SEEDS_FILE_ENV, CREDENTIAL_SEEDS_JSON_ENV, is_unset_env_value
 
@@ -584,18 +585,15 @@ def get_embedder_api_key(
     return _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
 
 
-def get_ollama_host(runtime_paths: RuntimePaths) -> str | None:
-    """Get Ollama host configuration.
+def get_ollama_host(runtime_paths: RuntimePaths, *, configured_host: str | None) -> str:
+    """Return the Ollama server a client reaches: ``configured_host``, else the saved ``OLLAMA_HOST``, else the default.
 
-    Returns:
-        The Ollama host URL if configured, None otherwise
-
+    Models, the memory LLM, and the Ollama embedder share this order.
     """
-    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
-    ollama_creds = creds_manager.load_credentials("ollama")
-    if ollama_creds:
-        return ollama_creds.get("host")
-    return None
+    if configured_host:
+        return configured_host
+    saved = get_runtime_shared_credentials_manager(runtime_paths).load_credentials("ollama") or {}
+    return saved.get("host") or OLLAMA_HOST_DEFAULT
 
 
 def get_ollama_api_key(runtime_paths: RuntimePaths) -> str | None:

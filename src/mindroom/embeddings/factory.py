@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 from mindroom.credentials.sync import get_embedder_api_key, get_ollama_api_key, get_ollama_host
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder
 from mindroom.embeddings.sentence_transformers_embedder import create_sentence_transformers_embedder
-from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -72,7 +71,7 @@ def resolve_embedder_settings(config: Config, runtime_paths: RuntimePaths) -> _R
         return _ResolvedEmbedderSettings(
             provider=provider,
             model=embedder_config.model,
-            host=get_ollama_host(runtime_paths=runtime_paths) or embedder_config.host or OLLAMA_HOST_DEFAULT,
+            host=get_ollama_host(runtime_paths=runtime_paths, configured_host=embedder_config.host),
             dimensions=None,
             api_key=get_ollama_api_key(runtime_paths),
         )

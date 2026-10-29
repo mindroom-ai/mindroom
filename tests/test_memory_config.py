@@ -30,7 +30,7 @@ from pydantic import ValidationError
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config, config_validation_issues
 from mindroom.config.memory import MemoryConfig, _MemoryEmbedderConfig, _MemoryLLMConfig
-from mindroom.config.models import EmbedderConfig, RouterConfig
+from mindroom.config.models import EmbedderConfig, ModelConfig, RouterConfig
 from mindroom.config.resolution import memory_search
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
@@ -59,6 +59,7 @@ from mindroom.model_defaults import (
 )
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.path_globs import matches_root_glob
+from mindroom.providers.ollama.adapter import build_provider as build_ollama_provider
 from mindroom.tool_system.dependencies import optional_dependency_environment
 from tests.conftest import orchestrator_runtime_paths
 
@@ -880,33 +881,36 @@ class TestMemoryConfig:
         assert result["llm"]["provider"] == mem0_provider
         LlmFactory.create(result["llm"]["provider"], result["llm"]["config"])
 
-    def test_get_memory_config_ollama_embedder_uses_credential_host_before_config(self, tmp_path: Path) -> None:
-        """Credential-backed Ollama host should override the embedder config host."""
+    @pytest.mark.parametrize(
+        ("configured_host", "reached_host"),
+        [("http://config-ollama:11434", "http://config-ollama:11434"), (None, "http://saved-ollama:11434")],
+    )
+    def test_ollama_memory_clients_reach_their_configured_host_before_the_saved_one(
+        self,
+        tmp_path: Path,
+        configured_host: str | None,
+        reached_host: str,
+    ) -> None:
+        """The memory LLM and the Ollama embedder reach their own ``host`` as a model does, else the saved one."""
         runtime_paths = _runtime_paths(tmp_path)
         get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
             "ollama",
-            {"host": "http://credential-ollama:11434"},
+            {"host": "http://saved-ollama:11434"},
         )
         config = Config(
             memory={
-                "embedder": {
-                    "provider": "ollama",
-                    "config": {
-                        "model": "nomic-embed-text",
-                        "host": "http://config-ollama:11434",
-                    },
-                },
+                "embedder": {"provider": "ollama", "config": {"model": "nomic-embed-text", "host": configured_host}},
+                "llm": {"provider": "ollama", "config": {"model": "gemma4", "host": configured_host}},
             },
             router=RouterConfig(model="default"),
         )
+        model = ModelConfig(provider="ollama", id="gemma4", host=configured_host)
 
         result = _get_memory_config(tmp_path / "memory", config, runtime_paths)
 
-        assert result["embedder"]["provider"] == "ollama"
-        assert result["embedder"]["config"] == {
-            "model": "nomic-embed-text",
-            "ollama_base_url": "http://credential-ollama:11434",
-        }
+        assert result["embedder"]["config"] == {"model": "nomic-embed-text", "ollama_base_url": reached_host}
+        assert result["llm"]["config"]["ollama_base_url"] == reached_host
+        assert build_ollama_provider(model, runtime_paths).identity.endpoint == reached_host
 
     @pytest.mark.parametrize(
         ("model", "effective_dimensions"),
