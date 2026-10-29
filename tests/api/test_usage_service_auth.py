@@ -179,7 +179,7 @@ def _seed_usage_database(storage_root: Path) -> None:
             ),
         )
 
-    prepare_conversation_database(database, TableNames.of_database(database))
+    prepare_conversation_database(database, TableNames.of_database(database), agent_name=None)
 
 
 def _invalid_service_assertion(case: str, private_key: rsa.RSAPrivateKey) -> str | None:

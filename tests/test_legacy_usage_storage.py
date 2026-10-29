@@ -31,7 +31,7 @@ _NAMES = AgnoTableNames("code")
 
 
 def _convert(path: Path) -> None:
-    prepare_conversation_database(path, TableNames.of_database(path))
+    prepare_conversation_database(path, TableNames.of_database(path), agent_name=None)
 
 
 def _usage(path: Path) -> list[tuple[str | None, object]]:

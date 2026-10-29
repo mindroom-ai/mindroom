@@ -53,7 +53,7 @@
     "message": {
       "content": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
       "provider_data": {
-        "content_blocks": [
+        "claude_blocks": [
           {
             "text": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
             "type": "text"

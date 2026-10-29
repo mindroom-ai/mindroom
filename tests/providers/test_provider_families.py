@@ -111,7 +111,7 @@ _STRICT = {"gated": {"strict": True}, "plain": {"strict": False}}
 async def test_each_wire_leaves_unset_tool_fields_out_of_its_definitions(family: str, tmp_path: Path) -> None:
     """An unset field is left out; each wire keeps the fields its API takes.
 
-    OpenAI's Chat and Responses wires carry ``strict`` when set; Cerebras, Ollama, and Gemini send only name,
+    The Chat and Responses wires carry ``strict`` when set, Cerebras's included; Ollama and Gemini send only name,
     description, and parameters, Gemini's as JSON Schema.
     """
     spec = FAMILIES[family]
@@ -129,7 +129,7 @@ async def test_each_wire_leaves_unset_tool_fields_out_of_its_definitions(family:
     kind = {"type": "function"} if family == "openai_responses" else {}
     assert sent["unset"] == {"name": "unset", "parameters": _SCHEMA, **kind}
     expected_flags: dict[str, dict[str, Any]] = (
-        _STRICT if family in {"openai_chat", "openai_responses"} else {"gated": {}, "plain": {}}
+        _STRICT if family in {"openai_chat", "openai_responses", "cerebras"} else {"gated": {}, "plain": {}}
     )
     for name in ("gated", "plain"):
         assert sent[name] == {

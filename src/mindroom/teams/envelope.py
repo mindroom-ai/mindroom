@@ -73,7 +73,6 @@ from mindroom.teams.members import (
 from mindroom.teams.presentation import (
     NO_TEAM_RESPONSE,
     TeamStreamPresentation,
-    finished_run_text,
     format_team_header,
 )
 from mindroom.teams.resume import TeamResume, continued_team_pause, drive_team_delegations
@@ -635,8 +634,7 @@ class _TeamTurn:
     def resolve_paused(self, attempt: TeamAttempt, record: TeamRunRecord) -> PausedAttempt:
         """Return the pause the lifecycle owner asks the requester about, in the document its events built.
 
-        The pause freezes that document, so it shows none of the paused notices its runs hold as their content
-        (``paused_content``, ``team_paused_content``); the approval card says what it waits for.
+        The pause freezes that document; the approval card says what it waits for.
         """
         paused = paused_attempt_from_response(record, toolkit_owners=attempt.team.tool_owners())
         if paused is None:
@@ -676,11 +674,11 @@ class _TeamTurn:
         rendered = format_team_header(attempt.members.display_names) + (body_text or NO_TEAM_RESPONSE)
         replayable_text = rendered if body_text else ""
         response_text = "" if shown else rendered
-        leader_text = finished_run_text(record)
+        leader_text = record.handover_content or ""
         if (
             self.ctx.allow_no_report_response
             and is_silent_schedule_no_report_response(leader_text)
-            and not any(finished_run_text(member).strip() for member in record.ended_member_runs)
+            and not any((member.handover_content or "").strip() for member in record.ended_member_runs)
         ):
             # A quiet scheduled reply delivers and records the bare token, not the team document.
             response_text = replayable_text = leader_text.strip()

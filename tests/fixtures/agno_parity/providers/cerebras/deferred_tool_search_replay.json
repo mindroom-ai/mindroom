@@ -164,10 +164,12 @@
     "message": {
       "content": "Order A-1001 has shipped.",
       "provider_data": {
+        "id": "chatcmpl-parity",
         "mindroom_model": {
           "id": "gpt-oss-120b",
           "provider": "Cerebras"
-        }
+        },
+        "system_fingerprint": "fp_parity"
       },
       "role": "assistant"
     },
@@ -193,22 +195,22 @@
         },
         {
           "role": "assistant",
-          "content": "",
           "tool_calls": [
             {
-              "id": "call_parity_order",
-              "type": "function",
               "function": {
-                "name": "call_tool",
-                "arguments": "{\"name\": \"lookup_order\", \"arguments\": {\"order_id\": \"A-1001\"}}"
-              }
+                "arguments": "{\"name\": \"lookup_order\", \"arguments\": {\"order_id\": \"A-1001\"}}",
+                "name": "call_tool"
+              },
+              "id": "call_parity_order",
+              "type": "function"
             }
-          ]
+          ],
+          "content": ""
         },
         {
           "role": "tool",
-          "tool_call_id": "call_parity_order",
-          "content": "{\"order_id\": \"A-1001\", \"status\": \"shipped\"}"
+          "content": "{\"order_id\": \"A-1001\", \"status\": \"shipped\"}",
+          "tool_call_id": "call_parity_order"
         }
       ],
       "tools": [

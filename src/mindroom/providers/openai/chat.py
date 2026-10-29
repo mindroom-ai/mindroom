@@ -1,6 +1,6 @@
 """The Chat Completions adapter shared by every OpenAI-compatible route.
 
-A route fixes the endpoint, identity strings, wire dialect, and capabilities (see ``build``); the per-model
+A route fixes the endpoint, identity strings, wire rules, and capabilities (see ``build``); the per-model
 settings come from ``extra_kwargs``.
 """
 

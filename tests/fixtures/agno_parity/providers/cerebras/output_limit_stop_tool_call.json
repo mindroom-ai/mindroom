@@ -73,10 +73,12 @@
     "message": {
       "content": "Checking the forecast. ",
       "provider_data": {
+        "id": "chatcmpl-parity",
         "mindroom_model": {
           "id": "gpt-oss-120b",
           "provider": "Cerebras"
-        }
+        },
+        "system_fingerprint": "fp_parity"
       },
       "role": "assistant",
       "tool_calls": [

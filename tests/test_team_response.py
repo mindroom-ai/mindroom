@@ -224,7 +224,7 @@ async def test_a_member_that_fails_to_build_is_a_failed_delegation_the_leader_re
     """A member that cannot be built fails only the delegation to it: the leader reads why, and the team answers.
 
     The reason reaches the leader, the member's slot, and the member's stored row as a failed run's does, credentials
-    redacted where it is shown.
+    redacted: the row stores it as its error and has no content, since no model wrote any.
     """
     team = _team(
         tmp_path,
@@ -243,7 +243,7 @@ async def test_a_member_that_fails_to_build_is_a_failed_delegation_the_leader_re
     record, [failed] = team.stored_runs()
     assert record.status is RunStatus.completed
     assert (failed.agent_id, failed.status) == ("research", RunStatus.error)
-    assert failed.content == "research is misconfigured: api_key=example-secret"
+    assert (failed.content, failed.error) == (None, reason)
 
 
 @pytest.mark.asyncio

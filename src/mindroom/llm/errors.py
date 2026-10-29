@@ -20,6 +20,12 @@ TRANSPORT_TIMEOUT = "timeout"
 SAFEGUARD_REFUSAL = "refusal"
 # The marker of a request whose route has no credential at all, so the reply can say how to add one.
 MISSING_API_KEY = "missing_api_key"
+# The marker of a request that alone exceeds the account's tokens-per-minute limit: it fails as a context-window error,
+# since only a smaller request passes, but its reply must not say the conversation outgrew the context window.
+TOKENS_PER_MINUTE = "tokens_per_minute"
+# The marker of a request the provider refused because the account has no credit left or reached its monthly spend or
+# usage limit: no retry passes until the account's billing or limits change, and the request's media did not cause it.
+QUOTA_EXHAUSTED = "quota_exhausted"
 # The text of a safeguard refusal, which error runs store.
 MODEL_SAFEGUARD_REFUSAL_MESSAGE = "Claude returned stop_reason=refusal"
 
@@ -59,7 +65,10 @@ class AuthenticationFailed(ProviderError):  # noqa: N818
 
 
 class ContextWindowExceeded(ProviderError):  # noqa: N818
-    """The request does not fit the model's context window; compaction, not retrying, resolves it."""
+    """The request does not fit the model's context window, or alone exceeds the account's tokens-per-minute limit.
+
+    A smaller request, not a retry, resolves it.
+    """
 
 
 class InvalidRequest(ProviderError):  # noqa: N818
@@ -106,7 +115,9 @@ __all__ = [
     "MALFORMED_TOOL_CALL",
     "MISSING_API_KEY",
     "MODEL_SAFEGUARD_REFUSAL_MESSAGE",
+    "QUOTA_EXHAUSTED",
     "SAFEGUARD_REFUSAL",
+    "TOKENS_PER_MINUTE",
     "TRANSPORT_TIMEOUT",
     "AuthenticationFailed",
     "ContextWindowExceeded",

@@ -896,7 +896,7 @@ def test_daily_models_read_real_agno_2_history(tmp_path: Path, double_encoded: b
         with sqlite3.connect(database) as connection:
             runs = connection.execute("SELECT runs FROM code_sessions").fetchone()[0]
             connection.execute("UPDATE code_sessions SET runs = ?", (json.loads(runs),))
-    prepare_conversation_database(database, TableNames.of_database(database))
+    prepare_conversation_database(database, TableNames.of_database(database), agent_name=None)
 
     report = collect_self_usage(
         agent_name="code",
@@ -941,7 +941,7 @@ def test_migration_keeps_valid_usage_beside_a_malformed_counter(tmp_path: Path) 
                 ),
             ),
         )
-    prepare_conversation_database(database, TableNames.of_database(database))
+    prepare_conversation_database(database, TableNames.of_database(database), agent_name=None)
 
     report = collect_self_usage(
         agent_name="code",

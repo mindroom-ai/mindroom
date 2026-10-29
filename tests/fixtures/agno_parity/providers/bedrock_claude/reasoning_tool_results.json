@@ -142,7 +142,7 @@
     "message": {
       "content": "Pack a light rain jacket and comfortable shoes.",
       "provider_data": {
-        "content_blocks": [
+        "claude_blocks": [
           {
             "signature": "parity-thinking-signature",
             "thinking": "The forecast says light rain.",
@@ -158,7 +158,6 @@
           "provider": "AwsBedrock"
         },
         "mindroom_native_compaction": null,
-        "signature": "parity-thinking-signature",
         "stop_reason": "end_turn"
       },
       "reasoning_content": "The forecast says light rain.",
