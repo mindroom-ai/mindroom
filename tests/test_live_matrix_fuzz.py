@@ -6916,6 +6916,7 @@ async def test_supersession_anchor_accepts_the_revision_mindroom_answered() -> N
     oracle = ExactReplyOracle(client, "@agent:example", coalescing_threads=True)
     oracle.expect("op:2", "$newer", thread=0)
     oracle.expect("op:3", "$other", thread=0)
+    answered_edit = _source_marker("op:2", "edit:5")
     declined_edit = _source_marker("op:2", "edit:7")
     observed = {5: frozenset({_source_marker("op:2", ORIGINAL_REVISION)})}
     auditor = FinalStateAuditor(
@@ -6924,19 +6925,22 @@ async def test_supersession_anchor_accepts_the_revision_mindroom_answered() -> N
         agent_id="@agent:example",
         expected_body_for=_short_body_for,
         source_current_markers={"$newer": declined_edit},
-        source_revision_markers={"$newer": {"$edit": declined_edit}},
+        source_revision_markers={"$newer": {"$answered": answered_edit, "$edit": declined_edit}},
         observed_markers_for=lambda call_id: observed.get(call_id, frozenset()),
     )
     anchor = _agent_reply_event("$newer", "$anchor", _short_body_for(5))
     anchor["content"]["io.mindroom.stream_status"] = "completed"
     records = {"$newer": TurnRecord.create(source_event_ids=("$newer",), response_event_id="$anchor", completed=True)}
     try:
-        assert auditor._completed_supersession_anchor(
-            "$newer",
-            records,
-            {"$anchor": anchor},
-            {"$newer": {"$anchor"}},
-        ) == ("$newer", "$anchor")
+        # Its original and an edit an answer used both anchor, as long as the call answered this message.
+        for revision in (_source_marker("op:2", ORIGINAL_REVISION), answered_edit):
+            observed[5] = frozenset({revision})
+            assert auditor._completed_supersession_anchor(
+                "$newer",
+                records,
+                {"$anchor": anchor},
+                {"$newer": {"$anchor"}},
+            ) == ("$newer", "$anchor")
 
         # A call that answered another message anchors nothing.
         observed[5] = frozenset({_source_marker("op:3", ORIGINAL_REVISION)})

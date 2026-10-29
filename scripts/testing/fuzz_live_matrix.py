@@ -7030,8 +7030,8 @@ class FinalStateAuditor:
         A restart may leave a stream on a visible interrupted note only when
         independently proven deliberate supersession closes it, or when MindRoom
         dropped the regeneration it cut short; otherwise replay continues the
-        interrupted reply in the same message. Superseded
-        interruptions are counted separately from completed generation;
+        interrupted reply in the same message. Superseded interruptions and
+        dropped regenerations are counted separately from completed generation;
         unfinished partial streams still fail.
         """
         problems: list[str] = []
