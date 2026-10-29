@@ -594,7 +594,7 @@ Before each retry it waits as long as the provider's `Retry-After` or Azure's `r
 SDK retry settings in `client_params`, such as `max_retries` or Gemini's `http_options.retry_options`, have no effect; the Gemini SDK still resends on its own after a dropped connection and during a file upload's transfer.
 A request that still fails ends the turn with "⏱️ Rate limited. Please wait a moment and try again." for a rate limit, or "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly." otherwise.
 A request larger than the account's tokens-per-minute limit, which OpenAI rejects as "Request too large", is not retried, since only a smaller request can pass; it ends the turn with "⚠️ This request is larger than the account's tokens-per-minute limit. Start a new thread or compact the conversation, then try again."
-A request that OpenAI, Anthropic, Gemini, Moonshot, or Z.ai refuses because the account has no credit left or reached its monthly spend or usage limit is not retried either, and the turn ends with an error that shows the provider's message, such as "⚠️ Error: You exceeded your current quota, please check your plan and billing details."
+A request that OpenAI, Anthropic, Gemini, or Moonshot refuses because the account has no credit left or reached its monthly spend or usage limit, that Z.ai refuses because the account has no balance or its plan or package expired, or that any provider answers with HTTP `402 Payment Required` is not retried either, and the turn ends with an error that shows the provider's message, such as "⚠️ Error: You exceeded your current quota, please check your plan and billing details."
 
 ## Stalled Streams
 

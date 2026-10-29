@@ -244,7 +244,7 @@ def test_a_payment_required_status_fails_at_once_as_a_billing_stop(
         ("1302", "Rate limit reached for requests", RateLimited, None),
     ],
 )
-def test_a_z_ai_429_whose_code_says_the_account_cannot_pay_fails_at_once(
+def test_a_z_ai_429_fails_at_once_only_when_its_code_says_the_account_cannot_pay(
     code: str,
     message: str,
     expected: type[ProviderError],
