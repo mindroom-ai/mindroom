@@ -19,13 +19,11 @@ from mindroom.llm.errors import (
     ContextWindowExceeded,
     ModelSafeguardRefusal,
     ProviderError,
-    RateLimited,
 )
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides, complete
 from mindroom.llm.usage import TokenCounts
 from mindroom.logging_config import get_logger
-from mindroom.providers.errors import is_context_window_error
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
@@ -82,15 +80,6 @@ def is_summary_timeout(error: BaseException) -> bool:
     return isinstance(error, TimeoutError) or (isinstance(error, ProviderError) and error.code == TRANSPORT_TIMEOUT)
 
 
-def _is_size_error(error: Exception) -> bool:
-    """Return whether a rate limit says the input alone was too large.
-
-    A request above the account's tokens-per-minute limit fails as a rate limit worded "Request too large"; waiting
-    never lets it through, but a smaller input does.
-    """
-    return isinstance(error, RateLimited) and is_context_window_error(str(error), code=error.provider_code)
-
-
 @dataclass(frozen=True)
 class SummaryRetryDecision:
     """One policy-owned retry action for the compaction summary caller."""
@@ -117,7 +106,7 @@ class SummaryRetryPolicy:
 
     def should_shrink(self, error: Exception) -> bool:
         """Return whether rebuilding a smaller summary input may resolve the failure."""
-        return isinstance(error, _TYPED_SHRINKABLE_ERRORS) or _is_size_error(error)
+        return isinstance(error, _TYPED_SHRINKABLE_ERRORS)
 
     def retry_budget(
         self,

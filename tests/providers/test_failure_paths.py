@@ -31,6 +31,8 @@ from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.history.summary_call import generate_compaction_summary
 from mindroom.llm.errors import (
     MALFORMED_TOOL_CALL,
+    QUOTA_EXHAUSTED,
+    TOKENS_PER_MINUTE,
     AuthenticationFailed,
     ContextWindowExceeded,
     InvalidRequest,
@@ -75,6 +77,7 @@ UNAVAILABLE = "⚠️ Model provider temporarily unavailable after automatic ret
 ERROR = "⚠️ Error: "
 AUTHENTICATION = "❌ Authentication failed"
 CONTEXT_WINDOW = "⚠️ The conversation no longer fits the model's context window."
+OVER_TOKENS_PER_MINUTE = "⚠️ This request is larger than the account's tokens-per-minute limit."
 
 
 @pytest.fixture(autouse=True)
@@ -658,6 +661,22 @@ _OPENAI_HTTP_CASES = [
         RATE_LIMITED,
         _PIPELINE,
     ),
+    # A request larger than the account's tokens-per-minute limit fails every time; only a smaller one passes.
+    _Case(
+        "http_429_request_too_large",
+        _openai_status(
+            429,
+            "Request too large for gpt-6-astra in organization org-test on tokens per min (TPM): Limit 30000, "
+            "Requested 50000. The input or output tokens must be reduced in order to run successfully. "
+            "Visit https://platform.openai.com/account/rate-limits to learn more.",
+            "tokens",
+            "rate_limit_exceeded",
+        ),
+        ContextWindowExceeded,
+        OVER_TOKENS_PER_MINUTE,
+        1,
+        code=TOKENS_PER_MINUTE,
+    ),
     _Case(
         "http_500",
         _openai_status(500, "The server had an error while processing your request.", "server_error"),
@@ -755,6 +774,35 @@ _OPENAI_HTTP_CASES = [
         ProviderError,
         ERROR,
         1,
+    ),
+    # An account without credit, or past its spend or usage limit, fails every time until its billing changes, so the
+    # reply shows the provider's text. ``insufficient_quota`` is the older code and still the type of the others.
+    _Case(
+        "http_429_insufficient_quota",
+        _openai_status(
+            429,
+            "You exceeded your current quota, please check your plan and billing details. For more information on "
+            "this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.",
+            "insufficient_quota",
+            "insufficient_quota",
+        ),
+        ProviderError,
+        f"{ERROR}You exceeded your current quota, please check your plan and billing details.",
+        1,
+        code=QUOTA_EXHAUSTED,
+    ),
+    _Case(
+        "http_429_credit_balance_exhausted",
+        _openai_status(
+            429,
+            "Your organization has no prepaid credits remaining.",
+            "insufficient_quota",
+            "credit_balance_exhausted",
+        ),
+        ProviderError,
+        f"{ERROR}Your organization has no prepaid credits remaining.",
+        1,
+        code=QUOTA_EXHAUSTED,
     ),
     _Case(
         "http_404",
@@ -964,6 +1012,10 @@ _RESPONSES_CASES = [
     ),
 ]
 
+_GEMINI_CREDITS_DEPLETED = (
+    "Your prepayment credits are depleted. Please go to AI Studio at https://ai.studio/projects to manage your project "
+    "and billing."
+)
 _GEMINI_CASES = [
     _Case(
         "http_429",
@@ -971,6 +1023,32 @@ _GEMINI_CASES = [
         RateLimited,
         RATE_LIMITED,
         _PIPELINE,
+    ),
+    # Gemini sends used-up prepaid credit and a reached monthly spending cap as a 429 like a rate limit, with no code
+    # of its own, and Google's troubleshooting guide names a 402 for used-up credit; no retry passes until the credits
+    # or the cap change, so the reply shows Google's text.
+    *(
+        _Case(
+            f"http_{status}_{failure}",
+            _gemini_status(status, message, reason),
+            ProviderError,
+            f"{ERROR}{message}",
+            1,
+            code=QUOTA_EXHAUSTED,
+        )
+        for status, reason, failure, message in (
+            (429, "RESOURCE_EXHAUSTED", "prepayment_credits_depleted", _GEMINI_CREDITS_DEPLETED),
+            (402, "PAYMENT_REQUIRED", "prepayment_credits_depleted", _GEMINI_CREDITS_DEPLETED),
+            # The wording matches in any case, as the shared classifier's markers do.
+            (429, "RESOURCE_EXHAUSTED", "prepayment_credits_depleted_capitalized", "Prepayment credits are depleted."),
+            (429, "RESOURCE_EXHAUSTED", "project_spending_cap", "Your project has exceeded its monthly spending cap."),
+            (
+                429,
+                "RESOURCE_EXHAUSTED",
+                "billing_account_spending_cap",
+                "Your billing account has exceeded its monthly spending cap.",
+            ),
+        )
     ),
     _Case(
         "http_500",

@@ -171,14 +171,13 @@ async def settle_child_response(
 ) -> None:
     """Derive operational state from one exact run, then publish its audit view.
 
-    A finished run's result is what it hands over (``handover_content``), so a failed run's is why it failed.
+    A finished run's result is what it hands over (``handover_content``), so a failed run's is why it failed, a run
+    recovery cancelled hands over why, and a resumed run's is what it wrote before its pause and since, else the
+    completion note.
     """
     if response.run_id != child.run_id or response.session_id != child.session_id:
         msg = "Delegation child response does not match its retained run"
         raise ValueError(msg)
-    # TODO(simplify): A resumed child that wrote nothing hands over its carried pause notice ("I have tools to
-    # execute, but I need confirmation.") after its call ran. Hand over only what the resume added
-    # (``new_handover_content``) or the completion note below. The delegating parent's model would notice.
     content = response.handover_content
     if response.status == RunStatus.completed:
         child.status = "completed"
@@ -188,7 +187,7 @@ async def settle_child_response(
         child.result = content or "Delegation cancelled."
     elif response.status == RunStatus.error:
         child.status = "failed"
-        child.result = str(content or response.status)
+        child.result = content or "Delegation failed."
     else:
         child.status = "paused" if response.status == RunStatus.paused else "running"
         child.result = None

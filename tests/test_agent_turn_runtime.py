@@ -638,8 +638,7 @@ async def test_a_provider_error_stores_an_error_record_and_streams_the_friendly_
     [text] = [chunk for chunk in chunks if isinstance(chunk, str)]
     assert "Rate limited" in text
     record = _stored(reply)
-    assert record.status is RunStatus.error
-    assert record.content == "slow down"
+    assert (record.status, record.content, record.error) == (RunStatus.error, None, "slow down")
 
 
 @pytest.mark.asyncio
@@ -697,8 +696,7 @@ async def test_an_error_record_never_repeats_an_earlier_answer(
 
     assert "Rate limited" in text
     record = _stored(reply)
-    assert record.status is RunStatus.error
-    assert record.content == "slow down"
+    assert (record.status, record.content, record.error) == (RunStatus.error, None, "slow down")
     assert all("green pixel" not in str(message.content) for message in record.messages if message.role == "assistant")
     # The turn's own record keeps no partial text either: the earlier answer was history, not this reply's.
     assert reply.recorder.outcome == "interrupted"
@@ -1245,7 +1243,7 @@ async def test_a_third_cut_off_response_fails_the_run(
     assert [chunk for chunk in chunks if isinstance(chunk, str)]
     record = _stored(reply)
     assert record.status is RunStatus.error
-    assert "output limit" in str(record.content)
+    assert "output limit" in str(record.error)
 
 
 @pytest.mark.asyncio
@@ -1265,8 +1263,7 @@ async def test_a_safeguard_refusal_is_stored_and_reported_as_an_error(
 
     assert [chunk for chunk in chunks if isinstance(chunk, str)]
     record = _stored(reply)
-    assert record.status is RunStatus.error
-    assert record.content == MODEL_SAFEGUARD_REFUSAL_MESSAGE
+    assert (record.status, record.content, record.error) == (RunStatus.error, None, MODEL_SAFEGUARD_REFUSAL_MESSAGE)
 
 
 @pytest.mark.asyncio

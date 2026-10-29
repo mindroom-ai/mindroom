@@ -92,6 +92,10 @@ class RefreshEmbedder:
         cardinality mismatch retires batching for the rest of this refresh and
         the same texts are embedded one at a time instead.
 
+        A batch the provider rejects as too large, such as one above the
+        account's tokens-per-minute limit, is embedded one text per request
+        too, without retiring batching, since a smaller request can pass.
+
         Everything else is re-raised: transient failures keep the caller's
         retry and backoff, and credentials, permissions, a bad model, or a
         malformed payload would fail exactly the same way one input at a time.
@@ -112,6 +116,8 @@ class RefreshEmbedder:
         try:
             vectors = self.embedder.embed(texts, purpose="document")
         except Exception as exc:
+            if isinstance(exc, EmbedderRequestError) and exc.too_large:
+                return self._embed_each_leaving_failures(texts, stop)
             if embedder_failure_is_transient(exc) or not embedder_batch_cardinality_mismatch(exc):
                 raise
             self._disable_batching(f"multi-input request failed: {describe_embedder_error(exc)}")

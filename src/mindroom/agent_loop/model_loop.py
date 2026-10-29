@@ -28,7 +28,7 @@ from mindroom.llm.errors import incomplete_stream_error
 from mindroom.llm.events import ToolCompleted, ToolStarted
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message, model_provenance, usage_sums_attempts
 from mindroom.llm.provider import ModelRequest, ReasoningDelta, ReportedUsage, TextDelta, TurnCompleted, UsageReported
-from mindroom.llm.runs import RunRecord, RunRequirement
+from mindroom.llm.runs import RunRecord, RunRequirement, joined_texts
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
@@ -168,8 +168,9 @@ async def run_model_loop(
     """Request, run the requested tools, and repeat until the run completes or pauses; ``LoopEnded`` comes last.
 
     ``messages`` is the list the run stores from: every assistant and tool message is appended to it.
-    ``record`` collects the loop's text as ``content`` (the loop's requests concatenated, replacing what the record
-    held), its tool executions, its pause requirements, and its usage, in the metrics the record must carry.
+    ``record`` collects the loop's text as ``content`` (a resumed run's carried text and the loop's request texts, a
+    blank line apart), its tool executions, its pause requirements, and its usage, in the metrics the record must
+    carry.
     ``request_template`` carries the per-run request settings; its messages and tools are replaced per request.
     ``resumed`` makes the loop a resume's: the requirements the resume decided, which it answers first, in order, as
     the rest of the paused batch; None for a fresh run.
@@ -252,10 +253,9 @@ def _accept_turn(
 ) -> None:
     """Record one finished request: the assistant message, its usage, and its text as the run's content so far.
 
-    The provider stamped the message with the model that answered it. The run's content is its requests' texts, a
-    blank line between them, so the text before and after a tool call reads as two paragraphs. A request that answers
-    without content, as the adapters report a turn without text, leaves the content as it was, so a resumed run keeps
-    its paused text until the model says something new.
+    The provider stamped the message with the model that answered it. The run's content is the text a resumed run
+    carried from its pause and its requests' texts, joined a blank line apart (``joined_texts``). A request that
+    answers without content, as the adapters report a turn without text, leaves the content as it was.
     """
     metrics = state.record.metrics
     assert metrics is not None
@@ -264,15 +264,7 @@ def _accept_turn(
     state.request_index += 1
     if message.content is not None:
         progress.text_parts.append(message.get_content_string())
-        state.record.content = _joined_texts(progress.text_parts)
-
-
-def _joined_texts(parts: Sequence[str]) -> str:
-    """Return a run's request texts as its content: one text as it is, several stripped and a blank line apart."""
-    texts = [part for part in parts if part.strip()]
-    if len(texts) <= 1:
-        return texts[0] if texts else "".join(parts)
-    return "\n\n".join(text.strip() for text in texts)
+        state.record.content = joined_texts([state.record.carried_content or "", *progress.text_parts])
 
 
 async def _run_tool_batch(

@@ -131,9 +131,9 @@ def delegate_functions(
 def member_result_text(child: RunRecord) -> str:
     """Return what the leader reads for a finished member run: its text, else its tool results, else a notice.
 
-    The text is the content the run hands over (``handover_content``), so a failed member gives the reason its run
-    recorded, credentials redacted. A run without text that ran tools gives their results, and one that did neither
-    gives the no-response notice.
+    The text is the content the run hands over (``handover_content``): a resumed run's is what it wrote before its
+    pause and since, and a failed member gives the reason its run recorded, credentials redacted. A run without text
+    that ran tools gives their results, and one that did neither gives the no-response notice.
     """
     content = child.handover_content
     if content is not None and content.strip():
@@ -183,9 +183,6 @@ def answer_delegation(
     the result of a member that finished before the pause or in an earlier resume. Return the answered call, or None
     when no call waits on the run.
     """
-    # TODO(simplify): A resumed member that wrote nothing hands over its carried pause notice ("I have tools to
-    # execute, but I need confirmation.") after its call ran. Hand over only what the resume added
-    # (``new_handover_content``) or a completion note. The leader model would notice.
     result = member_result_text(run)
     name = run.agent_display_name or member.name
     coordinate = _waiting_coordinate_call(tools, member.id, run, MEMBER_PAUSED_RESULT.format(name=name))

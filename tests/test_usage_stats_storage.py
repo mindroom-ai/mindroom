@@ -55,7 +55,7 @@ _INSERTED_COLUMNS = "session_id, session_type, agent_id, team_id, user_id, sessi
 def _source(path: Path) -> UsageStorageSource:
     # Existing-history fixtures pass through the same conversion as startup; a read of a missing file creates none.
     if path.is_file():
-        prepare_conversation_database(path, TableNames.of_database(path))
+        prepare_conversation_database(path, TableNames.of_database(path), agent_name=None)
     return UsageStorageSource(
         path=path,
         path_label=path.name,

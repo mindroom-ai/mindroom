@@ -23,12 +23,16 @@ from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import TYPE_CHECKING, Any, BinaryIO
 
+import httpx
+import httpx2
 import pytest
 from agno.knowledge.document.base import Document
 from agno.knowledge.reader.markdown_reader import MarkdownReader
+from openai import APIStatusError, RateLimitError
 from structlog.testing import capture_logs
 
 import mindroom.embeddings.batching as embedding_batching_module
+import mindroom.embeddings.openai_embedder as openai_embedder_module
 import mindroom.knowledge.candidate_checkpoint as knowledge_checkpoint_module
 import mindroom.knowledge.indexing_config as knowledge_indexing_config
 import mindroom.knowledge.manager as knowledge_manager_module
@@ -45,6 +49,7 @@ from mindroom.embeddings.errors import (
     embedder_retry_after_seconds,
     openai_embedder_error,
 )
+from mindroom.embeddings.factory import create_configured_embedder
 from mindroom.embeddings.signatures import effective_knowledge_embedder_signature, effective_mem0_embedder_signature
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.candidate_checkpoint import (
@@ -314,9 +319,6 @@ def _server_error() -> EmbedderRequestError:
 
 def _api_error() -> Exception:
     """Return what the OpenAI embedder raises for a 503 with a ``Retry-After`` hint, classified at its boundary."""
-    import httpx  # noqa: PLC0415
-    from openai import APIStatusError  # noqa: PLC0415
-
     request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
     response = httpx.Response(503, request=request, headers={"retry-after": "7"})
     return openai_embedder_error(APIStatusError("overloaded", response=response, body=None))
@@ -1118,6 +1120,148 @@ async def test_batch_failure_falls_back_to_per_file_without_reembedding_successe
         assert embedder.embedded_count(f"content {index}") == 1
 
 
+def _tokens_per_minute_error() -> Exception:
+    """Return what the OpenAI embedder raises for a request larger than the account's tokens-per-minute limit."""
+    message = (
+        "Request too large for text-embedding-3-small in organization org-test on tokens per min (TPM): Limit 40000, "
+        "Requested 80000. The input or output tokens must be reduced in order to run successfully."
+    )
+    body = {"message": message, "type": "tokens", "param": None, "code": "rate_limit_exceeded"}
+    response = httpx.Response(429, request=httpx.Request("POST", "http://embeddings.local/v1/embeddings"))
+    return openai_embedder_error(RateLimitError(message, response=response, body=body))
+
+
+@pytest.mark.asyncio
+async def test_a_batch_above_the_tokens_per_minute_limit_is_embedded_one_chunk_per_request(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """Only a smaller request fits the account's per-minute token limit, so the batch's chunks go one at a time."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    embedder.batch_error = _tokens_per_minute_error()
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert _stored_paths(config, state.collection) == names
+    assert (len(embedder.batch_requests), sorted(embedder.single_requests)) == (
+        1,
+        [f"content {index}" for index in range(3)],
+    )
+
+
+def _input_too_long_error() -> EmbedderRequestError:
+    """Return the embedder error of OpenAI's 400 for an input longer than the embedding model accepts."""
+    message = (
+        "This model's maximum context length is 8192 tokens, however you requested 9000 tokens (9000 in your prompt; "
+        "0 for the completion). Please reduce your prompt; or completion length."
+    )
+    failure = classify_provider_error(message, provider="openai", status_code=400)
+    return embedder_request_error(RuntimeError(message), failure)
+
+
+@pytest.mark.asyncio
+async def test_a_chunk_too_long_for_the_embedding_model_fails_only_its_own_file(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """The batch goes one chunk per request, so the refresh fails but keeps every other file's vectors for the next."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    embedder.batch_error = _input_too_long_error()
+    embedder.failures["content 1"] = [_input_too_long_error() for _ in range(5)]
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is False
+    checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
+    assert checkpoint is not None
+    assert (sorted(checkpoint.completed), sorted(checkpoint.failed)) == (["doc0000.md", "doc0002.md"], ["doc0001.md"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_embedder_clients")
+async def test_a_refresh_sends_a_request_the_account_s_billing_stops_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refresh retries a failed request itself, so the OpenAI SDK must not resend it underneath."""
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        sent.append(request)
+        error = {
+            "message": "You exceeded your current quota.",
+            "type": "insufficient_quota",
+            "code": "insufficient_quota",
+        }
+        return httpx2.Response(429, headers={"retry-after-ms": "1"}, json={"error": error})
+
+    sdk_client = openai_embedder_module.OpenAI
+    monkeypatch.setattr(
+        openai_embedder_module,
+        "OpenAI",
+        lambda **kwargs: sdk_client(**kwargs, http_client=httpx2.Client(transport=httpx2.MockTransport(respond))),
+    )
+    monkeypatch.setattr(knowledge_manager_module, "create_configured_embedder", create_configured_embedder)
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 3)
+    embedder_config = {"model": "text-embedding-3-small", "api_key": "test-key", "host": "http://embeddings.local/v1"}
+    config = _config(tmp_path, docs_path, memory={"embedder": {"provider": "openai", "config": embedder_config}})
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths_for(config))
+
+    assert result.index_published is False
+    assert len(sent) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_embedder_clients")
+async def test_a_knowledge_search_keeps_the_sdk_s_retry_of_a_failed_query(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing retries a search's query embedding in place, so the OpenAI SDK's own retry of a 503 must stay."""
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        sent.append(request)
+        if len(sent) == 1:
+            return httpx2.Response(503, headers={"retry-after-ms": "1"}, json={"error": {"message": "overloaded"}})
+        return httpx2.Response(200, json={"object": "list", "data": [{"embedding": [4.0, 1.0], "index": 0}]})
+
+    sdk_client = openai_embedder_module.AsyncOpenAI
+    monkeypatch.setattr(
+        openai_embedder_module,
+        "AsyncOpenAI",
+        lambda **kwargs: sdk_client(
+            **{**kwargs, "http_client": httpx2.AsyncClient(transport=httpx2.MockTransport(respond))},
+        ),
+    )
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "a.md").write_text("body", encoding="utf-8")
+    embedder_config = {"model": "text-embedding-3-small", "api_key": "test-key", "host": "http://embeddings.local/v1"}
+    config = _config(tmp_path, docs_path, memory={"embedder": {"provider": "openai", "config": embedder_config}})
+    runtime_paths = runtime_paths_for(config)
+    # The refresh embeds with the recording embedder; the search builds its embedder the production way.
+    monkeypatch.setattr(knowledge_registry, "create_configured_embedder", create_configured_embedder)
+    assert (await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)).index_published
+    lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
+    assert lookup.index is not None
+
+    hits = await lookup.index.reader.asearch("body", limit=5)
+
+    assert ([hit.content for hit in hits], len(sent)) == (["body"], 2)
+
+
 class _InFlightEmbedder(_RecordingEmbedder):
     """Recording embedder that counts how many batch requests run at once."""
 
@@ -1348,6 +1492,20 @@ def test_refresh_embedder_degrades_for_providers_without_batching() -> None:
     assert inner.single_requests == ["one", "two"]
     assert embedder.embed_each(["one"]) == [[3.0, 1.0]]
     assert inner.single_requests == ["one", "two", "one"]
+
+
+def test_a_too_large_batch_keeps_batching_for_the_next_one() -> None:
+    """A smaller batch can pass the same limit, so one too-large batch does not retire batching for the refresh."""
+    inner = _RecordingEmbedder()
+    inner.batch_error = _tokens_per_minute_error()
+    embedder = RefreshEmbedder(inner)
+
+    assert sorted(embedder.embed_texts(["one", "two"])) == ["one", "two"]
+    inner.batch_error = None
+    embedder.embed_texts(["three", "four"])
+
+    assert inner.batch_requests == [("one", "two"), ("three", "four")]
+    assert inner.single_requests == ["one", "two"]
 
 
 class _QueryPromptedEmbedder(_RecordingEmbedder):

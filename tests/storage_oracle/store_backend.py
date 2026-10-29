@@ -147,7 +147,7 @@ def redaction_cut(store: ConversationStore, scope: HistoryScope, redacted: set[s
     async def redacted_history_events(event_ids: tuple[str, ...]) -> dict[str, str | None]:
         return {event_id: None for event_id in event_ids if event_id in redacted}
 
-    return asyncio.run(remove_history_of_redacted_events(store, session, scope, redacted_history_events))
+    return asyncio.run(remove_history_of_redacted_events(store, session, redacted_history_events))
 
 
 def _rewritten(changed: Sequence[AnyRunRecord]) -> object:
