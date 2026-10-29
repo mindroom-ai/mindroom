@@ -349,6 +349,12 @@ _UNDECODABLE = {
     "member_record": ("runs", "record", "member", '{"content": "I have tools to execute, but I need confirmation."'),
     "team_message": ("messages", "data", "team", '{"role": "system", "content": "<summary_of_previous_interactions>'),
     "team_message_without_role": ("messages", "data", "team", '{"content": "<summary_of_previous_interactions>"}'),
+    "team_message_media_entry": (
+        "messages",
+        "data",
+        "team",
+        json.dumps({"role": "system", "content": "x", "images": [1]}),
+    ),
     "team_tool": ("tools", "data", "team", "[1, 2]"),
     "team_tool_arguments": (
         "tools",

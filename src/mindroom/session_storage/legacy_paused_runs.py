@@ -130,7 +130,7 @@ def _own_answers(texts: Iterable[object]) -> list[str] | None:
     try:
         messages = [Message.from_dict(data) for data in stored]
         return [message.get_content_string().strip() for message in messages if is_own_model_message(message)]
-    except (KeyError, TypeError, ValueError):
+    except (AttributeError, KeyError, TypeError, ValueError):
         return None
 
 
@@ -158,10 +158,10 @@ def _strip_summary_blocks(connection: sqlite3.Connection, names: TableNames) -> 
     ).fetchall()
     for run_id, message_id, raw_data in candidates:
         data = decoded_mapping(raw_data)
-        content = None if data is None else data.get("content")
-        if data is None or data.get("role") != "system" or not isinstance(content, str):
+        if data is None or data.get("role") != "system":
             continue
-        if not _SUMMARY_BLOCK.search(content):
+        content = data.get("content")
+        if not isinstance(content, str) or not _SUMMARY_BLOCK.search(content):
             continue
         # A block that ended the message leaves the separator before it, which Agno would have stripped.
         data["content"] = _SUMMARY_BLOCK.sub("", content).rstrip()
