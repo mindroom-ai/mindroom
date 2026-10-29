@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import secrets
-import shlex
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -115,7 +114,11 @@ class CallbackManagerTools(Toolkit):
                     label=normalized_label,
                 ),
             )
-            instruction = f'When finished, run: bash {shlex.quote(str(script_path))} "<short result summary>"'
+            # Workers mount the workspace at their own path, which every agent shell names in $MINDROOM_AGENT_WORKSPACE.
+            relative_script = script_path.relative_to(workspace_root).as_posix()
+            instruction = (
+                f'When finished, run: bash "$MINDROOM_AGENT_WORKSPACE/{relative_script}" "<short result summary>"'
+            )
             return custom_tool_payload(
                 "callback_manager",
                 "ok",
