@@ -42,6 +42,7 @@ from tests.storage_oracle.record import (
     observe_database,
     sequence_id,
     storage_name_of,
+    with_defaults,
 )
 
 if TYPE_CHECKING:
@@ -239,7 +240,7 @@ def _end_state(dump: str, scenario: Scenario, root: Path) -> dict[str, Any]:
         determinism.at(len(scenario.actions) - 1)
         store = create_state_storage(storage_name, root, HistoryScope(kind=scenario.kind, scope_id=storage_name))
         observed = observe(store, SESSION_ID, HistoryScope(kind=scenario.kind, scope_id=storage_name))
-    return json.loads(json.dumps(observed, sort_keys=True))
+    return with_defaults(json.loads(json.dumps(observed, sort_keys=True)))
 
 
 def _runs(observed: dict[str, Any]) -> list[dict[str, Any]]:
@@ -441,7 +442,7 @@ def _masked(
         # The Agno-layout store failed every read of the session; leaving the row out reads as never having stored it.
         for entry in recorded["sessions"].values():
             assert "JSONDecodeError" in entry["observed"]["list_runs"]["error"]
-        expected = observe_database(_without_runs(dump, facts.undecodable), root, extra)
+        expected = with_defaults(observe_database(_without_runs(dump, facts.undecodable), root, extra))
         recorded.clear()
         recorded.update(expected)
         used.add("undecodable_run_left_out")
@@ -449,7 +450,7 @@ def _masked(
         # The Agno-layout store read each run under the agent it named; the conversion adopts them as layout version 3
         # did at the agent's own open, so the recording is what the same database shows with its runs adopted.
         recorded.clear()
-        recorded.update(observe_database(_adopted(dump, agent), root, extra))
+        recorded.update(with_defaults(observe_database(_adopted(dump, agent), root, extra)))
         used.add("foreign_runs_take_the_database_agent")
     for session_id, entry in observed["sessions"].items():
         if "observed" not in entry:
@@ -467,7 +468,7 @@ def test_a_converted_input_shows_its_recording_but_for_named_masks(name: str, tm
     text = dump.read_text(encoding="utf-8")
     recorded = decode(recording.read_text(encoding="utf-8"))
     facts = _input_facts(text)
-    observed = observe_database(text, tmp_path / "converted", facts.extra_run_ids())
+    observed = with_defaults(observe_database(text, tmp_path / "converted", facts.extra_run_ids()))
     used = _masked(text, recorded, observed, facts, tmp_path / "expected")
     assert first_difference(recorded, observed) is None, first_difference(recorded, observed)
     assert used == _PINS.get(name, set())

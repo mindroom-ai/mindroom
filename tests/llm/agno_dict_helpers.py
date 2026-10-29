@@ -2,6 +2,7 @@
 
 A run's content that is a paused notice, as earlier releases stored for a run paused without text, goes too, since
 the owned reader reads it as no content (see the ``LEGACY_COMPAT`` marker in ``mindroom.llm.legacy_run_content``).
+So does every key a message or tool execution holds at its default, which the owned writers leave out.
 """
 
 from __future__ import annotations
@@ -28,6 +29,27 @@ DROPPED_TOOL_EXECUTION_KEYS = frozenset(
         "created_at",
     },
 )
+# The defaults of the message and tool-execution keys the owned writers store only when they differ, since the reader
+# reads an absent key as its default; Agno and every release up to v2026.10.664 stored them all.
+MESSAGE_DEFAULTS: dict[str, object] = {"from_history": False, "stop_after_tool_call": False}
+TOOL_EXECUTION_DEFAULTS: dict[str, object] = {
+    **dict.fromkeys(
+        (
+            "tool_args",
+            "tool_call_error",
+            "result",
+            "child_run_id",
+            "requires_confirmation",
+            "confirmed",
+            "confirmation_note",
+            "external_execution_required",
+            "external_execution_silent",
+            "approval_type",
+        ),
+        None,
+    ),
+    "stop_after_tool_call": False,
+}
 # Keys Agno wrote on requirement dicts that the owned ``RunRequirement`` does not model; nothing read its timestamp.
 DROPPED_REQUIREMENT_KEYS = frozenset({"created_at"})
 # Keys Agno wrote on run and session metrics that the owned metrics do not model; only tests ever filled them in.
@@ -63,15 +85,31 @@ def without(data: dict[str, Any], keys: frozenset[str]) -> dict[str, Any]:
     return {key: value for key, value in data.items() if key not in keys}
 
 
+def _without_defaults(data: dict[str, Any], defaults: dict[str, object]) -> dict[str, Any]:
+    return {key: value for key, value in data.items() if key not in defaults or value is not defaults[key]}
+
+
+def expected_message_dict(data: dict[str, Any]) -> dict[str, Any]:
+    """A stored message dict minus the flags it holds at their defaults."""
+    return _without_defaults(data, MESSAGE_DEFAULTS)
+
+
+def expected_tool_dict(data: dict[str, Any]) -> dict[str, Any]:
+    """A stored tool-execution dict minus the keys the owned type dropped and those it holds at their defaults."""
+    return _without_defaults(without(data, DROPPED_TOOL_EXECUTION_KEYS), TOOL_EXECUTION_DEFAULTS)
+
+
 def expected_run_dict(data: dict[str, Any]) -> dict[str, Any]:
-    """Agno's run dict minus dropped keys and paused notices, recursively over metrics, tools, requirements, and members."""
+    """Agno's run dict minus dropped keys, defaults, and paused notices, recursively over every nested record."""
     result = without(data, DROPPED_RUN_KEYS)
     if isinstance(result.get("content"), str) and result["content"].startswith(PAUSED_NOTICE_OPENINGS):
         del result["content"]
     if isinstance(result.get("metrics"), dict):
         result["metrics"] = without(result["metrics"], DROPPED_METRICS_KEYS)
+    if "messages" in result:
+        result["messages"] = [expected_message_dict(message) for message in result["messages"]]
     if "tools" in result:
-        result["tools"] = [without(tool, DROPPED_TOOL_EXECUTION_KEYS) for tool in result["tools"]]
+        result["tools"] = [expected_tool_dict(tool) for tool in result["tools"]]
     if "requirements" in result:
         result["requirements"] = [expected_requirement_dict(item) for item in result["requirements"]]
     if "member_responses" in result:
@@ -80,9 +118,9 @@ def expected_run_dict(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def expected_requirement_dict(data: dict[str, Any]) -> dict[str, Any]:
-    """Agno's requirement dict minus the requirement and tool-execution keys the owned types dropped."""
+    """Agno's requirement dict minus the requirement keys the owned type dropped, its tool execution as written."""
     result = without(data, DROPPED_REQUIREMENT_KEYS)
-    result["tool_execution"] = without(result["tool_execution"], DROPPED_TOOL_EXECUTION_KEYS)
+    result["tool_execution"] = expected_tool_dict(result["tool_execution"])
     return result
 
 
