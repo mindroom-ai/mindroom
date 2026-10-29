@@ -387,6 +387,7 @@ async def test_project_download_from_a_member_channel_uses_the_bot_token(
     ]
     assert _form(fake.calls("conversations.info")[0]) == {"channel": CHANNEL}
     assert {_bearer(request) for request in fake.requests} == {BOT_TOKEN}
+    assert fake.requests[-1].headers["accept-encoding"] == "identity"
 
 
 @pytest.mark.asyncio

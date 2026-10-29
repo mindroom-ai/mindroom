@@ -13215,7 +13215,7 @@ With `room`, the agent answers Slack:
 
 Who can wake the agent:
 
-- The author's Slack email must be in `slack.email_domain`, and its localpart maps to a Matrix account through `slack.matrix_user_id_template`.
+- The author's Slack email must be confirmed and in `slack.email_domain`, and its localpart maps to a Matrix account through `slack.matrix_user_id_template`.
 - Guests, bots and other apps, deactivated accounts, and people from other workspaces never wake an agent.
 - The mapped account must also pass the agent's [`access`](https://docs.mindroom.chat/authorization/#responder-access) check in `room`.
 - Anyone else sees a message in Slack that only they can see, `MindRoom can't answer you here.`, at most once a day per thread, and nothing reaches Matrix.
