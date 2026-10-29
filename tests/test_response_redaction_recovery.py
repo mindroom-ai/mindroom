@@ -122,7 +122,7 @@ async def test_pending_redaction_owns_interrupted_initial_response(  # noqa: PLR
             store.release_pending_turn_claim(turn)
 
     runner = ResponseRunner(deps=MagicMock())
-    response = runner.track_inbox_response(
+    response = runner.inbox.track_inbox_response(
         generate(),
         name="inbox_response:deleted",
         recovery_proof_ready=lambda: bot._response_recovery_ready(turn),
@@ -134,7 +134,7 @@ async def test_pending_redaction_owns_interrupted_initial_response(  # noqa: PLR
         await admit_dispatch_event(dispatcher, room, _redaction(), EventKind.REDACTION, EventClass.ACTIONABLE)
         assert not await principal.is_pending(SOURCE)
         assert await principal.is_pending(REDACTION)
-        proof = runner._inbox_response_tasks[response].recovery_proof_ready
+        proof = runner.inbox._inbox_response_tasks[response].recovery_proof_ready
         pending_proof = proof()
         assert inspect.isawaitable(pending_proof)
         assert not await pending_proof

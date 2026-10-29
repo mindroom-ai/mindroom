@@ -65,6 +65,7 @@ from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import actual_entity_usernames, entity_ids, entity_name_for_id, persist_entity_accounts
 from tests.journal_helpers import admit_dispatch_event
 from tests.response_attempt_helpers import install_direct_response_admission
+from tests.response_runner_helpers import streamed_answer
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -750,12 +751,12 @@ class TestRoutingRegression:
 
     @pytest.mark.asyncio
     @patch("mindroom.response_attempt.is_user_online")
-    @patch("mindroom.response_runner.ai_response")
+    @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_does_not_respond_when_agent_mentioned(
         self,
         mock_suggest_responder: AsyncMock,
-        mock_ai_response: AsyncMock,
+        mock_stream_agent_response: MagicMock,
         mock_is_user_online: AsyncMock,
         mock_research_agent: AgentMatrixUser,
         mock_news_agent: AgentMatrixUser,
@@ -778,6 +779,8 @@ class TestRoutingRegression:
         news_bot = setup_test_bot(mock_news_agent, tmp_path, test_room_id)
 
         # Mock AI responses
+        mock_ai_response = AsyncMock()
+        mock_stream_agent_response.side_effect = streamed_answer(mock_ai_response)
         mock_ai_response.return_value = "I can help with that research!"
         mock_suggest_responder.return_value = "news"  # Router would pick news
 
@@ -823,12 +826,12 @@ class TestRoutingRegression:
         assert mock_suggest_responder.call_count == 0
 
     @pytest.mark.asyncio
-    @patch("mindroom.response_runner.ai_response")
+    @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_activates_when_no_agent_mentioned(
         self,
         mock_suggest_responder: AsyncMock,
-        mock_ai_response: AsyncMock,
+        mock_stream_agent_response: MagicMock,
         mock_research_agent: AgentMatrixUser,
         mock_news_agent: AgentMatrixUser,
         tmp_path: Path,
@@ -878,6 +881,8 @@ class TestRoutingRegression:
         news_bot = setup_test_bot(mock_news_agent, tmp_path, test_room_id, config=test_config)
 
         # Mock AI responses
+        mock_ai_response = AsyncMock()
+        mock_stream_agent_response.side_effect = streamed_answer(mock_ai_response)
         mock_ai_response.return_value = "I can help with that!"
         mock_suggest_responder.return_value = "research"  # Router picks research
 
@@ -1790,12 +1795,12 @@ class TestRoutingRegression:
 
     @pytest.mark.asyncio
     @patch("mindroom.teams.members.resolve_agent_knowledge_access")
-    @patch("mindroom.response_runner.ai_response")
+    @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.config.main.load_config")
     async def test_multiple_mentions_each_responds_once(
         self,
         mock_from_yaml: MagicMock,
-        mock_ai_response: AsyncMock,
+        mock_stream_agent_response: MagicMock,
         mock_resolve_agent_knowledge_access: MagicMock,
         mock_research_agent: AgentMatrixUser,
         mock_news_agent: AgentMatrixUser,
@@ -1859,6 +1864,8 @@ class TestRoutingRegression:
         news_bot.orchestrator = mock_orchestrator
 
         # Mock AI responses; the team's leader is scripted above.
+        mock_ai_response = AsyncMock()
+        mock_stream_agent_response.side_effect = streamed_answer(mock_ai_response)
         mock_ai_response.side_effect = ["Research response!", "News response!"]
 
         # Mock successful room_send
@@ -1905,10 +1912,10 @@ class TestRoutingRegression:
 
     @pytest.mark.asyncio
     @patch("mindroom.response_attempt.is_user_online")
-    @patch("mindroom.response_runner.ai_response")
+    @patch("mindroom.response_runner.stream_agent_response")
     async def test_router_message_has_completion_marker(
         self,
-        mock_ai_response: AsyncMock,
+        mock_stream_agent_response: MagicMock,
         mock_is_user_online: AsyncMock,
         mock_research_agent: AgentMatrixUser,
         mock_news_agent: AgentMatrixUser,  # noqa: ARG002
@@ -1939,6 +1946,8 @@ class TestRoutingRegression:
         research_bot = setup_test_bot(mock_research_agent, tmp_path, test_room_id)
 
         # Mock AI response
+        mock_ai_response = AsyncMock()
+        mock_stream_agent_response.side_effect = streamed_answer(mock_ai_response)
         mock_ai_response.return_value = "I can help with that research question!"
 
         # Mock successful room_send

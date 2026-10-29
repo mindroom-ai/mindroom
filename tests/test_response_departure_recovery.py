@@ -63,7 +63,7 @@ async def test_departure_during_generation_allows_orderly_shutdown(
         finally:
             turn_store.release_pending_turn_claim(turn)
 
-    response = runner.track_inbox_response(
+    response = runner.inbox.track_inbox_response(
         generate(),
         name="generation_during_departure",
         recovery_proof_ready=lambda: bot._response_recovery_ready(turn),
@@ -75,15 +75,18 @@ async def test_departure_during_generation_allows_orderly_shutdown(
         await admit_room_membership(principal, ROOM, "leave")
         if rejoin:
             await admit_room_membership(principal, ROOM, "join")
-        runner.begin_process_shutdown()
+        runner.inbox.begin_process_shutdown()
         # The drain returns once the proof's journal reads do; a proof that never holds still exhausts the window.
-        assert await runner.drain_inbox_responses(cancel_after_seconds=2.0, shutdown_intent=ORDERLY_SHUTDOWN)
+        assert await runner.inbox.drain_inbox_responses(cancel_after_seconds=2.0, shutdown_intent=ORDERLY_SHUTDOWN)
         assert response.cancelled()
-        assert runner.pending_inbox_response_count == 0
+        assert runner.inbox.pending_inbox_response_count == 0
         assert not any(turn_store.has_live_turn_claim(source_id) for source_id in sources)
         assert await principal.load_matrix_delivery(delivery_id=turn.anchor_event_id, stage=DeliveryStage.FINAL) is None
     finally:
-        tasks = [response, *(owner.proof_task for owner in runner._inbox_response_tasks.values() if owner.proof_task)]
+        tasks = [
+            response,
+            *(owner.proof_task for owner in runner.inbox._inbox_response_tasks.values() if owner.proof_task),
+        ]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

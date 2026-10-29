@@ -15,6 +15,7 @@ from mindroom.event_journal.history_recovery import (
 from mindroom.interactive_models import InteractiveSelection
 
 from .approval_calls import (
+    DEFAULT_ROUTER_MANAGED_ROOM_REASON,
     JOB_ENDED_REASON,
     ApprovalCall,
     ApprovalDecision,
@@ -101,6 +102,7 @@ from .views import (
 )
 
 __all__ = [
+    "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
     "JOB_ENDED_REASON",
     "SCHEDULED_APPROVAL_WINDOW_NS",
     "TIMEOUT_REASON",

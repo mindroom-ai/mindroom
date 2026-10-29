@@ -58,7 +58,7 @@ if TYPE_CHECKING:
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.watch import KnowledgeSourceWatcher
-    from mindroom.response_activity import ActiveScriptRunInfo, ResponseIdentity
+    from mindroom.response_activity import ActiveResponseIdentity, ActiveScriptRunInfo
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.scheduling.runtime import ScheduledTaskRuntime
     from mindroom.thread_export.workspace_sync import WorkspaceThreadExportRunner
@@ -139,8 +139,8 @@ class _MindroomAppState:
     budget_monitor: BudgetMonitor | None = None
     # The embedded runtime's scheduled-task owner, whose bots back schedule edits the router may not write.
     scheduled_tasks: ScheduledTaskRuntime | None = None
-    openai_responses: set[ResponseIdentity] = field(default_factory=set)
-    active_calls: Callable[[], list[ResponseIdentity]] | None = None
+    openai_responses: set[ActiveResponseIdentity] = field(default_factory=set)
+    active_calls: Callable[[], list[ActiveResponseIdentity]] | None = None
     active_script_runs: Callable[[], Awaitable[list[ActiveScriptRunInfo]]] | None = None
     config_reload_status: Callable[[], ConfigReloadStatus] | None = None
     script_worker_keepalive: Callable[[WorkerBackend], None] | None = None

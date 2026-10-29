@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from itertools import chain, repeat
 from typing import TYPE_CHECKING, Any
 
@@ -19,6 +20,7 @@ from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
 from mindroom.llm.errors import ModelOutputLimitError
 from mindroom.llm.messages import Message
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, make_turn_context, runtime_paths_for, test_runtime_paths
 from tests.providers.golden_support import httpx2_transport
 
@@ -189,16 +191,24 @@ def _tool_results(body: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 async def _reply(config: Config, prompt: str) -> str:
-    """Answer one prompt the way the OpenAI-compatible endpoint does: the streamed turn, collected."""
-    return await ai_response(
+    """Answer one prompt the way the OpenAI-compatible endpoint does."""
+    identity = ToolExecutionIdentity(
+        channel="openai_compat",
+        agent_name="coder",
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-1",
+    )
+    turn = replace(
         make_turn_context("coder", session_id="session-1"),
         prompt=prompt,
-        runtime_paths=runtime_paths_for(config),
-        config=config,
-        include_interactive_questions=False,
-        include_openai_compat_guidance=True,
         show_tool_calls=False,
+        execution_identity=identity,
+        include_interactive_questions=False,
     )
+    return await ai_response(turn, runtime_paths_for(config), config)
 
 
 @pytest.mark.asyncio

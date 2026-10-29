@@ -34,6 +34,7 @@ from tests.conftest import (
     test_runtime_paths,
     wrap_extracted_collaborators,
 )
+from tests.streaming_helpers import FakeReplyRecords
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -302,10 +303,8 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
         async def response_stream() -> AsyncIterator[str]:
             yield "Processed selection"
 
-        with patch(
-            "mindroom.streaming.edit_message_result",
-            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit:localhost")),
-        ) as mock_edit:
+        mock_edit = AsyncMock(side_effect=delivered_matrix_side_effect("$edit:localhost"))
+        with patch("mindroom.streaming.edit_message_result", new=mock_edit):
             outcome = await send_streaming_response(
                 client=bot.client,
                 target=response_envelope.target,
@@ -314,6 +313,7 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
                 response_stream=response_stream(),
                 existing_event_id=existing_event_id,
                 adopt_existing_placeholder=True,
+                **FakeReplyRecords(edit=mock_edit).hooks(),
             )
 
         mock_edit.assert_awaited()

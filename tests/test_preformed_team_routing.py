@@ -46,12 +46,13 @@ from tests.identity_helpers import entity_ids
 from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Callable
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable
     from contextvars import Context
     from pathlib import Path
 
     from mindroom.final_delivery import FinalDeliveryOutcome
-    from mindroom.history.turn_recorder import TurnRecorder
+    from mindroom.response_turn import ResponseTurnContext, TurnSinks
+    from mindroom.teams.envelope import TeamTurnSpec
 
 
 def _running_members() -> dict[str, MagicMock]:
@@ -187,10 +188,10 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
     bot.client = _make_matrix_client_mock()
     install_runtime_journal_support(bot)
 
-    async def fake_team_response(*_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401
-        return "🤝 Team Response (a1, a2):\n\n**a1**: ok\n\n**a2**: ok"
+    async def fake_team_response_stream(*_args: Any, **_kwargs: Any) -> AsyncIterator[str]:  # noqa: ANN401
+        yield "🤝 Team Response (a1, a2):\n\n**a1**: ok\n\n**a2**: ok"
 
-    # Minimal orchestrator stub is fine because we patch team_response
+    # Minimal orchestrator stub is fine because we patch team_response_stream
     bot.orchestrator = MagicMock()
     bot.orchestrator.agent_bots = _running_members()
 
@@ -203,7 +204,7 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
         nio.RoomSendResponse.from_dict({"event_id": "$edit"}, room.room_id),
     ]
     with patch_response_runner_module(
-        team_response=fake_team_response,
+        team_response_stream=fake_team_response_stream,
         should_use_streaming=AsyncMock(return_value=False),
         typing_indicator=_noop_typing_indicator,
     ):
@@ -273,10 +274,22 @@ async def _team_memory_saves(
         scheduled_tasks.append(task)
         return task
 
-    async def team_response(*_args: Any, turn_recorder: TurnRecorder, **_kwargs: Any) -> str:  # noqa: ANN401
+    async def team_response_stream(
+        _spec: TeamTurnSpec,
+        _ctx: ResponseTurnContext,
+        *,
+        sinks: TurnSinks,
+    ) -> AsyncIterator[str]:
+        # The turn driver this stream stands in for records how the turn ended.
+        assert sinks.turn_recorder is not None
         if completes:
-            turn_recorder.mark_completed()
-        return "team response"
+            sinks.turn_recorder.record_completed(
+                run_id=None,
+                run_metadata=None,
+                assistant_text="team response",
+                completed_tools=(),
+            )
+        yield "team response"
 
     request = ResponseRequest(
         sources=ResponseSources(pending_event_ids=("$evt1",), logical_source_event_ids=("$evt1",)),
@@ -295,7 +308,7 @@ async def _team_memory_saves(
     with patch_response_runner_module(
         should_use_streaming=AsyncMock(return_value=False),
         typing_indicator=_noop_typing_indicator,
-        team_response=team_response,
+        team_response_stream=team_response_stream,
         store_conversation_memory=fake_store_conversation_memory,
         create_background_task=schedule_background_task,
     ):
@@ -505,12 +518,12 @@ async def test_preformed_team_plain_reply_does_not_continue_existing_thread_root
         },
     )
 
-    async def fake_team_response(*_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401
-        return "🤝 Team Response (a1, a2):\n\n**a1**: ok\n\n**a2**: ok"
+    async def fake_team_response_stream(*_args: Any, **_kwargs: Any) -> AsyncIterator[str]:  # noqa: ANN401
+        yield "🤝 Team Response (a1, a2):\n\n**a1**: ok\n\n**a2**: ok"
 
     with (
         patch_response_runner_module(
-            team_response=fake_team_response,
+            team_response_stream=fake_team_response_stream,
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing_indicator,
         ),
@@ -558,8 +571,8 @@ async def test_team_does_not_respond_to_different_domain_mention(config_with_tea
     bot.orchestrator = MagicMock()
     bot.orchestrator.agent_bots = _running_members()
 
-    async def fake_team_response(*_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401
-        return "🤝 Team Response (a1, a2): ok"
+    async def fake_team_response_stream(*_args: Any, **_kwargs: Any) -> AsyncIterator[str]:  # noqa: ANN401
+        yield "🤝 Team Response (a1, a2): ok"
 
     # Craft a mention using a DIFFERENT domain than the bot's MatrixID
     # This simulates someone trying to impersonate the team
@@ -572,7 +585,7 @@ async def test_team_does_not_respond_to_different_domain_mention(config_with_tea
     event = _mock_event_with_team_mention(mentioned_id, body=f"{mentioned_id} ping")
 
     with patch_response_runner_module(
-        team_response=fake_team_response,
+        team_response_stream=fake_team_response_stream,
         should_use_streaming=AsyncMock(return_value=False),
         typing_indicator=_noop_typing_indicator,
     ):

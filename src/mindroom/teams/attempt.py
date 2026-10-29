@@ -1,7 +1,7 @@
 """One attempt of a team run, a turn's or a resumed run's: the reply document its events build and what it produced.
 
-An attempt records its document's text without tool markers, however it ends, and pauses showing that document; the
-records the run hands over give its run metadata.
+An attempt records its document's text without tool markers, however it ends, and shows that document when it pauses;
+the records the run hands over give its run metadata.
 """
 
 from __future__ import annotations
@@ -93,8 +93,9 @@ class TeamAttempt:
     def interrupted_text(self) -> str:
         """Return the text the turn records when this attempt is stopped or fails: its document without tool markers.
 
-        The text ends with the no-consensus note only once the team run completed, so it matches the message a stopped
-        reply shows.
+        A stopped leader that wrote nothing contributes nothing; a failed one contributes the reason its run recorded,
+        credentials redacted. The text ends with the no-consensus note only once the team run completed, so it matches
+        the message a stopped reply shows.
         """
         record = self.records.record
         return self.presentation.text_without_tool_markers(

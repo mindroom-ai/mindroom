@@ -37,11 +37,11 @@ from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
 from mindroom.providers import registry as provider_registry
 from mindroom.response_runner import _paused_with_committed_presentation
-from mindroom.response_turn import PausedAnswer, ResponsePausedForApproval
+from mindroom.response_turn import PausedAnswer, ResponsePausedForApproval, TurnSinks
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import persist_to
-from mindroom.teams.envelope import team_response
+from mindroom.teams.envelope import TeamTurnSpec
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, tool_runtime_context
@@ -50,6 +50,7 @@ from tests.approval_continuation_helpers import approval_continuation
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, make_turn_context
 from tests.scripted_agent_helpers import registered_toolkit
+from tests.team_turn_helpers import collect_team_reply
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
@@ -248,18 +249,23 @@ async def respond(
     hook_registry: HookRegistry | None = None,
     correlation_id: str | None = None,
 ) -> str | PausedAttempt:
-    """Run one reply of ``agent_name`` as the response runner does: its text, or the pause it suspended on.
+    """Run one reply of ``agent_name`` as the response runner does: its text, or the pause it suspended on, as it shows.
 
     A ``correlation_id`` is the turn's and its tool context's, as a production turn's is.
     """
-    ctx = make_turn_context(
-        agent_name,
-        session_id=identity.session_id,
-        run_id=run_id,
-        correlation_id=correlation_id or f"corr-{run_id or 'turn'}",
-        room_id=identity.room_id,
-        thread_id=identity.thread_id,
-        requester_id=identity.requester_id,
+    ctx = replace(
+        make_turn_context(
+            agent_name,
+            session_id=identity.session_id,
+            run_id=run_id,
+            correlation_id=correlation_id or f"corr-{run_id or 'turn'}",
+            room_id=identity.room_id,
+            thread_id=identity.thread_id,
+            requester_id=identity.requester_id,
+        ),
+        prompt=prompt,
+        execution_identity=identity,
+        supports_native_tool_approval=True,
     )
     runtime = _delegate_runtime_context(
         config,
@@ -271,16 +277,9 @@ async def respond(
     )
     with tool_runtime_context(runtime):
         try:
-            return await ai_response(
-                ctx,
-                prompt=prompt,
-                runtime_paths=runtime_paths,
-                config=config,
-                execution_identity=identity,
-                supports_native_tool_approval=True,
-            )
+            return await ai_response(ctx, runtime_paths, config)
         except ResponsePausedForApproval as suspended:
-            return _paused_with_committed_presentation(suspended, show_tool_calls=True)
+            return _paused_with_committed_presentation(suspended, show_tool_calls=ctx.show_tool_calls)
 
 
 async def _run_in_tool_context[T](
@@ -472,7 +471,7 @@ async def respond_team(
     run_id: str | None = None,
     correlation_id: str | None = None,
 ) -> str | PausedAttempt:
-    """Run one blocking reply of the configured team ``team_name``: its text, or the pause it suspended on.
+    """Run one collected reply of the configured team ``team_name``: its text, or the pause it suspended on.
 
     A ``correlation_id`` is the turn's and its tool context's, as a production turn's is.
     """
@@ -486,30 +485,30 @@ async def respond_team(
     )
     orchestrator = team_orchestrator(config, runtime_paths)
     orchestrator.agent_bots = {name: SimpleNamespace(running=True) for name in members}
-    ctx = make_turn_context(
-        team_name,
-        session_id=identity.session_id,
-        run_id=run_id,
-        correlation_id=correlation_id or f"corr-{run_id or 'team'}",
-        room_id=identity.room_id,
-        thread_id=identity.thread_id,
-        requester_id=identity.requester_id,
+    ctx = replace(
+        make_turn_context(
+            team_name,
+            session_id=identity.session_id,
+            run_id=run_id,
+            correlation_id=correlation_id or f"corr-{run_id or 'team'}",
+            room_id=identity.room_id,
+            thread_id=identity.thread_id,
+            requester_id=identity.requester_id,
+        ),
+        prompt=prompt,
+        execution_identity=team_identity,
+    )
+    spec = TeamTurnSpec(
+        agent_names=list(members),
+        mode=TeamMode(config.teams[team_name].mode),
+        orchestrator=orchestrator,
+        configured_team_name=team_name,
     )
     with tool_runtime_context(runtime):
         try:
-            return await team_response(
-                agent_names=list(members),
-                mode=TeamMode(config.teams[team_name].mode),
-                message=prompt,
-                orchestrator=orchestrator,
-                execution_identity=team_identity,
-                ctx=ctx,
-                user_id=identity.requester_id,
-                configured_team_name=team_name,
-                turn_recorder=TurnRecorder(user_message=prompt),
-            )
+            return await collect_team_reply(spec, ctx, sinks=TurnSinks(turn_recorder=TurnRecorder(user_message=prompt)))
         except ResponsePausedForApproval as suspended:
-            return suspended.paused
+            return _paused_with_committed_presentation(suspended, show_tool_calls=ctx.show_tool_calls)
 
 
 async def resume_team(

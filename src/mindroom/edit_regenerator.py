@@ -42,7 +42,7 @@ logger = get_logger(__name__)
 
 
 class _TrackInboxResponse(Protocol):
-    """Own one response task off the room's event lane, as ``ResponseRunner.track_inbox_response`` does."""
+    """Own one response task off the room's event lane, as ``InboxResponses.track_inbox_response`` does."""
 
     def __call__(
         self,

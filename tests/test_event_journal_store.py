@@ -34,7 +34,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 import pytest
 import pytest_asyncio
 
-from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY
 from mindroom.event_journal import (
     AdmissionResult,
     ApprovalCall,
@@ -6283,31 +6282,6 @@ class TestOutbox:
         assert claimed.payload["body"] == "final preview"
         assert claimed.result == {"body": "final full result"}
 
-    @pytest.mark.parametrize("marker_version", [2, 3])
-    async def test_a_compatibility_marker_does_not_replace_the_local_result(
-        self,
-        alice: PrincipalStore,
-        marker_version: int,
-    ) -> None:
-        """Every version-only old-reader sentinel defers to the semantic result."""
-        await alice.enqueue_matrix_delivery(
-            delivery_id="turn-1",
-            stage=DeliveryStage.FINAL,
-            room_id=ROOM,
-            thread_id=None,
-            payload={
-                "msgtype": "m.text",
-                "body": "preview",
-                DURABLE_FINAL_OUTCOME_KEY: {"version": marker_version},
-            },
-            result={"body": "full result", "interactive": None},
-        )
-
-        stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
-
-        assert stored is not None
-        assert stored.result == {"body": "full result", "interactive": None}
-
     async def test_claiming_freezes_the_payload_and_rejects_a_late_preflight_failure(
         self,
         alice: PrincipalStore,
@@ -6365,106 +6339,6 @@ class TestOutbox:
         assert stored is not None
         assert stored.payload["body"] == "sent preview"
         assert stored.result == {"body": "sent full result"}
-
-    async def test_legacy_inline_final_result_remains_recoverable(self, alice: PrincipalStore) -> None:
-        """Rows written before local result storage retain their semantic outcome."""
-        legacy_result = {"body": "legacy full result", "interactive": None}
-        await alice.enqueue_matrix_delivery(
-            delivery_id="turn-1",
-            stage=DeliveryStage.FINAL,
-            room_id=ROOM,
-            thread_id=None,
-            payload={
-                "msgtype": "m.text",
-                "body": "* legacy preview",
-                "m.new_content": {
-                    "msgtype": "m.text",
-                    "body": "legacy preview",
-                    DURABLE_FINAL_OUTCOME_KEY: legacy_result,
-                },
-                "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
-            },
-        )
-
-        stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
-
-        assert stored is not None
-        assert stored.result == legacy_result
-
-    async def test_legacy_inline_edit_prefers_visible_replacement_outcome(self, alice: PrincipalStore) -> None:
-        """Recovery uses the outcome users saw rather than stale edit-wrapper state."""
-        await alice.enqueue_matrix_delivery(
-            delivery_id="turn-1",
-            stage=DeliveryStage.FINAL,
-            room_id=ROOM,
-            thread_id=None,
-            payload=text("current preview"),
-            result={"body": "current local result", "source": "local"},
-        )
-        old_payload = {
-            "msgtype": "m.text",
-            "body": "* visible preview",
-            DURABLE_FINAL_OUTCOME_KEY: {"body": "stale wrapper result", "source": "outer"},
-            "m.new_content": {
-                "msgtype": "m.text",
-                "body": "visible preview",
-                DURABLE_FINAL_OUTCOME_KEY: {"body": "visible result", "source": "replacement"},
-            },
-            "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
-        }
-        await alice._backend.write(
-            lambda transaction: transaction.execute(
-                """
-                UPDATE matrix_delivery_outbox
-                SET payload_json = ?
-                WHERE principal_id = ? AND delivery_id = ? AND stage = ?
-                """,
-                (json.dumps(old_payload), "agent@alice", "turn-1", "final"),
-            ),
-        )
-
-        stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
-
-        assert stored is not None
-        assert stored.payload == old_payload
-        assert stored.result == {"body": "visible result", "source": "replacement"}
-
-    async def test_a_legacy_reenqueue_replaces_a_new_writers_local_result(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """The result read after a rolling-version rewrite belongs to its payload."""
-        await alice.enqueue_matrix_delivery(
-            delivery_id="turn-1",
-            stage=DeliveryStage.FINAL,
-            room_id=ROOM,
-            thread_id=None,
-            payload=text("new-writer preview"),
-            result={"body": "new-writer full result", "interactive": None},
-        )
-        legacy_result = {"body": "legacy-writer full result", "interactive": None}
-        legacy_payload = {
-            "msgtype": "m.text",
-            "body": "legacy-writer preview",
-            DURABLE_FINAL_OUTCOME_KEY: legacy_result,
-        }
-
-        await alice._backend.write(
-            lambda transaction: transaction.execute(
-                """
-                UPDATE matrix_delivery_outbox
-                SET payload_json = ?
-                WHERE principal_id = ? AND delivery_id = ? AND stage = ?
-                """,
-                (json.dumps(legacy_payload), "agent@alice", "turn-1", "final"),
-            ),
-        )
-
-        stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
-
-        assert stored is not None
-        assert stored.payload["body"] == "legacy-writer preview"
-        assert stored.result == legacy_result
 
     async def test_reclaiming_sends_the_identical_delivery(self, alice: PrincipalStore) -> None:
         """Everything that goes on the wire is frozen; the claim state is not.

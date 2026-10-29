@@ -14,12 +14,12 @@ from uuid import uuid4
 from mindroom.approval import manager as approval_manager
 from mindroom.approval.auto_approve_windows import auto_approve_expires_at
 from mindroom.approval.manager import (
-    DEFAULT_ROUTER_MANAGED_ROOM_REASON,
     ApprovalActionResult,
     ToolApprovalTransportError,
 )
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
+from mindroom.event_journal import DEFAULT_ROUTER_MANAGED_ROOM_REASON
 from mindroom.logging_config import get_logger
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 from mindroom.tool_approval_grants import grant_operation

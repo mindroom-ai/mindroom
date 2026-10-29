@@ -3805,7 +3805,7 @@ async def test_replaced_runtime_refuses_deferred_response_without_matrix_io(
     # Stand where a config apply stands: admission closed, plan in progress.
     assert admission_gate.close_if_idle()
     assert bot.admission_gate is admission_gate
-    task = bot._response_runner.track_inbox_response(
+    task = bot._response_runner.inbox.track_inbox_response(
         bot._response_runner.generate_response(
             ResponseRequest(
                 sources=ResponseSources(

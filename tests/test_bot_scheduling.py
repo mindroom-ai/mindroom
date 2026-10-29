@@ -1338,7 +1338,7 @@ class TestCommandHandling:
         )
 
         with (
-            patch("mindroom.response_runner.team_response") as mock_team,
+            patch("mindroom.response_runner.team_response_stream") as mock_team,
         ):
             await bot._on_message(room, event)
             await drain_coalescing(bot)

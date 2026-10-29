@@ -354,7 +354,7 @@ def _attachment_parts(
 
 def _ensure_response_admission_open(controller: TurnController) -> None:
     """Refuse response planning after orderly shutdown closes task ownership."""
-    if controller.deps.response_runner.process_shutdown_started:
+    if controller.deps.response_runner.inbox.process_shutdown_started:
         raise ResponseAdmissionRefusedError
 
 
@@ -435,7 +435,7 @@ async def _apply_turn_plan(  # noqa: C901
     async def response_recovery_ready() -> bool:
         return await controller.deps.response_recovery_ready(handled_turn)
 
-    response_task = controller.deps.response_runner.track_inbox_response(
+    response_task = controller.deps.response_runner.inbox.track_inbox_response(
         _run_lazily_claimed_response(
             controller,
             turn_claim,

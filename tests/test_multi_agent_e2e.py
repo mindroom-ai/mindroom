@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -36,10 +36,11 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.response_attempt_helpers import install_direct_response_admission
+from tests.response_runner_helpers import streamed_answer
 from tests.threading_helpers import seed_thread_history
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, AsyncIterator
     from pathlib import Path
 
 
@@ -180,12 +181,19 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
                 should_use_streaming=AsyncMock(return_value=True),
             ),
         ):
-            mock_send_streaming_response.return_value = StreamTransportOutcome(
+            transport = StreamTransportOutcome(
                 last_physical_stream_event_id="$response",
-                terminal_status="completed",
                 rendered_body="15% of 200 is 30",
                 visible_body_state="visible_body",
             )
+
+            async def consume_stream(*args: object, **_kwargs: object) -> StreamTransportOutcome:
+                # The turn's stream starts the agent once the streamer reads it.
+                async for _chunk in cast("AsyncIterator[object]", args[4]):
+                    pass
+                return transport
+
+            mock_send_streaming_response.side_effect = consume_stream
             await bot._on_message(room, message_event)
             await drain_coalescing(bot)
 
@@ -195,25 +203,24 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
         ai_ctx = mock_ai.call_args.args[0]
         assert ai_ctx.entity_label == "calculator"
         assert (
-            ai_kwargs["prompt"]
-            == f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
+            ai_ctx.prompt == f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
         )
         assert (
-            ai_kwargs["model_prompt"]
+            ai_ctx.model_prompt
             == f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
         )
-        assert ai_kwargs["current_timestamp_ms"] == 1234567890.0
+        assert ai_ctx.current_timestamp_ms == 1234567890.0
         assert ai_ctx.session_id == f"{test_room_id}:$thread_root:localhost"
-        assert ai_kwargs["thread_history"] == []
-        assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
-        assert ai_kwargs["config"] == config
+        assert ai_ctx.thread_history == []
+        assert mock_ai.call_args.args[1].storage_root == runtime_paths_for(config).storage_root
+        assert mock_ai.call_args.args[2] == config
         assert ai_ctx.room_id == test_room_id
-        assert ai_kwargs["knowledge"] is None
+        assert ai_ctx.knowledge is None
         assert ai_ctx.requester_id == test_user_id
-        assert ai_kwargs["media"] == MediaInputs()
+        assert ai_ctx.media == MediaInputs()
         assert ai_ctx.reply_to_event_id == "$test_event:localhost"
-        assert ai_kwargs["show_tool_calls"] is True
-        assert ai_kwargs["run_metadata_collector"] == {}
+        assert ai_ctx.show_tool_calls is True
+        assert ai_kwargs["sinks"].run_metadata_collector == {}
 
         mock_send_streaming_response.assert_awaited_once()
         send_args = mock_send_streaming_response.await_args.args
@@ -391,7 +398,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
         mock_ai = AsyncMock(return_value="20% of 300 is 60")
         with patch_response_runner_module(
-            ai_response=mock_ai,
+            stream_agent_response=streamed_answer(mock_ai),
             should_use_streaming=AsyncMock(return_value=False),
         ):
             await bot._on_message(room, message_event)
@@ -460,8 +467,8 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         mock_ai = AsyncMock()
         mock_team_response = AsyncMock(return_value="Team response")
         with patch_response_runner_module(
-            ai_response=mock_ai,
-            team_response=mock_team_response,
+            stream_agent_response=streamed_answer(mock_ai),
+            team_response_stream=streamed_answer(mock_team_response),
             should_use_streaming=AsyncMock(return_value=False),
         ):
             await bot._on_message(room, message_event_2)
@@ -533,7 +540,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
             mock_ai = AsyncMock(return_value="20% of 300 is 60")
             with patch_response_runner_module(
-                ai_response=mock_ai,
+                stream_agent_response=streamed_answer(mock_ai),
                 should_use_streaming=AsyncMock(return_value=False),
             ):
                 await bot._on_message(room, message_event_with_mention)
@@ -544,24 +551,25 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             ai_kwargs = mock_ai.call_args.kwargs
             ai_ctx = mock_ai.call_args.args[0]
             assert ai_ctx.entity_label == "calculator"
-            assert ai_kwargs["prompt"] == f"@mindroom_calculator:{domain} What about 20% of 300?"
-            assert ai_kwargs["model_prompt"] == f"@mindroom_calculator:{domain} What about 20% of 300?"
-            assert ai_kwargs["current_timestamp_ms"] == 1234567890.0
+            assert ai_ctx.prompt == f"@mindroom_calculator:{domain} What about 20% of 300?"
+            assert ai_ctx.model_prompt == f"@mindroom_calculator:{domain} What about 20% of 300?"
+            assert ai_ctx.current_timestamp_ms == 1234567890.0
             assert ai_ctx.session_id == f"{test_room_id}:{thread_root_id}"
-            assert ai_kwargs["thread_history"][0].body.startswith("[")
-            assert ai_kwargs["thread_history"][0].body.endswith("What's 10% of 100?")
-            assert ai_kwargs["thread_history"][1].body == "10% of 100 is 10"
-            assert ai_kwargs["thread_history"][2].body == "I can also help"
-            assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
-            assert ai_kwargs["config"] == config
+            assert ai_ctx.thread_history[0].body.startswith("[")
+            assert ai_ctx.thread_history[0].body.endswith("What's 10% of 100?")
+            assert ai_ctx.thread_history[1].body == "10% of 100 is 10"
+            assert ai_ctx.thread_history[2].body == "I can also help"
+            assert mock_ai.call_args.args[1].storage_root == runtime_paths_for(config).storage_root
+            assert mock_ai.call_args.args[2] == config
             assert ai_ctx.room_id == test_room_id
-            assert ai_kwargs["knowledge"] is None
+            assert ai_ctx.knowledge is None
             assert ai_ctx.requester_id == test_user_id
-            assert ai_kwargs["media"] == MediaInputs()
+            assert ai_ctx.media == MediaInputs()
             assert ai_ctx.reply_to_event_id == f"$test_event2:{domain}"
-            assert ai_kwargs["show_tool_calls"] is True
-            assert ai_kwargs["tool_trace_collector"] == []
-            assert ai_kwargs["run_metadata_collector"] == {}
+            assert ai_ctx.show_tool_calls is True
+            # The runner collects the trace from the stream itself; the turn writes its record.
+            assert ai_kwargs["sinks"].turn_recorder is not None
+            assert ai_kwargs["sinks"].run_metadata_collector == {}
 
             # Verify a response stays in the target thread.
             sent_contents = [call.kwargs["content"] for call in bot.client.room_send.call_args_list]

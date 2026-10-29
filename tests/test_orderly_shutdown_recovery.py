@@ -25,8 +25,12 @@ from mindroom.matrix.state import MatrixState
 from mindroom.orchestration.runtime import sync_forever_with_restart
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
-from mindroom.response_runner import ResponseShutdownTimeoutError
-from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
+from mindroom.runtime_shutdown import (
+    ORDERLY_SHUTDOWN,
+    SYNC_RESTART_SHUTDOWN,
+    ResponseShutdownTimeoutError,
+    RuntimeShutdownIntent,
+)
 from mindroom.session_storage.agent_storage import create_state_storage
 from tests.conftest import install_bots, unwrap_extracted_collaborator
 from tests.journal_helpers import admit_dispatch_event

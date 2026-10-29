@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1030,7 +1031,6 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
                 target=MessageTarget.resolve("!room:localhost", None, "$event"),
                 stream_transport_outcome=StreamTransportOutcome(
                     last_physical_stream_event_id="$thinking",
-                    terminal_status="completed",
                     rendered_body="Thinking...",
                     visible_body_state="placeholder_only",
                     canonical_final_body_candidate="final body",
@@ -1231,3 +1231,61 @@ async def test_suppressed_placeholder_cleanup_exception_returns_typed_outcome_af
     assert len(cancelled_seen) == 1
     assert cancelled_seen[0].visible_response_event_id is None
     assert cancelled_seen[0].failure_reason == outcome.failure_reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("run_succeeded", "applied"), [(True, 1), (False, 0)], ids=["owed-answer", "approval-pause"])
+async def test_a_suspended_reply_applies_its_run_effects_only_once_its_run_finished(
+    tmp_path: Path,
+    run_succeeded: bool,
+    applied: int,
+) -> None:
+    """An answer recorded but not yet in the room finished its run, so memory and skill review take it now.
+
+    A run paused for approval has not finished and applies nothing; neither fires a delivery hook before the reply is
+    in the room.
+    """
+    _, response_hooks = _response_hook_service(tmp_path, HookRegistry.from_plugins([]))
+    lifecycle = _response_lifecycle(response_hooks, response_envelope=_envelope(), correlation_id="corr-owed")
+    post_effects = AsyncMock()
+    after_response = AsyncMock()
+    cancelled = AsyncMock()
+
+    with (
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=post_effects),
+        patch.object(response_hooks, "emit_after_response", new=after_response),
+        patch.object(response_hooks, "emit_cancelled_response", new=cancelled),
+    ):
+        outcome = await lifecycle.finalize(
+            FinalDeliveryOutcome(terminal_status="suspended", event_id=None, failure_reason="delivery_failed"),
+            build_post_response_outcome=lambda _outcome: ResponseOutcome(run_succeeded=run_succeeded),
+            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        )
+
+    assert outcome.terminal_status == "suspended"
+    assert post_effects.await_count == applied
+    after_response.assert_not_awaited()
+    cancelled.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_owed_answer_hands_a_shutdown_during_its_effects_back_to_the_process(tmp_path: Path) -> None:
+    """Process shutdown owns cancellation, so a shutdown that lands during an owed answer's effects still stops it."""
+    _, response_hooks = _response_hook_service(tmp_path, HookRegistry.from_plugins([]))
+    lifecycle = _response_lifecycle(response_hooks, response_envelope=_envelope(), correlation_id="corr-owed-shutdown")
+    stopping: list[bool] = []
+    lifecycle.deps = replace(lifecycle.deps, process_shutdown_requested=lambda: bool(stopping))
+
+    async def shut_down(*_args: object) -> None:
+        stopping.append(True)
+        raise asyncio.CancelledError
+
+    with (
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(side_effect=shut_down)),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await lifecycle.finalize(
+            FinalDeliveryOutcome(terminal_status="suspended", event_id=None),
+            build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        )
