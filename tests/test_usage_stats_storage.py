@@ -28,6 +28,7 @@ from mindroom.session_storage.agent_storage import (
 from mindroom.session_storage.schema import TableNames, table_names
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
+from mindroom.usage import stats_storage
 from mindroom.usage.stats_storage import (
     UsageRunNode,
     UsageSessionRow,
@@ -44,6 +45,8 @@ from tests.session_storage.agno_layout import recorded_owner
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
+
+    from mindroom.session_storage.usage_reader import UnreadableLayout
 
 # Writes inside a transaction until its change reaches the file, then dies, leaving a hot journal beside the database.
 _DIE_MID_WRITE = """
@@ -602,6 +605,36 @@ def test_reader_does_not_change_database_bytes(tmp_path: Path) -> None:
 
     assert len(result) == 1
     assert database.read_bytes() == before
+
+
+def test_a_read_is_one_snapshot_from_its_layout_check_to_its_last_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A writer that commits after the read checked the layout waits for the read, which never sees its change."""
+    database = tmp_path / "code.db"
+    _create_database(database)
+    source = _source(database)
+    writes: list[str] = []
+    check_layout = stats_storage.unreadable_layout
+
+    def check_then_write(connection: sqlite3.Connection, names: TableNames) -> UnreadableLayout | None:
+        problem = check_layout(connection, names)
+        with closing(sqlite3.connect(database, timeout=0.05)) as writer:
+            try:
+                with writer:
+                    writer.execute("INSERT INTO code_sessions (session_id, created_at) VALUES ('session-2', 1)")
+                writes.append("committed")
+            except sqlite3.OperationalError as error:
+                writes.append(str(error))
+        return problem
+
+    monkeypatch.setattr(stats_storage, "unreadable_layout", check_then_write)
+
+    result = list(iter_usage_storage_rows(source))
+
+    assert [row.row_key for row in result if isinstance(row, UsageSessionRow)] == ["session-1"]
+    assert writes == ["database is locked"]
 
 
 def test_a_read_leaves_a_crashed_writers_journal_for_the_store_to_roll_back(tmp_path: Path) -> None:
