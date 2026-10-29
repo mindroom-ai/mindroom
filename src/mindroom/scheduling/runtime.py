@@ -153,7 +153,7 @@ class ScheduledTaskRuntime:
             # LEGACY_COMPAT: Scheduled tasks without a stored owner.
             # Legacy format: Scheduled-task state content without an "owner" field; every task saved before owners
             #   were stored.
-            # Last legacy release: v2026.10.673 wrote scheduled-task state without an owner; replacement: the next
+            # Last legacy release: v2026.10.674 wrote scheduled-task state without an owner; replacement: the next
             #   release stores the owner's Matrix ID in the task's state content when the task is saved.
             # Handling: The owner is decided by the current rule over the room's full state, with the task's latest
             #   state writer standing in for its creator. The field is never written back, so a rewrite keeps the task
