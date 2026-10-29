@@ -556,3 +556,47 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
 
         assert completed is False
         assert process_shutdown_markers == [True]
+
+
+class TestBotRunPhase(ThreadingBehaviorTestBase):
+    """Which work a bot generation accepts across restart drains, process shutdown, and ingestion quiesce."""
+
+    @staticmethod
+    async def _accepts_waiting_responses(bot: AgentBot) -> bool:
+        return await asyncio.wait_for(bot.wait_for_admission_or_shutdown(), timeout=1.0)
+
+    @pytest.mark.asyncio
+    async def test_a_restart_drain_refuses_waiting_responses_until_the_next_sync_loop(self, bot: AgentBot) -> None:
+        """A sync restart refuses work waiting for admission but keeps owned responses, and the next loop reopens."""
+        assert await self._accepts_waiting_responses(bot)
+        bot._sync_shutdown_budget = ShutdownBudget.start(0.01)
+
+        await asyncio.wait_for(bot.prepare_for_sync_shutdown(shutdown_intent=SYNC_RESTART_SHUTDOWN), timeout=2.0)
+
+        assert not await self._accepts_waiting_responses(bot)
+        assert not bot._response_runner.inbox.process_shutdown_started
+        bot.mark_sync_loop_started()
+        assert await self._accepts_waiting_responses(bot)
+
+    @pytest.mark.asyncio
+    async def test_process_shutdown_refuses_everything_and_no_sync_loop_reopens_it(self, bot: AgentBot) -> None:
+        """Orderly process shutdown closes admission for good, including new inbox responses."""
+        bot.begin_process_shutdown()
+
+        assert not await self._accepts_waiting_responses(bot)
+        assert bot._response_runner.inbox.process_shutdown_started
+        bot.mark_sync_loop_started()
+        assert not await self._accepts_waiting_responses(bot)
+        assert bot._response_runner.inbox.process_shutdown_started
+
+    @pytest.mark.asyncio
+    async def test_a_quiesced_generation_stays_closed_after_its_drain(self, bot: AgentBot) -> None:
+        """Once the fleet quiesces a bot's ingestion before stopping it, a late sync loop cannot reopen admission."""
+        bot._ingestion_session = None
+        await bot._quiesce_matrix_ingestion()
+        bot._sync_shutdown_budget = ShutdownBudget.start(0.01)
+        await asyncio.wait_for(bot.prepare_for_sync_shutdown(shutdown_intent=SYNC_RESTART_SHUTDOWN), timeout=2.0)
+
+        bot.mark_sync_loop_started()
+
+        assert not await self._accepts_waiting_responses(bot)
