@@ -344,6 +344,28 @@ def reload_plugins(
     )
 
 
+def forget_edited_plugin_files() -> None:
+    """Drop cached plugin manifests and modules whose files changed, so the next load reads them again.
+
+    Only a process without plugin reloads, such as a sandbox runner, calls this.
+    In the primary runtime, only a reload may replace a plugin module, because it also cancels the module's tasks.
+    """
+    with locked_tool_registry_state():
+        for manifest_path, cached_manifest in tuple(plugin_imports._PLUGIN_CACHE.items()):
+            if _file_mtime(manifest_path) != cached_manifest.manifest_mtime:
+                del plugin_imports._PLUGIN_CACHE[manifest_path]
+        for module_path, cached_module in tuple(plugin_imports._MODULE_IMPORT_CACHE.items()):
+            if _file_mtime(module_path) != cached_module.mtime:
+                del plugin_imports._MODULE_IMPORT_CACHE[module_path]
+
+
+def _file_mtime(path: Path) -> float | None:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
 def _cached_package_roots() -> set[str]:
     """Return the synthetic top-level package of every plugin module imported so far."""
     return {cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()}
@@ -457,17 +479,18 @@ def load_plugin_module(
     # Built-in decorators must run before any plugin registration owner is active.
     import mindroom.tools  # noqa: F401, PLC0415
 
+    module_name = plugin_imports._module_name(plugin_name, plugin_root, module_path)
+    cached = plugin_imports._MODULE_IMPORT_CACHE.get(module_path)
+    # An edited file stays cached until a reload, which cancels the replaced module's tasks, or forget_edited_plugin_files.
+    if cached is not None and cached.module_name == module_name:
+        return cached.module
+
     try:
         mtime = module_path.stat().st_mtime
     except OSError as exc:
         msg = f"Failed to stat plugin {kind} module {module_path}: {exc}"
         logger.exception("Failed to stat plugin module", path=str(module_path), kind=kind, error=str(exc))
         raise plugin_imports.PluginValidationError(msg) from exc
-
-    module_name = plugin_imports._module_name(plugin_name, plugin_root, module_path)
-    cached = plugin_imports._MODULE_IMPORT_CACHE.get(module_path)
-    if cached is not None and cached.mtime == mtime and cached.module_name == module_name:
-        return cached.module
 
     # Nested plugin roots can import one physical file under different owners.
     # Only the owner being re-executed is replacing its registrations.

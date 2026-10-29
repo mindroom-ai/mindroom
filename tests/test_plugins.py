@@ -1439,7 +1439,7 @@ def test_load_plugins_preserves_metadata_only_built_in_tools(tmp_path: Path) -> 
 
 
 def test_load_plugins_removes_stale_tools_when_enabled_plugin_changes_exports(tmp_path: Path) -> None:
-    """Reloading an enabled plugin should drop tool names it no longer registers."""
+    """Picking up an edited enabled plugin should drop tool names it no longer registers."""
     plugin_root = tmp_path / "plugins" / "demo"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -1502,6 +1502,7 @@ def test_load_plugins_removes_stale_tools_when_enabled_plugin_changes_exports(tm
         )
         stat_result = tools_path.stat()
         os.utime(tools_path, (stat_result.st_atime, stat_result.st_mtime + 1))
+        plugins_module.forget_edited_plugin_files()
 
         assert [plugin.name for plugin in load_plugins(config, runtime_paths_for(config))] == ["demo_plugin"]
         assert "old_tool" not in TOOL_REGISTRY
@@ -1652,7 +1653,7 @@ def test_load_plugins_rejects_duplicate_tool_names_within_one_plugin(tmp_path: P
 
 
 def test_load_plugins_preserves_tools_when_manifest_name_changes(tmp_path: Path) -> None:
-    """Changing only the manifest plugin name should force a logical module reload."""
+    """Picking up a manifest that changes only the plugin name should force a logical module reload."""
     plugin_root = tmp_path / "plugins" / "demo"
     plugin_root.mkdir(parents=True)
     manifest_path = plugin_root / "mindroom.plugin.json"
@@ -1700,6 +1701,7 @@ def test_load_plugins_preserves_tools_when_manifest_name_changes(tmp_path: Path)
         )
         stat_result = manifest_path.stat()
         os.utime(manifest_path, (stat_result.st_atime, stat_result.st_mtime + 1))
+        plugins_module.forget_edited_plugin_files()
 
         assert [plugin.name for plugin in load_plugins(config, runtime_paths_for(config))] == ["renamed_plugin"]
         assert "renamed_tool" in TOOL_REGISTRY
@@ -3195,6 +3197,58 @@ async def test_reload_plugins_cancels_tasks_for_removed_plugins(tmp_path: Path) 
         for module_name in set(sys.modules) - original_modules:
             if module_name.startswith("mindroom_plugin_"):
                 sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_plugin_load_between_an_edit_and_its_reload_does_not_orphan_module_tasks(tmp_path: Path) -> None:
+    """An agent build that loads plugins between an edit and its reload must not orphan the edited module's tasks."""
+    plugin_root = tmp_path / "plugins" / "edited-task-plugin"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "edited-task-plugin", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    hooks_path = (plugin_root / "hooks.py").resolve()
+    hooks_path.write_text(
+        "from mindroom.hooks import hook\n"
+        "\n"
+        "VERSION = 1\n"
+        "\n"
+        "@hook('message:received')\n"
+        "async def audit(ctx):\n"
+        "    del ctx\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/edited-task-plugin"]), config_path)
+    runtime_paths = runtime_paths_for(config)
+
+    task = asyncio.create_task(asyncio.Event().wait())
+    with _preserved_plugin_loader_state():
+        try:
+            reload_plugins(config, runtime_paths)
+            live_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path].module
+            live_module._AUTO_POKE_TASK = task
+            hooks_path.write_text(
+                hooks_path.read_text(encoding="utf-8").replace("VERSION = 1", "VERSION = 2"),
+                encoding="utf-8",
+            )
+            mtime = hooks_path.stat().st_mtime + 10
+            os.utime(hooks_path, (mtime, mtime))
+
+            load_plugins(config, runtime_paths)
+            assert plugin_module._MODULE_IMPORT_CACHE[hooks_path].module is live_module
+
+            result = reload_plugins(config, runtime_paths)
+            await asyncio.sleep(0)
+
+            assert result.cancelled_task_count == 1
+            assert task.cancelled()
+            assert plugin_module._MODULE_IMPORT_CACHE[hooks_path].module.VERSION == 2
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 def test_reload_plugins_raises_when_configured_plugin_becomes_invalid(tmp_path: Path) -> None:

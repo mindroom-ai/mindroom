@@ -240,17 +240,16 @@ def _load_plugin_base(root: Path) -> _PluginBase:
     if not root.is_relative_to(_REPO_ROOT):
         _warn_once("Loading non-bundled plugin", path=root)
 
-    try:
-        manifest_mtime = manifest_path.stat().st_mtime
-    except OSError as exc:
-        msg = f"Failed to stat plugin manifest {manifest_path}: {exc}"
-        logger.exception("Failed to stat plugin manifest", path=str(manifest_path), error=str(exc))
-        raise PluginValidationError(msg) from exc
-
     cached = _PLUGIN_CACHE.get(manifest_path)
-    if cached and cached.manifest_mtime == manifest_mtime:
+    if cached is not None:
         manifest = cached.manifest
     else:
+        try:
+            manifest_mtime = manifest_path.stat().st_mtime
+        except OSError as exc:
+            msg = f"Failed to stat plugin manifest {manifest_path}: {exc}"
+            logger.exception("Failed to stat plugin manifest", path=str(manifest_path), error=str(exc))
+            raise PluginValidationError(msg) from exc
         manifest = _parse_manifest(manifest_path)
         _PLUGIN_CACHE[manifest_path] = _PluginCacheEntry(manifest_mtime=manifest_mtime, manifest=manifest)
 
