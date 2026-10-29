@@ -76,12 +76,14 @@ _CHAT_STOP_REASONS: dict[str, StopReason] = {
 class ChatWire:
     """How one route shapes Chat Completions requests and reads responses.
 
-    The route selects the rules its API differs by, such as ``openai`` sending the system prompt as ``developer``,
-    ``deepseek`` and ``openrouter`` replaying their reasoning fields, and ``groq`` streaming its usage in its own chunk
-    extension.
+    The route selects the rules its API differs by, such as ``deepseek`` and ``openrouter`` replaying their reasoning
+    fields and ``groq`` streaming its usage in its own chunk extension. ``system_role`` is the role the system prompt
+    goes as: ``developer`` to OpenAI's own API, ``system`` to every other endpoint, an OpenAI-compatible server behind
+    the ``openai`` route included.
     """
 
     route: str
+    system_role: Literal["system", "developer"]
 
 
 @dataclass(slots=True, kw_only=True)
@@ -120,9 +122,9 @@ def _chat_call(call: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in call.items() if key in _CALL_FIELDS}
 
 
-def _chat_message(message: Message, wire: ChatWire, system_role: str, provider: str) -> dict[str, Any]:
+def _chat_message(message: Message, wire: ChatWire, provider: str) -> dict[str, Any]:
     values: dict[str, Any] = {
-        "role": system_role if message.role == "system" else message.role,
+        "role": wire.system_role if message.role == "system" else message.role,
         "content": _message_content(message),
         "tool_call_id": message.tool_call_id,
         "tool_calls": [_chat_call(call) for call in message.tool_calls or ()] or None,
@@ -147,10 +149,9 @@ def _chat_message(message: Message, wire: ChatWire, system_role: str, provider: 
 
 
 def _chat_messages(messages: Sequence[Message], wire: ChatWire, provider: str) -> list[dict[str, Any]]:
-    """Return the request's messages: the system prompt joined, as ``developer`` on OpenAI, and foreign ids fitted."""
-    system_role = "developer" if wire.route == "openai" else "system"
+    """Return the request's messages: the system prompt joined, in the wire's ``system_role``, and foreign ids fitted."""
     canonical = reformat_tool_call_ids(with_joined_system(messages), "chat")
-    return [_chat_message(message, wire, system_role, provider) for message in canonical]
+    return [_chat_message(message, wire, provider) for message in canonical]
 
 
 def function_definition(tool: ToolSpec) -> dict[str, Any]:
