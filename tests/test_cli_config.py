@@ -899,14 +899,24 @@ class TestConfigInit:
 
         config = yaml.safe_load(target.read_text())
         assert "mindroom_user" not in config
-        assert config["models"]["default"]["provider"] == "ollama"
-        assert config["models"]["default"]["id"] == OLLAMA_GEMMA
-        assert config["models"]["default"]["host"] == "http://localhost:11434"
-        assert config["models"]["default"]["context_window"] == 128_000
-        assert config["models"][LOCAL_QWEN_PRESET_NAME]["provider"] == "ollama"
-        assert config["models"][LOCAL_QWEN_PRESET_NAME]["id"] == OLLAMA_QWEN
-        assert config["models"][LOCAL_QWEN_PRESET_NAME]["host"] == "http://localhost:11434"
-        assert config["models"][LOCAL_QWEN_PRESET_NAME]["context_window"] == LOCAL_QWEN_CONTEXT_WINDOW
+        # Ollama runs each model at the context size the request asks for, so history fits what Ollama loads.
+        assert config["models"] == {
+            "default": {
+                "provider": "ollama",
+                "id": OLLAMA_GEMMA,
+                "context_window": 32_768,
+                "host": "http://localhost:11434",
+                "extra_kwargs": {"options": {"num_ctx": 32_768}},
+            },
+            LOCAL_QWEN_PRESET_NAME: {
+                "provider": "ollama",
+                "id": OLLAMA_QWEN,
+                "context_window": 32_768,
+                "host": "http://localhost:11434",
+                "extra_kwargs": {"options": {"num_ctx": 32_768}},
+            },
+        }
+        assert load_config_yaml(target).models["default"].extra_kwargs == {"options": {"num_ctx": 32_768}}
 
         env_content = (tmp_path / ".env").read_text()
         assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content

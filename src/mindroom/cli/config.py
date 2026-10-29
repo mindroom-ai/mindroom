@@ -1131,6 +1131,9 @@ def _model_settings_block(model_preset: ModelPreset) -> str:
     extra_kwargs: list[str] = []
     if model_preset.provider == "llama_cpp":
         extra_kwargs.extend([f"api_key: {LOCAL_OPENAI_API_KEY_DEFAULT}", f"base_url: {_LLAMA_CPP_BASE_URL}"])
+    if model_preset.provider == "ollama" and model_preset.context_window is not None:
+        # Ollama loads a model with its own, often small, context unless the request sets one, so ask for the window.
+        extra_kwargs.extend(["options:", f"  num_ctx: {model_preset.context_window}"])
     if model_preset.reasoning_effort is not None:
         extra_kwargs.append(f"reasoning_effort: {model_preset.reasoning_effort}")
     if extra_kwargs:
