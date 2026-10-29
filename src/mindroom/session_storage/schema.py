@@ -183,8 +183,11 @@ def create_log_schema(connection: sqlite3.Connection, names: TableNames, owner: 
 
 def layout_version(connection: sqlite3.Connection, names: TableNames) -> int | None:
     """Return the layout version the database's meta row records, or None for a database in an older layout."""
-    if not is_current_layout(connection, names):
-        return None
+    return meta_version(connection, names) if is_current_layout(connection, names) else None
+
+
+def meta_version(connection: sqlite3.Connection, names: TableNames) -> int:
+    """Return the layout version the meta row of a database in the current layout records."""
     (version,) = connection.execute(f"SELECT version FROM {quote_identifier(names.log_meta)} WHERE id = 1").fetchone()  # noqa: S608
     return version
 
@@ -223,5 +226,6 @@ __all__ = [
     "is_current_layout",
     "layout_version",
     "log_schema_sql",
+    "meta_version",
     "table_names",
 ]

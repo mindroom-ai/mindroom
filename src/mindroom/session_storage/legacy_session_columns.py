@@ -20,7 +20,7 @@ from mindroom.session_storage.schema import (
     SESSION_COLUMNS,
     TableNames,
     index_name,
-    layout_version,
+    meta_version,
     table_names,
 )
 from mindroom.session_storage.store import begun, decoded_mapping
@@ -67,7 +67,7 @@ def upgrade_layout(
     with begun(connection, write=True):
         # Asked again under the lock: another opener may have converted the file while this one waited, and backing up
         # the converted file would replace the original's backup.
-        version = layout_version(connection, names) or 0
+        version = meta_version(connection, names)
         if version >= LOG_VERSION:
             return
         # The copy takes the file's size, and the conversion's rollback journal at most as much again.
