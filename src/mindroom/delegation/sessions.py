@@ -11,6 +11,7 @@ from dataclasses import asdict, replace
 from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import run_blocking_until_complete
+from mindroom.constants import subagent_sessions_dir
 from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.durable_write import create_directory_durable, write_json_file_durable
@@ -35,7 +36,7 @@ class SubagentSessionError(ValueError):
 def _path(subagent_id: str, paths: RuntimePaths) -> Path:
     if not re.fullmatch(r"[a-f0-9]{32}", subagent_id):
         raise SubagentSessionError(_UNAVAILABLE)
-    root = paths.storage_root / "subagent_sessions"
+    root = subagent_sessions_dir(paths)
     path = root / f"{subagent_id}.json"
     if (
         root.is_symlink()

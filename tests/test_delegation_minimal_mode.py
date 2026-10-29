@@ -20,7 +20,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.delegation.state import DelegationChild
+from mindroom.delegation.legacy_snapshots import migrate_subagent_sessions
 from mindroom.response_turn import ResponseTurnContext
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -437,7 +437,7 @@ async def test_child_snapshot_without_mode_continues_in_standard_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A subagent saved before modes existed continues in standard mode with its full tool surface."""
+    """A subagent saved before modes existed continues in standard mode with its full tool surface once rewritten."""
     config = _config(helper_tools=["shell"])
     paths = _paths(tmp_path, {})
     entity_ids(config, paths)
@@ -458,7 +458,8 @@ async def test_child_snapshot_without_mode_continues_in_standard_mode(
         payload = json.loads(handle.read_text())
         del payload["child"]["agent_mode"]
         handle.write_text(json.dumps(payload))
-        assert DelegationChild(**payload["child"]).agent_mode == "standard"
+        await migrate_subagent_sessions(paths)
+        assert json.loads(handle.read_text())["child"]["agent_mode"] == "standard"
         assert "Answer 1" in await toolkit.continue_subagent(payload["child"]["subagent_id"], "More")
 
     assert "bash" not in offered_tools(child.requests[1])

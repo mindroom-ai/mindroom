@@ -2532,7 +2532,7 @@ Before each retry it waits as long as the provider's `Retry-After` or Azure's `r
 SDK retry settings in `client_params`, such as `max_retries` or Gemini's `http_options.retry_options`, have no effect; the Gemini SDK still resends on its own after a dropped connection and during a file upload's transfer.
 A request that still fails ends the turn with "⏱️ Rate limited. Please wait a moment and try again." for a rate limit, or "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly." otherwise.
 A request larger than the account's tokens-per-minute limit, which OpenAI rejects as "Request too large", is not retried, since only a smaller request can pass; it ends the turn with "⚠️ This request is larger than the account's tokens-per-minute limit. Start a new thread or compact the conversation, then try again."
-A request that OpenAI, Anthropic, Gemini, or Moonshot refuses because the account has no credit left or reached its monthly spend or usage limit is not retried either, and the turn ends with an error that shows the provider's message, such as "⚠️ Error: You exceeded your current quota, please check your plan and billing details."
+A request that OpenAI, Anthropic, Gemini, or Moonshot refuses because the account has no credit left or reached its monthly spend or usage limit, that Z.ai refuses because the account has no balance or its plan or package expired, or that any provider answers with HTTP `402 Payment Required` is not retried either, and the turn ends with an error that shows the provider's message, such as "⚠️ Error: You exceeded your current quota, please check your plan and billing details."
 
 ## Stalled Streams
 
@@ -5647,7 +5647,7 @@ The retry adds `[Inline media unavailable for this model]` to the message that c
 If the provider error says the model does not support that kind of input, such as `does not support image input` or `is not a multimodal model`, later requests to the same model leave that media kind out from the start until MindRoom restarts.
 Other rejections, such as an image the provider could not decode, drop the media from that one request only.
 The same note replaces the request's media when an attachment file no longer exists or cannot be read, or when MindRoom cannot download media a tool returned as a URL, including media larger than 20 MiB.
-Once a reply has produced text, tool calls, or reasoning, a later provider error is reported instead of retried without media, and provider safeguard refusals are never retried without media.
+Once a reply has produced text, tool calls, or reasoning, a later provider error is reported instead of retried without media, and provider safeguard refusals and the billing refusals listed under [Retries](https://docs.mindroom.chat/configuration/models/#retries) are never retried without media.
 
 # Attachments
 
@@ -21700,7 +21700,8 @@ Failures from one `sender_device_id` point at that client, while failures across
 
 ### `conversation_converted`
 
-Logged once for each conversation database the first start after [upgrading to conversation storage v2](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-conversation-storage-v2) or [to one owner per conversation database](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-one-owner-per-conversation-database) converts, or that converts at its first use later, such as a restored backup.
+Logged once for each conversation database the first start after an upgrade that changes the database layout converts, such as [upgrading to conversation storage v2](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-conversation-storage-v2) or [to one owner per conversation database](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-one-owner-per-conversation-database), or that converts at its first use later, such as a restored backup.
+An upgrade the [upgrade notes](https://docs.mindroom.chat/deployment/upgrades/) do not list converts without a backup, and the release before it reads the converted databases as they are, so going back needs no restore.
 
 | Field | Meaning |
 |-------|---------|
@@ -21813,7 +21814,7 @@ These `error_type` values are stable; any other value is the class name of an un
 - `InvalidRequest`: the provider rejected the request, such as a malformed or oversized body or an unknown model.
 - `ModelSafeguardRefusal`: the model's safeguards refused the request.
 - `ModelOutputLimitError`: the model's responses kept stopping at the output limit before their tool calls were complete.
-- `ProviderError`: any other provider rejection, such as an HTTP `403`, or an OpenAI, Anthropic, Gemini, or Moonshot account with no credit left or past its monthly spend or usage limit.
+- `ProviderError`: any other provider rejection, such as an HTTP `403`, an HTTP `402`, an OpenAI, Anthropic, Gemini, or Moonshot account with no credit left or past its monthly spend or usage limit, or a Z.ai account with no balance or an expired plan or package.
 
 Count it grouped by `error_type` and alert when one value is far more frequent than usual.
 `RateLimited` and `ProviderUnavailable` from many agents mean a provider is failing, while `InvalidRequest` or `ContextWindowExceeded` from one agent is more likely one conversation the provider cannot accept.

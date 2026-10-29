@@ -169,7 +169,8 @@ Failures from one `sender_device_id` point at that client, while failures across
 
 ### `conversation_converted`
 
-Logged once for each conversation database the first start after [upgrading to conversation storage v2](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-conversation-storage-v2) or [to one owner per conversation database](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-one-owner-per-conversation-database) converts, or that converts at its first use later, such as a restored backup.
+Logged once for each conversation database the first start after an upgrade that changes the database layout converts, such as [upgrading to conversation storage v2](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-conversation-storage-v2) or [to one owner per conversation database](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-one-owner-per-conversation-database), or that converts at its first use later, such as a restored backup.
+An upgrade the [upgrade notes](https://docs.mindroom.chat/deployment/upgrades/) do not list converts without a backup, and the release before it reads the converted databases as they are, so going back needs no restore.
 
 | Field | Meaning |
 |-------|---------|
@@ -282,7 +283,7 @@ These `error_type` values are stable; any other value is the class name of an un
 - `InvalidRequest`: the provider rejected the request, such as a malformed or oversized body or an unknown model.
 - `ModelSafeguardRefusal`: the model's safeguards refused the request.
 - `ModelOutputLimitError`: the model's responses kept stopping at the output limit before their tool calls were complete.
-- `ProviderError`: any other provider rejection, such as an HTTP `403`, or an OpenAI, Anthropic, Gemini, or Moonshot account with no credit left or past its monthly spend or usage limit.
+- `ProviderError`: any other provider rejection, such as an HTTP `403`, an HTTP `402`, an OpenAI, Anthropic, Gemini, or Moonshot account with no credit left or past its monthly spend or usage limit, or a Z.ai account with no balance or an expired plan or package.
 
 Count it grouped by `error_type` and alert when one value is far more frequent than usual.
 `RateLimited` and `ProviderUnavailable` from many agents mean a provider is failing, while `InvalidRequest` or `ContextWindowExceeded` from one agent is more likely one conversation the provider cannot accept.

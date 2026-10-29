@@ -180,6 +180,83 @@ def test_an_account_out_of_credit_or_past_its_limits_fails_at_once(
 
 
 @pytest.mark.parametrize(
+    ("message", "status", "code", "error_type"),
+    [
+        # OpenRouter's account or API key without credit, whose code is the status, on an HTTP error and on an error
+        # event inside a stream.
+        ("Insufficient credits. Add more using https://openrouter.ai/credits", 402, "402", None),
+        ("Insufficient credits. Add more using https://openrouter.ai/credits", None, "402", None),
+        # The status outranks wording that names the credentials, as OpenRouter's error docs word its 402.
+        ("Your account or API key has insufficient credits. Add more credits and retry the request.", 402, "402", None),
+        # DeepSeek's account without balance, whose type and code name no billing failure.
+        ("Insufficient Balance", 402, "invalid_request_error", "unknown_error"),
+    ],
+)
+def test_a_payment_required_status_fails_at_once_as_a_billing_stop(
+    message: str,
+    status: int | None,
+    code: str | None,
+    error_type: str | None,
+) -> None:
+    """Every provider that sends a 402 means the account cannot pay for the request, which no retry changes."""
+    error = classify_provider_error(message, provider="Test", status_code=status, code=code, error_type=error_type)
+
+    assert (type(error), error.retryable, error.code, error.provider_code, str(error)) == (
+        ProviderError,
+        False,
+        QUOTA_EXHAUSTED,
+        code,
+        message,
+    )
+
+
+@pytest.mark.parametrize(
+    ("code", "message", "expected", "marker"),
+    [
+        ("1113", "Insufficient balance or no resource package. Please recharge.", ProviderError, QUOTA_EXHAUSTED),
+        (
+            "1309",
+            "Your GLM Coding Plan package has expired and is temporarily unavailable. You can resume using it after "
+            "renewing the subscription on the official website. https://z.ai/subscribe",
+            ProviderError,
+            QUOTA_EXHAUSTED,
+        ),
+        (
+            "1314",
+            "Your enterprise package has expired. Please contact your enterprise administrator.",
+            ProviderError,
+            QUOTA_EXHAUSTED,
+        ),
+        # A limit that resets stays a rate limit, even once no balance or spend limit is left for extra usage.
+        (
+            "1316",
+            "Usage limit reached for the past 5 hours. Insufficient balance for extra usage. Resets at 2026-10-29 18:00:00.",
+            RateLimited,
+            None,
+        ),
+        (
+            "1321",
+            "Usage limit reached for the past 7 days. Extra usage is not available due to monthly spend limit. Resets at "
+            "2026-11-02 09:00:00.",
+            RateLimited,
+            None,
+        ),
+        ("1302", "Rate limit reached for requests", RateLimited, None),
+    ],
+)
+def test_a_z_ai_429_fails_at_once_only_when_its_code_says_the_account_cannot_pay(
+    code: str,
+    message: str,
+    expected: type[ProviderError],
+    marker: str | None,
+) -> None:
+    """Z.ai sends every refusal of its account with a 429, and only its business code tells which a wait lets through."""
+    error = classify_provider_error(message, provider="ZAI", status_code=429, code=code)
+
+    assert (type(error), error.code, error.provider_code) == (expected, marker, code)
+
+
+@pytest.mark.parametrize(
     ("message", "code", "error_type", "expected"),
     [
         ("Slow down", None, "rate_limit_error", RateLimited),
@@ -236,6 +313,8 @@ def test_an_error_event_without_a_status_is_classified_by_its_name_and_wording(
             None,
             ContextWindowExceeded,
         ),
+        # Bedrock's ValidationException for input and requested output tokens above the model's quota.
+        ("Input is too long for requested model.", None, ContextWindowExceeded),
         # Neither Vertex AI's empty-text rejection, which opens the same way, nor an invented limit that closes the same
         # way is about the window.
         ("Unable to submit request because it has an empty text parameter.", None, InvalidRequest),

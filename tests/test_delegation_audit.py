@@ -80,8 +80,11 @@ def _child() -> DelegationChild:
         session_id="child-session",
         run_id="child-run",
         model_name="test-model",
+        requested_model_name="test-model",
         depth=1,
         execution_identity=serialize_tool_execution_identity(identity),
+        agent_mode="standard",
+        persona=None,
     )
 
 

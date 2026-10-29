@@ -36,6 +36,7 @@ from mindroom.background_tasks import (
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.constants import ROUTER_AGENT_NAME, ROUTER_DISPLAY_NAME, tracking_dir
 from mindroom.credentials.legacy_tool_credentials import migrate_tool_credential_defaults
+from mindroom.delegation.legacy_snapshots import migrate_subagent_sessions
 from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.desktop.identity import controller_identity_for_live_bot
 from mindroom.egress_broker.env import egress_broker_enabled
@@ -2312,6 +2313,7 @@ async def _run_runtime(  # noqa: PLR0915
     """Run the multi-agent bot system until it stops."""
     await migrate_private_storage(runtime_paths)
     await migrate_state_root_records(runtime_paths)
+    await migrate_subagent_sessions(runtime_paths)
     await migrate_tool_credential_defaults(runtime_paths)
     storage_path = runtime_paths.storage_root
     orchestrator: _MultiAgentOrchestrator | None = None
