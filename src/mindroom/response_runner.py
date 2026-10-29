@@ -180,6 +180,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.turn_origin import TurnOrigin
+    from mindroom.turn_store import SourcePreparation
 
     from .response_admission import ResponseAdmissionGate
 
@@ -338,12 +339,18 @@ class ResponseRequest:
     current_timestamp_ms: float | None = None
     current_prompt_is_structured: bool = False
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
-    prepare_source_turn: Callable[[Sequence[ResolvedVisibleMessage]], Coroutine[Any, Any, bool]] | None = None
+    # Which sources became terminal while the request waited for its lock: deleted, or answered elsewhere.
+    prepare_source_turn: Callable[[Sequence[ResolvedVisibleMessage]], Coroutine[Any, Any, SourcePreparation]] | None = (
+        None
+    )
     # Runs once the turn claimed its reply, before the response is prepared: an edit prunes the history it
     # replaces only then, so a Stop that refuses the claim leaves that history whole.
     on_reply_claimed: Callable[[], Awaitable[None]] | None = None
     # Settles the turn's sources when they became terminal before any reply existed to settle them.
     on_source_turn_suppressed: Callable[[], Awaitable[None]] | None = None
+    # When only some sources became terminal before any reply existed: settles those and hands the
+    # rest back to the journal, to answer as their own turn once this request lets them go.
+    on_sources_invalidated: Callable[[SourcePreparation], Awaitable[None]] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     # Records and settles a turn that ended before any reply span existed to settle it.
     on_no_response_handled: Callable[[], Awaitable[None]] | None = None
@@ -601,8 +608,8 @@ class _TeamResponseRequest:
 
     member_names: tuple[str, ...]
     team_mode: str
-    reason_prefix: str
-    resolution_reason: str | None
+    # Why a configured team cannot answer: the turn delivers it as its final instead of running the team.
+    rejection_message: str | None = None
 
 
 def _post_lock_error(error: Exception, early_placeholder: _EarlyPlaceholderState) -> Exception:
@@ -1738,43 +1745,53 @@ class ResponseRunner:
         *,
         resolved_target: MessageTarget,
     ) -> ResponseRequest | None:
-        """Apply the owner gate to this exact request history, before and after refresh."""
+        """Apply the owner gate to this exact request history, before and after refresh.
+
+        A source deleted or answered elsewhere while the request waited ends it.
+        When others survive and no reply exists yet, only the terminal ones
+        settle and the rest answer as their own turn; once a reply exists, its
+        sources stay together and the whole request ends.
+        """
         preparation = (
             await run_coroutine_until_complete(request.prepare_source_turn(request.thread_history))
             if request.prepare_source_turn is not None
-            else False
+            else None
         )
+        if preparation is None or not preparation.invalid:
+            return request
         handle = current_span()
-        if preparation:
-            self.deps.logger.info(
-                "response_suppressed_for_terminal_source",
-                source_event_id=request.response_envelope.source_event_id,
+        self.deps.logger.info(
+            "response_suppressed_for_terminal_source",
+            source_event_id=request.response_envelope.source_event_id,
+            surviving_source_count=len(preparation.surviving),
+        )
+        source_deleted = await self._sources_deleted(request, resolved_target)
+        if handle is not None and not handle.exited:
+            await self.deps.delivery_gateway.end_reply_span(
+                handle,
+                terminal_source_decision(source_deleted=source_deleted),
             )
-            source_deleted = await self._sources_deleted(request, resolved_target)
-            if handle is not None and not handle.exited:
-                await self.deps.delivery_gateway.end_reply_span(
-                    handle,
-                    terminal_source_decision(source_deleted=source_deleted),
-                )
-            elif (
-                # Before the claim, the reply an earlier attempt left ends through its records.
-                not await self.deps.delivery_gateway.settle_unclaimed_reply(
-                    (*request.sources.pending_event_ids, *request.sources.logical_source_event_ids),
-                    source_deleted=source_deleted,
-                )
-                and request.on_source_turn_suppressed is not None
-            ):
-                # No reply exists to settle them.
+        elif not await self.deps.delivery_gateway.settle_unclaimed_reply(
+            # Before the claim, the reply an earlier attempt left ends through its records.
+            (*request.sources.pending_event_ids, *request.sources.logical_source_event_ids),
+            source_deleted=source_deleted,
+        ):
+            # No reply exists to settle them.
+            if preparation.surviving and request.on_sources_invalidated is not None:
+                await request.on_sources_invalidated(preparation)
+            elif request.on_source_turn_suppressed is not None:
                 await request.on_source_turn_suppressed()
-            return None
-        return request
+        return None
 
     async def _sources_deleted(self, request: ResponseRequest, target: MessageTarget) -> bool:
-        """Return whether deletion made the request's sources terminal: all of them, or the edit driving it."""
+        """Return whether deletion made the request's sources terminal: all of them, or the edit driving it.
+
+        A source answering for a relayed message is deleted with that message.
+        """
         driving = request.response_envelope.source_event_id
         logical = request.sources.logical_source_event_ids
-        redacted = await self.deps.replies.store.redacted_event_ids(target.room_id, (driving, *logical))
-        return redacted.issuperset(logical) or (driving not in logical and driving in redacted)
+        deleted = await self.deps.replies.store.deleted_event_ids(target.room_id, (driving, *logical))
+        return deleted.issuperset(logical) or (driving not in logical and driving in deleted)
 
     async def _prepare_admitted_locked_turn(
         self,
@@ -2156,16 +2173,36 @@ class ResponseRunner:
         *,
         member_names: Sequence[str],
         team_mode: str,
-        reason_prefix: str = "Team request",
-        resolution_reason: str | None = None,
     ) -> str | None:
         """Generate a team response of ``member_names`` with lifecycle locking and queued-message state."""
-        team_request = _TeamResponseRequest(
-            member_names=tuple(member_names),
-            team_mode=team_mode,
-            reason_prefix=reason_prefix,
-            resolution_reason=resolution_reason,
+        return await self._run_team_turn(
+            request,
+            _TeamResponseRequest(member_names=tuple(member_names), team_mode=team_mode),
         )
+
+    async def deliver_team_rejection(
+        self,
+        request: ResponseRequest,
+        *,
+        member_names: Sequence[str],
+        team_mode: str,
+        rejection_message: str,
+    ) -> str | None:
+        """Deliver why a configured team cannot answer as the final of the reply this request claims.
+
+        A regeneration's request names its existing reply, so the rejection
+        edits that reply in place and its records settle the turn.
+        """
+        return await self._run_team_turn(
+            request,
+            _TeamResponseRequest(
+                member_names=tuple(member_names),
+                team_mode=team_mode,
+                rejection_message=rejection_message,
+            ),
+        )
+
+    async def _run_team_turn(self, request: ResponseRequest, team_request: _TeamResponseRequest) -> str | None:
         return await self.run_locked_response_lifecycle(
             request,
             response_kind="team",
@@ -2258,7 +2295,7 @@ class ResponseRunner:
         else:
             team_models = (
                 None
-                if team.resolution_reason is not None
+                if team.rejection_message is not None
                 else resolve_team_turn_models(
                     self.deps.runtime.config,
                     self.deps.runtime_paths,
@@ -2298,8 +2335,8 @@ class ResponseRunner:
                 execution_identity=execution_identity,
                 participation=participation,
             )
-        elif team.resolution_reason is not None:
-            return await self._deliver_resolution_reason(request, resolved_target, team.resolution_reason)
+        elif team.rejection_message is not None:
+            return await self._deliver_team_rejection(request, resolved_target, team.rejection_message)
         else:
             assert team_models is not None
             turn = await self._prepare_team_turn(
@@ -2312,7 +2349,7 @@ class ResponseRunner:
         early_placeholder_state.settlement_started = True
         return await self._generate_and_settle(turn)
 
-    async def _deliver_resolution_reason(
+    async def _deliver_team_rejection(
         self,
         request: ResponseRequest,
         resolved_target: MessageTarget,
@@ -2323,7 +2360,7 @@ class ResponseRunner:
         lifecycle = self.build_lifecycle(identity=response_identity, request=request)
         progress = DeliveryProgress()
 
-        async def deliver_resolution_reason(message_id: str | None) -> None:
+        async def deliver_rejection(message_id: str | None) -> None:
             progress.settle(
                 await self.deps.delivery_gateway.deliver_final(
                     FinalDeliveryRequest(
@@ -2342,7 +2379,7 @@ class ResponseRunner:
             target=resolved_target,
             lifecycle=lifecycle,
             progress=progress,
-            response_function=deliver_resolution_reason,
+            response_function=deliver_rejection,
             user_id=request.user_id,
             build_post_response_outcome=lambda _final_outcome: ResponseOutcome(),
             post_response_deps=lambda: self._post_response_deps(request),
@@ -2412,7 +2449,6 @@ class ResponseRunner:
             member_model_names=team_models.member_model_names,
             configured_team_name=configured_team_name,
             response_sender_id=self.deps.matrix_full_id,
-            reason_prefix=team.reason_prefix,
         )
         matrix_target_item = matrix_message_target_item(
             resolved_target,
@@ -2520,7 +2556,7 @@ class ResponseRunner:
                 self.client(),
                 request.room_id,
                 requester_user_id=request.user_id,
-                enable_streaming=self.deps.runtime.enable_streaming,
+                enable_streaming=self.deps.runtime.config.defaults.enable_streaming,
             )
         )
         if request.pipeline_timing is not None:

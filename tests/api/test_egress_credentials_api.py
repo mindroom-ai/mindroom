@@ -732,7 +732,7 @@ def test_dashboard_config_save_sorts_services_and_agents_and_ties_follow_service
     saved = client.put("/api/config/save", json=payload, headers=admin)
     assert saved.status_code == 200, saved.text
     # Read the file back, as a restart or reload does, so the order on disk is what the pages and rules see.
-    assert config_lifecycle.load_config_into_app(paths, main.app)
+    assert config_lifecycle.load_config_into_app(paths, main.app).loaded
 
     assert _agent_rows(_listing(portal, "alice")) == ["personal", "shared_dev"]
     assert _agent_rows(client.get("/api/connections", headers=alice)) == ["no_shell", "personal", "shared_dev"]

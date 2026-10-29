@@ -45,7 +45,7 @@ class UserStopReconciler:
         failure settlement, or the owed cancel note shows it. Nothing waits for
         the conversation. An event no reply owns has nothing to stop.
         """
-        owner = self.deps.turn_store.turn_record_for_response_event_id(response_event_id)
+        owner = await self.deps.turn_store.turn_record_for_response_event_id(response_event_id)
         if owner is not None and owner.conversation_target is None:
             return False
         # A reaction on someone else's message, or one whose create resolved elsewhere, reaches no reply.

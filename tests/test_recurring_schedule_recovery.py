@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock
@@ -20,11 +20,11 @@ from mindroom.matrix import client_delivery
 from mindroom.matrix.large_messages import MatrixEventTooLargeError
 from mindroom.scheduling import executor as scheduling_executor
 from mindroom.scheduling import recurring_schedule
-from mindroom.scheduling import tasks as scheduling
+from mindroom.scheduling import runtime as scheduling
 from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow
 from tests.conftest import delivered_matrix_event, delivered_matrix_side_effect
 from tests.conftest import test_runtime_paths as runtime_paths
-from tests.scheduling_helpers import persist_schedule_writer, serve_task_state_events
+from tests.scheduling_helpers import persist_schedule_writer, run_cron_task, serve_task_state_events
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -132,11 +132,10 @@ async def run_until_wait(
     paths = runtime_paths(tmp_path)
     persist_schedule_writer(paths, client.user_id)
     with suppress(asyncio.CancelledError):
-        await scheduling._run_cron_task(
+        await run_cron_task(
             client,
             "daily",
             task,
-            {},
             config or Config(),
             paths,
             AsyncMock(),
@@ -390,6 +389,40 @@ async def test_live_timer_fires_with_catch_up_disabled(
 
 
 @pytest.mark.asyncio
+async def test_an_owner_restart_before_planning_counts_against_the_catch_up_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    controlled_clock: Clock,
+) -> None:
+    """A due occurrence whose planning waited out its owner's restart follows catch-up, so with 0 it is skipped."""
+    due = datetime(2026, 1, 15, 7, 0, tzinfo=UTC)
+    sleeps = 0
+
+    async def reach_due_time_once(_delay: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps > 1:
+            raise asyncio.CancelledError
+        controlled_clock.now = due
+
+    checkpoint_identity = scheduling._TaskRunner._checkpoint_identity
+
+    async def owner_restarts_while_planning(runner: scheduling._TaskRunner) -> tuple[str, str]:
+        identity = await checkpoint_identity(runner)
+        if controlled_clock.now == due:
+            controlled_clock.now = due + timedelta(seconds=5)
+        return identity
+
+    monkeypatch.setattr(scheduling.asyncio, "sleep", reach_due_time_once)
+    monkeypatch.setattr(scheduling._TaskRunner, "_checkpoint_identity", owner_restarts_while_planning)
+    sent = AsyncMock(side_effect=delivered_matrix_side_effect("$trigger"))
+    monkeypatch.setattr(client_delivery, "send_message_outcome", sent)
+    task = workflow()
+    await run_until_wait(task, client_for(task), tmp_path, Config(scheduler_catch_up_grace_seconds=0))
+    sent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_transaction_identity_reaches_matrix_transport(
     tmp_path: Path,
     controlled_clock: Clock,
@@ -603,7 +636,7 @@ async def test_checkpoint_retry_rechecks_time_and_task_state(
     failed = False
     pauses = 0
 
-    def fail_final_plan(
+    def fail_plan_of_due_occurrence(
         path: Path,
         workflow_key: str,
         cron: str,
@@ -612,8 +645,8 @@ async def test_checkpoint_retry_rechecks_time_and_task_state(
     ) -> recurring_schedule.RecurringOccurrence:
         nonlocal plans
         plans += 1
-        if stage == "plan" and plans == 2:
-            msg = "temporary final planning failure"
+        if stage == "plan" and plans == 1:
+            msg = "temporary planning failure"
             raise OSError(msg)
         return plan(path, workflow_key, cron, now, grace_seconds)
 
@@ -642,7 +675,7 @@ async def test_checkpoint_retry_rechecks_time_and_task_state(
                 state_key="daily",
             )
 
-    monkeypatch.setattr(recurring_schedule, "_plan", fail_final_plan)
+    monkeypatch.setattr(recurring_schedule, "_plan", fail_plan_of_due_occurrence)
     monkeypatch.setattr(recurring_schedule, "_save", fail_preparation)
     monkeypatch.setattr(scheduling.asyncio, "sleep", change_during_retry)
     await run_until_wait(task, client, tmp_path)

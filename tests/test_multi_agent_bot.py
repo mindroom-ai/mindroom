@@ -28,7 +28,6 @@ from mindroom.event_journal import (
     IngestionRecordDisposition,
     RoomMembershipPosition,
 )
-from mindroom.handled_turns import TurnRecord
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.state import MatrixState
@@ -41,15 +40,17 @@ from mindroom.orchestrator import (
     _MultiAgentOrchestrator,
 )
 from mindroom.startup_errors import PermanentStartupError
+from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import (
     AgentBotTestBase,
     _make_matrix_client_mock,
     _runtime_bound_config,
-    _set_turn_store_tracker,
     _turn_store,
     _visible_message,
     _wrap_extracted_collaborators,
+    assert_no_turn_answered,
+    assert_turn_answered,
     make_mock_agent_user,
     make_test_agent_bot,
     unique_room_send_responses,
@@ -167,18 +168,6 @@ class TestAgentBot(AgentBotTestBase):
         assert bot.agent_name == "calculator"
         assert bot.rooms == ["!test:localhost"]
         assert not bot.running
-        assert bot.enable_streaming is True  # Default value
-
-        # Test with streaming disabled
-        bot_no_stream = make_test_agent_bot(
-            mock_agent_user,
-            tmp_path,
-            rooms=["!test:localhost"],
-            enable_streaming=False,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-        )
-        assert bot_no_stream.enable_streaming is False
 
     def test_journal_admission_is_given_a_matrix_id_not_a_journal_principal(
         self,
@@ -334,7 +323,7 @@ class TestAgentBot(AgentBotTestBase):
         assert bot._tool_runtime_support.matrix_id.full_id == actual_user_id
         assert bot._response_runner.deps.matrix_full_id == actual_user_id
         assert bot._turn_policy.deps.matrix_id.full_id == actual_user_id
-        assert bot._turn_controller.deps.matrix_id.full_id == actual_user_id
+        assert bot._turn_ingress.deps.matrix_id.full_id == actual_user_id
         mock_client.add_event_callback.assert_called_once_with(
             bot._on_invite_before_sync_certification,
             nio.InviteEvent,
@@ -864,52 +853,6 @@ class TestAgentBot(AgentBotTestBase):
             await owned_journal.close()
 
     @pytest.mark.asyncio
-    async def test_agent_bot_try_start_reraises_permanent_startup_error(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Permanent startup failures should stop retrying immediately."""
-        config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-
-        with (
-            patch.object(
-                bot,
-                "start",
-                new=AsyncMock(side_effect=PermanentMatrixStartupError("boom")),
-            ) as mock_start,
-            pytest.raises(PermanentMatrixStartupError, match="boom"),
-        ):
-            await bot.try_start()
-
-        mock_start.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_agent_bot_try_start_does_not_retry_after_cancellation(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Cancelling a start stuck in login ends it instead of starting another attempt."""
-        config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        start_entered = asyncio.Event()
-
-        async def _blocked_start() -> None:
-            start_entered.set()
-            await asyncio.Event().wait()
-
-        with patch.object(bot, "start", new=AsyncMock(side_effect=_blocked_start)) as mock_start:
-            start = asyncio.create_task(bot.try_start())
-            await asyncio.wait_for(start_entered.wait(), timeout=1.0)
-            start.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await asyncio.wait_for(start, timeout=1.0)
-
-        mock_start.assert_awaited_once()
-
-    @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test stopping an agent bot."""
         config = self._config_for_storage(tmp_path)
@@ -1100,6 +1043,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_should_use_streaming.return_value = enable_streaming
 
         config = self._config_for_storage(tmp_path)
+        config.defaults.enable_streaming = enable_streaming
         mention_id = f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))}"
         agent_user = AgentMatrixUser(
             agent_name="calculator",
@@ -1112,7 +1056,6 @@ class TestAgentBot(AgentBotTestBase):
             agent_user,
             tmp_path,
             rooms=["!test:localhost"],
-            enable_streaming=enable_streaming,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -1201,7 +1144,9 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = AsyncMock()
 
         mock_room = MagicMock()
+        mock_room.room_id = "!test:localhost"
         mock_event = MagicMock()
+        mock_event.event_id = "$hello"
         mock_event.sender = "@user:localhost"
         mock_event.body = "Hello everyone!"
         mock_event.source = {"content": {"body": "Hello everyone!"}}
@@ -1429,8 +1374,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        tracker = _set_turn_store_tracker(bot, MagicMock())
-        tracker.has_responded.return_value = False
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
@@ -1444,11 +1387,9 @@ class TestAgentBot(AgentBotTestBase):
             await self._invoke_handler(bot, handler_name, room, event)
 
         if marks_responded:
-            tracker.record_handled_turn.assert_called_once_with(
-                TurnRecord.create([event.event_id]),
-            )
+            await assert_turn_answered(bot, TurnRecord.create([event.event_id]))
         else:
-            tracker.record_handled_turn.assert_not_called()
+            await assert_no_turn_answered(bot)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1479,8 +1420,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        tracker = _set_turn_store_tracker(bot, MagicMock())
-        tracker.has_responded.return_value = False
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
@@ -1507,7 +1446,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch.object(bot._turn_policy, "can_reply_to_sender_in_room", return_value=False),
             patch.object(
-                bot._turn_controller.deps.turn_policy,
+                bot._turn_ingress.deps.turn_policy,
                 "can_reply_to_sender_in_room",
                 return_value=False,
             ),
@@ -1515,11 +1454,9 @@ class TestAgentBot(AgentBotTestBase):
             await self._invoke_handler(bot, handler_name, room, event)
 
         if marks_responded:
-            tracker.record_handled_turn.assert_called_once_with(
-                TurnRecord.create([event.event_id]),
-            )
+            await assert_turn_answered(bot, TurnRecord.create([event.event_id]))
         else:
-            tracker.record_handled_turn.assert_not_called()
+            await assert_no_turn_answered(bot)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
@@ -1541,6 +1478,7 @@ class TestAgentBot(AgentBotTestBase):
         """Test agent bot thread response behavior based on agent participation."""
         # Use the helper method to create mock config
         config = self._config_for_storage(tmp_path)
+        config.defaults.enable_streaming = enable_streaming
         mock_load_config.return_value = config
 
         mock_resolve_agent_knowledge_access.return_value = _KnowledgeResolution(knowledge=None)
@@ -1557,7 +1495,6 @@ class TestAgentBot(AgentBotTestBase):
             config,
             runtime_paths_for(config),
             rooms=["!test:localhost"],
-            enable_streaming=enable_streaming,
         )
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
@@ -1740,7 +1677,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = AsyncMock()
 
         # Mark an event as already responded
-        await _turn_store(bot).record_turn(TurnRecord.create(["event123"]))
+        await _turn_store(bot).record_turn(TurnRecord.create(["event123"]), room_id="!test:localhost")
 
         # Create mock room and event
         mock_room = MagicMock()

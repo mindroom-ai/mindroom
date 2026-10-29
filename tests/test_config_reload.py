@@ -60,8 +60,11 @@ from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    initialize_from_config_file,
+    install_bots,
     install_send_response_mock,
     orchestrator_runtime_paths,
+    published_config_load,
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
@@ -75,6 +78,7 @@ if TYPE_CHECKING:
     from collections.abc import Set as AbstractSet
 
     from mindroom.message_target import MessageTarget
+    from mindroom.orchestration.entity_fleet import EntityFleet
 
 
 def _calls_for(
@@ -182,14 +186,18 @@ def test_startup_phase_logging_helpers_emit_structured_timing(monkeypatch: pytes
 
 @pytest.mark.asyncio
 async def test_watch_skills_task_snapshots_off_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The skills watcher should not run recursive skill snapshots on the asyncio loop."""
+    """The skills watcher snapshots off the asyncio loop and keeps watching until cancelled, even after shutdown begins."""
 
     class DummyOrchestrator:
         running = True
 
+    class StopWatchingError(Exception):
+        pass
+
     dummy_orchestrator = DummyOrchestrator()
     snapshot_function_calls: list[object] = []
     clear_calls = 0
+    sleeps = 0
 
     def direct_snapshot_call() -> object:
         raise AssertionError
@@ -204,6 +212,10 @@ async def test_watch_skills_task_snapshots_off_event_loop(monkeypatch: pytest.Mo
 
     async def fake_sleep(delay: float) -> None:
         del delay
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 2:
+            raise StopWatchingError
 
     def fake_clear_skill_cache() -> None:
         nonlocal clear_calls
@@ -214,7 +226,8 @@ async def test_watch_skills_task_snapshots_off_event_loop(monkeypatch: pytest.Mo
     monkeypatch.setattr(orchestrator_module.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(orchestrator_module, "clear_skill_cache", fake_clear_skill_cache)
 
-    await _watch_skills_task(dummy_orchestrator)  # type: ignore[arg-type]
+    with pytest.raises(StopWatchingError):
+        await _watch_skills_task(dummy_orchestrator)  # type: ignore[arg-type]
 
     assert snapshot_function_calls == [direct_snapshot_call, direct_snapshot_call]
     assert clear_calls == 1
@@ -307,10 +320,9 @@ async def _noop_sync_runtime_support_services(
     self: _MultiAgentOrchestrator,
     config: Config,
     *,
-    start_watcher: bool,
     previous_config: Config | None = None,
 ) -> None:
-    del self, config, start_watcher, previous_config
+    del self, config, previous_config
 
 
 async def _noop_setup_rooms_and_memberships(
@@ -322,27 +334,18 @@ async def _noop_setup_rooms_and_memberships(
 
 async def _noop_emit_config_reloaded(
     self: _MultiAgentOrchestrator,
-    *,
-    new_config: Config,
+    plan: ConfigUpdatePlan,
     changed_entities: set[str],
-    added_entities: set[str],
-    removed_entities: set[str],
-    plugin_changes: tuple[str, ...],
 ) -> None:
-    del self, new_config, changed_entities, added_entities, removed_entities, plugin_changes
+    del self, plan, changed_entities
 
 
-def _noop_start_sync_task(
-    self: _MultiAgentOrchestrator,
-    entity_name: str,
-    bot: AgentBot,
-) -> None:
-    del self, entity_name, bot
+def _noop_start_sync(self: EntityFleet, bots: Iterable[AgentBot]) -> None:
+    del self, bots
 
 
-async def _noop_try_start(self: AgentBot) -> bool:
+async def _noop_start(self: AgentBot) -> None:
     self.running = True
-    return True
 
 
 async def _noop_stop(self: AgentBot, *, shutdown_intent: object | None = None) -> None:
@@ -369,21 +372,16 @@ def _patch_orchestrator_plugin_update_test_runtime(monkeypatch: pytest.MonkeyPat
         _noop_sync_runtime_support_services,
     )
     monkeypatch.setattr(
-        "mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships",
+        "mindroom.orchestration.rooms.RoomSetup.setup",
         _noop_setup_rooms_and_memberships,
     )
     monkeypatch.setattr(
         "mindroom.orchestrator._MultiAgentOrchestrator._emit_config_reloaded",
         _noop_emit_config_reloaded,
     )
-    monkeypatch.setattr(
-        "mindroom.orchestrator._MultiAgentOrchestrator._start_sync_task",
-        _noop_start_sync_task,
-    )
-    monkeypatch.setattr("mindroom.bot.AgentBot.try_start", _noop_try_start)
-    monkeypatch.setattr("mindroom.bot.TeamBot.try_start", _noop_try_start)
+    monkeypatch.setattr("mindroom.orchestration.entity_fleet.EntityFleet.start_sync", _noop_start_sync)
+    monkeypatch.setattr("mindroom.bot.AgentBot.start", _noop_start)
     monkeypatch.setattr("mindroom.bot.AgentBot.stop", _noop_stop)
-    monkeypatch.setattr("mindroom.bot.TeamBot.stop", _noop_stop)
 
 
 @pytest.mark.asyncio
@@ -442,6 +440,41 @@ async def test_plugin_watcher_debounces_changes_and_ignores_unconfigured_roots(
     assert (plugin_root / "hooks.py") in changed_paths
     assert (plugin_root / "helper.py") in changed_paths
     assert all(path.is_relative_to(plugin_root) for path in changed_paths)
+
+
+@pytest.mark.asyncio
+async def test_plugin_watcher_idles_until_cancelled_once_shutdown_begins(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A watcher that returned at shutdown would be restarted with a warning, so it idles until cancelled."""
+    monkeypatch.setattr("mindroom.file_watcher._WATCH_SCAN_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.file_watcher._WATCH_TREE_DEBOUNCE_SECONDS", 0.01)
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        '{"name": "demo", "hooks_module": "hooks.py", "skills": []}',
+        encoding="utf-8",
+    )
+    (plugin_root / "hooks.py").write_text("VALUE = 1\n", encoding="utf-8")
+    config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator.config = config
+    orchestrator.running = True
+    orchestrator.reload_plugins_now = AsyncMock()
+    watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
+    try:
+        await asyncio.sleep(0.05)
+        orchestrator.running = False
+        (plugin_root / "hooks.py").write_text("VALUE = 2\n", encoding="utf-8")
+        await asyncio.sleep(0.1)
+        assert not watcher_task.done()
+    finally:
+        watcher_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await watcher_task
+
+    orchestrator.reload_plugins_now.assert_not_awaited()
 
 
 def test_plugin_watcher_drops_unconfigured_root_snapshots(tmp_path: Path) -> None:
@@ -787,14 +820,7 @@ async def test_manual_plugin_reload_interrupts_scripts_before_plugin_publication
     orchestrator.running = True
     order: list[str] = []
 
-    async def apply_update_plan(
-        _runtime: object,
-        plan: ConfigUpdatePlan,
-        *,
-        plugins_changed: bool = False,
-    ) -> None:
-        assert plan.new_config is config
-        assert plugins_changed is True
+    async def interrupt_for_plugin_reload(_runtime: object) -> None:
         order.append("scripts")
 
     async def finish_reload(_runtime: object) -> None:
@@ -805,7 +831,11 @@ async def test_manual_plugin_reload_interrupts_scripts_before_plugin_publication
         return PluginReloadResult(HookRegistry.empty(), (), 0)
 
     with (
-        patch.object(type(orchestrator.script_runtime), "apply_update_plan", new=apply_update_plan),
+        patch.object(
+            type(orchestrator.script_runtime),
+            "interrupt_for_plugin_reload",
+            new=interrupt_for_plugin_reload,
+        ),
         patch.object(
             type(orchestrator.script_runtime),
             "finish_reload",
@@ -842,6 +872,7 @@ async def test_plugin_watcher_drops_pending_changes_when_reload_commits_during_s
     orchestrator, config, plugin_root, hooks_path = _plugin_watcher_race_runtime(tmp_path)
     second_scan_started = asyncio.Event()
     release_second_scan = asyncio.Event()
+    third_scan_started = asyncio.Event()
     collect_count = 0
 
     async def collect(roots: tuple[Path, ...], _snapshots: dict[Path, dict[Path, int]]) -> set[Path]:
@@ -850,8 +881,11 @@ async def test_plugin_watcher_drops_pending_changes_when_reload_commits_during_s
         collect_count += 1
         if collect_count == 1:
             return {hooks_path}
-        second_scan_started.set()
-        await release_second_scan.wait()
+        if collect_count == 2:
+            second_scan_started.set()
+            await release_second_scan.wait()
+        else:
+            third_scan_started.set()
         return set()
 
     monkeypatch.setattr("mindroom.orchestration.plugin_watch._collect_plugin_root_changes", collect)
@@ -861,12 +895,14 @@ async def test_plugin_watcher_drops_pending_changes_when_reload_commits_during_s
     try:
         await asyncio.wait_for(second_scan_started.wait(), timeout=1)
         orchestrator.plugin_watch.refresh(config)
-        orchestrator.running = False
         release_second_scan.set()
-        await task
+        # The scan after the committed reload shows the watcher already handled the pending edit.
+        await asyncio.wait_for(third_scan_started.wait(), timeout=1)
     finally:
         task.cancel()
         release_second_scan.set()
+        with suppress(asyncio.CancelledError):
+            await task
     reload_mock.assert_not_awaited()
 
 
@@ -1154,12 +1190,12 @@ async def test_update_config_keeps_current_config_when_new_entity_account_prepar
     )
     orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config))
     orchestrator.config = current_config
-    orchestrator.agent_bots = {ROUTER_AGENT_NAME: MagicMock(), "general": MagicMock()}
+    install_bots(orchestrator, {ROUTER_AGENT_NAME: MagicMock(), "general": MagicMock()})
     orchestrator.running = True
     account_error = PermanentStartupError("configured entities share a Matrix ID")
 
     with (
-        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+        patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
         patch.object(orchestrator, "_prepare_entity_accounts", new=AsyncMock(side_effect=account_error)) as prepare,
         pytest.raises(PermanentStartupError, match="share a Matrix ID"),
     ):
@@ -1179,11 +1215,11 @@ async def test_update_config_starts_agent_added_only_by_personal_agent_roster(tm
     assert current_config.authored_model_dump() == new_config.authored_model_dump()
     orchestrator = _MultiAgentOrchestrator(paths)
     orchestrator.config = current_config
-    orchestrator.agent_bots = {ROUTER_AGENT_NAME: MagicMock()}
+    install_bots(orchestrator, {ROUTER_AGENT_NAME: MagicMock()})
     orchestrator.running = True
 
     with (
-        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+        patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
         patch.object(
             orchestrator,
             "_prepare_entity_accounts",
@@ -1216,12 +1252,12 @@ async def test_update_config_keeps_current_config_when_restarted_entity_account_
     )
     orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config))
     orchestrator.config = current_config
-    orchestrator.agent_bots = {ROUTER_AGENT_NAME: MagicMock(), "general": MagicMock()}
+    install_bots(orchestrator, {ROUTER_AGENT_NAME: MagicMock(), "general": MagicMock()})
     orchestrator.running = True
     account_error = PermanentStartupError("configured entities share a Matrix ID")
 
     with (
-        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+        patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
         patch.object(orchestrator, "_prepare_entity_accounts", new=AsyncMock(side_effect=account_error)) as prepare,
         pytest.raises(PermanentStartupError, match="share a Matrix ID"),
     ):
@@ -1245,12 +1281,11 @@ async def test_initialize_keeps_config_unpublished_when_entity_account_preparati
     account_error = PermanentStartupError("configured entities share a Matrix ID")
 
     with (
-        patch("mindroom.orchestrator.load_config", return_value=config),
         patch.object(orchestrator, "_prepare_user_account", new=AsyncMock()),
         patch.object(orchestrator, "_prepare_entity_accounts", new=AsyncMock(side_effect=account_error)),
         pytest.raises(PermanentStartupError, match="share a Matrix ID"),
     ):
-        await orchestrator.initialize()
+        await orchestrator.initialize(config)
 
     assert orchestrator.config is None
 
@@ -1288,11 +1323,11 @@ async def test_update_config_validates_internal_user_collision_before_publish(tm
     state.save(runtime_paths=runtime_paths)
     orchestrator = _MultiAgentOrchestrator(runtime_paths)
     orchestrator.config = current_config
-    orchestrator.agent_bots = {ROUTER_AGENT_NAME: MagicMock(), "general": MagicMock()}
+    install_bots(orchestrator, {ROUTER_AGENT_NAME: MagicMock(), "general": MagicMock()})
     orchestrator.running = True
 
     with (
-        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+        patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
         patch.object(orchestrator, "_prepare_user_account", new=AsyncMock()),
         patch.object(orchestrator, "_prepare_entity_accounts", new=AsyncMock()) as prepare_entities,
         pytest.raises(PermanentStartupError, match="internal user Matrix ID"),
@@ -1362,7 +1397,7 @@ async def test_ready_personal_agent_nudges_router_reconciliation(tmp_path: Path)
     orchestrator = _MultiAgentOrchestrator(paths)
     orchestrator.config = Config.validate_with_runtime(data, paths)
     router = MagicMock(spec=AgentBot)
-    orchestrator.agent_bots = {ROUTER_AGENT_NAME: router}
+    install_bots(orchestrator, {ROUTER_AGENT_NAME: router})
 
     await orchestrator.handle_bot_ready(MagicMock(spec=AgentBot, agent_name="general"))
     router.personal_room_target_ready.assert_not_called()
@@ -1537,7 +1572,7 @@ async def test_update_config_cancels_tasks_for_removed_plugins(
         _write_plugin_removal_test_config(tmp_path, with_plugin=True)
         _patch_orchestrator_plugin_update_test_runtime(monkeypatch)
         orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-        await orchestrator.initialize()
+        await initialize_from_config_file(orchestrator)
 
         hooks_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module
         package_root = plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module_name.split(".", 1)[0]
@@ -1592,13 +1627,13 @@ async def test_initialize_and_reload_warn_about_foreign_homeserver_authorities(
     write_config(administrators=["@owner:localhost"], invite_users=["@test:m-test-4.mindroom.chat"])
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     with capture_logs() as startup_logs:
-        await orchestrator.initialize()
+        await initialize_from_config_file(orchestrator)
 
     write_config(administrators=["@owner:localhost", "@admin:remote.example"], invite_users=["@owner:localhost"])
     with capture_logs() as reload_logs:
         updated = await orchestrator.config_reload._update_config()
 
-    assert updated is True
+    assert updated is False
     assert [log["user_ids"] for log in startup_logs if log["event"] == warning] == [["@test:m-test-4.mindroom.chat"]]
     assert [log["user_ids"] for log in reload_logs if log["event"] == warning] == [["@admin:remote.example"]]
 
@@ -1635,7 +1670,7 @@ async def test_initialize_and_reload_warn_about_unrestricted_file_access_next_to
     write_config("coder")
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     with capture_logs() as startup_logs:
-        await orchestrator.initialize()
+        await initialize_from_config_file(orchestrator)
 
     write_config("builder")
     with capture_logs() as reload_logs:
@@ -1691,11 +1726,9 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
 
     plan = ConfigUpdatePlan(
         new_config=new_config,
-        changed_mcp_servers=set(),
-        configured_entities=set(),
-        entities_to_restart=set(),
-        new_entities=set(),
-        removed_entities=set(),
+        restart=set(),
+        start=set(),
+        remove=set(),
         mindroom_user_changed=False,
         room_access_changed=False,
         matrix_space_changed=False,
@@ -1721,16 +1754,15 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
             return set()
 
         with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
-            patch("mindroom.orchestration.config_lifecycle.build_config_update_plan", return_value=plan),
-            patch.object(
-                orchestrator,
-                "_stop_entities_before_mcp_sync",
-                new=AsyncMock(side_effect=start_blocked_reload),
+            patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
+            patch(
+                "mindroom.orchestration.config_lifecycle.build_config_update_plan",
+                side_effect=lambda **kwargs: replace(plan, plugin_changes=kwargs["plugin_changes"]),
             ),
+            # Removal runs after the changed plugins are staged and before they are committed.
+            patch.object(orchestrator.fleet, "remove", new=AsyncMock(side_effect=start_blocked_reload)),
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
-            patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
         ):
             updated = await orchestrator.config_reload._update_config()
 
@@ -1768,6 +1800,8 @@ async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_cha
     orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
     orchestrator.config = config
     orchestrator.running = True
+    # The catalog change restarts only dependents that have a bot.
+    install_bots(orchestrator, {"agent1": MagicMock(spec=AgentBot, running=True)})
     reloaded_config = _runtime_bound_config(
         Config(
             agents={"agent1": AgentConfig(display_name="Agent 1", tools=["mcp_demo"])},
@@ -1779,18 +1813,14 @@ async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_cha
     apply_started = asyncio.Event()
     finish_apply = asyncio.Event()
 
-    async def apply_update_plan(
-        _current_config: Config,
-        _plan: ConfigUpdatePlan,
-        _plugin_changes: tuple[str, ...],
-    ) -> bool:
+    async def apply_update_plan(_current_config: Config, _plan: ConfigUpdatePlan) -> bool:
         apply_started.set()
         await finish_apply.wait()
         return False
 
     reload_result = PluginReloadResult(HookRegistry.empty(), (), 0)
     with (
-        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=reloaded_config),
+        patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(reloaded_config)),
         patch.object(orchestrator.config_reload, "apply_update_plan", new=apply_update_plan),
         patch("mindroom.orchestrator.reload_plugins", return_value=reload_result) as reload_plugins_mock,
     ):
@@ -1876,15 +1906,15 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.config = config
     orchestrator.running = True
-    orchestrator.agent_bots["agent1"] = bot
+    orchestrator.fleet.add("agent1", bot)
     # The orchestrator owns one shared gate that every managed bot admits through.
     bot.admission_gate = orchestrator.config_reload.response_admission_gate
     reloaded_config = _runtime_bound_config(
         config.model_copy(update={"defaults": config.defaults.model_copy(update={"enable_streaming": False})}),
         tmp_path,
     )
-    load_config_mock = MagicMock(return_value=reloaded_config)
-    monkeypatch.setattr("mindroom.orchestration.config_lifecycle.load_config", load_config_mock)
+    load_config_mock = MagicMock(return_value=published_config_load(reloaded_config))
+    monkeypatch.setattr(orchestrator.config_reload, "load_config", load_config_mock)
     orchestrator.config_reload.apply_update_plan = AsyncMock(return_value=True)
 
     response_task = asyncio.create_task(
@@ -1942,12 +1972,11 @@ def _entity_edit_plan(
     stopped: AbstractSet[str] = frozenset(),
 ) -> ConfigUpdatePlan:
     entities = {ROUTER_AGENT_NAME, "helper", "other", "crew"}
+    new_config = _entity_edit_config(change)
     return build_config_update_plan(
         current_config=_entity_edit_config(),
-        new_config=_entity_edit_config(change),
-        configured_entities=entities,
-        existing_entities=entities,
-        agent_bots={entity: AsyncMock(running=entity not in stopped) for entity in entities},
+        new_config=new_config,
+        bots={entity: AsyncMock(running=entity not in stopped) for entity in entities},
     )
 
 
@@ -1990,8 +2019,8 @@ def test_config_update_plan_applies_live_entity_edits_without_restarting(
     """Edits to fields running bots read live reach them through the unchanged-bot path."""
     plan = _entity_edit_plan(change)
 
-    assert plan.entities_to_restart == set()
-    assert plan.live_updated_entities == {entity}
+    assert plan.restart == set()
+    assert plan.live_updated == {entity}
 
 
 @pytest.mark.parametrize(
@@ -2018,8 +2047,94 @@ def test_config_update_plan_restarts_only_entities_whose_startup_inputs_changed(
     """Fields a bot reads only when it starts restart that bot and no other."""
     plan = _entity_edit_plan(change)
 
-    assert plan.entities_to_restart == restarted
-    assert plan.live_updated_entities == set()
+    assert plan.restart == restarted
+    assert plan.live_updated == set()
+
+
+def _remove_other_and_crew(data: dict[str, Any]) -> None:
+    del data["agents"]["other"]
+    del data["teams"]["crew"]
+
+
+def _remove_helper_and_change_docs_server(data: dict[str, Any]) -> None:
+    del data["agents"]["helper"]
+    data["teams"]["crew"]["agents"] = ["other"]
+    data["mcp_servers"]["docs"]["command"] = "uvx"
+
+
+def _helper_uses_docs(data: dict[str, Any]) -> None:
+    data["agents"]["helper"]["tools"] = ["mcp_docs"]
+
+
+@pytest.mark.parametrize(
+    ("change", "removed"),
+    [
+        pytest.param(_remove_other_and_crew, {"other", "crew"}, id="plain-removal"),
+        pytest.param(_remove_helper_and_change_docs_server, {"helper"}, id="removed-mcp-dependent"),
+    ],
+)
+def test_config_update_plan_removes_deleted_entities_without_restarting_them(
+    change: Callable[[dict[str, Any]], object],
+    removed: set[str],
+) -> None:
+    """A deleted entity is only removed, so its removal path still finds its bot."""
+    entities = {ROUTER_AGENT_NAME, "helper", "other", "crew"}
+    current_config = _entity_edit_config(_helper_uses_docs)
+    new_config = _entity_edit_config(change)
+    plan = build_config_update_plan(
+        current_config=current_config,
+        new_config=new_config,
+        bots={entity: AsyncMock(running=True) for entity in entities},
+        plugin_changes=("plugins/changed",),
+    )
+
+    assert plan.remove == removed
+    assert not plan.restart & removed
+
+
+def _crew_becomes_agent(data: dict[str, Any]) -> None:
+    del data["teams"]["crew"]
+    data["agents"]["crew"] = {"display_name": "Crew"}
+
+
+def _other_becomes_team(data: dict[str, Any]) -> None:
+    del data["agents"]["other"]
+    data["teams"]["other"] = {"display_name": "Other", "role": "Coordinate", "agents": ["helper"]}
+
+
+@pytest.mark.parametrize(
+    ("change", "entity"),
+    [
+        pytest.param(_crew_becomes_agent, "crew", id="team-to-agent"),
+        pytest.param(_other_becomes_team, "other", id="agent-to-team"),
+    ],
+)
+def test_config_update_plan_rebuilds_an_entity_that_changes_kind_under_the_same_name(
+    change: Callable[[dict[str, Any]], object],
+    entity: str,
+) -> None:
+    """The kept account needs the other kind of bot, so the entity restarts instead of keeping its old bot."""
+    plan = _entity_edit_plan(change)
+
+    assert entity in plan.restart
+    assert entity not in plan.start | plan.remove
+
+
+@pytest.mark.parametrize(
+    ("section", "entity"),
+    [pytest.param("teams", "crew", id="team"), pytest.param("agents", "other", id="agent")],
+)
+def test_config_update_plan_rebuilds_a_bot_left_over_from_a_failed_removal(section: str, entity: str) -> None:
+    """Restoring an entity whose removal failed part way rebuilds its half-stopped bot instead of keeping it."""
+    removal_config = _entity_edit_config(lambda data: data[section].pop(entity))
+    plan = build_config_update_plan(
+        current_config=removal_config,
+        new_config=_entity_edit_config(),
+        bots={name: AsyncMock(running=True) for name in (ROUTER_AGENT_NAME, "helper", "other", "crew")},
+    )
+
+    assert entity in plan.restart
+    assert entity not in plan.start | plan.remove
 
 
 @pytest.mark.parametrize(
@@ -2036,8 +2151,8 @@ def test_config_update_plan_restarts_a_stopped_bot_for_any_edit(
     """An edit to a bot whose startup failed retries that startup, even for a field read live."""
     plan = _entity_edit_plan(change, stopped={entity})
 
-    assert plan.entities_to_restart == {entity}
-    assert plan.live_updated_entities == set()
+    assert plan.restart == {entity}
+    assert plan.live_updated == set()
 
 
 @pytest.mark.parametrize("prompt_name", ["HIDDEN_TOOL_CALLS_PROMPT", "DELEGATE_BACKGROUND_JOB_INSTRUCTIONS"])
@@ -2075,13 +2190,10 @@ def test_config_update_plan_restarts_running_entities_when_construction_prompts_
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        bots={entity: AsyncMock() for entity in running_entities},
     )
 
-    assert plan.entities_to_restart == running_entities
-    assert plan.only_support_service_changes is False
+    assert plan.restart == running_entities
 
 
 def test_config_update_plan_does_not_restart_for_request_time_prompt_change() -> None:
@@ -2118,13 +2230,10 @@ def test_config_update_plan_does_not_restart_for_request_time_prompt_change() ->
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        bots={entity: AsyncMock() for entity in running_entities},
     )
 
-    assert plan.entities_to_restart == set()
-    assert plan.only_support_service_changes is True
+    assert plan.restart == set()
 
 
 def test_config_update_plan_reconciles_room_metadata_without_restarting_bots() -> None:
@@ -2148,14 +2257,11 @@ def test_config_update_plan_reconciles_room_metadata_without_restarting_bots() -
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        bots={entity: AsyncMock() for entity in running_entities},
     )
 
-    assert plan.entities_to_restart == set()
-    assert plan.room_metadata_changed is True
-    assert plan.only_support_service_changes is False
+    assert plan.restart == set()
+    assert plan.room_access_changed is True
 
 
 @pytest.mark.parametrize(
@@ -2197,9 +2303,7 @@ def test_config_update_plan_drains_responses_only_for_restarts_or_reply_authoriz
     plan = build_config_update_plan(
         current_config=_runtime_bound_config(Config.model_validate(base)),
         new_config=_runtime_bound_config(Config.model_validate({**base, **changes})),
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        bots={entity: AsyncMock() for entity in running_entities},
     )
 
     assert plan.requires_response_drain is requires_drain
@@ -2239,13 +2343,10 @@ def test_config_update_plan_restarts_agents_when_tool_output_threshold_changes()
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        bots={entity: AsyncMock() for entity in running_entities},
     )
 
-    assert plan.entities_to_restart == {"general", "team1"}
-    assert plan.only_support_service_changes is False
+    assert plan.restart == {"general", "team1"}
 
 
 def test_config_update_plan_restarts_old_and_new_call_agents_when_calls_change() -> None:
@@ -2275,12 +2376,10 @@ def test_config_update_plan_restarts_old_and_new_call_agents_when_calls_change()
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities),
+        bots=_call_bots(running_entities),
     )
 
-    assert plan.entities_to_restart == {"general", "writer"}
+    assert plan.restart == {"general", "writer"}
 
 
 def _two_call_agents_config(change: Callable[[dict[str, Any]], object] | None = None) -> Config:
@@ -2361,12 +2460,10 @@ def test_config_update_plan_restarts_call_agents_for_their_call_setup_or_a_call_
     plan = build_config_update_plan(
         current_config=_two_call_agents_config(),
         new_config=_two_call_agents_config(change),
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities, in_call=in_call),
+        bots=_call_bots(running_entities, in_call=in_call),
     )
 
-    assert plan.entities_to_restart & {"general", "writer"} == expected_call_restarts | in_call
+    assert plan.restart & {"general", "writer"} == expected_call_restarts | in_call
 
 
 def test_a_knowledge_graph_change_leaves_an_agent_in_a_call_running() -> None:
@@ -2376,12 +2473,10 @@ def test_a_knowledge_graph_change_leaves_an_agent_in_a_call_running() -> None:
     plan = build_config_update_plan(
         current_config=_two_call_agents_config(),
         new_config=_two_call_agents_config(lambda d: d.update(knowledge_graph={"generation": 1})),
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities, in_call={"general"}),
+        bots=_call_bots(running_entities, in_call={"general"}),
     )
 
-    assert plan.entities_to_restart == set()
+    assert plan.restart == set()
 
 
 def test_config_update_plan_restarts_call_agents_when_administrators_change() -> None:
@@ -2407,12 +2502,10 @@ def test_config_update_plan_restarts_call_agents_when_administrators_change() ->
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities, in_call={"general"}),
+        bots=_call_bots(running_entities, in_call={"general"}),
     )
 
-    assert plan.entities_to_restart == {"general"}
+    assert plan.restart == {"general"}
 
 
 def test_config_update_plan_restarts_call_agents_for_captured_policy_changes() -> None:
@@ -2437,12 +2530,10 @@ def test_config_update_plan_restarts_call_agents_for_captured_policy_changes() -
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities, in_call={"general"}),
+        bots=_call_bots(running_entities, in_call={"general"}),
     )
 
-    assert plan.entities_to_restart == {"general"}
+    assert plan.restart == {"general"}
 
 
 def test_config_update_plan_restarts_call_agent_when_inherited_tools_change() -> None:
@@ -2468,12 +2559,10 @@ def test_config_update_plan_restarts_call_agent_when_inherited_tools_change() ->
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities, in_call={"general"}),
+        bots=_call_bots(running_entities, in_call={"general"}),
     )
 
-    assert plan.entities_to_restart == {"general"}
+    assert plan.restart == {"general"}
 
 
 def test_config_update_plan_restarts_call_agent_when_worker_routing_changes() -> None:
@@ -2499,12 +2588,10 @@ def test_config_update_plan_restarts_call_agent_when_worker_routing_changes() ->
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities, in_call={"general"}),
+        bots=_call_bots(running_entities, in_call={"general"}),
     )
 
-    assert plan.entities_to_restart == {"general"}
+    assert plan.restart == {"general"}
 
 
 @pytest.mark.parametrize("backend", ["cascaded", "live"])
@@ -2537,12 +2624,10 @@ def test_config_update_plan_restarts_delegated_call_agent_when_referenced_model_
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities),
+        bots=_call_bots(running_entities),
     )
 
-    assert plan.entities_to_restart == {"general"}
+    assert plan.restart == {"general"}
 
 
 @pytest.mark.parametrize("backend", ["cascaded", "live"])
@@ -2575,12 +2660,10 @@ def test_config_update_plan_keeps_call_agents_running_when_only_model_prices_cha
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities),
+        bots=_call_bots(running_entities),
     )
 
-    assert plan.entities_to_restart == set()
+    assert plan.restart == set()
 
 
 def test_config_update_plan_restarts_realtime_call_agent_when_agent_model_changes() -> None:
@@ -2606,12 +2689,10 @@ def test_config_update_plan_restarts_realtime_call_agent_when_agent_model_change
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities, in_call={"general"}),
+        bots=_call_bots(running_entities, in_call={"general"}),
     )
 
-    assert plan.entities_to_restart == {"general"}
+    assert plan.restart == {"general"}
 
 
 @pytest.mark.parametrize("backend", ["cascaded", "live"])
@@ -2645,12 +2726,10 @@ def test_config_update_plan_restarts_implicit_delegated_call_agent_when_room_mod
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities, in_call={"general"}),
+        bots=_call_bots(running_entities, in_call={"general"}),
     )
 
-    assert plan.entities_to_restart == {"general"}
+    assert plan.restart == {"general"}
 
 
 @pytest.mark.parametrize(
@@ -2684,12 +2763,10 @@ def test_config_update_plan_restarts_call_agents_when_room_encryption_policy_cha
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities, in_call={"general"}),
+        bots=_call_bots(running_entities, in_call={"general"}),
     )
 
-    assert plan.entities_to_restart == {"general"}
+    assert plan.restart == {"general"}
 
 
 def test_config_update_plan_restarts_call_agent_when_knowledge_definition_changes() -> None:
@@ -2721,12 +2798,10 @@ def test_config_update_plan_restarts_call_agent_when_knowledge_definition_change
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities, in_call={"general"}),
+        bots=_call_bots(running_entities, in_call={"general"}),
     )
 
-    assert plan.entities_to_restart == {"general"}
+    assert plan.restart == {"general"}
 
 
 def test_config_update_plan_restarts_call_agent_when_its_rooms_change() -> None:
@@ -2750,13 +2825,11 @@ def test_config_update_plan_restarts_call_agent_when_its_rooms_change() -> None:
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities, in_call={"general"}),
+        bots=_call_bots(running_entities, in_call={"general"}),
     )
 
-    assert plan.entities_to_restart == {"general"}
-    assert plan.entities_to_reconcile_rooms == {ROUTER_AGENT_NAME}
+    assert plan.restart == {"general"}
+    assert plan.reconcile_rooms == {ROUTER_AGENT_NAME}
 
 
 def test_config_update_plan_reconciles_agent_and_router_room_changes_without_restarts() -> None:
@@ -2800,14 +2873,11 @@ def test_config_update_plan_reconciles_agent_and_router_room_changes_without_res
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots={entity: AsyncMock() for entity in running_entities},
+        bots={entity: AsyncMock() for entity in running_entities},
     )
 
-    assert plan.entities_to_restart == set()
-    assert plan.entities_to_reconcile_rooms == {ROUTER_AGENT_NAME, "general", "editors"}
-    assert plan.only_support_service_changes is False
+    assert plan.restart == set()
+    assert plan.reconcile_rooms == {ROUTER_AGENT_NAME, "general", "editors"}
 
 
 def test_config_update_plan_stops_call_agents_when_calls_are_disabled() -> None:
@@ -2831,16 +2901,14 @@ def test_config_update_plan_stops_call_agents_when_calls_are_disabled() -> None:
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities=running_entities,
-        existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities),
+        bots=_call_bots(running_entities),
     )
 
-    assert plan.entities_to_restart == {"general"}
+    assert plan.restart == {"general"}
 
 
-def test_config_update_plan_tracks_added_entities_even_when_they_restart() -> None:
-    """Added entities stay visible to account-preparation gates even when restart planning creates them."""
+def test_config_update_plan_starts_added_entities_without_restarting_them() -> None:
+    """An added entity is started, not restarted, so account preparation and hooks see it as added."""
     old_config = _runtime_bound_config(
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
@@ -2860,14 +2928,11 @@ def test_config_update_plan_tracks_added_entities_even_when_they_restart() -> No
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        configured_entities={ROUTER_AGENT_NAME, "general", "writer"},
-        existing_entities={ROUTER_AGENT_NAME, "general"},
-        agent_bots={ROUTER_AGENT_NAME: AsyncMock(), "general": AsyncMock()},
+        bots={ROUTER_AGENT_NAME: AsyncMock(), "general": AsyncMock()},
     )
 
-    assert plan.added_entities == {"writer"}
-    assert plan.new_entities == set()
-    assert plan.entities_to_restart == {"writer"}
+    assert plan.start == {"writer"}
+    assert plan.restart == set()
 
 
 @pytest.fixture
@@ -3014,18 +3079,6 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
-    # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(
-        _client: AsyncMock,
-        _room_id: str,
-        _config: Config,
-        _runtime_paths: object,
-        _conversation_reader: object,
-    ) -> int:
-        return 0
-
-    monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
-
     # Mock resolve_room_aliases
     def mock_resolve_room_aliases(aliases: list[str], _runtime_paths: object | None = None) -> list[str]:
         return list(aliases)
@@ -3097,21 +3150,6 @@ async def test_router_updates_rooms_on_config_reload(
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
-    # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(
-        _client: AsyncMock,
-        _room_id: str,
-        _config: Config,
-        _runtime_paths: object,
-        _conversation_reader: object,
-        *,
-        config_provider: Callable[[], Config | None] | None = None,
-    ) -> int:
-        del config_provider
-        return 0
-
-    monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
-
     # Mock resolve_room_aliases
     def mock_resolve_room_aliases(aliases: list[str], _runtime_paths: object | None = None) -> list[str]:
         return list(aliases)
@@ -3179,18 +3217,6 @@ async def test_new_agent_joins_rooms_on_config_reload(
 
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
 
-    # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(
-        _client: AsyncMock,
-        _room_id: str,
-        _config: Config,
-        _runtime_paths: object,
-        _conversation_reader: object,
-    ) -> int:
-        return 0
-
-    monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
-
     # Mock resolve_room_aliases
     def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
         return list(aliases)
@@ -3253,18 +3279,6 @@ async def test_team_room_changes_on_config_reload(
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
-    # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(
-        _client: AsyncMock,
-        _room_id: str,
-        _config: Config,
-        _runtime_paths: object,
-        _conversation_reader: object,
-    ) -> int:
-        return 0
-
-    monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
-
     # Mock resolve_room_aliases
     def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
         return list(aliases)
@@ -3306,27 +3320,13 @@ async def test_team_room_changes_on_config_reload(
 @pytest.mark.asyncio
 @pytest.mark.requires_matrix  # This test requires a real Matrix server or extensive mocking
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
+async def test_orchestrator_handles_config_reload(
     initial_config: Config,
     updated_config: Config,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Test that the orchestrator properly handles config reloads and updates all bots."""
-    # Track config loads
-    config_loads = [initial_config, updated_config]
-    load_count = [0]
-
-    def mock_load_config(
-        _runtime_paths: object | None = None,
-        **_kwargs: object,
-    ) -> Config:
-        result = config_loads[min(load_count[0], len(config_loads) - 1)]
-        load_count[0] += 1
-        return result
-
-    monkeypatch.setattr("mindroom.orchestrator.load_config", mock_load_config)
-    monkeypatch.setattr("mindroom.orchestration.config_lifecycle.load_config", mock_load_config)
 
     def mock_resolve_room_aliases(aliases: list[str], _runtime_paths: object | None = None) -> list[str]:
         return list(aliases)
@@ -3351,15 +3351,14 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
 
     monkeypatch.setattr("mindroom.bot.AgentBot.start", mock_start)
     monkeypatch.setattr("mindroom.bot.AgentBot.sync_forever", AsyncMock())
-    monkeypatch.setattr("mindroom.bot.TeamBot.start", mock_start)
-    monkeypatch.setattr("mindroom.bot.TeamBot.sync_forever", AsyncMock())
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
-    monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
+    monkeypatch.setattr("mindroom.orchestration.rooms.RoomSetup.setup", AsyncMock())
 
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    monkeypatch.setattr(orchestrator.config_reload, "load_config", lambda: published_config_load(updated_config))
 
     # Initialize with initial config
-    await orchestrator.initialize()
+    await orchestrator.initialize(initial_config)
 
     # Verify initial state
     assert "agent1" in orchestrator.agent_bots
@@ -3381,9 +3380,8 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
             self.client = AsyncMock()
             self.client.user_id = self.agent_user.user_id
 
-    # Patch AgentBot.start and TeamBot.start to use our mock
+    # Patch AgentBot.start to use our mock
     monkeypatch.setattr("mindroom.bot.AgentBot.start", mock_start_with_thread_manager)
-    monkeypatch.setattr("mindroom.bot.TeamBot.start", mock_start_with_thread_manager)
 
     # Mock bot operations for update
     for bot in orchestrator.agent_bots.values():
@@ -3419,7 +3417,7 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
 
 
 @pytest.mark.asyncio
-async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
+async def test_room_membership_state_after_config_update(  # noqa: C901
     initial_config: Config,  # noqa: ARG001
     updated_config: Config,  # noqa: ARG001
     mock_agent_users: dict[str, AgentMatrixUser],
@@ -3459,21 +3457,6 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
 
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
-
-    # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(
-        _client: AsyncMock,
-        _room_id: str,
-        _config: Config,
-        _runtime_paths: object,
-        _conversation_reader: object,
-        *,
-        config_provider: Callable[[], Config | None] | None = None,
-    ) -> int:
-        del config_provider
-        return 0
-
-    monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
 
     # Mock resolve_room_aliases
     def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
@@ -3880,11 +3863,11 @@ async def test_shutdown_during_active_drain_cancels_reload(
     mock_bot.deferred_stop_phase = None
     mock_bot.deferred_stop_required = False
     mock_bot.stop = AsyncMock()
-    orchestrator.agent_bots["agent1"] = mock_bot
+    orchestrator.fleet.add("agent1", mock_bot)
     # An admitted response that never finishes, so the drain never goes idle.
     assert orchestrator.config_reload.response_admission_gate.admit()
-    load_config_mock = MagicMock(return_value=reloaded_config)
-    monkeypatch.setattr("mindroom.orchestration.config_lifecycle.load_config", load_config_mock)
+    load_config_mock = MagicMock(return_value=published_config_load(reloaded_config))
+    monkeypatch.setattr(orchestrator.config_reload, "load_config", load_config_mock)
     orchestrator.config_reload.apply_update_plan = AsyncMock(return_value=True)
     orchestrator.config_reload.request_reload()
     task = orchestrator.config_reload._reload_task

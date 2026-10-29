@@ -11,18 +11,18 @@ import pytest
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     drain_coalescing,
+    install_edit_regeneration_mock,
     install_runtime_journal_support,
     make_matrix_client_mock,
-    replace_edit_regenerator_deps,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -67,10 +67,9 @@ def setup_test_bot(
     agent: AgentMatrixUser,
     storage_path: Path,
     room_id: str,
-    enable_streaming: bool = False,
     config: Config | None = None,
 ) -> AgentBot:
-    """Set up a test bot with all required mocks."""
+    """Set up a non-streaming test bot with all required mocks."""
     runtime_paths = test_runtime_paths(storage_path)
     if config is None:
         config = bind_runtime_paths(Config(router=RouterConfig(model="default")), runtime_paths)
@@ -80,6 +79,7 @@ def setup_test_bot(
         except KeyError:
             config = bind_runtime_paths(config, runtime_paths)
     persist_entity_accounts(config, runtime_paths_for(config))
+    config.defaults.enable_streaming = False
 
     bot = make_test_agent_bot(
         agent,
@@ -87,12 +87,11 @@ def setup_test_bot(
         config,
         runtime_paths_for(config),
         rooms=[room_id],
-        enable_streaming=enable_streaming,
     )
     install_direct_response_admission(bot)
     bot.client = _make_matrix_client_mock()
     install_runtime_journal_support(bot)
-    bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
+    bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
     )
     bot._conversation_resolver.fetch_thread_history = AsyncMock(
@@ -102,6 +101,7 @@ def setup_test_bot(
     # Mock orchestrator
     mock_orchestrator = MagicMock()
     mock_orchestrator.current_config = config
+    mock_orchestrator.agent_bots = {name: MagicMock(running=True) for name in (*config.agents, *config.teams)}
     bot.orchestrator = mock_orchestrator
 
     return bot
@@ -179,6 +179,7 @@ class TestStreamingEdits:
         assert mock_stream_agent_response.call_count == 1
         await bot._turn_store.record_turn(
             TurnRecord.create(["$initial123"], response_event_id="$response123"),
+            room_id="!test:localhost",
         )
 
         # Reset mocks
@@ -208,7 +209,7 @@ class TestStreamingEdits:
 
         # Process edit - bot SHOULD regenerate its response.
         mock_generate_response = AsyncMock(return_value=_delivery_resolution("$response123"))
-        replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+        install_edit_regeneration_mock(bot, mock_generate_response)
         await bot._on_message(mock_room, edit_event1)
         await drain_coalescing(bot)
         assert mock_generate_response.await_count == 1
@@ -240,7 +241,7 @@ class TestStreamingEdits:
 
         # Process second edit - bot should regenerate again.
         mock_generate_response = AsyncMock(return_value=_delivery_resolution("$response123"))
-        replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+        install_edit_regeneration_mock(bot, mock_generate_response)
         await bot._on_message(mock_room, edit_event2)
         await drain_coalescing(bot)
         assert mock_generate_response.await_count == 1
@@ -270,7 +271,7 @@ class TestStreamingEdits:
         mock_room.room_id = "!test:localhost"
 
         # Mark that we already responded to some original message
-        await bot._turn_store.record_turn(TurnRecord.create(["$original123"]))
+        await bot._turn_store.record_turn(TurnRecord.create(["$original123"]), room_id="!test:localhost")
 
         # New message (NOT an edit) mentioning the agent
         new_event = MagicMock()

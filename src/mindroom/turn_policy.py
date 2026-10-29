@@ -1,8 +1,7 @@
-"""Pure turn policy and ingress hook enrichment for inbound turns."""
+"""Pure turn policy for inbound turns."""
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -14,25 +13,9 @@ from mindroom.authorization import (
     is_sender_allowed_for_agent_reply_in_room,
     is_sender_allowed_for_responder,
 )
-from mindroom.constants import MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY, ROUTER_AGENT_NAME, RuntimePaths
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, ScheduledHistoryBudget
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.hooks import (
-    EVENT_MESSAGE_ENRICH,
-    EVENT_MESSAGE_RECEIVED,
-    EVENT_SYSTEM_ENRICH,
-    EnrichmentItem,
-    HookContextSupport,
-    HookIngressPolicy,
-    MessageEnrichContext,
-    MessageEnvelope,
-    MessageReceivedContext,
-    SystemEnrichContext,
-    emit,
-    emit_collect,
-    render_enrichment_block,
-)
-from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.managed_room_notice import managed_room_notice, responder_display_names
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.responder_availability import (
@@ -59,7 +42,7 @@ from mindroom.thread_utils import (
     is_router_only_agent_mention,
     thread_requires_explicit_agent_targeting,
 )
-from mindroom.timing import emit_elapsed_timing, timed
+from mindroom.timing import timed
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -72,12 +55,9 @@ if TYPE_CHECKING:
     from mindroom.config.participation import ParticipationConfig
     from mindroom.conversation_resolver import MessageContext
     from mindroom.dispatch_handoff import DispatchEvent, MediaDispatchEvent, PreparedIngress
+    from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
-
-
-def _without_runtime_owned_enrichment(items: list[EnrichmentItem]) -> list[EnrichmentItem]:
-    return [item for item in items if item.key != MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY]
 
 
 @dataclass(frozen=True)
@@ -111,7 +91,7 @@ class PreparedDispatch:
 
 
 @dataclass(frozen=True)
-class _DispatchPlan:
+class DispatchPlan:
     """Pure policy output for one normalized inbound turn."""
 
     kind: Literal["ignore", "route", "respond"]
@@ -133,148 +113,6 @@ _ROUTER_ONLY_MENTION_GUIDANCE = (
     "automatic routing can still choose an agent or team when appropriate. The router is not a conversational AI "
     "agent you can tag directly."
 )
-
-
-@dataclass(frozen=True)
-class _PreparedHookedPayload:
-    """Concrete payload returned after ingress enrichment hooks run."""
-
-    payload: DispatchPayload
-    envelope: MessageEnvelope
-    transient_enrichment_items: tuple[EnrichmentItem, ...]
-
-
-@dataclass
-class IngressHookRunner:
-    """Own ingress hook emission and message or system enrichment updates."""
-
-    hook_context: HookContextSupport
-
-    async def emit_message_received_hooks(
-        self,
-        *,
-        envelope: MessageEnvelope,
-        correlation_id: str,
-        policy: HookIngressPolicy,
-    ) -> bool:
-        """Emit message:received and return whether hooks suppressed processing."""
-        if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_RECEIVED):
-            return False
-        if not policy.rerun_message_received:
-            return False
-
-        context = MessageReceivedContext(
-            **self.hook_context.base_kwargs(EVENT_MESSAGE_RECEIVED, correlation_id),
-            envelope=envelope,
-            skip_plugin_names=policy.skip_message_received_plugin_names,
-        )
-        await emit(self.hook_context.registry, EVENT_MESSAGE_RECEIVED, context)
-        return context.suppress
-
-    async def apply_message_enrichment(
-        self,
-        dispatch: PreparedDispatch,
-        payload: DispatchPayload,
-        *,
-        target_entity_name: str,
-        target_member_names: tuple[str, ...] | None,
-    ) -> _PreparedHookedPayload:
-        """Run message:enrich and return the model-facing payload."""
-        started = time.monotonic()
-        hook_registered = self.hook_context.registry.has_hooks(EVENT_MESSAGE_ENRICH)
-        item_count = 0
-        transient_enrichment_items: tuple[EnrichmentItem, ...] = ()
-
-        envelope = MessageEnvelope(
-            source_event_id=dispatch.envelope.source_event_id,
-            target=dispatch.envelope.target,
-            body=dispatch.envelope.body,
-            attachment_ids=(
-                tuple(payload.attachment_ids)
-                if payload.attachment_ids is not None
-                else dispatch.envelope.attachment_ids
-            ),
-            mentioned_agents=dispatch.envelope.mentioned_agents,
-            agent_name=target_entity_name,
-            hook_source=dispatch.envelope.hook_source,
-            message_received_depth=dispatch.envelope.message_received_depth,
-            dispatch_policy_source_kind=dispatch.envelope.dispatch_policy_source_kind,
-            origin=dispatch.envelope.origin,
-        )
-        model_prompt = payload.model_prompt
-        if hook_registered:
-            context = MessageEnrichContext(
-                **self.hook_context.base_kwargs(EVENT_MESSAGE_ENRICH, dispatch.correlation_id),
-                envelope=envelope,
-                target_entity_name=target_entity_name,
-                target_member_names=target_member_names,
-            )
-            items = _without_runtime_owned_enrichment(
-                await emit_collect(self.hook_context.registry, EVENT_MESSAGE_ENRICH, context),
-            )
-            item_count = len(items)
-            persisted_items = [item for item in items if item.persist]
-            transient_enrichment_items = tuple(item for item in items if not item.persist)
-            if persisted_items:
-                enrichment_block = render_enrichment_block(persisted_items)
-                base_model_prompt = payload.model_prompt if payload.model_prompt is not None else payload.prompt
-                model_prompt = f"{base_model_prompt.rstrip()}\n\n{enrichment_block}"
-
-        emit_elapsed_timing(
-            "response_payload.apply_message_enrichment",
-            started,
-            room_id=dispatch.envelope.room_id,
-            target_entity_name=target_entity_name,
-            hook_registered=hook_registered,
-            enrichment_item_count=item_count,
-        )
-        return _PreparedHookedPayload(
-            payload=DispatchPayload(
-                prompt=payload.prompt,
-                model_prompt=model_prompt,
-                media=payload.media,
-                attachment_ids=payload.attachment_ids,
-            ),
-            envelope=envelope,
-            transient_enrichment_items=transient_enrichment_items,
-        )
-
-    async def apply_system_enrichment(
-        self,
-        dispatch: PreparedDispatch,
-        envelope: MessageEnvelope,
-        *,
-        target_entity_name: str,
-        target_member_names: tuple[str, ...] | None,
-    ) -> list[EnrichmentItem]:
-        """Run system:enrich and return system-prompt enrichment items."""
-        started = time.monotonic()
-        hook_registered = self.hook_context.registry.has_hooks(EVENT_SYSTEM_ENRICH)
-
-        def finish(items: list[EnrichmentItem]) -> list[EnrichmentItem]:
-            emit_elapsed_timing(
-                "response_payload.apply_system_enrichment",
-                started,
-                room_id=dispatch.envelope.room_id,
-                target_entity_name=target_entity_name,
-                hook_registered=hook_registered,
-                enrichment_item_count=len(items),
-            )
-            return items
-
-        if not hook_registered:
-            return finish([])
-        context = SystemEnrichContext(
-            **self.hook_context.base_kwargs(EVENT_SYSTEM_ENRICH, dispatch.correlation_id),
-            envelope=envelope,
-            target_entity_name=target_entity_name,
-            target_member_names=target_member_names,
-        )
-        return finish(
-            _without_runtime_owned_enrichment(
-                await emit_collect(self.hook_context.registry, EVENT_SYSTEM_ENRICH, context),
-            ),
-        )
 
 
 @dataclass(frozen=True)
@@ -387,10 +225,10 @@ class TurnPolicy:
             self.deps.runtime_paths,
             self.deps.agent_reply_memberships,
         )
-        available = self._filter_materializable_responders(candidates.allowed, self.responder_availability())
+        available = self._filter_materializable_responders(candidates.allowed, self._responder_availability())
         return participation if self.deps.matrix_id in available else None
 
-    def responder_availability(self) -> _ResponderAvailability:
+    def _responder_availability(self) -> _ResponderAvailability:
         """Snapshot in-memory responder liveness for one decision flow.
 
         Each decision flow takes a fresh snapshot on entry and passes it down
@@ -436,7 +274,7 @@ class TurnPolicy:
         requester_user_id: str,
     ) -> list[MatrixID]:
         """Return candidates from the boundary-prepared room membership snapshot."""
-        availability = self.responder_availability()
+        availability = self._responder_availability()
         candidates = classify_responder_candidates_from_cached_room(
             room,
             requester_user_id,
@@ -604,7 +442,7 @@ class TurnPolicy:
         """Apply configured-team execution behavior before running one response action."""
         if action.kind != "individual":
             return action
-        configured_team_action = self._configured_team_response_action(self.responder_availability())
+        configured_team_action = self._configured_team_response_action(self._responder_availability())
         return configured_team_action or action
 
     def _explicit_configured_team_rejection_action(
@@ -688,7 +526,7 @@ class TurnPolicy:
         extra_content: dict[str, Any] | None = None,
         media_events: list[MediaDispatchEvent] | None = None,
         router_event: DispatchEvent | None = None,
-    ) -> _DispatchPlan | None:
+    ) -> DispatchPlan | None:
         """Return one router-specific dispatch plan when this entity is the router."""
         if self.deps.agent_name != ROUTER_AGENT_NAME:
             return None
@@ -703,8 +541,8 @@ class TurnPolicy:
             runtime_paths=self.deps.runtime_paths,
         ):
             if not self.can_reply_to_sender_in_room(requester_user_id, room.room_id):
-                return _DispatchPlan(kind="ignore", ignore_reason="router")
-            plan = _DispatchPlan(
+                return DispatchPlan(kind="ignore", ignore_reason="router")
+            plan = DispatchPlan(
                 kind="respond",
                 response_action=ResponseAction(
                     kind="reject",
@@ -712,13 +550,13 @@ class TurnPolicy:
                 ),
             )
         elif context.mentioned_agents or context.has_non_agent_mentions:
-            plan = _DispatchPlan(kind="ignore", ignore_reason="router")
+            plan = DispatchPlan(kind="ignore", ignore_reason="router")
         elif context.planning_thread_history_unavailable:
             self.deps.logger.info("Skipping routing: thread policy history unavailable")
-            plan = _DispatchPlan(kind="ignore", ignore_reason="router")
+            plan = DispatchPlan(kind="ignore", ignore_reason="router")
         else:
             if not self.can_reply_to_sender_in_room(requester_user_id, room.room_id):
-                return _DispatchPlan(kind="ignore", ignore_reason="router")
+                return DispatchPlan(kind="ignore", ignore_reason="router")
             available_responders = await self.responder_candidates_for_room(room, requester_user_id)
             if context.is_thread and thread_requires_explicit_agent_targeting(
                 planning_thread_history,
@@ -729,12 +567,12 @@ class TurnPolicy:
                 available_responders_in_room=available_responders,
             ):
                 self.deps.logger.info("Skipping routing: thread already requires explicit responder targeting")
-                plan = _DispatchPlan(kind="ignore", ignore_reason="router")
+                plan = DispatchPlan(kind="ignore", ignore_reason="router")
             elif len(available_responders) == 1:
                 self.deps.logger.info("Skipping routing: only one responder candidate")
-                plan = _DispatchPlan(kind="ignore", ignore_reason="router")
+                plan = DispatchPlan(kind="ignore", ignore_reason="router")
             else:
-                plan = _DispatchPlan(
+                plan = DispatchPlan(
                     kind="route",
                     router_message=message,
                     extra_content=extra_content,
@@ -754,7 +592,7 @@ class TurnPolicy:
         extra_content: dict[str, Any] | None = None,
         media_events: list[MediaDispatchEvent] | None = None,
         router_event: DispatchEvent | None = None,
-    ) -> _DispatchPlan:
+    ) -> DispatchPlan:
         """Return the explicit policy plan for one prepared inbound turn."""
         router_plan = await self._plan_router_dispatch(
             room,
@@ -774,8 +612,8 @@ class TurnPolicy:
             has_active_response_for_target=has_active_response_for_target,
         )
         if action.kind == "skip":
-            return _DispatchPlan(kind="ignore")
-        return _DispatchPlan(kind="respond", response_action=action)
+            return DispatchPlan(kind="ignore")
+        return DispatchPlan(kind="respond", response_action=action)
 
     def _adaptive_response_action(
         self,
@@ -806,7 +644,7 @@ class TurnPolicy:
         context = dispatch.context
         requester_user_id = dispatch.requester_user_id
         planning_thread_history = context.planning_thread_history
-        availability = self.responder_availability()
+        availability = self._responder_availability()
         candidates = classify_responder_candidates_from_cached_room(
             room,
             requester_user_id,

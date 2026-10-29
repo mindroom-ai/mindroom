@@ -15,9 +15,10 @@ from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.cancellation import current_task_is_process_shutdown
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
+from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.event_journal.opening import OpenEventJournal
-from mindroom.handled_turns import _reset_handled_turn_ledger_runtime
+from mindroom.history.types import HistoryScope
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.event_info import EventInfo
@@ -32,7 +33,7 @@ from mindroom.runtime_shutdown import (
     RuntimeShutdownIntent,
 )
 from mindroom.session_storage.agent_storage import create_state_storage
-from tests.conftest import unwrap_extracted_collaborator
+from tests.conftest import install_bots, make_ingress_facts, unwrap_extracted_collaborator
 from tests.journal_helpers import admit_dispatch_event
 from tests.response_runner_helpers import _bot, _plain_request, _target
 from tests.test_edit_regenerator import (
@@ -46,7 +47,6 @@ from tests.test_edit_regenerator import (
     _turn_record,
 )
 from tests.test_response_attempt import _Span
-from tests.test_response_delivery_gateway import _response_recovery_bot
 from tests.test_turn_store import _store, _store_with_storage
 
 if TYPE_CHECKING:
@@ -56,7 +56,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal import EventJournalStore, PrincipalStore
     from mindroom.response_runner import ResponseRequest
 
-pytestmark = [pytest.mark.ledger_loads_from_disk, pytest.mark.usefixtures("enforce_turn_authorization")]
+pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
 
 def _dispatcher(
@@ -99,7 +99,7 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     principal = journal_store.principal("agent@alice")
     store = await _store_with_storage(
         journal_store,
-        create_state_storage(AGENT_NAME, tmp_path / "history"),
+        create_state_storage(AGENT_NAME, tmp_path / "history", HistoryScope(kind="agent", scope_id=AGENT_NAME)),
         agent_name=AGENT_NAME,
     )
     await store.record_responded_turn(_turn_record(source_event_prompts={ORIGINAL_EVENT_ID: "original"}))
@@ -139,7 +139,7 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
             room,
             event,
             EventInfo.from_event(event.source),
-            USER_ID,
+            make_ingress_facts(event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id=USER_ID),
         )
         return TurnDispatchOutcome.DEFERRED if handed_off else TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
@@ -163,7 +163,7 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     await asyncio.gather(*harness.regenerations, return_exceptions=True)
 
     assert await principal.is_pending(EDIT_EVENT_ID)
-    interrupted = store.get_turn_record(ORIGINAL_EVENT_ID)
+    interrupted = await store.get_turn_record(ORIGINAL_EVENT_ID)
     assert interrupted is not None
     # The turn took the edit when its regeneration claimed the reply.
     assert interrupted.source_event_revisions == {ORIGINAL_EVENT_ID: (1_000_001, EDIT_EVENT_ID)}
@@ -177,9 +177,8 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     recovered = _dispatcher(principal, callback, source_has_live_owner=regenerating)
     assert await recovered.drain_once() == 1
     await asyncio.gather(*harness.regenerations)
-    _reset_handled_turn_ledger_runtime()
     reopened = await _store(journal_store, agent_name=AGENT_NAME)
-    recovered_record = reopened.get_turn_record(ORIGINAL_EVENT_ID)
+    recovered_record = await reopened.get_turn_record(ORIGINAL_EVENT_ID)
     assert recovered_record is not None
     assert recovered_record.completed
     assert recovered_record.response_event_id == NEW_RESPONSE_EVENT_ID
@@ -257,7 +256,7 @@ async def test_shutdown_closes_callbacks_before_membership_invalidation(  # noqa
     orchestrator.config = bot.config
     orchestrator.agent_reply_memberships = memberships
     orchestrator.agent_reply_membership_sync = AgentReplyMembershipSync(memberships)
-    orchestrator.agent_bots = {"general": bot}
+    install_bots(orchestrator, {"general": bot})
 
     async def release_callback() -> None:
         release.set()
@@ -310,8 +309,7 @@ async def test_recovery_proof_rejects_settlement_without_final_output(journal_st
         ),
     )
     await principal.settle("$missing-output")
-    proof_owner = _response_recovery_bot(journal_store, store)
-    assert not await proof_owner._response_recovery_ready(record)
+    assert not await store.response_recovery_ready(record)
 
 
 @pytest.mark.asyncio
@@ -397,10 +395,10 @@ async def test_shutdown_retains_slow_callback_cleanup_within_budgets(  # noqa: P
     monkeypatch.setattr("mindroom.bot.SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.02)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
     orchestrator.config = bot.config
-    orchestrator.agent_bots = {"general": bot}
+    install_bots(orchestrator, {"general": bot})
     opened_journal = MagicMock(spec=OpenEventJournal, store=journal_store, close=AsyncMock())
     orchestrator._open_journal = opened_journal
-    monkeypatch.setattr("mindroom.orchestrator.RESPONSE_FINALIZATION_TIMEOUT_SECONDS", 0.02)
+    monkeypatch.setattr("mindroom.orchestration.entity_fleet.RESPONSE_FINALIZATION_TIMEOUT_SECONDS", 0.02)
     stopping = asyncio.create_task(orchestrator.stop() if orchestrated else bot.stop(shutdown_intent=ORDERLY_SHUTDOWN))
     try:
         await asyncio.wait_for(unwinding.wait(), timeout=1)
@@ -496,11 +494,11 @@ async def test_orderly_shutdown_upgrades_callback_already_stopping(  # noqa: PLR
     await asyncio.wait_for(unwinding.wait(), timeout=2)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
     orchestrator.config = bot.config
-    orchestrator.agent_bots = {"general": bot}
+    install_bots(orchestrator, {"general": bot})
     opened_journal = MagicMock(spec=OpenEventJournal, store=journal_store, close=AsyncMock())
     orchestrator._open_journal = opened_journal
     monkeypatch.setattr("mindroom.bot.SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.02)
-    monkeypatch.setattr("mindroom.orchestrator.RESPONSE_FINALIZATION_TIMEOUT_SECONDS", 0.02)
+    monkeypatch.setattr("mindroom.orchestration.entity_fleet.RESPONSE_FINALIZATION_TIMEOUT_SECONDS", 0.02)
     try:
         with pytest.raises(ResponseShutdownTimeoutError):
             await asyncio.wait_for(orchestrator.stop(), timeout=3)
@@ -542,7 +540,7 @@ async def test_process_shutdown_fence_survives_late_sync_start(  # noqa: C901, P
     bot._journal_dispatcher = dispatcher
     orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
     orchestrator.config = bot.config
-    orchestrator.agent_bots = {"general": bot}
+    install_bots(orchestrator, {"general": bot})
     teardown_entered = asyncio.Event()
     release_teardown = asyncio.Event()
     retry_entered = asyncio.Event()

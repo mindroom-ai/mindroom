@@ -1,0 +1,119 @@
+{
+ "records": {
+  "$a1": {
+   "anchor_event_id": "$m6",
+   "completed": true,
+   "discovery_event_ids": [
+    "$a1"
+   ],
+   "redacted_source_event_ids": [],
+   "response_event_id": "$r6",
+   "source_event_ids": [
+    "$m6"
+   ],
+   "timestamp": 1799913600.0
+  },
+  "$m1": {
+   "anchor_event_id": "$m1",
+   "completed": true,
+   "pending_redaction_cleanup_event_ids": [],
+   "redacted_source_event_ids": [],
+   "response_event_id": "$r1",
+   "source_event_ids": [
+    "$m1"
+   ],
+   "timestamp": 1799913600.0
+  },
+  "$m2": {
+   "anchor_event_id": "$m3",
+   "completed": true,
+   "redacted_source_event_ids": [],
+   "response_event_id": "$r2",
+   "source_event_ids": [
+    "$m2",
+    "$m3"
+   ],
+   "source_event_prompts": {
+    "$m2": "a",
+    "$m3": "b"
+   },
+   "timestamp": 1799913600.0
+  },
+  "$m3": {
+   "anchor_event_id": "$m3",
+   "completed": true,
+   "redacted_source_event_ids": [],
+   "response_event_id": "$r2",
+   "source_event_ids": [
+    "$m2",
+    "$m3"
+   ],
+   "source_event_prompts": {
+    "$m2": "a",
+    "$m3": "b"
+   },
+   "timestamp": 1799913600.0
+  },
+  "$m4": {
+   "anchor_event_id": "$m4",
+   "completed": false,
+   "conversation_target": {
+    "reply_to_event_id": null,
+    "resolved_thread_id": "$thread-a",
+    "room_id": "!a:example.org",
+    "session_id": "!a:example.org:$thread-a",
+    "source_thread_id": "$thread-a"
+   },
+   "history_scope": {
+    "kind": "agent",
+    "scope_id": "agent"
+   },
+   "redacted_source_event_ids": [],
+   "requester_id": "@alice:example.org",
+   "response_event_id": null,
+   "response_owner": "agent",
+   "source_event_ids": [
+    "$m4"
+   ],
+   "source_event_revisions": {
+    "$m4": [
+     40,
+     "$e4"
+    ]
+   },
+   "timestamp": 1799913600.0
+  },
+  "$m5": {
+   "anchor_event_id": "$m5",
+   "completed": false,
+   "redacted_source_event_ids": [
+    "$m5"
+   ],
+   "response_event_id": null,
+   "source_event_ids": [
+    "$m5"
+   ],
+   "timestamp": 1799913600.0
+  },
+  "$m6": {
+   "anchor_event_id": "$m6",
+   "completed": true,
+   "discovery_event_ids": [
+    "$a1"
+   ],
+   "redacted_source_event_ids": [],
+   "response_event_id": "$r6",
+   "source_event_ids": [
+    "$m6"
+   ],
+   "timestamp": 1799913600.0
+  },
+  "$m7": {
+   "completed": true,
+   "source_event_ids": [
+    "$m7"
+   ]
+  }
+ },
+ "schema_version": 1
+}

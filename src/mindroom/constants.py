@@ -1118,6 +1118,8 @@ PER_FIRE_THREAD_ROOT_EVENT_ID_KEY = "com.mindroom.per_fire_thread_root_event_id"
 SCHEDULED_HISTORY_LIMIT_KEY = "com.mindroom.history_limit"
 SCHEDULED_MODEL_KEY = "com.mindroom.scheduled_model"
 SILENT_SCHEDULE_EVENT_TYPE = "io.mindroom.scheduled.trigger"
+# Room state holding one scheduled task, keyed by its task ID.
+SCHEDULED_TASK_EVENT_TYPE = "com.mindroom.scheduled.task"
 SILENT_SCHEDULE_NO_REPLY_TOKEN = "NO_REPLY"  # noqa: S105 - Public no-report marker, not a credential.
 HOOK_SOURCE_KEY = "com.mindroom.hook_source"
 HOOK_MESSAGE_RECEIVED_DEPTH_KEY = "com.mindroom.message_received_depth"

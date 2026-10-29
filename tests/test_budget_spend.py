@@ -20,7 +20,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
 from mindroom.providers.registry import build_model_provider
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.stats_storage import UsageRunNode, UsageSessionRow, UsageStorageDiagnostic, UsageStorageSource
 from tests.conftest import persist_runs, persist_session
@@ -266,7 +266,7 @@ def test_spend_prices_usage_recorded_through_session_storage(tmp_path: Path) -> 
     config = _config()
     paths = _paths(tmp_path)
     model = build_model_provider(config, paths, "astra").identity
-    storage = create_state_storage("code", paths.storage_root / "agents" / "code")
+    storage = create_agent_state_storage("code", paths.storage_root / "agents" / "code")
     metrics = RunMetrics(
         tokens=TokenCounts(input_tokens=1_000_000, output_tokens=100_000, total_tokens=1_100_000),
         details={
@@ -344,7 +344,7 @@ def test_spend_charges_a_resumed_run_for_its_requests_this_month(
         messages=[request(started)],
         metrics=metrics(1_000_000),
     )
-    storage = create_state_storage("code", paths.storage_root / "agents" / "code")
+    storage = create_agent_state_storage("code", paths.storage_root / "agents" / "code")
     with monkeypatch.context() as clock:
         clock.setattr("mindroom.session_storage.store.time", lambda: started)
         session = persist_session(

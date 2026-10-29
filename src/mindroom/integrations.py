@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from fastapi import APIRouter, FastAPI
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import MessageEnvelope
@@ -25,7 +25,7 @@ class Integration:
     # Returns the public routes, which authenticate their own requests.
     # Config validation reads the registry, so an integration loads its route and runtime on first use, never at import.
     router: Callable[[], APIRouter]
-    bind: Callable[[FastAPI, Mapping[str, AgentBot | TeamBot], AgentReplyMembershipIndex], None]
+    bind: Callable[[FastAPI, Mapping[str, AgentBot], AgentReplyMembershipIndex], None]
     unbind: Callable[[FastAPI], object | None]
     # Returns the coroutine that passes a final agent reply on, or None when the reply is not for this integration.
     reply_mirror: Callable[[MessageEnvelope, str, Config, RuntimePaths], Coroutine[Any, Any, None] | None]
@@ -47,7 +47,7 @@ def integration_routers() -> list[APIRouter]:
 
 def bind_integrations(
     api_app: FastAPI,
-    bots: Mapping[str, AgentBot | TeamBot],
+    bots: Mapping[str, AgentBot],
     agent_reply_memberships: AgentReplyMembershipIndex,
 ) -> None:
     """Let every integration's events reach the orchestrator's live bots."""

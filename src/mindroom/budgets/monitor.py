@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
+from mindroom.background_tasks import SupervisedLoop
 from mindroom.budgets.caps import BudgetCaps, UserCap, budget_caps_path
 from mindroom.budgets.pricing import model_prices
 from mindroom.budgets.spend import SpendSnapshot, collect_monthly_spend, month_bounds
@@ -168,6 +169,7 @@ def _utc_now() -> datetime:
 class BudgetMonitor:
     """Keep month-to-date spend current off the event loop and decide when a reply uses the fallback model."""
 
+    name = "budgets"
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
     clock: Callable[[], datetime] = _utc_now
@@ -177,16 +179,16 @@ class BudgetMonitor:
     caps: BudgetCaps = field(init=False)
     _snapshot: SpendSnapshot | None = field(default=None, init=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False)
-    _task: asyncio.Task[None] | None = field(default=None, init=False)
+    _loop: SupervisedLoop = field(init=False)
 
     def __post_init__(self) -> None:
         """Load the per-user caps a previous run stored."""
         self.caps = BudgetCaps(budget_caps_path(self.runtime_paths))
+        self._loop = SupervisedLoop("budget_monitor", self._run)
 
-    def sync(self) -> None:
+    async def sync(self, config: Config) -> None:  # noqa: ARG002 - each scan reads the active config
         """Start the refresh loop once and rescan for the active config."""
-        if self._task is None or self._task.done():
-            self._task = asyncio.create_task(self._run(), name="budget_monitor")
+        self._loop.start()
         self._request_scan()
 
     def response_finished(self) -> None:
@@ -195,10 +197,7 @@ class BudgetMonitor:
 
     async def stop(self) -> None:
         """Stop the refresh loop; the last snapshot stays readable."""
-        task, self._task = self._task, None
-        if task is not None:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        await self._loop.stop()
 
     def _spend_usd(self, user_id: str) -> float:
         """Return a canonical requester's month-to-date spend from the latest scan of this month."""

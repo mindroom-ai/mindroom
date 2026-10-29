@@ -290,7 +290,7 @@ class TestMatrixOperations:
     def test_avatar_routes_require_dashboard_authentication(self, test_client: TestClient) -> None:
         """Matrix avatar routes retain the matrix router's dashboard authentication."""
         runtime_paths = use_trusted_upstream_runtime(test_client.app)
-        assert config_lifecycle.load_config_into_app(runtime_paths, test_client.app) is True
+        assert config_lifecycle.load_config_into_app(runtime_paths, test_client.app).loaded
 
         agent_response = test_client.get("/api/matrix/agents/test_agent/avatar")
         room_response = test_client.get("/api/matrix/rooms/avatar", params={"room_id": "test_room"})
@@ -568,7 +568,7 @@ class TestMatrixOperations:
         )
         runtime_paths = constants.resolve_primary_runtime_paths(config_path=config_path, process_env={})
         main.initialize_api_app(main.app, runtime_paths)
-        assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is True
+        assert config_lifecycle.load_config_into_app(runtime_paths, main.app).loaded
 
         with (
             patch(
@@ -849,7 +849,7 @@ def test_matrix_operations_refuse_stale_config_after_invalid_reload(
     """Matrix operations should surface malformed current config instead of stale cached entities."""
     runtime_paths = main._app_runtime_paths(main.app)
     temp_config_file.write_text("agents:\n  broken: [\n", encoding="utf-8")
-    assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is False
+    assert not config_lifecycle.load_config_into_app(runtime_paths, main.app).loaded
 
     with (
         patch(

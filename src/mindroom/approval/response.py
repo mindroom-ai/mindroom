@@ -46,26 +46,11 @@ class ApprovalPausePlan:
     waiting_text: str | None
 
 
-def _team_config_names_by_provider_id(state: dict[str, object]) -> dict[str, str]:
-    """Read the frozen provider-to-config identity map from a team presentation."""
-    stored_members = state.get("members") if state.get("kind") == "team_stream" else None
-    if not isinstance(stored_members, list):
-        return {}
-    config_names_by_provider_id: dict[str, str] = {}
-    member_identities: set[str] = set()
-    for member in stored_members:
-        if not isinstance(member, dict):
-            continue
-        stored_member = cast("dict[str, object]", member)
-        provider_id = stored_member.get("id")
-        config_name = stored_member.get("config_name")
-        if isinstance(provider_id, str) and provider_id and isinstance(config_name, str) and config_name:
-            if {provider_id, config_name} & member_identities:
-                msg = "Paused approval tool has ambiguous frozen member identity"
-                raise RuntimeError(msg)
-            member_identities.update((provider_id, config_name))
-            config_names_by_provider_id[provider_id] = config_name
-    return config_names_by_provider_id
+def _team_member_ids(state: Mapping[str, object]) -> list[str]:
+    """Return the member ids, the members' config names, whose slots the live team document of a pause holds."""
+    if state.get("kind") != "team_stream":
+        return []
+    return [member["id"] for member in cast("list[dict[str, str]]", state["members"])]
 
 
 def identify_approval_tools(
@@ -74,10 +59,9 @@ def identify_approval_tools(
     default_agent_name: str,
 ) -> tuple[tuple[ToolExecution, str], ...]:
     """Pair each paused call with the agent that invokes it, a team member by its config name."""
-    # Each frozen member slot's config name, by slot id; a requirement names its member by either.
-    slots = _team_config_names_by_provider_id(paused.response_presentation_state)
+    member_ids = _team_member_ids(paused.response_presentation_state)
     owners = {
-        requirement.tool_execution.tool_call_id: slots[member_slot_id(slots, requirement.member_agent_id)]
+        requirement.tool_execution.tool_call_id: member_slot_id(member_ids, requirement.member_agent_id)
         for requirement in paused.requirements
         if requirement.member_agent_id
     }
@@ -101,26 +85,21 @@ def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls
     requirements_by_call_id = {
         requirement.tool_execution.tool_call_id: requirement for requirement in paused.requirements
     }
-    is_team_presentation = paused.response_presentation_state.get("kind") == "team_stream"
-    config_names_by_provider_id = _team_config_names_by_provider_id(paused.response_presentation_state)
-    member_names = config_names_by_provider_id.values()
+    member_ids = _team_member_ids(paused.response_presentation_state)
     for tool in paused.tools:
         call_id = tool.tool_call_id
         requirement = requirements_by_call_id.get(call_id)
-        member_id, anchor_id = (None, call_id) if requirement is None else pending_call_slot(requirement, member_names)
+        member_id, anchor_id = (None, call_id) if requirement is None else pending_call_slot(requirement, member_ids)
         matches = [
             entry
             for entry in paused.tool_trace
             if entry.type == "tool_call_started" and entry.tool_call_id == anchor_id
         ]
-        # An unanchored call is refused as such, before its member identity is resolved.
         if not matches:
             raise RuntimeError(unordered)
-        if member_id is not None:
-            member_id = member_slot_id(config_names_by_provider_id, member_id)
-        expected_scope = f"agent:{member_id}" if member_id is not None else ("team" if is_team_presentation else None)
-        # Call ids are unique only within one member's run, so another member's call may share the anchor's id.
-        if sum(entry.scope_key == expected_scope for entry in matches) != 1:
+        # Call ids are unique only within one member's run, so another member's call may share the anchor's id; a member
+        # the document holds no slot for has no call in one.
+        if sum(entry.member_id == member_id for entry in matches) != 1:
             raise RuntimeError(unordered)
 
 

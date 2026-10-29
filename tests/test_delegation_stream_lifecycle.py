@@ -319,6 +319,6 @@ async def test_a_consumer_failure_during_the_continuation_stores_the_cancelled_p
                 on_event=deliver,
             )
 
-    persisted = store.load_session(session.session_id, "agent")
+    persisted = store.load_session(session.session_id)
     assert persisted is not None
     assert [(run.run_id, run.status) for run in persisted.runs] == [("parent-run", RunStatus.cancelled)]

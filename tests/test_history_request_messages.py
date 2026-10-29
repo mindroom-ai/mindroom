@@ -287,7 +287,7 @@ def test_a_save_keeps_no_system_message_in_a_visible_run_so_none_replays(store: 
     run = _agent_run("run", messages=[Message(role="system", content="old system prompt"), *_exchange("run")])
     seed_session(store, ConversationSession(session_id="s1", kind="agent", owner_id="code", runs=[run]))
 
-    loaded = store.load_session("s1", "agent")
+    loaded = store.load_session("s1")
 
     assert loaded is not None
     assert [message.role for message in loaded.runs[0].messages] == ["user", "assistant"]

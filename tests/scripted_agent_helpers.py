@@ -37,7 +37,7 @@ def stored_runs(
 ) -> list[AnyRunRecord]:
     """Return the runs the agent's replies stored in the session, none when the session does not exist."""
     storage = create_session_storage(agent_name, config, runtime_paths, execution_identity=None)
-    session = storage.load_session(session_id, "agent")
+    session = storage.load_session(session_id)
     return [] if session is None else session.runs
 
 

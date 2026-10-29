@@ -46,7 +46,7 @@ from mindroom.response_turn import (
     collect_streamed_response_content,
 )
 from mindroom.run_storage import RunStorage
-from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage, create_session_storage
 from mindroom.tool_system.agent_tool_calls import AgentToolCallWaiting, DeferredAgentToolkit, execute_agent_tool_call
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.events import CollectedStreamPresentation
@@ -183,7 +183,7 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
         tmp_path,
         [_toolkit("shell", run_shell_command), adapt_toolkit(Toolkit(name="control", tools=[switch, mutate]))],
     )
-    catalog.store = create_state_storage("helper", tmp_path)
+    catalog.store = create_agent_state_storage("helper", tmp_path)
     receipts = []
     owner = _owner(catalog)
     owner.shell_env = AgentCliShellEnv("http://127.0.0.1:9", "test-grant")
@@ -586,7 +586,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
             )
             assert catalog.store is not None
             persisted = catalog.store.get_run("run")
-            session = catalog.store.load_session("session", "agent")
+            session = catalog.store.load_session("session")
             assert isinstance(persisted, RunRecord)
             assert session is not None
             build = agents.create_agent(

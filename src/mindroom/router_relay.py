@@ -20,12 +20,11 @@ from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, content_owns_per_fire_thread_root
-from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.routing import suggest_responder_for_message
 from mindroom.turn_origin import original_sender_for_router_handoff
-from mindroom.turn_record import canonicalize_turn_record
+from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -258,22 +257,17 @@ async def execute_router_relay(
     handled_turn: TurnRecord | None = None,
     scheduled_prompt: str | None = None,
 ) -> None:
-    """Run one explicit router relay from the turn controller."""
+    """Run one explicit router relay from turn dispatch."""
     assert deps.agent_name == ROUTER_AGENT_NAME
 
-    permission_sender_id = requester_user_id
-    responder_candidates = await deps.turn_policy.responder_candidates_for_room(
-        room,
-        permission_sender_id,
-    )
+    source_turn = handled_turn or TurnRecord.create([event.event_id])
+    responder_candidates = await deps.turn_policy.responder_candidates_for_room(room, requester_user_id)
     if not responder_candidates:
         deps.logger.debug(
             "No responders to route to in this room for sender",
-            sender=permission_sender_id,
+            sender=requester_user_id,
         )
-        await deps.visible_responses.settle_source_events_ignored(
-            handled_turn or TurnRecord.create([event.event_id]),
-        )
+        await deps.visible_responses.settle_source_events_ignored(source_turn)
         return
 
     with bound_log_context(room_id=room.room_id, thread_id=thread_id):
@@ -349,10 +343,6 @@ async def execute_router_relay(
         response_text=response_text,
         extra_content=routed_extra_content or None,
     )
-    source_turn = handled_turn or TurnRecord.create([event.event_id])
-    visible_echo_event_id = deps.turn_store.finalized_visible_echo_for_sources(
-        source_turn.source_event_ids,
-    )
     (
         tracked_handled_turn,
         recovered_response_event_id,
@@ -360,7 +350,8 @@ async def execute_router_relay(
         source_turn,
         requester_id=requester_user_id,
         target=resolved_target,
-        excluded_event_ids=(visible_echo_event_id,) if visible_echo_event_id is not None else (),
+        # The router's own voice echoes are publication, never the relay this turn still owes.
+        excluded_event_ids=await deps.turn_store.finalized_visible_echoes(source_turn.source_event_ids),
     )
     if tracked_handled_turn is None:
         return
@@ -383,7 +374,8 @@ async def execute_router_relay(
     with bound_log_context(**resolved_target.log_context):
         if event_id:
             deps.logger.info("Routed to entity", suggested_entity=suggested_entity)
-            await deps.visible_responses.record_pending_visible_response(tracked_handled_turn, event_id)
+            # The relay is not an outbox delivery, so a replay before the turn is recorded answered adopts it from here.
+            await deps.turn_store.record_placeholder(tracked_handled_turn, event_id)
             await deps.turn_store.record_responded_turn(
                 canonicalize_turn_record(tracked_handled_turn, response_event_id=event_id),
             )

@@ -9,10 +9,10 @@ anchor event ID is exactly that identity.
 
 Two things follow from the omission, and these tests pin both.
 
-A direct send settles nothing, so the terminal record lands in the handled-turn
-ledger while the journal source is still pending -- the window that forces the
-degraded replay guard to consult two records instead of one. Routing the send
-through the outbox settles the sources inside the enqueue, so the answer
+A direct send settles nothing, so the turn is recorded answered while the
+journal source is still pending -- the window that forces the degraded replay
+guard to consult two records instead of one. Routing the send through the
+outbox binds the turn and settles its sources inside the enqueue, so the answer
 becoming durably owed and the turn leaving the journal are one commit.
 
 And a direct send is recovered only by scanning the room for something that may
@@ -59,12 +59,11 @@ class _RecordingGateway:
 class _RecordingTurnStore:
     """The slice of the turn store this delivery touches."""
 
-    recorded: list[TurnRecord] = field(default_factory=list)
+    placeholders: list[tuple[TurnRecord, str]] = field(default_factory=list)
 
-    async def record_pending_turn(self, turn_record: TurnRecord) -> TurnRecord:
+    async def record_placeholder(self, turn_record: TurnRecord, response_event_id: str) -> None:
         """Bind one visible response to its turn."""
-        self.recorded.append(turn_record)
-        return turn_record
+        self.placeholders.append((turn_record, response_event_id))
 
 
 def _reconciler(gateway: _RecordingGateway) -> VisibleResponseReconciler:
@@ -108,7 +107,7 @@ class TestAReplyWithATurnBehindItIsDurable:
         resend.
         """
         gateway = _RecordingGateway()
-        handled_turn = TurnRecord.create([SOURCE])
+        handled_turn = TurnRecord.create([SOURCE], turn_key="stored-turn")
 
         await _reconciler(gateway).deliver_recoverable_text(
             handled_turn,
@@ -120,6 +119,7 @@ class TestAReplyWithATurnBehindItIsDurable:
         assert len(gateway.requests) == 1
         assert gateway.requests[0].delivery_turn_id == handled_turn.anchor_event_id
         assert gateway.requests[0].delivery_turn_id is not None
+        assert gateway.requests[0].delivery_turn_key == "stored-turn"
 
     async def test_an_answer_recovery_already_found_is_never_sent_again(self) -> None:
         """Adoption still wins over the outbox, and must not enqueue anything.

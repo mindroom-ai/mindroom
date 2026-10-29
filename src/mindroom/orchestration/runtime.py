@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from mindroom import constants
+from mindroom.background_tasks import retry_delay_seconds
 from mindroom.cancellation import (
     SYNC_RESTART_CANCEL_MSG,
     USER_STOP_CANCEL_MSG,
@@ -40,12 +41,9 @@ from mindroom.matrix.sync_diagnostics import SyncStallDiagnostics
 from mindroom.runtime_shutdown import (
     GENERIC_SHUTDOWN,
     SYNC_RESTART_SHUTDOWN,
-    ResponseShutdownTimeoutError,
     RestartReasonCategory,
     RuntimeLifecycleAction,
     RuntimeShutdownIntent,
-    gather_shutdown_phase,
-    shutdown_intent_for_entity,
 )
 from mindroom.runtime_state import set_runtime_starting
 from mindroom.startup_errors import PermanentStartupError
@@ -56,7 +54,7 @@ if TYPE_CHECKING:
 
     import structlog
 
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
@@ -89,11 +87,9 @@ __all__ = [
     "SYNC_RESTART_CANCEL_MSG",
     "USER_STOP_CANCEL_MSG",
     "CancelSource",
-    "EntityStartResults",
     "cancel_failure_reason",
     "cancel_logged_task",
     "cancel_source_from_failure_reason",
-    "cancel_sync_task",
     "cancel_task",
     "classify_cancel_source",
     "create_logged_task",
@@ -107,9 +103,8 @@ __all__ = [
     "matrix_ingestion_grace_seconds",
     "matrix_sync_startup_timeout_seconds",
     "request_task_cancel",
-    "retry_delay_seconds",
+    "run_shutdown_step",
     "run_with_retry",
-    "stop_entities",
     "sync_forever_with_restart",
     "wait_for_matrix_homeserver",
 ]
@@ -211,17 +206,6 @@ def _matrix_homeserver_startup_timeout_seconds_from_env(
     return timeout_seconds
 
 
-def retry_delay_seconds(
-    attempt: int,
-    *,
-    initial_delay_seconds: float,
-    max_delay_seconds: float,
-) -> float:
-    """Return capped exponential backoff delay for a retry attempt."""
-    exponent = max(0, attempt - 1)
-    return min(max_delay_seconds, initial_delay_seconds * (2**exponent))
-
-
 def is_permanent_startup_error(exc: Exception) -> bool:
     """Return whether a startup exception is clearly non-retryable."""
     return isinstance(exc, PermanentStartupError)
@@ -258,7 +242,7 @@ class _MatrixSyncStalledError(RuntimeError):
     """Raised when the watchdog detects a stalled Matrix sync loop."""
 
 
-def _matrix_sync_receive_loop_active(bot: AgentBot | TeamBot) -> bool:
+def _matrix_sync_receive_loop_active(bot: AgentBot) -> bool:
     """Return whether the supervisor still owns an active receive loop."""
     return bot.running and not bot._matrix_ingestion_quiesce_requested
 
@@ -267,14 +251,14 @@ def _matrix_sync_receive_loop_active(bot: AgentBot | TeamBot) -> bool:
 class _SyncIteration:
     """Own the lifecycle of one sync task and its watchdog."""
 
-    bot: AgentBot | TeamBot
+    bot: AgentBot
     sync_task: asyncio.Task[Any] | None
     watchdog_task: asyncio.Task[Any] | None
     watchdog_cancelled_sync: asyncio.Event = field(default_factory=asyncio.Event)
 
     @staticmethod
     async def _watch(
-        bot: AgentBot | TeamBot,
+        bot: AgentBot,
         sync_task: asyncio.Task[Any],
         watchdog_cancelled_sync: asyncio.Event,
     ) -> None:
@@ -369,7 +353,7 @@ class _SyncIteration:
             await sync_task
 
     @classmethod
-    def start(cls, bot: AgentBot | TeamBot) -> _SyncIteration:
+    def start(cls, bot: AgentBot) -> _SyncIteration:
         """Create the sync task and its watchdog for one loop iteration."""
         bot.mark_sync_loop_started()
         # Reset the monotonic watchdog clock so a fresh iteration gets the full
@@ -445,7 +429,7 @@ class _SyncIterationOutcome:
     shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN
 
 
-async def _run_sync_iteration(bot: AgentBot | TeamBot, *, attempt: int) -> _SyncIterationOutcome:
+async def _run_sync_iteration(bot: AgentBot, *, attempt: int) -> _SyncIterationOutcome:
     """Run one receive-loop iteration and settle only the tasks that iteration owns.
 
     Live responses outlive a transport restart: the response runtime is torn down
@@ -650,124 +634,19 @@ async def wait_for_matrix_homeserver(
     raise TimeoutError(msg)
 
 
-@dataclass(slots=True)
-class EntityStartResults:
-    """Result of one pass trying to start a batch of entities."""
-
-    started_bots: list[AgentBot | TeamBot] = field(default_factory=list)
-    retryable_entities: list[str] = field(default_factory=list)
-    permanently_failed_entities: list[str] = field(default_factory=list)
-
-
-async def cancel_sync_task(
-    entity_name: str,
-    sync_tasks: dict[str, asyncio.Task],
-    *,
-    shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
-) -> None:
-    """Cancel and remove a sync task for an entity."""
-    task = sync_tasks.pop(entity_name, None)
-    await cancel_task(task, shutdown_intent=shutdown_intent)
+async def run_shutdown_step[Result](shutdown_phase: str, operation: Awaitable[Result]) -> Result:
+    """Expose one non-sensitive shutdown boundary without changing its result."""
+    logger.info("orchestrator_shutdown_phase_started", shutdown_phase=shutdown_phase)
+    try:
+        result = await operation
+    except BaseException:
+        logger.info("orchestrator_shutdown_phase_failed", shutdown_phase=shutdown_phase)
+        raise
+    logger.info("orchestrator_shutdown_phase_completed", shutdown_phase=shutdown_phase)
+    return result
 
 
-def _split_restart_response_timeouts(
-    bot_entity_names: list[str],
-    phase_results: tuple[list[object], ...],
-    *,
-    restart_entities: set[str],
-) -> tuple[list[BaseException], set[str]]:
-    """Separate failed bot stops from restarting bots whose reply outlived the drain.
-
-    A restarting bot releases every resource even when a reply outlives the
-    bounded drain, and the cancelled reply stays pending for its replacement
-    to replay, so any other failure still keeps it from being replaced.
-    """
-    failures: list[BaseException] = []
-    response_timeout_entities: set[str] = set()
-    for results in phase_results:
-        for entity_name, result in zip(bot_entity_names, results, strict=True):
-            if isinstance(result, ResponseShutdownTimeoutError) and entity_name in restart_entities:
-                response_timeout_entities.add(entity_name)
-            elif isinstance(result, BaseException):
-                failures.append(result)
-    return failures, response_timeout_entities
-
-
-async def stop_entities(
-    entities_to_stop: set[str],
-    agent_bots: dict[str, AgentBot | TeamBot],
-    sync_tasks: dict[str, asyncio.Task],
-    *,
-    restart_entities: set[str] | None = None,
-) -> None:
-    """Stop a set of entities and remove them from runtime maps."""
-    restart_entities = set() if restart_entities is None else restart_entities
-    shutdown_intents = {
-        entity_name: shutdown_intent_for_entity(entity_name, restart_entities=restart_entities)
-        for entity_name in entities_to_stop
-    }
-    entity_names = sorted(entities_to_stop)
-    bot_entity_names = [entity_name for entity_name in entity_names if entity_name in agent_bots]
-    bots_to_stop = [agent_bots[entity_name] for entity_name in bot_entity_names]
-    phase_cancellations: list[asyncio.CancelledError] = []
-    quiesce_results, cancellation = await gather_shutdown_phase(
-        *(bot._quiesce_matrix_ingestion() for bot in bots_to_stop),
-    )
-    if cancellation is not None:
-        phase_cancellations.append(cancellation)
-    quiesce_failures = [result for result in quiesce_results if isinstance(result, BaseException)]
-    # Stop sync loops before certifying callback drains; otherwise fresh callbacks can
-    # appear after the checkpoint decision.
-    cancel_results, cancellation = await gather_shutdown_phase(
-        *(
-            cancel_sync_task(
-                entity_name,
-                sync_tasks,
-                shutdown_intent=shutdown_intents[entity_name],
-            )
-            for entity_name in entity_names
-        ),
-    )
-    if cancellation is not None:
-        phase_cancellations.append(cancellation)
-    prepare_results, cancellation = await gather_shutdown_phase(
-        *(
-            agent_bots[entity_name].prepare_for_sync_shutdown(
-                shutdown_intent=shutdown_intents[entity_name],
-            )
-            for entity_name in bot_entity_names
-        ),
-    )
-    if cancellation is not None:
-        phase_cancellations.append(cancellation)
-    stop_results, cancellation = await gather_shutdown_phase(
-        *(
-            agent_bots[entity_name].stop(shutdown_intent=shutdown_intents[entity_name])
-            for entity_name in bot_entity_names
-        ),
-    )
-    if cancellation is not None:
-        phase_cancellations.append(cancellation)
-    bot_failures, response_timeout_entities = _split_restart_response_timeouts(
-        bot_entity_names,
-        (prepare_results, stop_results),
-        restart_entities=restart_entities,
-    )
-    cleanup_failures = [result for result in cancel_results if isinstance(result, BaseException)]
-    failures = [*quiesce_failures, *phase_cancellations, *cleanup_failures, *bot_failures]
-    if failures:
-        raise failures[0]
-    if response_timeout_entities:
-        logger.warning(
-            "restart_replacing_entities_after_response_drain_timeout",
-            entities=sorted(response_timeout_entities),
-        )
-
-    for entity_name in entity_names:
-        agent_bots.pop(entity_name, None)
-
-
-async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = -1) -> None:
+async def sync_forever_with_restart(bot: AgentBot, max_retries: int = -1) -> None:
     """Run sync_forever with automatic restart on failure."""
     retry_count = 0
     while _matrix_sync_receive_loop_active(bot) and (max_retries < 0 or retry_count < max_retries):

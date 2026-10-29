@@ -12,7 +12,8 @@ Room membership is not the boundary either, because two bots joined to the same 
 
 Approval coordination is the one place that deliberately crosses principals, because the router owns approval cards while the responding entity owns the paused continuation.
 It does so only by validating persisted card-to-continuation relationships inside the runtime, and it is not a way for ordinary conversation readers to select another principal.
-Turn records are scoped to the agent name alone, so a re-login under a new Matrix ID does not answer every outstanding message again, and they still hold conversation-derived text.
+Turn rows and redactions are scoped to the agent name alone, so a re-login under a new Matrix ID neither answers every outstanding message again nor forgets a deletion, and turn rows still hold conversation-derived text.
+A redaction one login observes is applied to the projection, pending journal rows, and replies of every login of that agent, and never to another agent's rows; the logins share the deletion fact, not content.
 
 ## Where durable plaintext lives
 
@@ -22,14 +23,16 @@ Turn records are scoped to the agent name alone, so a re-login under a new Matri
 - `visible_messages.content_json` holds the current visible body of each logical message and keeps no edit history.
   Redacting a message deletes its row and its held edits, and redacting the revision on screen clears the body in the same transaction, after which no read returns that message until a refetch installs the server's replacement.
   The truncated preview carried by a message too large for one Matrix event is never stored as its body.
-  A departure deletes the departing principal's projection for that room, including its held edits and redaction tombstones, while other bots in the room keep theirs.
+  A departure deletes the departing principal's projection for that room, including its held edits, while other bots in the room keep theirs; the agent's record of each redaction stays, so a bot that rejoins keeps hiding content redacted before it left.
 - `unresolved_edits.content_json` holds an edit whose target has not arrived yet, and it is deleted the moment the target lands or is redacted.
   Redacting the held edit itself clears its payload but keeps its identity and ordering until the target arrives.
 - `interactive_questions.question_json` holds question text and options for every revision, including superseded revisions needed for source replay and consumption proof.
   Redacting a revision deletes its row, and deleting the logical message deletes all of its revisions.
-- `turn_records.record_json` holds turn identity, outcome, and regeneration content.
-  Its prepared voice-source checkpoint (prepared body, Matrix content, batching scope, and echo thread) lets a retry skip transcription, is never copied into agent run metadata, and is removed on turn completion or source redaction, including redaction through a source's discovery alias.
-  Records holding a conversation's redaction tombstone are kept indefinitely, because history cleanup derives from them; other records follow age and count retention once no unsettled source or unfinished turn fact protects them.
+- `turns` holds turn identity, outcome, response context, and a command's checkpointed result text, and `turn_sources` holds each source's regeneration prompt and attribution.
+  `turn_sources.prepared_voice_json` holds a voice source's checkpoint (prepared body, Matrix content, batching scope, and echo thread), which lets a retry skip transcription, is never copied into agent run metadata, and is removed on turn completion, on redaction of the source or of the message it answers for, and at the next retention pass once none of the turn's sources is unsettled and the turn has no recorded response context.
+  A redaction clears, in the transaction that admits it, the prompt and checkpoint of the source it deletes and of a source whose selected edit it is, and every later write is checked against it, so text written after a deletion is never stored.
+  Turns follow age and count retention once no unsettled source or unfinished turn fact protects them.
+- `event_redactions` holds only the ids of each redacted event and its room, per agent, and is kept indefinitely, because history cleanup and replay derive from it; `legacy_summary_revisions` holds only ids an upgrade copied from older turn records.
 - `matrix_delivery_outbox.payload_json` holds each response or tool-approval event frozen before it is sent, `result_json` holds local completion facts, which can include final response text and interactive metadata, and `reply_row_json` can hold the reply text that delivery writes.
   Rows an earlier release wrote can also hold source prompts inside a serialized prepared edit turn record.
 - `approval_continuations.context_json` can hold the original `request_body`, `memory_prompt`, and `memory_thread_history[*].body` needed to resume an approved call, and `failure_detail` can hold the unredacted text of the error that failed a paused reply, which is redacted only where it is shown; both are deleted with the continuation after terminal delivery or cleanup.

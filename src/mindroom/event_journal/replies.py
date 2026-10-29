@@ -24,26 +24,17 @@ from mindroom.reply_lifecycle import (
     Transition,
 )
 
-from . import approval_continuations, journal, outbox, reply_messages, reply_spans, turn_records
+from . import approval_continuations, journal, outbox, reply_messages, reply_spans, turn_rows
+from .identity import agent_of_principal
 from .membership_state import claim_membership_epoch
-from .projection import is_tombstoned
 
 logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from mindroom.turn_record import TurnRecord
-
     from .backend import Backend, Transaction
     from .models import MatrixDelivery
-
-
-@dataclass(frozen=True, slots=True)
-class TurnCompleted:
-    """After commit: the turn ledger learns a turn a reply's settlement recorded answered."""
-
-    record: TurnRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +56,7 @@ class ApprovalEnded:
 
 
 # Effects the caller runs after the transaction commits.
-type PostCommitEffect = CancelSpan | WakeApproval | ApprovalEnded | TurnCompleted
+type PostCommitEffect = CancelSpan | WakeApproval | ApprovalEnded
 
 
 type Decide = Callable[[Reply, Span], Transition]
@@ -137,23 +128,13 @@ def _run(
             span = _span_for(transaction, principal_id, transition, span_id)
             reply = transition.reply
             assert reply is not None, "a settlement belongs to a reply's transition"
+            journal.settle_many(transaction, principal_id, span.sources.pending_event_ids)
             # Nothing answers a turn whose every message the user deleted, whichever rule settles it.
-            if not answered or all(
-                is_tombstoned(transaction, principal_id, reply.room_id, source)
-                for source in span.sources.logical_source_event_ids
+            logical = span.sources.logical_source_event_ids
+            if answered and not set(logical).issubset(
+                turn_rows.deleted_events(transaction, reply.entity_name, reply.room_id, logical),
             ):
-                journal.settle_many(transaction, principal_id, span.sources.pending_event_ids)
-                return
-            completed = turn_records.settle_turn(
-                transaction,
-                principal_id,
-                reply.entity_name,
-                pending=span.sources.pending_event_ids,
-                logical=span.sources.logical_source_event_ids,
-            )
-            if completed is not None:
-                # The ledger's write ordering and cache learn it after the commit.
-                post_commit.append(TurnCompleted(completed))
+                turn_rows.complete_turn_of(transaction, reply.entity_name, logical)
         case FenceApproval(approval_id=approval_id, kind=kind, detail=detail):
             failure = approval_continuations.ApprovalFailure(kind, detail)
             approval_continuations.fence(transaction, principal_id, approval_id=approval_id, failure=failure)
@@ -245,22 +226,30 @@ def end_replies_of_deleted_source(
 ) -> None:
     """End the replies whose current work lost every logical source to this deletion, settling their sources.
 
-    An answer already written is kept; a reply an approval holds ends too, and
-    its approval is fenced for its settlement. The bot cancels the spans it
-    runs, wakes those approvals, and redacts what the replies showed after the
-    deletion commits, and the turn ledger loads the turns this answered.
+    A source is deleted when it was redacted, or when the human message a
+    router relayed and it answers for was: the redacted event is resolved to
+    the sources it deletes before the replies naming them are looked up. An
+    answer already written is kept; a reply an approval holds ends too, and its
+    approval is fenced for its settlement. The bot cancels the spans it runs,
+    wakes those approvals, and redacts what the replies showed after the
+    deletion commits.
     """
-    for reply_id in reply_messages.naming_logical_source(transaction, principal_id, event_id):
+    agent_name = agent_of_principal(principal_id)
+    deleted = (event_id, *turn_rows.sources_deleted_by(transaction, agent_name, room_id, event_id))
+    reply_ids = dict.fromkeys(
+        reply_id
+        for source_event_id in deleted
+        for reply_id in reply_messages.naming_logical_source(transaction, principal_id, source_event_id)
+    )
+    for reply_id in reply_ids:
         reply = reply_messages.lock(transaction, principal_id, reply_id)
         if reply is None or reply.terminal or reply.room_id != room_id:
             continue
         span = reply_spans.load(transaction, principal_id, reply.current_span_id or reply.last_span_id)
-        if span is None or event_id not in span.sources.logical_source_event_ids:
+        logical = () if span is None else span.sources.logical_source_event_ids
+        if span is None or set(deleted).isdisjoint(logical):
             continue
-        if not all(
-            is_tombstoned(transaction, principal_id, room_id, source)
-            for source in span.sources.logical_source_event_ids
-        ):
+        if not set(logical).issubset(turn_rows.deleted_events(transaction, agent_name, room_id, logical)):
             continue
         transition = rl.sources_deleted(reply, span, now_ns=time.time_ns())
         if transition.applied:

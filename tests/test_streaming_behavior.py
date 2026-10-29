@@ -171,7 +171,6 @@ def _make_bot_with_shared_knowledge(
         agent,
         tmp_path,
         rooms=["!test:localhost"],
-        enable_streaming=True,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -366,12 +365,12 @@ class TestStreamingBehavior:
 
         # Set up helper bot (the one that will stream)
         config = self.config
+        config.defaults.enable_streaming = streaming
 
         helper_bot = make_test_agent_bot(
             mock_helper_agent,
             tmp_path,
             rooms=["!test:localhost"],
-            enable_streaming=streaming,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -384,14 +383,14 @@ class TestStreamingBehavior:
         mock_orchestrator.current_config = config
         helper_bot.orchestrator = mock_orchestrator
 
-        # Set up calculator bot (the one that will be mentioned)
-        config = self.config
+        # Set up calculator bot (the one that will be mentioned) with its own non-streaming config
+        config = bind_runtime_paths(self.config, runtime_paths_for(self.config))
+        config.defaults.enable_streaming = False
 
         calc_bot = make_test_agent_bot(
             mock_calculator_agent,
             tmp_path,
             rooms=["!test:localhost"],
-            enable_streaming=False,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -500,12 +499,12 @@ class TestStreamingBehavior:
         """Test that agents respond to the final complete message, not edits."""
         # Set up calculator bot
         config = self.config
+        config.defaults.enable_streaming = False
 
         calc_bot = make_test_agent_bot(
             mock_calculator_agent,
             tmp_path,
             rooms=["!test:localhost"],
-            enable_streaming=False,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -2311,7 +2310,6 @@ class TestStreamingBehavior:
             mock_helper_agent,
             tmp_path,
             rooms=["!test:localhost"],
-            enable_streaming=True,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )

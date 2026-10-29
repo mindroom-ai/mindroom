@@ -12,7 +12,6 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal, Protocol
 from urllib.parse import urlsplit
 
-from mindroom.access_policy import resolve_responder_access
 from mindroom.approval import manager as approval_manager
 from mindroom.approval.tool_approval import (
     BackgroundScriptToolOrigin,
@@ -79,17 +78,6 @@ logger = get_logger(__name__)
 _SCRIPT_RETENTION_SECONDS_ENV = "MINDROOM_SCRIPT_RETENTION_SECONDS"
 _DEFAULT_SCRIPT_RETENTION_SECONDS = 30 * 24 * 60 * 60
 _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 5.0
-
-
-def _agent_reply_authorization_changed(current: Config, replacement: Config) -> bool:
-    """Return whether a continuing script owner's reply authority may change."""
-    if current.authorization != replacement.authorization or current.administrators != replacement.administrators:
-        return True
-    continuing_agents = set(current.agents) & set(replacement.agents)
-    return any(
-        resolve_responder_access(current, agent_name) != resolve_responder_access(replacement, agent_name)
-        for agent_name in continuing_agents
-    )
 
 
 class _ScriptRuntimeUnavailableError(RuntimeError):
@@ -590,32 +578,56 @@ class ScriptRuntimeLifecycle:
         if lease is not None:
             await asyncio.to_thread(lease.release)
 
-    async def apply_update_plan(self, plan: ConfigUpdatePlan, *, plugins_changed: bool = False) -> None:
+    async def apply_update_plan(self, plan: ConfigUpdatePlan) -> None:
         """Revoke removed owners and process-isolation changes before bot replacement."""
+        await self._apply_update(
+            plan.new_config,
+            removed_entities=plan.remove,
+            authorization_changed=plan.responder_access_changed,
+            plugins_changed=bool(plan.plugin_changes),
+        )
+
+    async def interrupt_for_plugin_reload(self) -> None:
+        """Interrupt every active run before a live plugin reload replaces the code they call."""
+        current_config = self.config_provider()
+        if current_config is not None:
+            await self._apply_update(
+                current_config,
+                removed_entities=frozenset(),
+                authorization_changed=False,
+                plugins_changed=True,
+            )
+
+    async def _apply_update(
+        self,
+        new_config: Config,
+        *,
+        removed_entities: frozenset[str],
+        authorization_changed: bool,
+        plugins_changed: bool,
+    ) -> None:
         current_config = self.config_provider()
         if current_config is None:
             return
         # The worker manager's identity is its backend settings, which a config reload never changes, and script
         # workers use per-run keys no other call ensures, so a reload leaves their processes running.
-        removed_agents = plan.removed_entities & set(current_config.agents)
+        removed_agents = set(removed_entities) & set(current_config.agents)
+        continuing_agents = set(current_config.agents) & set(new_config.agents)
         isolation_changes = {
             agent_name
-            for agent_name in set(current_config.agents) & set(plan.new_config.agents)
-            if _agent_isolation_changed(current_config.agents[agent_name], plan.new_config.agents[agent_name])
+            for agent_name in continuing_agents
+            if _agent_isolation_changed(current_config.agents[agent_name], new_config.agents[agent_name])
         }
         script_tool_removals = {
             agent_name
-            for agent_name in set(current_config.agents) & set(plan.new_config.agents)
-            if _agent_has_script_tool(current_config, agent_name)
-            and not _agent_has_script_tool(plan.new_config, agent_name)
+            for agent_name in continuing_agents
+            if _agent_has_script_tool(current_config, agent_name) and not _agent_has_script_tool(new_config, agent_name)
         }
         process_authority_changes = {
             agent_name
-            for agent_name in set(current_config.agents) & set(plan.new_config.agents)
-            if script_process_authority(current_config, agent_name)
-            != script_process_authority(plan.new_config, agent_name)
+            for agent_name in continuing_agents
+            if script_process_authority(current_config, agent_name) != script_process_authority(new_config, agent_name)
         }
-        authorization_changed = _agent_reply_authorization_changed(current_config, plan.new_config)
         if (
             not removed_agents
             and not isolation_changes
@@ -641,7 +653,7 @@ class ScriptRuntimeLifecycle:
                 isolation_changes=isolation_changes,
                 script_tool_removals=script_tool_removals,
                 process_authority_changes=process_authority_changes,
-                authorization_config=plan.new_config if authorization_changed else None,
+                authorization_config=new_config if authorization_changed else None,
                 plugins_changed=plugins_changed,
             )
 

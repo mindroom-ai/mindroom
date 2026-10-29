@@ -17,7 +17,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.users import AgentMatrixUser
-from tests.bot_helpers import make_test_team_bot
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -69,13 +69,13 @@ class TestTeamRoomMembership:
 
         # Create the team bot with configured rooms
         config = _bind_runtime_paths(Config(router=RouterConfig(model="default")), tmp_path)
-        bot = make_test_team_bot(
+        config.defaults.enable_streaming = False
+        bot = make_test_agent_bot(
             agent_user=team_user,
             storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=["!test_room:localhost"],
-            enable_streaming=False,
         )
         install_runtime_journal_support(bot)
 
@@ -92,18 +92,6 @@ class TestTeamRoomMembership:
 
         monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
         monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
-
-        # Mock restore_scheduled_tasks
-        async def mock_restore_scheduled_tasks(
-            _client: object,
-            _room_id: str,
-            _config: Config,
-            _runtime_paths: object,
-            _conversation_reader: object,
-        ) -> int:
-            return 0
-
-        monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
 
         # Test that the team joins its configured room
         await bot.join_configured_rooms()
@@ -125,13 +113,13 @@ class TestTeamRoomMembership:
 
         # Create the team bot with no configured rooms
         config = _bind_runtime_paths(Config(router=RouterConfig(model="default")), tmp_path)
-        bot = make_test_team_bot(
+        config.defaults.enable_streaming = False
+        bot = make_test_agent_bot(
             agent_user=team_user,
             storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=[],  # No configured rooms
-            enable_streaming=False,
         )
         install_runtime_journal_support(bot)
 
@@ -195,12 +183,12 @@ class TestTeamRoomMembership:
             ),
             tmp_path,
         )
-        bot = make_test_team_bot(
+        config.defaults.enable_streaming = False
+        bot = make_test_agent_bot(
             agent_user=team_user,
             storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            enable_streaming=False,
         )
         install_runtime_journal_support(bot)
         bot.client = AsyncMock()

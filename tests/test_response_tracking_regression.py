@@ -17,9 +17,10 @@ from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.router_relay import execute_router_relay
+from mindroom.turn_record import TurnRecord
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -81,13 +82,13 @@ class TestResponseTrackingRegression:
         """
         test_room_id = "!test:localhost"
 
+        mock_config.defaults.enable_streaming = False
         # Set up router bot (only router handles commands)
         bot = make_test_agent_bot(
             agent_user=mock_router_agent,
             config=mock_config,
             storage_path=tmp_path,
             runtime_paths=runtime_paths_for(mock_config),
-            enable_streaming=False,
             rooms=[test_room_id],
         )
         wrap_extracted_collaborators(bot)
@@ -127,6 +128,7 @@ class TestResponseTrackingRegression:
             command,
             target=MessageTarget.resolve(test_room_id, None, "$command_123", thread_start_root_event_id="$command_123"),
             handled_turn=TurnRecord.create([command_event.event_id]),
+            acts_for_requester=False,
         )
 
         # Verify response was sent
@@ -134,7 +136,7 @@ class TestResponseTrackingRegression:
 
         # IMPORTANT: Check if event was marked as responded
         # This should be True after the fix
-        assert bot._turn_store.is_handled(command_event.event_id), (
+        assert await bot._turn_store.is_handled(test_room_id, command_event.event_id), (
             "Command event should be marked as responded to prevent re-processing"
         )
 
@@ -142,7 +144,7 @@ class TestResponseTrackingRegression:
         bot.client.room_send.reset_mock()
 
         # Process same command again (simulating restart)
-        handled_turn = bot._turn_store.get_turn_record(command_event.event_id)
+        handled_turn = await bot._turn_store.get_turn_record(command_event.event_id)
         assert handled_turn is not None
         await bot._command_turn_executor.execute(
             mock_room,
@@ -151,6 +153,7 @@ class TestResponseTrackingRegression:
             command,
             target=MessageTarget.resolve(test_room_id, None, "$command_123", thread_start_root_event_id="$command_123"),
             handled_turn=handled_turn,
+            acts_for_requester=False,
         )
 
         # Should NOT send another response if properly tracked
@@ -171,13 +174,13 @@ class TestResponseTrackingRegression:
         """
         test_room_id = "!test:localhost"
 
+        mock_config.defaults.enable_streaming = False
         # Set up router bot
         bot = make_test_agent_bot(
             agent_user=mock_router_agent,
             config=mock_config,
             storage_path=tmp_path,
             runtime_paths=runtime_paths_for(mock_config),
-            enable_streaming=False,
             rooms=[test_room_id],
         )
         wrap_extracted_collaborators(bot)
@@ -234,7 +237,7 @@ class TestResponseTrackingRegression:
 
         # IMPORTANT: Check if event was marked as responded
         # This should be True after the fix in bot.py at line 371
-        assert bot._turn_store.is_handled(unknown_command_event.event_id), (
+        assert await bot._turn_store.is_handled(test_room_id, unknown_command_event.event_id), (
             "Unknown command event should be marked as responded"
         )
 
@@ -247,20 +250,20 @@ class TestResponseTrackingRegression:
         mock_config: Config,
         tmp_path: Path,
     ) -> None:
-        """Test that router AI routing is tracked in the handled-turn ledger.
+        """Test that router AI routing is tracked in the turn rows.
 
         Regression test for issue where router would re-route messages
         after restart.
         """
         test_room_id = "!test:localhost"
 
+        mock_config.defaults.enable_streaming = False
         # Set up router bot
         bot = make_test_agent_bot(
             agent_user=mock_router_agent,
             config=mock_config,
             storage_path=tmp_path,
             runtime_paths=runtime_paths_for(mock_config),
-            enable_streaming=False,
             rooms=[test_room_id],
         )
         wrap_extracted_collaborators(bot)
@@ -303,7 +306,8 @@ class TestResponseTrackingRegression:
         }
 
         # Process routing
-        await bot._turn_controller._execute_router_relay(
+        await execute_router_relay(
+            bot._turn_dispatcher.deps,
             mock_room,
             message_event,
             [],
@@ -319,10 +323,10 @@ class TestResponseTrackingRegression:
 
         # IMPORTANT: Check if event was marked as responded
         # This should be True after the fix
-        assert bot._turn_store.is_handled(message_event.event_id), (
+        assert await bot._turn_store.is_handled(test_room_id, message_event.event_id), (
             "Router event should be marked as responded to prevent re-routing"
         )
-        turn_record = bot._turn_store.get_turn_record(message_event.event_id)
+        turn_record = await bot._turn_store.get_turn_record(message_event.event_id)
         assert turn_record is not None
         assert turn_record.response_event_id == "$router_response_123"
         assert turn_record.source_event_ids == tuple(source_event_ids)
@@ -333,7 +337,8 @@ class TestResponseTrackingRegression:
         mock_suggest_responder.reset_mock()
 
         # Process same message again (simulating restart)
-        await bot._turn_controller._execute_router_relay(
+        await execute_router_relay(
+            bot._turn_dispatcher.deps,
             mock_room,
             message_event,
             [],

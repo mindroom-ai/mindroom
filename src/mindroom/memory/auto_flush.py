@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, TypedDict
 from uuid import uuid4
 
 from mindroom.agent_loop.helper import complete_prompt
+from mindroom.background_tasks import SupervisedLoop
 from mindroom.config.resolution import entity_model_name, memory_backend
 from mindroom.constants import tracking_dir
 from mindroom.durable_write import write_json_file_durable
@@ -101,7 +102,7 @@ class _DueConversation:
     runs: list[RunRecord]
 
 
-def auto_flush_enabled(config: Config) -> bool:
+def _auto_flush_enabled(config: Config) -> bool:
     """Return whether file-memory auto-flush is enabled."""
     return config.memory.auto_flush.enabled and config.uses_file_memory()
 
@@ -335,7 +336,7 @@ async def _extract_memory_summary(
 
 
 @dataclass
-class MemoryAutoFlushWorker:
+class _MemoryAutoFlushWorker:
     """Periodically flush the new finished turns of every file-memory agent and private instance into daily notes."""
 
     runtime_paths: RuntimePaths
@@ -349,7 +350,7 @@ class MemoryAutoFlushWorker:
         while True:
             config = self.config_provider()
             interval = _DISABLED_POLL_SECONDS
-            if config is not None and auto_flush_enabled(config):
+            if config is not None and _auto_flush_enabled(config):
                 try:
                     await self._run_cycle(config)
                 except Exception:
@@ -414,7 +415,6 @@ class MemoryAutoFlushWorker:
         changed = False
         for session_id, updated_at in updated_sessions(
             storage,
-            scope.agent_name,
             # Update times are whole seconds, so one in the start's own second is listed too.
             since=state["agents"][scope.agent_name] - 1,
         ):
@@ -584,3 +584,39 @@ class MemoryAutoFlushWorker:
 
     async def _persist(self, state: _FlushState) -> None:
         await asyncio.to_thread(write_json_file_durable, self._state_path(), state)
+
+
+@dataclass
+class MemoryAutoFlushService:
+    """Run the auto-flush worker while the config enables auto-flush."""
+
+    name = "memory_auto_flush"
+    runtime_paths: RuntimePaths
+    config_provider: Callable[[], Config | None]
+    redacted_event_ids: RedactedEventIds
+    _loop: SupervisedLoop = field(init=False)
+
+    def __post_init__(self) -> None:
+        """Create the supervised worker loop."""
+        self._loop = SupervisedLoop("memory_auto_flush_worker", self._run_worker)
+
+    async def sync(self, config: Config) -> None:
+        """Start the worker when ``config`` enables auto-flush, and stop it otherwise."""
+        if _auto_flush_enabled(config):
+            self._loop.start()
+        else:
+            await self.stop()
+
+    async def stop(self) -> None:
+        """Stop the worker without waiting for its pass."""
+        # A pass saves each conversation's progress and a retried note is never written twice, so cancelling loses
+        # nothing.
+        await self._loop.stop()
+
+    async def _run_worker(self) -> None:
+        worker = _MemoryAutoFlushWorker(
+            runtime_paths=self.runtime_paths,
+            config_provider=self.config_provider,
+            redacted_event_ids=self.redacted_event_ids,
+        )
+        await worker.run()

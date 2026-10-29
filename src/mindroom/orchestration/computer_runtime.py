@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -149,7 +149,7 @@ class ComputerRuntimeCoordinator:
     agent_reply_memberships: AgentReplyMembershipIndex
     api_enabled: bool = True
 
-    def bind_if_ready(self, config: Config | None, bots: Mapping[str, AgentBot | TeamBot]) -> None:
+    def bind_if_ready(self, config: Config | None, bots: Mapping[str, AgentBot]) -> None:
         """Capture live clients within the orchestrator; routes never receive bots."""
         if not self.api_enabled or config is None:
             return

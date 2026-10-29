@@ -2,20 +2,29 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import nio
 
+from mindroom.bot import AgentBot
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import MatrixState
+from mindroom.scheduling import runtime as scheduling_runtime
+from mindroom.scheduling.runtime import ScheduledTaskRuntime, _TaskRunner
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.hooks import HookMatrixAdmin
+    from mindroom.matrix.conversation_reads import ConversationReader
+    from mindroom.scheduling.tasks import ScheduledTaskRecord, ScheduledWorkflow
 
 SCHEDULE_WRITER_ID = "@mindroom_router:server"
 SCHEDULED_TASK_EVENT_TYPE = "com.mindroom.scheduled.task"
@@ -84,6 +93,11 @@ def room_create_state_response(room_id: str, *, full_event: bool) -> nio.RoomGet
     return nio.RoomGetStateEventResponse(body, "m.room.create", "", room_id)
 
 
+def serve_full_room_state(client: Any, room_id: str, events: list[dict[str, Any]] | None = None) -> None:  # noqa: ANN401
+    """Answer the full room-state read that decides a new task's owner; without events no router has joined."""
+    client.room_get_state = AsyncMock(return_value=nio.RoomGetStateResponse.from_dict(events or [], room_id=room_id))
+
+
 def joined_member_state(room_id: str, event_type: str, state_key: str = "") -> nio.RoomGetStateEventResponse:
     """Report every requested member as joined, for runners that check creator membership."""
     assert event_type == "m.room.member"
@@ -124,3 +138,139 @@ def serve_task_state_events(client: Any, *, sender: str = SCHEDULE_WRITER_ID) ->
 
     client._send = AsyncMock(side_effect=send)
     return client._send
+
+
+def scheduling_bot(
+    client: Any,  # noqa: ANN401
+    *,
+    agent_name: str = ROUTER_AGENT_NAME,
+    conversation_reader: ConversationReader | None = None,
+) -> AgentBot:
+    """Return a started, synced bot double whose client and reader scheduled-task runners borrow."""
+    bot = MagicMock(spec=AgentBot)
+    bot.agent_name = agent_name
+    bot.client = client
+    bot.running = True
+    bot.first_sync_complete = True
+    bot._conversation_reader = conversation_reader if conversation_reader is not None else AsyncMock()
+    return bot
+
+
+def scheduled_task_runtime(
+    runtime_paths: RuntimePaths,
+    *bots: AgentBot,
+    config: Config | None = None,
+    config_provider: Callable[[], Config | None] | None = None,
+    matrix_admin: HookMatrixAdmin | None = None,
+) -> ScheduledTaskRuntime:
+    """Return the scheduled-task owner over these bots, reading ``config`` unless a provider is given."""
+    bots_by_name = {bot.agent_name: bot for bot in bots}
+    return ScheduledTaskRuntime(
+        runtime_paths=runtime_paths,
+        config_provider=config_provider if config_provider is not None else lambda: config,
+        bots=lambda: bots_by_name,
+        matrix_admin=lambda: matrix_admin,
+    )
+
+
+def task_runner(
+    client: Any,  # noqa: ANN401
+    task_id: str,
+    room_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    conversation_reader: ConversationReader | None = None,
+    matrix_admin: HookMatrixAdmin | None = None,
+    *,
+    config_provider: Callable[[], Config | None] | None = None,
+) -> _TaskRunner:
+    """Return one task's runner owned by a ready router bot on ``client``."""
+    bot = scheduling_bot(client, conversation_reader=conversation_reader)
+    runtime = scheduled_task_runtime(
+        runtime_paths,
+        bot,
+        config=config,
+        config_provider=config_provider,
+        matrix_admin=matrix_admin,
+    )
+    return _TaskRunner(runtime, ROUTER_AGENT_NAME, room_id, task_id)
+
+
+async def run_once_task(
+    client: Any,  # noqa: ANN401
+    task_id: str,
+    workflow: ScheduledWorkflow,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    conversation_reader: ConversationReader | None = None,
+    matrix_admin: HookMatrixAdmin | None = None,
+    *,
+    config_provider: Callable[[], Config | None] | None = None,
+) -> None:
+    """Run one one-time task to completion on a ready router bot."""
+    assert workflow.room_id is not None
+    runner = task_runner(
+        client,
+        task_id,
+        workflow.room_id,
+        config,
+        runtime_paths,
+        conversation_reader,
+        matrix_admin,
+        config_provider=config_provider,
+    )
+    await runner.run_once(workflow)
+
+
+async def run_cron_task(
+    client: Any,  # noqa: ANN401
+    task_id: str,
+    workflow: ScheduledWorkflow,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    conversation_reader: ConversationReader | None = None,
+    matrix_admin: HookMatrixAdmin | None = None,
+    *,
+    config_provider: Callable[[], Config | None] | None = None,
+) -> None:
+    """Run one recurring task on a ready router bot until it ends or completes its first fire."""
+    assert workflow.room_id is not None
+    runner = task_runner(
+        client,
+        task_id,
+        workflow.room_id,
+        config,
+        runtime_paths,
+        conversation_reader,
+        matrix_admin,
+        config_provider=config_provider,
+    )
+    complete = scheduling_runtime.complete_recurring_occurrence
+
+    async def complete_then_stop(*args: object, **kwargs: object) -> None:
+        await complete(*args, **kwargs)
+        raise _FiredOnceError
+
+    with (
+        patch.object(scheduling_runtime, "complete_recurring_occurrence", complete_then_stop),
+        suppress(_FiredOnceError),
+    ):
+        await runner.run_cron(workflow)
+
+
+class _FiredOnceError(BaseException):
+    """Ends a test's recurring runner after one completed fire; a BaseException, so the runner reports no failure."""
+
+
+async def runnable_task(
+    client: Any,  # noqa: ANN401
+    room_id: str,
+    task_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    config_provider: Callable[[], Config | None] | None = None,
+) -> ScheduledTaskRecord | None:
+    """Return a task's runnable state the way its runner reconciles it before waiting or firing."""
+    runner = task_runner(client, task_id, room_id, config, runtime_paths, config_provider=config_provider)
+    return await runner._runnable_task()

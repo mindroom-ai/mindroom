@@ -275,19 +275,15 @@ def pending_call_slot(requirement: RunRequirement, member_ids: Collection[str]) 
     return requirement.member_agent_id, requirement.tool_execution.tool_call_id
 
 
-def member_slot_id(member_slots: Mapping[str, str], member: str | None, reported_name: str | None = None) -> str:
-    """Return the slot id of the team member that ``member`` names by its slot id or its config name.
+def member_slot_id(member_ids: Collection[str], member: str | None, reported_name: str | None = None) -> str:
+    """Return ``member`` when it is one of ``member_ids``, the config names a team presentation keys its slots by.
 
-    ``member_slots`` maps each member's slot id to its config name, as a team presentation freezes them. A name that
-    is neither, None included, has no slot; ``reported_name`` is how the error names it then, if given.
+    A name that is not one, None included, has no slot; ``reported_name`` is how the error names it then, if given.
     """
-    if member is not None and member in member_slots:
-        return member
-    slot_id = next((slot_id for slot_id, config_name in member_slots.items() if config_name == member), None)
-    if slot_id is None:
+    if member not in member_ids:
         msg = f"Team has no frozen member slot for {reported_name or member!r}"
         raise RuntimeError(msg)
-    return slot_id
+    return member
 
 
 def child_card_id(delegation_id: str, call_id: str) -> str:

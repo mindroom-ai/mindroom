@@ -17,7 +17,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, SessionMetrics, TokenCounts
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.stats import collect_admin_usage
@@ -115,7 +115,7 @@ def _usage_runtime(tmp_path: Path) -> tuple[Config, RuntimePaths]:
 def _usage_store(tmp_path: Path, *runs: RunRecord) -> tuple[Config, RuntimePaths, ConversationStore]:
     """Open the agent's store through the production storage owner and persist ``runs`` as their turns do."""
     config, paths = _usage_runtime(tmp_path)
-    storage = create_state_storage("code", tmp_path / "agents/code")
+    storage = create_agent_state_storage("code", tmp_path / "agents/code")
     persist_runs(storage, _session(), *runs)
     return config, paths, storage
 
@@ -259,7 +259,7 @@ def test_unreconciled_request_details_preserve_aggregates_and_mark_coverage(
 def test_a_compaction_summary_stored_with_an_untagged_request_reports_its_model(tmp_path: Path) -> None:
     """A summary row from before its request named its model reports the request under the summary's model."""
     config, paths = _usage_runtime(tmp_path)
-    storage = create_state_storage("code", tmp_path / "agents/code")
+    storage = create_agent_state_storage("code", tmp_path / "agents/code")
     counters = {"input_tokens": 40, "output_tokens": 4, "total_tokens": 44}
     # The row as compaction summaries stored it before its request named its model.
     stored = {
@@ -447,14 +447,14 @@ def test_initial_conversion_imports_available_requests_without_reseeding_old_led
             "run_data, created_at) VALUES (?, 'session', 'agent', 'code', ?, ?, 0, ?, ?)",
             (run.run_id, run.user_id, run.status.value, json.dumps(run.to_dict()), run.created_at),
         )
-    storage = create_state_storage("code", state_root)
+    storage = create_agent_state_storage("code", state_root)
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert [row.totals.input_tokens for row in report.request_breakdown] == [120_000, 130_000]
     with sqlite3.connect(storage.path) as connection:
         payload = json.loads(connection.execute("SELECT usage_data FROM code_sessions_usage").fetchone()[0])
         del payload["requests"]
         connection.execute("UPDATE code_sessions_usage SET usage_data = ?", (json.dumps(payload),))
-    create_state_storage("code", state_root)
+    create_agent_state_storage("code", state_root)
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert report.totals.total_tokens == 250_014
     assert report.request_breakdown == ()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import TYPE_CHECKING, Any
 
 from mindroom.cancellation import request_task_cancel
@@ -10,12 +11,16 @@ from mindroom.logging_config import get_logger
 from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, RuntimeShutdownIntent
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Awaitable, Callable, Coroutine
     from contextvars import Context
 
 logger = get_logger(__name__)
 _MAX_BACKGROUND_TASK_CANCEL_ROUNDS = 3
 _BACKGROUND_TASK_CANCEL_ROUND_TIMEOUT_SECONDS = 0.1
+_LOOP_RESTART_INITIAL_DELAY_SECONDS = 1.0
+_LOOP_RESTART_MAX_DELAY_SECONDS = 30.0
+# A loop that ran this long before it ended counts as healthy, so its next restart waits the initial delay again.
+_LOOP_HEALTHY_RUN_SECONDS = 30.0
 
 # Global registries keep strong references to background tasks and optional owners.
 _background_tasks: set[asyncio.Task[Any]] = set()
@@ -92,6 +97,77 @@ async def run_blocking_or_compensate[Result](
         if running.exception() is None:
             await run_blocking_until_complete(compensate, running.result())
         raise
+
+
+def retry_delay_seconds(
+    attempt: int,
+    *,
+    initial_delay_seconds: float,
+    max_delay_seconds: float,
+) -> float:
+    """Return capped exponential backoff delay for a retry attempt.
+
+    Doubling stops at the cap, so an owner that retries for days never overflows.
+    """
+    delay = initial_delay_seconds
+    for _ in range(max(0, attempt - 1)):
+        if delay >= max_delay_seconds:
+            break
+        delay *= 2
+    return min(max_delay_seconds, delay)
+
+
+class SupervisedLoop:
+    """Run one long-running loop that restarts with backoff whenever it crashes or returns before ``stop``."""
+
+    def __init__(self, name: str, run: Callable[[], Awaitable[None]]) -> None:
+        self.name = name
+        self._run = run
+        self._task: asyncio.Task[None] | None = None
+
+    @property
+    def running(self) -> bool:
+        """Return whether the loop is started and not stopped."""
+        return self._task is not None and not self._task.done()
+
+    def start(self) -> None:
+        """Start the loop once; calls while it runs are no-ops."""
+        if not self.running:
+            self._task = asyncio.create_task(self._supervise(), name=self.name)
+
+    async def stop(self) -> None:
+        """Cancel the loop and wait until it has finished."""
+        task, self._task = self._task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _supervise(self) -> None:
+        task = asyncio.current_task()
+        restarts = 0
+        while True:
+            started_at = time.monotonic()
+            try:
+                await self._run()
+            except Exception:
+                if self._task is not task:
+                    return
+                logger.exception("Supervised loop crashed; restarting", task_name=self.name)
+            else:
+                # A loop that swallowed the cancellation of ``stop`` returns here, and must not restart.
+                if self._task is not task:
+                    return
+                logger.warning("Supervised loop exited; restarting", task_name=self.name)
+            if time.monotonic() - started_at >= _LOOP_HEALTHY_RUN_SECONDS:
+                restarts = 0
+            restarts += 1
+            await asyncio.sleep(
+                retry_delay_seconds(
+                    restarts,
+                    initial_delay_seconds=_LOOP_RESTART_INITIAL_DELAY_SECONDS,
+                    max_delay_seconds=_LOOP_RESTART_MAX_DELAY_SECONDS,
+                ),
+            )
 
 
 def create_background_task(

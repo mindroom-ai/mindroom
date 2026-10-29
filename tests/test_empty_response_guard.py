@@ -90,7 +90,7 @@ async def _stream(config: Config, *, sinks: TurnSinks = TurnSinks(), **turn_inpu
 
 def test_discard_empty_completed_run_removes_run_from_loaded_session_and_storage(tmp_path: Path) -> None:
     """The empty run must disappear from both the in-memory session and persisted history."""
-    storage = create_state_storage("general", tmp_path)
+    storage = create_state_storage("general", tmp_path, HistoryScope(kind="agent", scope_id="general"))
     session = ConversationSession(
         session_id="session-1",
         kind="agent",
@@ -116,14 +116,14 @@ def test_discard_empty_completed_run_removes_run_from_loaded_session_and_storage
     )
 
     assert [run.run_id for run in session.runs] == ["run-good"]
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert [run.run_id for run in persisted.runs] == ["run-good"]
 
 
 def test_discard_empty_completed_run_deletes_a_run_the_live_session_never_saw(tmp_path: Path) -> None:
     """The loop stores the run without the scope session it loaded first, which therefore lacks the run."""
-    storage = create_state_storage("general", tmp_path)
+    storage = create_state_storage("general", tmp_path, HistoryScope(kind="agent", scope_id="general"))
     live_session = seed_session(
         storage,
         ConversationSession(
@@ -153,14 +153,14 @@ def test_discard_empty_completed_run_deletes_a_run_the_live_session_never_saw(tm
     )
 
     assert [run.run_id for run in live_session.runs] == ["run-good"]
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert [run.run_id for run in persisted.runs] == ["run-good"]
 
 
 def test_discard_empty_completed_team_run_removes_run_from_session_and_storage(tmp_path: Path) -> None:
     """The team discard must purge the run and its member runs from memory and persisted history."""
-    storage = create_state_storage("team_general", tmp_path)
+    storage = create_state_storage("team_general", tmp_path, HistoryScope(kind="team", scope_id="team_general"))
     session = ConversationSession(
         session_id="session-1",
         kind="team",
@@ -190,7 +190,7 @@ def test_discard_empty_completed_team_run_removes_run_from_session_and_storage(t
     )
 
     assert [run.run_id for run in session.runs] == ["run-good"]
-    persisted = storage.load_session("session-1", "team")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert [run.run_id for run in persisted.runs] == ["run-good"]
 

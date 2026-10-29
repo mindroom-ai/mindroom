@@ -261,7 +261,7 @@ class TeamTurn:
 
         Without ``run_id`` no member row is filtered out, so a stray row is still visible to negative checks.
         """
-        session = self.storage.load_session(session_id, "team")
+        session = self.storage.load_session(session_id)
         assert session is not None
         [record] = [run for run in session.runs if isinstance(run, TeamRunRecord) and run_id in (None, run.run_id)]
         members = [

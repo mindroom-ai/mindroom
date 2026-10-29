@@ -25,7 +25,7 @@ from mindroom.teams.members import BuiltTeam, build_team_spec, resolve_exact_tea
 from mindroom.teams.spec import TeamMode
 from mindroom.token_budget import compute_compaction_input_budget
 from mindroom.turn_model import ModelScope, resolve_turn_model
-from tests.bot_helpers import make_test_agent_bot, make_test_team_bot
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -69,7 +69,8 @@ async def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncItera
         ),
         runtime_paths,
     )
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    # Without the embedded API, reloads read the YAML through the plain loader.
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=False)
     orchestrator.config = config
     matrix_ids = entity_ids(config, runtime_paths)
     for name in ("general", "team", ROUTER_AGENT_NAME):
@@ -85,16 +86,11 @@ async def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncItera
             "config": config,
             "runtime_paths": runtime_paths,
         }
-        bot = make_test_team_bot(**kwargs) if name == "team" else make_test_agent_bot(**kwargs)
+        bot = make_test_agent_bot(**kwargs)
         bot.orchestrator = orchestrator
         bot.running = True
-        orchestrator.agent_bots[name] = bot
+        orchestrator.fleet.add(name, bot)
     monkeypatch.setattr(AgentBot, "_set_presence_with_model_info", AsyncMock())
-    monkeypatch.setattr(
-        orchestrator,
-        "_restart_changed_entities",
-        AsyncMock(side_effect=AssertionError("Model-only reload must preserve Matrix bots")),
-    )
     try:
         yield orchestrator
     finally:
@@ -320,4 +316,4 @@ async def test_agent_and_team_edits_reach_the_next_response_without_restarting_b
     assert "Answer in one sentence." in agent.prompt.instructions
     assert "calculator" in {toolkit.name for toolkit in agent.spec.toolkits}
     assert runtime.agent_bots["team"].config.teams["team"].mode == "collaborate"
-    assert emit_config_reloaded.await_args.kwargs["changed_entities"] == {"general", "team"}
+    assert emit_config_reloaded.await_args.args[1] == {"general", "team"}

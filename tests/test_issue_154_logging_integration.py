@@ -22,7 +22,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, tracking_dir
-from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import get_logger, setup_logging
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -30,12 +29,13 @@ from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.turn_policy import PreparedDispatch, ResponseAction
+from mindroom.turn_record import TurnRecord
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
     install_model_providers,
     make_turn_context,
-    replace_turn_controller_deps,
+    replace_turn_deps,
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
@@ -231,7 +231,7 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log(
         generate_response=AsyncMock(side_effect=generate_response),
         generate_team_response_helper=AsyncMock(),
     )
-    controller = replace_turn_controller_deps(
+    replace_turn_deps(
         bot,
         logger=get_logger("tests.issue_154.turn"),
         response_runner=response_runner,
@@ -266,13 +266,12 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log(
         ),
     )
 
-    await controller._execute_response_action(
+    await bot._turn_dispatcher._execute_response_action(
         room,
         event,
         dispatch,
         ResponseAction(kind="individual"),
         DispatchPayloadInputs((), (), ()),
-        processing_log="Processing",
         dispatch_started_at=time.monotonic(),
         handled_turn=TurnRecord.create(
             [event.event_id],

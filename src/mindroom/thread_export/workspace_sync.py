@@ -13,6 +13,7 @@ import asyncio
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol
 
+from mindroom.background_tasks import SupervisedLoop
 from mindroom.logging_config import get_logger
 from mindroom.private_storage.private_instance_identity import private_instances_for_agent
 from mindroom.requester_identity import is_access_checked_requester_id
@@ -92,41 +93,46 @@ class WorkspaceThreadExportRunner:
     which the loop idles on its event.
     """
 
+    name = "thread_exports"
+
     def __init__(self, deps: WorkspaceThreadExportDeps) -> None:
         self._deps = deps
         self._pending_room_ids: set[str] = set()
         self._full_pass_pending = False
         self._wakeup = asyncio.Event()
-        self._task: asyncio.Task[None] | None = None
+        self._loop = SupervisedLoop("thread_export_workspace_sync", self._run)
         self._manual_exports: set[asyncio.Task[object]] = set()
 
-    def start(self) -> None:
-        """Start the loop once; later calls are no-ops."""
-        if self._task is None:
-            self._task = asyncio.create_task(self._run(), name="thread_export_workspace_sync")
+    async def sync(self, config: Config) -> None:  # noqa: ARG002 - each pass reads the active config
+        """Start the loop, and reconcile every workspace against a changed config right away.
+
+        The first sync, from startup maintenance, finds the startup pass already queued once bots ran, so only later syncs queue one.
+        """
+        if self._loop.running:
+            self.queue_full_pass()
+        self._loop.start()
 
     async def stop(self) -> None:
         """Cancel and drain every export before its borrowed runtime closes."""
-        task = self._task
-        self._task = None
+        # The loop stops first, so no administrative export can start after the snapshot below.
+        _, cancellation = await gather_shutdown_phase(self._loop.stop())
         tasks = tuple(self._manual_exports)
-        if task is not None:
-            tasks = (*tasks, task)
         for task in tasks:
             task.cancel()
-        _, cancellation = await gather_shutdown_phase(*tasks)
+        _, export_cancellation = await gather_shutdown_phase(*tasks)
+        cancellation = cancellation or export_cancellation
         if cancellation is not None:
             raise cancellation
 
     async def prepare_runtime_replacement(self) -> None:
         """Drain old readers and queue a fresh pass behind closed replacement admission."""
-        was_running = self._task is not None
+        was_running = self._loop.running
         try:
             await self.stop()
         finally:
             if was_running:
                 self.queue_full_pass()
-                self.start()
+                self._loop.start()
 
     async def export_once(
         self,
@@ -138,7 +144,7 @@ class WorkspaceThreadExportRunner:
     ) -> ThreadExportStats:
         """Run an administrative export while holding runtime replacement admission."""
         gate = self._deps.response_admission_gate
-        if self._task is None or self._task.done() or not gate.admit():
+        if not self._loop.running or not gate.admit():
             msg = "MindRoom must be running and ready to export threads; retry after startup or reload"
             raise RuntimeError(msg)
         task = asyncio.current_task()

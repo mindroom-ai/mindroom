@@ -85,7 +85,6 @@ class PersonalRoomLifecycle:
     runtime_paths: RuntimePaths
     service: PersonalRoomService
     lookup_target: Callable[[str], PersonalRoomTarget | None]
-    requester_user_id: Callable[[nio.RoomMessageFormatted], str]
     # Creates one user's agent from a template (template, owner, joining account, source_room_id) and requests a reload.
     provision_personal_agent: Callable[[str, str, str, str], Awaitable[None]] | None = None
     _reconciled: bool = field(default=False, init=False)
@@ -301,8 +300,13 @@ class PersonalRoomLifecycle:
         self._retry_candidates.pop(candidate, None)
         return True
 
-    async def handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> bool:
-        """Recognize exact self-onboarding commands through trusted requester resolution."""
+    async def handle_command(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageFormatted,
+        requester_user_id: str,
+    ) -> bool:
+        """Recognize exact self-onboarding commands; ``requester_user_id`` is the event's trusted requester."""
         settings = self.runtime.config.personal_rooms
         if (
             not self.observes_onboarding_joins
@@ -311,12 +315,11 @@ class PersonalRoomLifecycle:
             or room.room_id not in resolve_room_aliases(settings.onboarding_rooms, self.runtime_paths)
         ):
             return False
-        requester = self.requester_user_id(event)
         if is_human_requester_id(
             event.sender,
             self.runtime.config,
             self.runtime_paths,
-        ) and requester == resolve_human_requester_alias(
+        ) and requester_user_id == resolve_human_requester_alias(
             event.sender,
             self.runtime.config,
             self.runtime_paths,

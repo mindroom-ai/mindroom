@@ -183,7 +183,7 @@ async def test_a_paused_delegation_resumes_its_child_and_then_the_parent(
 
 
 def _save(run: CodeResume, record: RunRecord) -> None:
-    session = run.store.load_session(record.session_id or "", "agent")
+    session = run.store.load_session(record.session_id or "")
     assert session is not None
     run.store.save_run(session, record, record_usage=False)
 

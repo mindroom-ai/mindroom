@@ -150,7 +150,7 @@ class _Resumable:
 
     def runner(self) -> ResumeRunner:
         """Return the resume as a saved approval runs it: on the session as the store holds it after the pause."""
-        session = self.store.load_session("session-1", "agent")
+        session = self.store.load_session("session-1")
         assert session is not None
         return ResumeRunner(
             build=self.build,
@@ -199,7 +199,7 @@ def _resumable(
         knowledge=None,
         model=turn_model(config, paths, "test_agent"),
     )
-    session = store.load_session("session-1", "agent") or new_scope_session(
+    session = store.load_session("session-1") or new_scope_session(
         session_id="session-1",
         scope_id="test_agent",
         is_team=False,
@@ -400,7 +400,7 @@ async def test_a_continuation_on_the_turns_own_session_replays_no_run_the_fold_s
     agent = _resumable(tmp_path, monkeypatch, model, replays_history=True)
     paused = await _pause(agent)
     assert summary_calls.inputs
-    fresh = agent.store.load_session("session-1", "agent")
+    fresh = agent.store.load_session("session-1")
     assert fresh is not None
     assert [run.run_id for run in agent.session.runs] == [run.run_id for run in fresh.runs] == [paused.run_id]
     before = len(model.requests)
@@ -452,7 +452,7 @@ async def test_compaction_after_an_approval_resume_reaches_the_stored_session(
     await _resume(agent, paused)
 
     assert len(summary_calls.inputs) > compactions_before_resume
-    stored = agent.store.load_session("session-1", "agent")
+    stored = agent.store.load_session("session-1")
     rows = summary_rows_of(agent.store, TEST_AGENT_SCOPE.key)
     assert stored is not None
     assert stored.summary is not None
@@ -536,7 +536,7 @@ async def test_long_single_team_turn_compacts_mid_turn_and_continues(
         f"run:{record.run_id}",
     ]
     assert {fold.run_id for fold in folds_of(team.storage, TEAM_SCOPE.key, SESSION_ID)} == {record.run_id}
-    stored = team.storage.load_session(SESSION_ID, "team")
+    stored = team.storage.load_session(SESSION_ID)
     assert stored is not None
     assert stored.summary is not None
     assert stored.summary.text == rows[-1].summary
@@ -713,7 +713,7 @@ async def test_team_approval_resume_after_mid_turn_compaction(
     [summary] = _summaries(resumed.messages)
     [paused_summary] = _summaries(paused_request.messages)
     assert summary.content == paused_summary.content
-    stored = team.storage.load_session(SESSION_ID, "team")
+    stored = team.storage.load_session(SESSION_ID)
     rows = summary_rows_of(team.storage, TEAM_SCOPE.key, SESSION_ID)
     assert stored is not None
     assert stored.summary is not None

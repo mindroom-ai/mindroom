@@ -5,14 +5,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable
+    from collections.abc import Awaitable, Mapping
 
     import nio
 
     from mindroom.agent_cli.session import TurnToolRegistry
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.automations.runner import AutomationRunner
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle
     from mindroom.response_admission import ResponseAdmissionGate
+    from mindroom.scheduling.runtime import ScheduledTaskRuntime
     from mindroom.skill_learning.runner import SkillReviewRunner
     from mindroom.tool_system.plugins import PluginReloadResult
 
@@ -55,7 +56,7 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
     def api_enabled(self) -> bool: ...  # noqa: D102
 
     @property
-    def agent_bots(self) -> object: ...  # noqa: D102
+    def agent_bots(self) -> Mapping[str, AgentBot]: ...  # noqa: D102
 
     @property
     def knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler: ...  # noqa: D102
@@ -71,6 +72,9 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
 
     @property
     def budgets(self) -> BudgetMonitor: ...  # noqa: D102
+
+    @property
+    def scheduled_tasks(self) -> ScheduledTaskRuntime: ...  # noqa: D102
 
     @property
     def agent_reply_memberships(self) -> AgentReplyMembershipIndex: ...  # noqa: D102
@@ -108,7 +112,7 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         """Resolve the current running bot's already-owned Matrix device pin."""
         ...
 
-    def handle_bot_ready(self, bot: AgentBot | TeamBot) -> Awaitable[None]:
+    def handle_bot_ready(self, bot: AgentBot) -> Awaitable[None]:
         """Handle a managed bot completing its first sync."""
         ...
 

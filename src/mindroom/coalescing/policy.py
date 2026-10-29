@@ -5,7 +5,7 @@ from __future__ import annotations
 import enum
 from typing import TYPE_CHECKING
 
-from mindroom.dispatch_handoff import DispatchEvent, PreparedIngress, is_media_dispatch_event
+from mindroom.dispatch_handoff import DispatchEvent, is_media_dispatch_event
 from mindroom.dispatch_source import (
     IMAGE_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
@@ -28,25 +28,6 @@ class QueueKind(enum.Enum):
 _ROOM_SCOPE_BATCHING_SOURCE_KINDS: frozenset[str] = frozenset(
     {VOICE_SOURCE_KIND, IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND},
 )
-
-
-def _effective_source_kind(
-    event: DispatchEvent,
-    fallback_source_kind: str | None = None,
-) -> str | None:
-    if fallback_source_kind is not None:
-        return fallback_source_kind
-    if isinstance(event, PreparedIngress) and event.source_kind_override is not None:
-        return event.source_kind_override
-    return None
-
-
-def is_coalescing_exempt_source_kind(
-    event: DispatchEvent,
-    fallback_source_kind: str | None = None,
-) -> bool:
-    """Return True when coalescing should be skipped for this event."""
-    return source_kind_bypasses_coalescing(_effective_source_kind(event, fallback_source_kind))
 
 
 def pending_event_is_text(pending_event: PendingEvent) -> bool:
@@ -83,6 +64,6 @@ def source_or_event_allows_room_scope_batching(
 
 def queue_kind(pending_event: PendingEvent) -> QueueKind:
     """Return the dispatch behavior for one resolved pending event."""
-    if is_coalescing_exempt_source_kind(pending_event.event, pending_event.event.source_kind):
+    if source_kind_bypasses_coalescing(pending_event.facts.source_kind):
         return QueueKind.BYPASS
     return QueueKind.NORMAL

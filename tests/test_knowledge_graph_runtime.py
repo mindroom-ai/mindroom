@@ -48,14 +48,14 @@ async def test_runtime_runs_while_an_agent_enables_the_graph(tmp_path: Path) -> 
         redacted_event_ids=_no_redactions,
     )
     try:
-        await runtime.sync()
+        await runtime.sync(config)
         store = knowledge_graph_store()
         assert store is not None
-        await runtime.sync()
+        await runtime.sync(config)
         assert knowledge_graph_store() is store
 
         config = _config(enabled=False)
-        await runtime.sync()
+        await runtime.sync(config)
         assert knowledge_graph_store() is None
     finally:
         await runtime.stop()
@@ -84,7 +84,7 @@ async def test_stop_cancels_a_pass_in_progress_and_clears_health(tmp_path: Path)
         redacted_event_ids=_no_redactions,
     )
     with patch.object(runtime_module, "GraphitiStore", return_value=store):
-        await runtime.sync()
+        await runtime.sync(config)
     await asyncio.wait_for(store.added.wait(), timeout=10)
     record_knowledge_graph_failure("ValueError: earlier failure")
 

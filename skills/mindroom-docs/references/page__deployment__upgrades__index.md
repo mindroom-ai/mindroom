@@ -4,6 +4,31 @@ Use this page when upgrading an existing deployment across a release that needs 
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
 
+## Upgrading to one owner per conversation database
+
+The first start after this upgrade converts every conversation database once more before any agent comes online, as the [conversation storage v2](#upgrading-to-conversation-storage-v2) upgrade did, so that each records the agent, team, or internal usage store it belongs to.
+A team's database that holds no conversation yet converts when that team next uses it instead.
+Each converted database logs one `conversation_converted` record (see [Events](https://docs.mindroom.chat/deployment/operational-log-events/#conversation_converted)).
+Conversation history, compaction summaries, session state, pending tool approvals, and usage records carry over.
+
+### Before upgrading to one owner per database
+
+Make sure each disk that holds conversation databases has free space of about twice the total size of their `.db` files.
+A database still in the Agno layout, which the [conversation storage v2](#upgrading-to-conversation-storage-v2) upgrade never converted, converts straight to this layout and needs the free space that section gives instead.
+A database whose directory lacks the space it needs is not converted: startup logs `conversation_conversion_skipped_store` for it, and every use of it fails with an error naming the database and the bytes it needs until you free the space.
+A deploy that rolls back on its own, such as `helm upgrade --atomic`, starts the older release on converted databases, which then moves them aside (see the next section).
+
+### Going back to an older release
+
+Before converting a database, MindRoom copies it byte for byte beside it and never deletes that copy: to `<name>.db.pre-storage-v4` for a database the conversation storage v2 upgrade already converted, and to `<name>.db.pre-storage-v2` for one still in the Agno layout.
+A crash or restart during the upgrade leaves the database being converted unchanged, and the next start converts it.
+The only way back is to stop MindRoom, replace each `<name>.db` with the copy this upgrade made of it, delete any `<name>.db-journal` beside it, and start the older release.
+When a database has both backups, the copy this upgrade made is the newer file.
+Everything written since the upgrade is lost: replies, summaries, session state, approvals requested since then, and usage records for that period.
+An older release started on converted databases without restoring the backups archives each agent's or team's `sessions/` directory, backups included, as [Incompatible session databases](https://docs.mindroom.chat/deployment/storage/#incompatible-session-databases) describes; move the backups back out of that archive and restore them as above.
+Going back below conversation storage v2 from a database that has both restores its `.pre-storage-v2` backup instead, as [Downgrading](#downgrading) describes.
+Once you are sure you will not downgrade, delete these backups.
+
 ## Upgrading to checked model references and per-agent workspaces
 
 A config whose agent, team, router, room, thread-summary, or enabled voice model names no model under `models` now fails to load instead of failing at the first reply, so run `mindroom config validate` before upgrading and add or rename the missing models; a config with agents and no `router.model` needs a model named `default`.

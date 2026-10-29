@@ -9,7 +9,7 @@ import pytest
 from mindroom.api import config_lifecycle
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import HelperUsage, MessageMetrics, RequestUsage, RunMetrics, TokenCounts, VoiceDuration
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.types import ConversationSession
 from tests.api.test_private_usage_api import _client as _private_client
 from tests.api.test_usage_service_auth import (
@@ -43,7 +43,7 @@ def test_live_voice_duration_exports_separately_from_delegate_tokens(
         env = {"MINDROOM_API_KEY": "test-usage-key"}
         headers = {"Authorization": "Bearer test-usage-key"}
     client, storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, env)
-    storage = create_state_storage("test_agent", storage_root / "agents/test_agent")
+    storage = create_agent_state_storage("test_agent", storage_root / "agents/test_agent")
     run = _run()
     run.agent_id = "test_agent"
     assert run.metrics is not None
@@ -117,7 +117,7 @@ def test_request_export_flag_authentication_and_cache_variants(
     else:
         headers = {"Cf-Access-Jwt-Assertion": _service_assertion(key)}
     client, storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, env)
-    storage = create_state_storage("test_agent", storage_root / "agents/test_agent")
+    storage = create_agent_state_storage("test_agent", storage_root / "agents/test_agent")
     run = _run()
     run.agent_id = "test_agent"
     assert run.metrics is not None
@@ -165,7 +165,7 @@ def test_helper_usage_exports_once_without_counting_another_reply(
 ) -> None:
     """The authenticated API must include independent helper usage from the real SQLite store."""
     client, storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, {"MINDROOM_API_KEY": "test-usage-key"})
-    storage = create_state_storage("test_agent", storage_root / "agents/test_agent")
+    storage = create_agent_state_storage("test_agent", storage_root / "agents/test_agent")
     run = RunRecord(
         run_id="ordinary",
         model="test-model",

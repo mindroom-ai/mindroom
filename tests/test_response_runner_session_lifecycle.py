@@ -21,6 +21,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.config.participation import ParticipationConfig
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -95,7 +96,7 @@ THREAD_SESSION_ID = "!test:localhost:$thread-root"
 
 def _history_store(tmp_path: Path) -> ConversationStore:
     """Return the agent scope's store the runner opens for its session probe."""
-    return create_state_storage("general", tmp_path / "scope_history")
+    return create_state_storage("general", tmp_path / "scope_history", HistoryScope(kind="agent", scope_id="general"))
 
 
 def _agent_store(config: Config, runtime_paths: RuntimePaths) -> ConversationStore:
@@ -142,7 +143,7 @@ def _start_session(storage: ConversationStore, session_id: str) -> None:
 
 def _persisted_run(storage: ConversationStore, session_id: str = THREAD_SESSION_ID) -> AnyRunRecord:
     """Return the first run the reply stored in its session."""
-    session = storage.load_session(session_id, "agent")
+    session = storage.load_session(session_id)
     assert session is not None
     assert session.runs
     return session.runs[0]
@@ -172,6 +173,7 @@ async def test_generate_response_emits_cancelled_hook_once_for_empty_prompt(
     """Blank prompts should emit one canonical message:cancelled hook through lifecycle finalization."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
+    config.defaults.enable_streaming = use_streaming
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     if use_streaming:
         _mark_requester_online(bot.client, "@alice:localhost")
@@ -183,7 +185,6 @@ async def test_generate_response_emits_cancelled_hook_once_for_empty_prompt(
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
             requester_id="@alice:localhost",
-            enable_streaming=use_streaming,
         )
         coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.reset_mock()
 
@@ -205,6 +206,7 @@ def _before_response_stopped_runner(tmp_path: Path) -> tuple[ResponseRunner, Con
     """Return a runner whose before_response hook is stopped by the user while the reply is delivered whole."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
+    config.defaults.enable_streaming = False
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     coordinator = _build_response_runner(
         bot,
@@ -213,7 +215,6 @@ def _before_response_stopped_runner(tmp_path: Path) -> tuple[ResponseRunner, Con
         storage_path=tmp_path,
         requester_id="@alice:localhost",
         message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-        enable_streaming=False,
     )
     coordinator.deps.delivery_gateway.deps.response_hooks._apply_before_response = AsyncMock(
         side_effect=asyncio.CancelledError(USER_STOP_CANCEL_MSG),
@@ -320,6 +321,7 @@ def _session_runner(
     if tools is not None:
         config.agents["general"].tools = tools
     config.memory.backend = "none"
+    config.defaults.enable_streaming = streaming
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     if streaming:
         _mark_requester_online(bot.client, "@alice:localhost")
@@ -344,7 +346,6 @@ def _session_runner(
             ),
             budgets=BudgetMonitor(runtime_paths=runtime_paths, config_provider=lambda: config),
         ),
-        enable_streaming=streaming,
     )
     # Each reply shows its own events, as a homeserver names them.
     unique_room_send_responses(bot.client)
@@ -499,7 +500,7 @@ async def test_session_started_skips_a_reply_that_stores_no_session(tmp_path: Pa
         await coordinator.generate_response(_thread_request())
 
     assert sequence == []
-    assert storage.load_session(THREAD_SESSION_ID, "agent") is None
+    assert storage.load_session(THREAD_SESSION_ID) is None
 
 
 @pytest.mark.asyncio
@@ -884,6 +885,7 @@ async def test_private_agent_response_runner_builds_execution_identity_from_requ
         ),
         runtime_paths,
     )
+    config.defaults.enable_streaming = False
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     target = MessageTarget.resolve("!test:localhost", None, "$external-trigger", room_mode=True)
 
@@ -899,7 +901,6 @@ async def test_private_agent_response_runner_builds_execution_identity_from_requ
             storage_path=tmp_path,
             requester_id="@owner:localhost",
             message_target=target,
-            enable_streaming=False,
         )
         build_calls: list[dict[str, object]] = []
         original_build_execution_identity = coordinator.deps.tool_runtime.build_execution_identity
@@ -1073,7 +1074,7 @@ async def test_generate_response_locked_returns_none_when_final_delivery_is_unha
             resolution = await coordinator.generate_response(_thread_request())
 
     assert resolution is None
-    assert storage.load_session(THREAD_SESSION_ID, "agent") is None
+    assert storage.load_session(THREAD_SESSION_ID) is None
 
 
 @pytest.mark.asyncio
@@ -1127,7 +1128,7 @@ async def test_generate_response_locked_unhandled_delivery_outcome_does_not_pers
             )
 
     assert resolution is None
-    assert history_storage.load_session(THREAD_SESSION_ID, "agent") is None
+    assert history_storage.load_session(THREAD_SESSION_ID) is None
 
 
 @pytest.mark.asyncio
@@ -1204,7 +1205,7 @@ async def test_generate_response_locked_preserves_visible_stream_when_finalize_r
 
     # An interruption whose note did not land leaves its turn to replay.
     assert resolution is None
-    assert storage.load_session(THREAD_SESSION_ID, "agent") is None
+    assert storage.load_session(THREAD_SESSION_ID) is None
 
 
 @pytest.mark.asyncio

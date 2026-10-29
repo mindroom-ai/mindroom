@@ -134,24 +134,33 @@ def observe_store(
     observation keeps those ids, so a later one asks the same questions.
     """
     with deterministic():
-        store = create_state_storage(storage_name, root)
+        scope = _named_owner(TableNames(storage_name).database_path(root))
+        store = create_state_storage(storage_name, root, scope)
         with closing(sqlite3.connect(store.path)) as connection:
-            rows = connection.execute(
-                f"SELECT session_id, session_type, agent_id, team_id FROM {quote_identifier(store.names.sessions)} "  # noqa: S608
-                "ORDER BY session_id",
-            ).fetchall()
+            session_ids = [
+                session_id
+                for (session_id,) in connection.execute(
+                    f"SELECT session_id FROM {quote_identifier(store.names.sessions)} ORDER BY session_id",  # noqa: S608
+                )
+            ]
         sessions: dict[str, object] = {}
-        for session_id, session_type, agent_id, team_id in rows:
-            owner = team_id if session_type == "team" else agent_id
-            if not owner:
-                sessions[session_id] = {"error": "the session row names no owner"}
-                continue
+        for session_id in session_ids:
             listed = [run.run_id for run in store.list_runs(session_id)]
             run_ids = sorted({*listed, *(extra_run_ids or {}).get(session_id, [])})
-            scope = HistoryScope(kind="team" if session_type == "team" else "agent", scope_id=owner)
             sessions[session_id] = {
                 "scope": scope.key,
                 "run_ids": run_ids,
                 "observed": observe(store, session_id, scope, run_ids=run_ids),
             }
     return json.loads(_canonical({"storage_name": storage_name, "sessions": sessions}))
+
+
+def _named_owner(database: Path) -> HistoryScope:
+    """Return the one owner the session rows of ``database``, as a release before layout version 4 left it, name."""
+    names = TableNames.of_database(database)
+    with closing(sqlite3.connect(database)) as connection:
+        [(kind, owner_id)] = connection.execute(
+            "SELECT DISTINCT session_type, CASE WHEN session_type = 'team' THEN team_id ELSE agent_id END "  # noqa: S608
+            f"FROM {quote_identifier(names.sessions)}",
+        ).fetchall()
+    return HistoryScope(kind=kind, scope_id=owner_id)

@@ -29,15 +29,19 @@ from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecor
 from mindroom.session_storage import legacy_agno3_conversion
 from mindroom.session_storage import store as store_module
 from mindroom.session_storage.agent_storage import prepare_conversation_database
-from mindroom.session_storage.legacy_agno3_backup import BACKUP_SUFFIX, ConversionSpaceError
-from mindroom.session_storage.legacy_agno3_conversion import convert_conversation_database, migrate_conversation_storage
+from mindroom.session_storage.legacy_agno3_conversion import (
+    BACKUP_SUFFIX,
+    convert_conversation_database,
+    migrate_conversation_storage,
+)
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_schema_sql
+from mindroom.session_storage.legacy_conversion_backup import ConversionSpaceError
 from mindroom.session_storage.schema import LOG_VERSION, SESSION_COLUMNS, TableNames, table_names
 from mindroom.session_storage.store import ConversationStore, connect_by_name
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.storage import SYSTEM_USAGE_STORAGE_NAME
 from tests.llm.agno_dict_helpers import DROPPED_RUN_KEYS, DROPPED_TOOL_EXECUTION_KEYS, expected_run_dict
-from tests.session_storage.agno_layout import write_agno_database
+from tests.session_storage.agno_layout import named_owner, recorded_owner, write_agno_database
 from tests.session_storage.goldens import LEGACY_AGNO3
 from tests.storage_oracle.determinism import deterministic
 from tests.storage_oracle.record import FIXTURES, GOLDEN_DUMPS, storage_name_of
@@ -215,7 +219,7 @@ def _segment(
 
 
 def _converted(database: Path) -> ConversationStore:
-    prepare_conversation_database(database, TableNames.of_database(database), agent_name=None)
+    prepare_conversation_database(database, TableNames.of_database(database), recorded_owner(database))
     return ConversationStore(database)
 
 
@@ -253,7 +257,7 @@ def _dump(database: Path) -> str:
 
 
 def _loaded_ids(store: ConversationStore, session_id: str = _SESSION) -> list[str]:
-    session = store.load_session(session_id, "agent")
+    session = store.load_session(session_id)
     assert session is not None
     return [run.run_id for run in session.runs]
 
@@ -355,7 +359,7 @@ def test_members_of_members_join_their_team_run(tmp_path: Path) -> None:
         "m0": "t0",
         "mm0": "t0",
     }
-    session = store.load_session("session", "team")
+    session = store.load_session("session")
     assert session is not None
     assert {run.run_id for run in session.runs} == {"t0", "m0", "mm0"}
 
@@ -447,7 +451,10 @@ def test_a_fold_run_without_a_row_takes_its_latest_folds_place_and_keeps_its_mem
 
 @pytest.mark.parametrize("field", ["agent_id", "user_id"])
 def test_a_lone_surrogate_in_a_runs_text_field_converts_as_a_replacement_character(tmp_path: Path, field: str) -> None:
-    """A run row's or fold member's text field worker code wrote with an escaped lone surrogate reads as U+FFFD."""
+    """A run row's or fold member's text field worker code wrote with an escaped lone surrogate reads as U+FFFD.
+
+    A top-level run's agent then becomes the database's agent, as every run of an agent's conversations does.
+    """
     database = _agno_database(tmp_path)
     _insert_run(database, _run("r0"), run_index=0, run_data=json.dumps({**_run("r0").to_dict(), field: "x\ud800"}))
     segment = _segment(members=(_run("gone.m", parent_run_id="gone"),))
@@ -459,7 +466,7 @@ def test_a_lone_surrogate_in_a_runs_text_field_converts_as_a_replacement_charact
     for run_id in ("r0", "gone.m"):
         run = store.get_run(run_id)
         assert run is not None
-        assert run.to_dict()[field] == "x\ufffd"
+        assert run.to_dict()[field] == ("code" if (run_id, field) == ("r0", "agent_id") else "x\ufffd")
 
 
 def test_a_run_whose_metadata_is_not_an_object_converts(tmp_path: Path) -> None:
@@ -776,7 +783,7 @@ def test_a_fold_whose_run_id_is_not_text_names_no_run(tmp_path: Path, fold_run_i
         (2, 2, None),
     ]
     assert [run.run_id for run in store.list_runs(_SESSION)] == ["r0", "r1"]
-    session = store.load_session(_SESSION, "agent")
+    session = store.load_session(_SESSION)
     assert session is not None
     retire(store, session=session, scope_key="agent:code")
     assert [run.run_id for run in store.list_runs(_SESSION)] == ["r0", "r1"]
@@ -918,7 +925,8 @@ def test_converted_runs_keep_only_the_keys_records_model(tmp_path: Path) -> None
     assert all(DROPPED_TOOL_EXECUTION_KEYS.isdisjoint(execution) for execution in executions)
     converted = store.get_run(stored["run_id"])
     assert converted is not None
-    expected = expected_run_dict(stored)
+    # The database's agent owns its top-level runs.
+    expected = {**expected_run_dict(stored), "agent_id": "code"}
     # The run holds a history copy, which no converted run keeps.
     expected["messages"] = [message for message in expected["messages"] if not message.get("from_history")]
     assert converted.to_dict() == expected
@@ -962,13 +970,13 @@ def test_session_columns_encoded_twice_are_stored_once(tmp_path: Path) -> None:
 
     store = _converted(database)
 
-    session_data, metadata, _ = _session_columns(database, _SESSION)
-    assert (json.loads(session_data), json.loads(metadata)) == ({"session_state": {"a": 1}}, {"k": "v"})
-    session = store.load_session(_SESSION, "agent")
+    state, session_data, metadata, _ = _session_columns(database, _SESSION)
+    assert (json.loads(state), session_data, json.loads(metadata)) == ({"a": 1}, None, {"k": "v"})
+    session = store.load_session(_SESSION)
     assert session is not None
     assert (session.session_state, session.metadata) == ({"a": 1}, {"k": "v"})
-    assert _session_columns(database, "odd")[1] == json.dumps("not json")
-    odd = store.load_session("odd", "agent")
+    assert _session_columns(database, "odd")[2] == json.dumps("not json")
+    odd = store.load_session("odd")
     assert odd is not None
     assert odd.metadata is None
 
@@ -1147,7 +1155,8 @@ def test_a_run_row_whose_data_is_not_utf8_converts_with_replacement_characters(t
             b'{"session_state": {"note": "x\xff"}}',
             lambda session: session.session_state == {"note": "x\ufffd"},
         ),
-        ("agent_id", b"code\xfe", lambda session: session.owner_id == "code\ufffd"),
+        # The row's owner no longer reaches a load, which names the database's.
+        ("agent_id", b"code\xfe", lambda session: session.owner_id == "code"),
     ],
     ids=["metadata", "session-data", "owner"],
 )
@@ -1164,7 +1173,7 @@ def test_session_text_that_is_not_utf8_is_stored_as_the_conversion_reads_it(
 
     store = _converted(database)
 
-    session = store.load_session(_SESSION, "agent")
+    session = store.load_session(_SESSION)
     assert session is not None
     assert read(session)
     assert [run.run_id for run in session.runs] == ["r0"]
@@ -1196,7 +1205,7 @@ def test_a_session_whose_text_holds_a_replacement_character_converts_unchanged(t
 
     store = _converted(database)
 
-    session = store.load_session("s\ufffd", "agent")
+    session = store.load_session("s\ufffd")
     assert session is not None
     assert (session.metadata, [run.run_id for run in session.runs]) == ({"note": "\ufffd"}, ["r0"])
 
@@ -1209,7 +1218,7 @@ def test_removed_runs_stay_removed(tmp_path: Path) -> None:
 
     store = _converted(database)
 
-    session = store.load_session(_SESSION, "agent")
+    session = store.load_session(_SESSION)
     assert session is not None
     assert store.save_run(session, _run("cut"), record_usage=False) == "removed"
     assert store.get_run("cut") is None
@@ -1218,10 +1227,10 @@ def test_removed_runs_stay_removed(tmp_path: Path) -> None:
 _PENDING_KEY = "mindroom_pending_compaction_scope_keys"
 
 
-def _session_columns(database: Path, session_id: str) -> tuple[object, object, object]:
+def _session_columns(database: Path, session_id: str) -> tuple[object, object, object, object]:
     [row] = _query(
         database,
-        'SELECT session_data, metadata, updated_at FROM "code_sessions" WHERE session_id = ?',
+        'SELECT session_state, session_data, metadata, updated_at FROM "code_sessions" WHERE session_id = ?',
         (session_id,),
     )
     return row
@@ -1266,12 +1275,15 @@ def test_a_queued_compaction_request_becomes_the_metadata_flag(tmp_path: Path) -
         session_id="team",
     )
     _store_raw(database, "code_sessions", "session_data", '{"session_state": {"tool": 1}}', session_id="idle")
-    idle_before = _session_columns(database, "idle")
+    [(_, idle_metadata, idle_updated_at)] = _query(
+        database,
+        "SELECT session_data, metadata, updated_at FROM code_sessions WHERE session_id = 'idle'",
+    )
 
     store = _converted(database)
 
-    session_data, metadata, updated_at = _session_columns(database, _SESSION)
-    assert json.loads(session_data) == {"session_state": {"tool": "kept"}, "session_metrics": {"total_tokens": 3}}
+    state, session_data, metadata, updated_at = _session_columns(database, _SESSION)
+    assert (json.loads(state), json.loads(session_data)) == ({"tool": "kept"}, {"session_metrics": {"total_tokens": 3}})
     flagged = {"force_compact_before_next_run": True}
     assert json.loads(metadata) == {
         "other": "kept",
@@ -1283,11 +1295,12 @@ def test_a_queued_compaction_request_becomes_the_metadata_flag(tmp_path: Path) -
     assert updated_at == 1
     assert has_queued_force_compaction(store, _SESSION, HistoryScope(kind="agent", scope_id="code"))
     assert has_queued_force_compaction(store, _SESSION, HistoryScope(kind="team", scope_id="squad"))
-    team = store.load_session("team", "team")
+    # The database's agent owns the session the team row named too.
+    team = store.load_session("team")
     assert team is not None
     assert team.session_state == {}
     assert has_queued_force_compaction(store, "team", HistoryScope(kind="team", scope_id="squad"))
-    assert _session_columns(database, "idle") == idle_before
+    assert _session_columns(database, "idle") == ('{"tool": 1}', None, idle_metadata, idle_updated_at)
 
 
 def test_a_request_queued_before_the_summary_rows_existed_leaves_the_scopes_tombstones_to_their_step(
@@ -1311,7 +1324,7 @@ def test_a_request_queued_before_the_summary_rows_existed_leaves_the_scopes_tomb
     store = _converted(database)
 
     assert _loaded_ids(store) == ["kept"]
-    session = store.load_session(_SESSION, "agent")
+    session = store.load_session(_SESSION)
     assert session is not None
     assert session.session_state == {}
     assert session.metadata == {
@@ -1342,22 +1355,39 @@ def test_a_queued_request_that_names_no_scope_requests_nothing(tmp_path: Path, q
 
     store = _converted(database)
 
-    session_data, metadata, _updated_at = _session_columns(database, _SESSION)
-    assert json.loads(session_data) == {"session_state": {"tool": "kept"}}
+    state, session_data, metadata, _updated_at = _session_columns(database, _SESSION)
+    assert (json.loads(state), session_data) == ({"tool": "kept"}, None)
     assert metadata == '{"other":  "kept"}'
     assert not has_queued_force_compaction(store, _SESSION, HistoryScope(kind="agent", scope_id="code"))
 
 
-@pytest.mark.parametrize("session_data", ["not json", json.dumps({"session_state": [_PENDING_KEY]}), json.dumps([1])])
-def test_session_data_that_holds_no_state_object_converts_as_stored(tmp_path: Path, session_data: str) -> None:
-    """Worker code can write the session row, so session data a run could not read leaves the row as it was."""
+@pytest.mark.parametrize(
+    ("session_data", "converted"),
+    [
+        ("not json", (None, "not json")),
+        (json.dumps({"session_state": [_PENDING_KEY]}), (json.dumps([_PENDING_KEY]), None)),
+        (json.dumps([1]), (None, json.dumps([1]))),
+    ],
+)
+def test_session_data_that_holds_no_state_object_converts_as_stored(
+    tmp_path: Path,
+    session_data: str,
+    converted: tuple[str | None, str | None],
+) -> None:
+    """Worker code can write the session row, so session data a run could not read keeps its bytes and loads no state.
+
+    A state that is not an object moves to the state column as stored; session data that is not an object stays.
+    """
     database = _agno_database(tmp_path)
     _store_raw(database, "code_sessions", "session_data", session_data, session_id=_SESSION)
-    before = _session_columns(database, _SESSION)
+    [(metadata, updated_at)] = _query(database, "SELECT metadata, updated_at FROM code_sessions")
 
-    _converted(database)
+    store = _converted(database)
 
-    assert _session_columns(database, _SESSION) == before
+    assert _session_columns(database, _SESSION) == (*converted, metadata, updated_at)
+    session = store.load_session(_SESSION)
+    assert session is not None
+    assert session.session_state == {}
 
 
 def test_a_removed_run_whose_id_is_not_utf8_is_stored_as_the_conversion_reads_it(tmp_path: Path) -> None:
@@ -1384,7 +1414,7 @@ def test_a_converted_database_holds_only_the_v2_layout(tmp_path: Path, dump: Pat
     """The Agno tables, the sessions table's other columns, and its unused index are gone; the meta row marks it."""
     database, names = _restore(dump, tmp_path)
 
-    prepare_conversation_database(database, names, agent_name=None)
+    prepare_conversation_database(database, names, recorded_owner(database))
 
     with closing(sqlite3.connect(database)) as connection:
         assert table_names(connection) == {
@@ -1403,9 +1433,7 @@ def test_a_converted_database_holds_only_the_v2_layout(tmp_path: Path, dump: Pat
         meta = connection.execute(f'SELECT version, next_seq FROM "{names.log_meta}"').fetchall()  # noqa: S608
         (largest,) = connection.execute(f'SELECT COALESCE(MAX(seq), 0) FROM "{names.log_runs}"').fetchone()  # noqa: S608
     assert columns == list(SESSION_COLUMNS)
-    assert {index for index in indexes if not index.startswith("sqlite_autoindex")} == {
-        f"idx_{names.sessions}_session_type",
-    }
+    assert {index for index in indexes if not index.startswith("sqlite_autoindex")} == set()
     assert meta == [(LOG_VERSION, largest + 1)]
 
 
@@ -1418,9 +1446,9 @@ def test_every_input_converts_once_and_the_same_way_twice(tmp_path: Path, name: 
         original = database.read_bytes()
         backup = database.with_name(f"{database.name}{BACKUP_SUFFIX}")
         with deterministic():
-            prepare_conversation_database(database, names, agent_name=None)
+            prepare_conversation_database(database, names, recorded_owner(database))
             converted = _dump(database)
-            prepare_conversation_database(database, names, agent_name=None)
+            prepare_conversation_database(database, names, recorded_owner(database))
         assert _dump(database) == converted
         assert backup.read_bytes() == original
         dumps.append(converted)
@@ -1442,13 +1470,13 @@ def test_a_failed_conversion_leaves_the_database_as_it_was(tmp_path: Path, monke
     with monkeypatch.context() as patched:
         patched.setattr(legacy_agno3_conversion, "_convert_summary", fail)
         with pytest.raises(RuntimeError, match="injected"):
-            prepare_conversation_database(database, names, agent_name=None)
+            prepare_conversation_database(database, names, named_owner(names))
     assert database.read_bytes() == original
     assert not _is_converted(database)
     backup = database.with_name(f"{database.name}{BACKUP_SUFFIX}")
     backup.write_bytes(b"stale")
 
-    prepare_conversation_database(database, names, agent_name=None)
+    prepare_conversation_database(database, names, named_owner(names))
 
     assert _is_converted(database)
     assert backup.read_bytes() == original
@@ -1470,7 +1498,7 @@ def test_a_failed_conversion_rolls_back_at_once(tmp_path: Path, monkeypatch: pyt
 
     monkeypatch.setattr(legacy_agno3_conversion, "_convert_summary", read_then_fail)
     with pytest.raises(RuntimeError, match="injected") as interrupted:
-        prepare_conversation_database(database, names, agent_name=None)
+        prepare_conversation_database(database, names, named_owner(names))
 
     # The failure's traceback keeps the reading cursor alive, as it does for a caller that logs or re-raises it.
     assert interrupted.traceback
@@ -1482,19 +1510,19 @@ def test_the_marker_is_read_again_under_the_write_lock(tmp_path: Path, monkeypat
     """A converter that read no marker before another one converted the file leaves it, and its backup, alone."""
     database, names = _restore(GOLDEN_DUMPS[0], tmp_path)
     original = database.read_bytes()
-    leave_wal_mode = legacy_agno3_conversion._leave_wal_mode
+    leave_wal_mode = legacy_agno3_conversion.leave_write_ahead_log
     converts = []
 
     def other_opener_converts_first(connection: sqlite3.Connection, path: Path) -> None:
-        monkeypatch.setattr(legacy_agno3_conversion, "_leave_wal_mode", leave_wal_mode)
-        prepare_conversation_database(path, names, agent_name=None)
+        monkeypatch.setattr(legacy_agno3_conversion, "leave_write_ahead_log", leave_wal_mode)
+        prepare_conversation_database(path, names, named_owner(names))
         leave_wal_mode(connection, path)
 
     convert = legacy_agno3_conversion._convert
-    monkeypatch.setattr(legacy_agno3_conversion, "_leave_wal_mode", other_opener_converts_first)
+    monkeypatch.setattr(legacy_agno3_conversion, "leave_write_ahead_log", other_opener_converts_first)
     monkeypatch.setattr(legacy_agno3_conversion, "_convert", lambda *args: converts.append(convert(*args)))
 
-    prepare_conversation_database(database, names, agent_name=None)
+    prepare_conversation_database(database, names, named_owner(names))
 
     assert len(converts) == 1
     assert database.with_name(f"{database.name}{BACKUP_SUFFIX}").read_bytes() == original
@@ -1514,7 +1542,7 @@ def test_no_other_process_writes_between_the_backup_and_the_commit(
         return convert_runs(*args)
 
     monkeypatch.setattr(legacy_agno3_conversion, "_convert_runs", convert_runs_after_probe)
-    prepare_conversation_database(database, names, agent_name=None)
+    prepare_conversation_database(database, names, named_owner(names))
 
     assert set(seen) == {"database is locked"}
     assert _other_process_takes_write_lock(database) == "locked"
@@ -1539,7 +1567,7 @@ def test_a_write_ahead_log_database_is_checkpointed_and_converted(tmp_path: Path
     """A commit only the log holds reaches both the converted file and its backup, and the file leaves the mode."""
     database, names = _wal_crash_copy(tmp_path)
 
-    prepare_conversation_database(database, names, agent_name=None)
+    prepare_conversation_database(database, names, named_owner(names))
 
     assert not Path(f"{database}-wal").exists()
     with closing(sqlite3.connect(database)) as connection:
@@ -1566,7 +1594,7 @@ def test_a_write_ahead_log_another_connection_holds_stops_the_conversion(tmp_pat
             closing(connect_by_name(database, timeout=0)) as connection,
             pytest.raises(RuntimeError, match=re.escape(str(database))),
         ):
-            convert_conversation_database(connection, database, names, descriptors, agent_name=None)
+            convert_conversation_database(connection, database, names, descriptors, owner=named_owner(names))
     finally:
         holder.close()
     assert not _is_converted(database)
@@ -1580,7 +1608,7 @@ def test_a_hot_journal_is_rolled_back_before_the_backup(tmp_path: Path) -> None:
     assert Path(f"{database}-journal").exists()
     assert database.read_bytes() != committed
 
-    prepare_conversation_database(database, names, agent_name=None)
+    prepare_conversation_database(database, names, named_owner(names))
 
     assert database.with_name(f"{database.name}{BACKUP_SUFFIX}").read_bytes() == committed
     assert "filler" not in _tables(database)
@@ -1598,7 +1626,7 @@ def test_a_database_without_a_sessions_table_only_gets_the_v2_tables(tmp_path: P
                 connection.execute(prepare)
 
         with capture_logs() as logs:
-            prepare_conversation_database(database, _NAMES, agent_name=None)
+            prepare_conversation_database(database, _NAMES, named_owner(_NAMES))
 
         assert {_NAMES.log_meta, _NAMES.log_runs, _NAMES.usage} <= _tables(database)
         assert database.with_name(f"{database.name}{BACKUP_SUFFIX}").exists() == (name == "other")
@@ -1628,7 +1656,7 @@ def test_a_conversion_is_logged_and_compacts_what_the_agno_tables_left_free(tmp_
     database = _database_of_large_runs(tmp_path, 40)
 
     with capture_logs() as logs:
-        prepare_conversation_database(database, _NAMES, agent_name=None)
+        prepare_conversation_database(database, _NAMES, named_owner(_NAMES))
 
     [entry] = [entry for entry in logs if entry["event"] == "conversation_converted"]
     assert entry["log_level"] == "info"
@@ -1653,7 +1681,7 @@ def test_a_conversion_that_frees_little_of_the_file_keeps_its_free_pages(tmp_pat
         connection.execute("INSERT INTO kept VALUES (?)", (b"x" * 400_000,))
 
     with capture_logs() as logs:
-        prepare_conversation_database(database, _NAMES, agent_name=None)
+        prepare_conversation_database(database, _NAMES, named_owner(_NAMES))
 
     [entry] = [entry for entry in logs if entry["event"] == "conversation_converted"]
     assert entry["compacted"] is False
@@ -1675,7 +1703,7 @@ def test_a_conversion_without_room_to_compact_keeps_its_free_pages(
 
     monkeypatch.setattr(os, "statvfs", free_space)
     with capture_logs() as logs:
-        prepare_conversation_database(database, _NAMES, agent_name=None)
+        prepare_conversation_database(database, _NAMES, named_owner(_NAMES))
 
     assert [entry["compacted"] for entry in logs if entry["event"] == "conversation_converted"] == [False]
     assert _free_pages(database) > 0
@@ -1706,11 +1734,11 @@ def test_an_interrupted_conversion_converts_on_retry_with_the_free_space_of_the_
     convert_runs = legacy_agno3_conversion._convert_runs
     monkeypatch.setattr(legacy_agno3_conversion, "_convert_runs", interrupted)
     with pytest.raises(RuntimeError, match="killed"):
-        prepare_conversation_database(database, _NAMES, agent_name=None)
+        prepare_conversation_database(database, _NAMES, named_owner(_NAMES))
     assert (database.read_bytes(), backup.read_bytes()) == (original, original)
 
     monkeypatch.setattr(legacy_agno3_conversion, "_convert_runs", convert_runs)
-    prepare_conversation_database(database, _NAMES, agent_name=None)
+    prepare_conversation_database(database, _NAMES, named_owner(_NAMES))
 
     assert _is_converted(database)
     assert backup.read_bytes() == original
@@ -1736,7 +1764,7 @@ def test_a_failed_compaction_is_logged_and_keeps_the_conversion(
 
     monkeypatch.setattr(store_module, "connect_conversation_database", connect)
     with capture_logs() as logs:
-        prepare_conversation_database(database, _NAMES, agent_name=None)
+        prepare_conversation_database(database, _NAMES, named_owner(_NAMES))
 
     assert _skipped(logs, "conversation_compaction_failed") == [str(database)]
     assert [entry["compacted"] for entry in logs if entry["event"] == "conversation_converted"] == [False]
@@ -1760,6 +1788,14 @@ def _store_at(directory: Path) -> Path:
     return database
 
 
+def _team_store_at(teams: Path) -> Path:
+    """Create team ``crew``'s Agno-layout database in its directory under ``teams``, with one session and one run."""
+    names = TableNames.of_team(HistoryScope(kind="team", scope_id="crew"))
+    database = _agno_database(teams / names.storage_name, (_SESSION, "team", "crew"), names=names)
+    _insert_run(database, _run("r0"), run_index=0)
+    return database
+
+
 @pytest.mark.asyncio
 async def test_the_startup_sweep_converts_every_store_and_skips_what_it_cannot(
     tmp_path: Path,
@@ -1768,8 +1804,11 @@ async def test_the_startup_sweep_converts_every_store_and_skips_what_it_cannot(
     """Every store under the state root converts; a linked, unreadable, locked, or too large one is logged and skipped."""
     paths, root = _runtime(tmp_path)
     converted = [
-        _store_at(root / relative)
-        for relative in ("agents/code", "private_instances/scope/code", "teams/code", SYSTEM_USAGE_STORAGE_NAME)
+        *(
+            _store_at(root / relative)
+            for relative in ("agents/code", "private_instances/scope/code", SYSTEM_USAGE_STORAGE_NAME)
+        ),
+        _team_store_at(root / "teams"),
     ]
     # Linked in under the name of the database it holds, so following the link would reach it.
     outside = _store_at(tmp_path / "outside/alias")
@@ -1784,11 +1823,11 @@ async def test_the_startup_sweep_converts_every_store_and_skips_what_it_cannot(
     locked, full = _store_at(root / "agents/locked"), _store_at(root / "agents/full")
     write_backup = legacy_agno3_conversion.write_conversion_backup
 
-    def backup_without_space(database: Path, descriptors: ExitStack, *, copied_bytes: int) -> None:
+    def backup_without_space(database: Path, descriptors: ExitStack, **sizes: Any) -> None:  # noqa: ANN401
         if database == full:
-            msg = f"Converting {database} to storage v2 needs more bytes"
+            msg = f"Converting {database} needs more bytes"
             raise ConversionSpaceError(msg)
-        write_backup(database, descriptors, copied_bytes=copied_bytes)
+        write_backup(database, descriptors, **sizes)
 
     monkeypatch.setattr(legacy_agno3_conversion, "write_conversion_backup", backup_without_space)
     before = outside.read_bytes()
@@ -1811,7 +1850,7 @@ async def test_the_startup_sweep_converts_every_store_and_skips_what_it_cannot(
         str(path) for path in (full, garbage, linked, locked)
     )
     assert garbage.read_bytes() == b"not a database"
-    prepare_conversation_database(locked, TableNames.of_database(locked), agent_name=None)
+    prepare_conversation_database(locked, TableNames.of_database(locked), named_owner(TableNames.of_database(locked)))
     assert _is_converted(locked)
 
 
@@ -1819,7 +1858,7 @@ async def test_the_startup_sweep_converts_every_store_and_skips_what_it_cannot(
 async def test_the_startup_sweep_does_not_follow_a_linked_root(tmp_path: Path) -> None:
     """An ``agents`` root worker code replaced with a link is not walked; the other roots convert."""
     paths, root = _runtime(tmp_path)
-    healthy = _store_at(root / "teams/code")
+    healthy = _team_store_at(root / "teams")
     outside = _store_at(tmp_path / "outside/agents/code")
     (root / "agents").symlink_to(tmp_path / "outside/agents", target_is_directory=True)
 
@@ -1834,7 +1873,7 @@ async def test_the_startup_sweep_does_not_follow_a_linked_root(tmp_path: Path) -
 async def test_the_startup_sweep_skips_an_unlistable_private_instance(tmp_path: Path) -> None:
     """A private instance directory worker code made unlistable is logged and skipped, and startup goes on."""
     paths, root = _runtime(tmp_path)
-    healthy = _store_at(root / "teams/code")
+    healthy = _team_store_at(root / "teams")
     hidden = _store_at(root / "private_instances/scope/code")
     scope = root / "private_instances/scope"
     scope.chmod(0)

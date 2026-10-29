@@ -91,7 +91,6 @@ class TestRoutingIntegration:
             research_agent,
             tmp_path,
             rooms=["!research:localhost"],
-            enable_streaming=True,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -102,7 +101,6 @@ class TestRoutingIntegration:
             config,
             runtime_paths_for(config),
             rooms=["!research:localhost"],
-            enable_streaming=True,
         )
 
         # Mock clients

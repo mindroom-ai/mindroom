@@ -81,7 +81,6 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.user_id = "@mindroom_test_agent:localhost"
     bot.hook_registry = HookRegistry.empty()
-    bot.enable_streaming = True
     bot.orchestrator = None
     install_runtime_journal_support(bot)
     bot._conversation_resolver.build_message_target = MagicMock(

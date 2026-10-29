@@ -269,7 +269,6 @@ async def _replay(
     session = await asyncio.to_thread(
         lambda: create_session_storage(agent_name, config, runtime_paths, execution_identity=identity).load_session(
             session_id,
-            "agent",
         ),
     )
     if session is None:
