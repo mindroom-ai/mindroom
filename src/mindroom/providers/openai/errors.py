@@ -49,7 +49,7 @@ def provider_error(error: Exception, *, provider: str) -> ProviderError:
     if (failure := provider_failure(error, provider=provider)) is not None:
         return failure
     if isinstance(error, openai.APIStatusError):
-        message, code, _ = _error_fields(error.body)
+        message, code, error_type = _error_fields(error.body)
         if message is None:
             message = error.response.text or str(error)
         return classify_provider_error(
@@ -57,6 +57,7 @@ def provider_error(error: Exception, *, provider: str) -> ProviderError:
             provider=provider,
             status_code=error.status_code,
             code=code,
+            error_type=error_type,
             retry_after_seconds=retry_after_seconds(error.response.headers),
         )
     if isinstance(error, openai.APIError):

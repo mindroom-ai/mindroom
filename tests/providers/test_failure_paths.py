@@ -804,6 +804,15 @@ _OPENAI_HTTP_CASES = [
         1,
         code=QUOTA_EXHAUSTED,
     ),
+    # An invented code stands for a billing code OpenAI adds later, which still carries ``insufficient_quota``.
+    _Case(
+        "http_429_unlisted_billing_code",
+        _openai_status(429, "A billing failure under a new code.", "insufficient_quota", "unlisted_billing_code"),
+        ProviderError,
+        f"{ERROR}A billing failure under a new code.",
+        1,
+        code=QUOTA_EXHAUSTED,
+    ),
     _Case(
         "http_404",
         _openai_status(404, "The model does not exist.", "invalid_request_error"),
