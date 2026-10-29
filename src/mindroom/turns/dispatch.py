@@ -83,7 +83,7 @@ if TYPE_CHECKING:
     from mindroom.response_runner import ResponseRunner
     from mindroom.teams.spec import TeamMode
     from mindroom.turn_policy import DispatchPlan, TurnPolicy
-    from mindroom.turn_store import SourcePreparation, TurnClaim, TurnStore
+    from mindroom.turn_store import TurnClaim, TurnStore
     from mindroom.turns.facts import IngressFacts
     from mindroom.turns.interactive_selection import InteractiveSelections
     from mindroom.visible_response_reconciliation import VisibleResponseReconciler
@@ -265,7 +265,6 @@ class TurnDispatchDeps:
     ingress: IngressValidator
     visible_responses: VisibleResponseReconciler
     retry_dispatch_sources: Callable[[str, tuple[str, ...]], None]
-    settle_dispatch_sources: Callable[[tuple[str, ...]], Awaitable[None]]
     selections: InteractiveSelections
 
 
@@ -1112,11 +1111,6 @@ class TurnDispatcher:
             async def settle_redacted_sources() -> None:
                 await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
 
-            async def answer_surviving_sources(preparation: SourcePreparation) -> None:
-                # The rest answer as their own turn once the response task lets their claim go.
-                await self.deps.settle_dispatch_sources(preparation.invalid)
-                self.deps.turn_store.retry_when_claim_releases(dispatch.target.room_id, preparation.surviving)
-
             async def record_no_response() -> None:
                 await self.deps.turn_store.record_turn(handled_turn)
                 await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
@@ -1154,7 +1148,10 @@ class TurnDispatcher:
                         thread_history=history,
                     ),
                     on_source_turn_suppressed=settle_redacted_sources,
-                    on_sources_invalidated=answer_surviving_sources,
+                    on_sources_invalidated=partial(
+                        self.deps.visible_responses.answer_surviving_sources,
+                        dispatch.target.room_id,
+                    ),
                     on_no_response_handled=record_no_response,
                 )
                 # The reply's records settle the sources and record the turn answered.

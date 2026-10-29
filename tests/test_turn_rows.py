@@ -571,19 +571,18 @@ class TestCompletion:
         assert await read(store, turn_rows.prepared_voice, "$v") is None
         assert await column(store, "SELECT prepared_voice_json FROM turn_sources") == [(None,)]
 
-    async def test_a_responded_turn_keeps_the_newest_response_and_proves_only_consumed_revisions(
+    async def test_a_responded_turn_keeps_the_newest_response_and_proves_only_selected_revisions(
         self,
         store: EventJournalStore,
     ) -> None:
-        """A responded turn keeps the newest response and proves only consumed revisions."""
+        """A responded turn keeps the newest response and proves only the revisions its record selected."""
         await accepted(store, turn(["$s"], prompts={"$s": "e1"}, revisions={"$s": (10, "$e1")}))
         await write(store, turn_rows.record_responded_turn, turn(["$s"], response="$r1"), room_id=ROOM)
         second = await write(
             store,
             turn_rows.record_responded_turn,
-            turn(["$s"], response="$r2"),
+            turn(["$s"], response="$r2", revisions={"$s": (10, "$e1")}),
             room_id=ROOM,
-            consumed_revisions=[(10, "$e1")],
         )
 
         assert isinstance(second, Accepted)

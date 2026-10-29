@@ -868,7 +868,6 @@ class AgentBot:
                 ingress=self._ingress_validator,
                 visible_responses=self._visible_responses,
                 retry_dispatch_sources=self._journal_dispatcher.retry_turn_sources,
-                settle_dispatch_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
                 selections=self._interactive_selections,
             ),
         )

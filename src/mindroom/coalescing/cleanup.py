@@ -44,10 +44,6 @@ class ClaimedSegmentOwner:
     pending_events: list[PendingEvent]
     closed: bool = False
 
-    def event_ids(self) -> set[str]:
-        """Return source event IDs owned by this segment."""
-        return {pending_event.event.event_id for pending_event in self.pending_events}
-
     def close_once(self) -> None:
         """Close this segment's events if it has not already been closed."""
         if self.closed:

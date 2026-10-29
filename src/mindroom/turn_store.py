@@ -192,7 +192,7 @@ def _shared_claim_registry(store_key: str, agent_name: str) -> _ClaimRegistry:
 
 
 def _reset_turn_claim_registries() -> None:
-    """Drop every live claim (tests and forked runtimes)."""
+    """Drop every live claim (tests)."""
     _CLAIM_REGISTRIES.clear()
 
 

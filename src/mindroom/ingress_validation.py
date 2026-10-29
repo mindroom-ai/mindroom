@@ -217,10 +217,10 @@ class IngressValidator:
         """Return whether one sender may supply trusted ingress metadata: the entity registry manages it."""
         return self.managed_entity_name_for_sender(sender_id) is not None
 
-    def managed_entity_name_for_sender(self, sender_id: str, *, include_router: bool = True) -> str | None:
+    def managed_entity_name_for_sender(self, sender_id: str) -> str | None:
         """Return the configured entity alias for an exact current Matrix user ID."""
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
-        return registry.current_entity_name_for_user_id(sender_id, include_router=include_router)
+        return registry.current_entity_name_for_user_id(sender_id)
 
     async def precheck_event(
         self,

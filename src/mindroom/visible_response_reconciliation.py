@@ -10,6 +10,7 @@ from mindroom.delivery_gateway import SendTextRequest
 from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
 from mindroom.model_selection import command_result_content_to_dict
 from mindroom.turn_record import canonicalize_turn_record
+from mindroom.turn_store import SourcePreparation
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Mapping
@@ -151,12 +152,19 @@ class VisibleResponseReconciler:
         if not deleted:
             return False
         source_event_ids = pending_turn.record.source_event_ids
-        await self.deps.settle_ignored_sources(tuple(event_id for event_id in source_event_ids if event_id in deleted))
-        self.deps.turn_store.retry_when_claim_releases(
+        await self.answer_surviving_sources(
             room_id,
-            tuple(event_id for event_id in source_event_ids if event_id not in deleted),
+            SourcePreparation(
+                invalid=tuple(event_id for event_id in source_event_ids if event_id in deleted),
+                surviving=tuple(event_id for event_id in source_event_ids if event_id not in deleted),
+            ),
         )
         return True
+
+    async def answer_surviving_sources(self, room_id: str, preparation: SourcePreparation) -> None:
+        """Settle a turn's invalid sources; the survivors answer as their own turn once the caller's claim releases."""
+        await self.deps.settle_ignored_sources(preparation.invalid)
+        self.deps.turn_store.retry_when_claim_releases(room_id, preparation.surviving)
 
     async def record_pending_visible_response(self, handled_turn: TurnRecord, response_event_id: str) -> None:
         """Durably bind one visible response to its incomplete turn before generation."""

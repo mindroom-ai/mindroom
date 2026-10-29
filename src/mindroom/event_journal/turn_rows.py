@@ -1435,12 +1435,8 @@ def record_responded_turn(
     record: TurnRecord,
     *,
     room_id: str,
-    consumed_revisions: Sequence[SourceEventRevision] | None = None,
 ) -> Accepted | Refused:
-    """Record one turn answered by a visible response, attributing it only to the revisions its snapshot consumed.
-
-    ``consumed_revisions`` defaults to the revisions the record selected.
-    """
+    """Record one turn answered by a visible response, attributing it to the revisions the record selected."""
     response_event_id = record.response_event_id
     if not response_event_id:
         msg = "A responded turn requires a visible Matrix response event ID"
@@ -1452,12 +1448,7 @@ def record_responded_turn(
         "UPDATE turns SET response_event_id = ? WHERE agent_name = ? AND turn_key = ?",
         (response_event_id, agent_name, turn.turn_key),
     )
-    consumed = tuple(
-        revision_id
-        for _timestamp, revision_id in (
-            (record.source_event_revisions or {}).values() if consumed_revisions is None else consumed_revisions
-        )
-    )
+    consumed = tuple(revision_id for _timestamp, revision_id in (record.source_event_revisions or {}).values())
     if consumed:
         transaction.execute(
             f"UPDATE turn_revisions SET response_event_id = ? "  # noqa: S608

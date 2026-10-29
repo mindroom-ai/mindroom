@@ -765,7 +765,8 @@ class TurnIngress:
                 return await self._handle_message_inner(
                     room,
                     event,
-                    PrecheckedEvent(event=turn_event, facts=facts),
+                    turn_event,
+                    facts,
                     is_edit=is_edit,
                     receipt_time=receipt_time,
                     ticket=ticket,
@@ -799,7 +800,8 @@ class TurnIngress:
         self,
         room: nio.MatrixRoom,
         event: nio.RoomMessageFormatted,
-        classified: PrecheckedEvent[nio.RoomMessageFormatted],
+        turn_event: nio.RoomMessageFormatted,
+        facts: IngressFacts,
         *,
         is_edit: bool,
         receipt_time: float,
@@ -807,8 +809,8 @@ class TurnIngress:
     ) -> TurnDispatchOutcome:
         """Handle one text message as a turn inside the per-turn conversation lookup scope.
 
-        ``classified`` is the event the turn reads, a finished reply in place of
-        the edit that delivered it, with its facts; it is not prechecked yet.
+        ``turn_event`` is the event the turn reads, a finished reply in place of
+        the edit that delivered it, and ``facts`` its provenance.
         """
         event_content = event.source.get("content") if isinstance(event.source, dict) else None
         is_nonterminal_stream = isinstance(event_content, dict) and is_unfinished_reply(event_content)
@@ -816,8 +818,8 @@ class TurnIngress:
         # reply needs as handled.
         if not isinstance(event.body, str) or is_nonterminal_stream:
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-        event = classified.event
-        prechecked_event = await self._precheck_dispatch_event(room, event, classified.facts, is_edit=is_edit)
+        event = turn_event
+        prechecked_event = await self._precheck_dispatch_event(room, event, facts, is_edit=is_edit)
         if prechecked_event is None:
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         await ensure_room_membership_synced(

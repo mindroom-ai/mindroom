@@ -98,8 +98,8 @@ class _RouterIngress:
 
     router_user_id: str
 
-    def managed_entity_name_for_sender(self, sender_id: str, *, include_router: bool = True) -> str | None:
-        if include_router and sender_id == self.router_user_id:
+    def managed_entity_name_for_sender(self, sender_id: str) -> str | None:
+        if sender_id == self.router_user_id:
             return ROUTER_AGENT_NAME
         return None
 
