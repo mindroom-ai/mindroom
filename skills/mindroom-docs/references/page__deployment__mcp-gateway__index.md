@@ -251,7 +251,7 @@ The limits apply to all three operations, and a call over any limit fails immedi
 A cancelled or timed-out call keeps its allowance until its tool work and cleanup finish.
 The defaults are conservative starting values; tune them to available resources, tool latency, and upstream quotas.
 Gateway tool work runs on 32 dedicated threads, and work beyond that waits within its call's deadline.
-A call holds one thread for each synchronous body or worker request it runs at once, including those of tools a plugin tool calls through `toolkit_functions`, so keep `MINDROOM_MCP_GATEWAY_MAX_USER_CALLS` low enough that one user's calls cannot hold all 32.
+A call holds one thread for each synchronous body or worker request it runs at once, including those of tools a plugin tool calls through `toolkit_functions`, so `MINDROOM_MCP_GATEWAY_MAX_USER_CALLS` limits a user's calls, not their threads: a plugin tool that runs several nested requests at once takes several threads.
 
 Size limits:
 
