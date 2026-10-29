@@ -43,11 +43,7 @@ from mindroom.session_storage.legacy_agno3_schema import (
     agno_schema_sql,
     run_from_row,
 )
-from mindroom.session_storage.legacy_conversion_backup import (
-    BACKUP_SUFFIX,
-    leave_write_ahead_log,
-    write_conversion_backup,
-)
+from mindroom.session_storage.legacy_conversion_backup import leave_write_ahead_log, write_conversion_backup
 from mindroom.session_storage.legacy_session_columns import convert_session_columns, team_owner, upgrade_layout
 from mindroom.session_storage.schema import (
     LOG_VERSION,
@@ -80,6 +76,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# The suffix of the backup a database in the Agno layout gets before its conversion.
+BACKUP_SUFFIX = ".pre-storage-v2"
 # Startup skips a locked database at once; its owner converts it with the full timeout when it next opens it.
 _STARTUP_LOCK_TIMEOUT_SECONDS = 0.0
 # The dropped Agno tables leave their pages free; compacting the file pays off once they are a quarter of it.
@@ -854,6 +852,7 @@ def _write_meta(connection: sqlite3.Connection, names: TableNames, next_seq: int
 
 
 __all__ = [
+    "BACKUP_SUFFIX",
     "convert_conversation_database",
     "migrate_conversation_storage",
 ]

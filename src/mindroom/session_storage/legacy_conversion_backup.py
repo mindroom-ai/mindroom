@@ -18,8 +18,6 @@ if TYPE_CHECKING:
     from contextlib import ExitStack
     from pathlib import Path
 
-# The suffix of the backup a database in the Agno layout gets before its conversion to storage v2.
-BACKUP_SUFFIX = ".pre-storage-v2"
 _TEMPORARY_SUFFIX = ".tmp"
 
 

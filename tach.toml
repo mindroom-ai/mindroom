@@ -6707,7 +6707,6 @@ from = ["mindroom.agents"]
 
 [[interfaces]]
 expose = [
-    "BACKUP_SUFFIX",
     "ConversionSpaceError",
     "leave_write_ahead_log",
     "write_conversion_backup",

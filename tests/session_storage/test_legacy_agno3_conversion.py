@@ -29,9 +29,13 @@ from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecor
 from mindroom.session_storage import legacy_agno3_conversion
 from mindroom.session_storage import store as store_module
 from mindroom.session_storage.agent_storage import prepare_conversation_database
-from mindroom.session_storage.legacy_agno3_conversion import convert_conversation_database, migrate_conversation_storage
+from mindroom.session_storage.legacy_agno3_conversion import (
+    BACKUP_SUFFIX,
+    convert_conversation_database,
+    migrate_conversation_storage,
+)
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_schema_sql
-from mindroom.session_storage.legacy_conversion_backup import BACKUP_SUFFIX, ConversionSpaceError
+from mindroom.session_storage.legacy_conversion_backup import ConversionSpaceError
 from mindroom.session_storage.schema import LOG_VERSION, SESSION_COLUMNS, TableNames, table_names
 from mindroom.session_storage.store import ConversationStore, connect_by_name
 from mindroom.session_storage.types import ConversationSession

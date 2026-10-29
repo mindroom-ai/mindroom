@@ -16,9 +16,8 @@ import pytest
 
 from mindroom.constants import resolve_runtime_paths
 from mindroom.debug_report import _session_databases
-from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
+from mindroom.session_storage.legacy_agno3_conversion import BACKUP_SUFFIX, migrate_conversation_storage
 from mindroom.session_storage.legacy_conversion_backup import (
-    BACKUP_SUFFIX,
     ConversionSpaceError,
     write_conversion_backup,
 )

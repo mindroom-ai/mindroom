@@ -21,7 +21,7 @@ from mindroom.session_storage.agent_storage import (
     create_session_storage,
     prepare_conversation_database,
 )
-from mindroom.session_storage.legacy_conversion_backup import BACKUP_SUFFIX
+from mindroom.session_storage.legacy_agno3_conversion import BACKUP_SUFFIX
 from mindroom.session_storage.schema import TableNames, table_names
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
