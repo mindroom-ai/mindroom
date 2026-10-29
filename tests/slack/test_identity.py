@@ -47,7 +47,14 @@ def _user(email: str | None = "ada@example.com", **overrides: Any) -> dict[str, 
     profile = {"display_name": "Ada", "real_name": "Ada Lovelace"}
     if email is not None:
         profile["email"] = email
-    return {"id": _USER_ID, "team_id": _TEAM, "name": "ada", "profile": profile, **overrides}
+    return {
+        "id": _USER_ID,
+        "team_id": _TEAM,
+        "name": "ada",
+        "profile": profile,
+        "is_email_confirmed": True,
+        **overrides,
+    }
 
 
 class _FakeSlack:
@@ -283,22 +290,18 @@ async def test_team_is_the_callers_team(paths: RuntimePaths) -> None:
     assert theirs == SlackAuthor(_USER_ID, "Ada", None)
 
 
-@pytest.mark.parametrize(
-    ("overrides", "matrix_id"),
-    [
-        ({"is_email_confirmed": True}, "@ada:example.org"),
-        ({}, "@ada:example.org"),
-        ({"is_email_confirmed": False}, None),
-    ],
-)
+@pytest.mark.parametrize(("confirmed", "matrix_id"), [(True, "@ada:example.org"), (None, None), (False, None)])
 @pytest.mark.asyncio
 async def test_unconfirmed_email_does_not_map(
-    overrides: dict[str, Any],
+    confirmed: bool | None,
     matrix_id: str | None,
     paths: RuntimePaths,
 ) -> None:
-    """An email Slack reports as unconfirmed proves nothing; a profile that does not say is taken as is."""
-    assert await _author(_slack(_user(**overrides)), paths) == SlackAuthor(_USER_ID, "Ada", matrix_id)
+    """Only an email Slack reports as confirmed proves who wrote; a profile that does not say maps to nobody."""
+    user = _user(is_email_confirmed=confirmed)
+    if confirmed is None:
+        del user["is_email_confirmed"]
+    assert await _author(_slack(user), paths) == SlackAuthor(_USER_ID, "Ada", matrix_id)
 
 
 @pytest.mark.parametrize("error", ["user_not_found", "user_not_visible"])

@@ -56,7 +56,7 @@ def _profile(user: Mapping[str, Any], team_id: str) -> _Profile:
     is_member = (
         user.get("team_id") == team_id
         and not any(user.get(flag) for flag in _NOT_A_MEMBER_FLAGS)
-        and user.get("is_email_confirmed", True)
+        and user.get("is_email_confirmed") is True
     )
     return _Profile(slack_display_name(user), email if is_member and isinstance(email, str) else None)
 

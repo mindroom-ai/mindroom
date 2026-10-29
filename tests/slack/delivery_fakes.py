@@ -65,7 +65,14 @@ type Answer = dict[str, Any] | Callable[[httpx.Request], Awaitable[dict[str, Any
 def slack_user(name: str, **flags: object) -> dict[str, Any]:
     """Return what `users.info` says about one person of our team, whose email is `<name>@example.com`."""
     profile = {"display_name": name.title(), "email": f"{name}@example.com"}
-    return {"id": SLACK_IDS[name], "team_id": TEAM, "name": name, "profile": profile, **flags}
+    return {
+        "id": SLACK_IDS[name],
+        "team_id": TEAM,
+        "name": name,
+        "profile": profile,
+        "is_email_confirmed": True,
+        **flags,
+    }
 
 
 @dataclass
