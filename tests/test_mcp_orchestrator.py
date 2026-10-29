@@ -12,6 +12,7 @@ import yaml
 
 from mindroom.api import config_lifecycle
 from mindroom.api import main as api_main
+from mindroom.api.slack_events import _bound_slack_runtime
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
@@ -22,7 +23,6 @@ from mindroom.mcp.manager import MCPServerManager
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
 from mindroom.orchestration.runtime import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.slack.integration import bound_slack_runtime
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -361,12 +361,12 @@ async def test_startup_room_setup_binds_external_trigger_runtime_after_setup(tmp
     ):
         try:
             await orchestrator._setup_startup_rooms_and_memberships([bot])
-            slack_runtime = bound_slack_runtime(api_main.app)
+            slack_runtime = _bound_slack_runtime(api_main.app)
             # Slack events reach the live bot mapping, so setup that runs again keeps the same runtime.
             assert slack_runtime is not None
             assert slack_runtime.bots is orchestrator.agent_bots
             await orchestrator._setup_startup_rooms_and_memberships([bot])
-            assert bound_slack_runtime(api_main.app) is slack_runtime
+            assert _bound_slack_runtime(api_main.app) is slack_runtime
         finally:
             unbind_integrations(api_main.app)
 

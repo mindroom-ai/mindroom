@@ -35,7 +35,7 @@ Matrix sync callback
 | `atomic_file.py` | Shared atomic byte publication and cleanup relative to an opened directory |
 | `delivery_replay.py` | Durable per-scope claims for inbound deliveries: event ids, Matrix thread roots, and nonces, each scope in its own file under its own lock; external triggers also split their old shared file through it |
 | `orchestrator.py` | MultiAgentOrchestrator - boots agents, manages sync loops, hot-reload |
-| `integrations.py` | The built-in integration registry, the one place core names an integration: each integration's public routes, its binding to the live bots and the shutdown drain of what it bound, final-reply mirroring, config checks, and created-agent tool edits |
+| `integrations.py` | The built-in integration registry, the one place core wires an integration's runtime: each integration's public routes, its binding to the live bots and the shutdown drain of what it bound, final-reply mirroring, config checks, and created-agent tool edits |
 | `orchestration/` | Extracted orchestrator helpers (config update plans, plugin watch, rooms, runtime) |
 | `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: queueing, response drain, and update-plan dispatch |
 | `config/bundle.py` | Native staged bundle validation, drift protection, directory publication, and recovery journals |
@@ -377,7 +377,7 @@ Matrix sync callback
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `api/` | FastAPI REST API (dashboard, credentials, OpenAI-compatible endpoint) |
 | `api/open_access.py` | Host allow-list and browser-origin guard for requests served without a credential (open dashboard auth, unauthenticated `/v1`) |
-| `api/slack_events.py` | Public `POST /api/slack/events`: verifies Slack's signature, answers `url_verification`, and delivers events within Slack's 3-second limit, finishing slower deliveries in the background |
+| `api/slack_events.py` | Public `POST /api/slack/events`: verifies Slack's signature, answers `url_verification`, and delivers events within Slack's 3-second limit, finishing slower deliveries in the background; also binds the runtime those events reach to the live bots and unbinds it at shutdown |
 | `api/request_body_limit.py` | Pure ASGI middleware answering 413 for dashboard API request bodies over 16 MiB, except knowledge uploads |
 | `api/validation_errors.py` | 422 handler for the dashboard API and sandbox runner that returns FastAPI's validation error detail without the rejected request values |
 | `api/budgets.py` | Dashboard and budget-service routes for budget status and setting or clearing one user's cap |
@@ -485,7 +485,7 @@ Matrix sync callback
 | `slack/events.py` | Pure Slack event handling: the signing-secret check, which Events API messages may wake anyone, the thread keys, which project agent answers an event, and which personal watches an event may be for |
 | `slack/files.py` | Slack file transfers: a download from Slack's file host, refused past 50 MB and written into the workspace's `slack-downloads/` without following links, and the external upload flow, which never sends the token to Slack's presigned upload link |
 | `slack/identity.py` | Maps a Slack author to a MindRoom account: the Slack display name and, for full workspace members whose profile email is in `slack.email_domain`, the Matrix user ID from `slack.matrix_user_id_template`; cached for ten minutes per team and user; also looks up a channel with `conversations.info`, cached the same way for names but fresh for deciding whether the app may act there, and holds that project channel rule |
-| `slack/integration.py` | Slack's entry in the integration registry: the events route, the runtime those events reach bound to the live bots, project-turn reply mirroring, and the Slack config checks; it loads the Slack runtime only on first use, because config validation reads the registry |
+| `slack/integration.py` | Slack's entry in the integration registry: its hooks for the events route, the runtime binding, project-turn reply mirroring, and the Slack config checks; each loads its Slack module only on first use, because config validation reads the registry |
 | `slack/oauth.py` | The built-in `slack` OAuth provider: each requester's own Slack user token requested as `user_scope`, accepted only from the workspace the bot token belongs to |
 | `slack/render.py` | Plain dictionaries for agents from Slack answers: messages with author names and permalinks, people, conversations, and the display-name rule; Slack message markup as plain text |
 | `slack/delivery.py` | Delivers a Slack event to the project agent answering its channel, while the app is still in it, as the mapped author, then to personal watches; retries after the route acknowledged, reacts 👀, and sends notices only the author sees |

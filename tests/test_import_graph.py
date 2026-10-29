@@ -127,7 +127,6 @@ _ALLOWED_THIRD_PARTY_ROOTS: dict[str, frozenset[str]] = {
     # provider, storage, or other feature-specific dependency.
     "mindroom.cli.doctor": _CLI_ROOTS | _REGISTRY_ROOTS,
     "mindroom.config.main": _CONFIG_LAYER_ROOTS,
-    # Config validation reads the integration registry, so an integration loads its runtime only on first use.
     "mindroom.slack.integration": _CONFIG_LAYER_ROOTS,
     "mindroom.providers.credentials": _CONFIG_LAYER_ROOTS,
     "mindroom.tool_system.declarations": frozenset({"dotenv"}),
@@ -190,12 +189,17 @@ loaded = sorted(
 print(json.dumps(loaded))
 """
 
+# Building a config runs every integration's validation hook, so these probes measure the footprint after one.
+_BUILDS_CONFIG = frozenset({"mindroom.config.main"})
+_BUILD_CONFIG_SNIPPET = "importlib.import_module('mindroom.config.main').Config(agents={})"
+
 _SLIM_PROBE_TEMPLATE = """
 import importlib, json, sys
 
 stdlib = set(sys.stdlib_module_names)
 baseline = {{name.split(".")[0] for name in sys.modules}}
 importlib.import_module({module!r})
+{build_config}
 banned_roots = {banned_roots!r}
 banned = sorted(
     name
@@ -232,6 +236,7 @@ def _run_slim_probe(module: str) -> tuple[list[str], frozenset[str]]:
             "-c",
             _SLIM_PROBE_TEMPLATE.format(
                 module=module,
+                build_config=_BUILD_CONFIG_SNIPPET if module in _BUILDS_CONFIG else "",
                 banned_roots=_PROVIDER_SDK_ROOTS + _SLIM_ONLY_ROOTS,
             ),
         ],
