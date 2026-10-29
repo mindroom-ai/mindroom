@@ -33,7 +33,7 @@ logger = get_logger(__name__)
 # `requested_model_name`, holds a null `requested_model_name`, or holds a persona that lacks `skills` or `knowledge`.
 # Last legacy release: v2026.10.18 without `agent_mode`, v2026.10.230 without `persona`, v2026.10.244 without
 # `requested_model_name`, v2026.10.245 without a persona's `skills`, and v2026.10.263 without its `knowledge`; the
-# release after each writes the field. Through v2026.10.684, a child read without a requested model was written back
+# release after each writes the field. Through v2026.10.693, a child read without a requested model was written back
 # with a null one. Background job adapters hold no such snapshot: the job store current code reads, the event journal's
 # `tool_jobs` table, first shipped in v2026.10.289, and each adapter there holds a child that release or a later one
 # prepared, with every field and its requested model; the jobs of v2026.9.165, reverted in v2026.9.166, lived in
