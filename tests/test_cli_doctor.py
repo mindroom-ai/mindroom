@@ -446,7 +446,7 @@ def test_doctor_checks_the_ollama_servers_memory_reaches_as_the_runtime_resolves
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The memory LLM's and embedder's own hosts win over the saved Ollama host, and only the embedder sends the key."""
+    """The saved Ollama host wins over the memory LLM's and embedder's own, and only the embedder sends the key."""
     runtime_paths = _runtime_with_env(
         tmp_path,
         {"OLLAMA_HOST": "http://saved.example:11434", "OLLAMA_API_KEY": "embed-key"},
@@ -464,8 +464,8 @@ def test_doctor_checks_the_ollama_servers_memory_reaches_as_the_runtime_resolves
     assert _check_memory_llm(config, runtime_paths) == (1, 0, 0)
     assert _check_memory_embedder(config, runtime_paths) == (1, 0, 0)
     assert _servers_and_keys(probed) == [
-        ("http://llm.example:11434/api/tags", None),
-        ("http://embed.example/api/tags", "Bearer embed-key"),
+        ("http://saved.example:11434/api/tags", None),
+        ("http://saved.example:11434/api/tags", "Bearer embed-key"),
     ]
 
 

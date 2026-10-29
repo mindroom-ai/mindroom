@@ -585,15 +585,17 @@ def get_embedder_api_key(
     return _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
 
 
-def get_ollama_host(runtime_paths: RuntimePaths, *, configured_host: str | None) -> str:
-    """Return the Ollama server a client reaches: ``configured_host``, else the saved ``OLLAMA_HOST``, else the default.
+def get_ollama_host(runtime_paths: RuntimePaths, *, configured_host: str | None, saved_first: bool) -> str:
+    """Return the Ollama server a client reaches: ``configured_host`` or the saved ``OLLAMA_HOST``, else the default.
 
-    Models, the memory LLM, and the Ollama embedder share this order.
+    ``configured_host`` wins unless ``saved_first``. A model's own host wins. The memory LLM and the Ollama embedder
+    put the saved host first, because the dashboard's Memory page saved ``http://localhost:11434`` as the embedder
+    host of configs whose Ollama server only ``OLLAMA_HOST`` names, such as a Docker install's host.
     """
-    if configured_host:
+    if configured_host and not saved_first:
         return configured_host
-    saved = get_runtime_shared_credentials_manager(runtime_paths).load_credentials("ollama") or {}
-    return saved.get("host") or OLLAMA_HOST_DEFAULT
+    saved = (get_runtime_shared_credentials_manager(runtime_paths).load_credentials("ollama") or {}).get("host")
+    return saved or configured_host or OLLAMA_HOST_DEFAULT
 
 
 def get_ollama_api_key(runtime_paths: RuntimePaths) -> str | None:

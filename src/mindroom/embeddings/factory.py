@@ -71,7 +71,7 @@ def resolve_embedder_settings(config: Config, runtime_paths: RuntimePaths) -> _R
         return _ResolvedEmbedderSettings(
             provider=provider,
             model=embedder_config.model,
-            host=get_ollama_host(runtime_paths=runtime_paths, configured_host=embedder_config.host),
+            host=get_ollama_host(runtime_paths=runtime_paths, configured_host=embedder_config.host, saved_first=True),
             dimensions=None,
             api_key=get_ollama_api_key(runtime_paths),
         )

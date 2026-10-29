@@ -297,6 +297,7 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Ol
     host = get_ollama_host(
         runtime_paths=runtime_paths,
         configured_host=(settings.client_params or {}).get("host") or model_config.host,
+        saved_first=False,
     )
     return OllamaProvider(
         identity=ModelIdentity(

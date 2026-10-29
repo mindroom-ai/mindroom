@@ -176,15 +176,14 @@ def _memory_collection_name(config: Config) -> str:
 
 
 def mem0_ollama_host(config: Config, runtime_paths: RuntimePaths) -> str:
-    """Return the server the Ollama memory LLM, configured or default, reaches, in a model's host order.
+    """Return the server the Ollama memory LLM, configured or default, reaches.
 
-    Its configured host is ``memory.llm.config.host``, else Mem0's own ``ollama_base_url``.
+    Mem0's own ``ollama_base_url`` goes as written; otherwise the saved Ollama host wins over ``memory.llm.config.host``.
     """
     llm_config = {} if config.memory.llm is None else config.memory.llm.config
-    return get_ollama_host(
-        runtime_paths=runtime_paths,
-        configured_host=llm_config.get("host") or llm_config.get("ollama_base_url"),
-    )
+    if base_url := llm_config.get("ollama_base_url"):
+        return base_url
+    return get_ollama_host(runtime_paths=runtime_paths, configured_host=llm_config.get("host"), saved_first=True)
 
 
 def _mem0_llm_config(config: Config, runtime_paths: RuntimePaths) -> dict[str, Any]:

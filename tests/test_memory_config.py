@@ -72,6 +72,10 @@ def _fake_mem0_llm() -> SimpleNamespace:
     return SimpleNamespace(config=SimpleNamespace(model="gemma4"), client=SimpleNamespace(chat=MagicMock()))
 
 
+_SAVED_OLLAMA = "http://saved-ollama:11434"
+_CONFIGURED_OLLAMA = "http://config-ollama:11434"
+
+
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     return resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "mindroom_data")
 
@@ -882,21 +886,26 @@ class TestMemoryConfig:
         LlmFactory.create(result["llm"]["provider"], result["llm"]["config"])
 
     @pytest.mark.parametrize(
-        ("configured_host", "reached_host"),
-        [("http://config-ollama:11434", "http://config-ollama:11434"), (None, "http://saved-ollama:11434")],
+        ("saved_host", "configured_host", "memory_host", "model_host"),
+        [
+            (_SAVED_OLLAMA, _CONFIGURED_OLLAMA, _SAVED_OLLAMA, _CONFIGURED_OLLAMA),
+            (None, _CONFIGURED_OLLAMA, _CONFIGURED_OLLAMA, _CONFIGURED_OLLAMA),
+            (_SAVED_OLLAMA, None, _SAVED_OLLAMA, _SAVED_OLLAMA),
+            (None, None, OLLAMA_HOST_DEFAULT, OLLAMA_HOST_DEFAULT),
+        ],
     )
-    def test_ollama_memory_clients_reach_their_configured_host_before_the_saved_one(
+    def test_ollama_memory_clients_put_the_saved_host_first_and_models_their_own(
         self,
         tmp_path: Path,
+        saved_host: str | None,
         configured_host: str | None,
-        reached_host: str,
+        memory_host: str,
+        model_host: str,
     ) -> None:
-        """The memory LLM and the Ollama embedder reach their own ``host`` as a model does, else the saved one."""
+        """The memory LLM and the Ollama embedder reach the saved Ollama host before their ``host``; a model its own."""
         runtime_paths = _runtime_paths(tmp_path)
-        get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
-            "ollama",
-            {"host": "http://saved-ollama:11434"},
-        )
+        if saved_host is not None:
+            get_runtime_shared_credentials_manager(runtime_paths).save_credentials("ollama", {"host": saved_host})
         config = Config(
             memory={
                 "embedder": {"provider": "ollama", "config": {"model": "nomic-embed-text", "host": configured_host}},
@@ -908,17 +917,14 @@ class TestMemoryConfig:
 
         result = _get_memory_config(tmp_path / "memory", config, runtime_paths)
 
-        assert result["embedder"]["config"] == {"model": "nomic-embed-text", "ollama_base_url": reached_host}
-        assert result["llm"]["config"]["ollama_base_url"] == reached_host
-        assert build_ollama_provider(model, runtime_paths).identity.endpoint == reached_host
+        assert result["embedder"]["config"] == {"model": "nomic-embed-text", "ollama_base_url": memory_host}
+        assert result["llm"]["config"] == {"model": "gemma4", "ollama_base_url": memory_host}
+        assert build_ollama_provider(model, runtime_paths).identity.endpoint == model_host
 
     def test_an_ollama_memory_llm_without_a_host_reaches_the_saved_one(self, tmp_path: Path) -> None:
-        """Without ``host``, an Ollama memory LLM reaches Mem0's own ``ollama_base_url``, else the saved Ollama host."""
+        """Without ``host``, an Ollama memory LLM reaches the saved Ollama host; Mem0's own ``ollama_base_url`` goes as written."""
         runtime_paths = _runtime_paths(tmp_path)
-        get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
-            "ollama",
-            {"host": "http://saved-ollama:11434"},
-        )
+        get_runtime_shared_credentials_manager(runtime_paths).save_credentials("ollama", {"host": _SAVED_OLLAMA})
 
         def mem0_llm_config(llm_config: dict[str, str]) -> dict[str, object]:
             config = Config(
@@ -927,11 +933,11 @@ class TestMemoryConfig:
             )
             return _get_memory_config(tmp_path / "memory", config, runtime_paths)["llm"]["config"]
 
-        assert mem0_llm_config({}) == {"model": "gemma4", "ollama_base_url": "http://saved-ollama:11434"}
+        assert mem0_llm_config({}) == {"model": "gemma4", "ollama_base_url": _SAVED_OLLAMA}
         mem0_host = {"ollama_base_url": "http://mem0-ollama:11434"}
         assert mem0_llm_config(mem0_host) == {"model": "gemma4", "ollama_base_url": "http://mem0-ollama:11434"}
-        both = {"host": "http://config-ollama:11434", **mem0_host}
-        assert mem0_llm_config(both) == {"model": "gemma4", "ollama_base_url": "http://config-ollama:11434"}
+        both = {"host": _CONFIGURED_OLLAMA, **mem0_host}
+        assert mem0_llm_config(both) == {"model": "gemma4", "ollama_base_url": "http://mem0-ollama:11434"}
 
     @pytest.mark.parametrize(
         ("model", "effective_dimensions"),
