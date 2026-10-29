@@ -50,7 +50,8 @@ __all__ = [
 _CHUNK = 64 * 1024
 # A client's request head, request line through the blank line, whether it arrives in one read or many.
 _MAX_REQUEST_HEAD = 64 * 1024
-# How long a closing connection gets: to flush what was written, or for an upstream that failed an upload to answer.
+# How long a closing connection gets to flush what was written, and how long an upload whose write failed without
+# losing the connection, such as on a timeout, waits for the upstream's answer.
 _CLOSE_TIMEOUT = 5.0
 # How long a peer may send nothing, while the broker waits on it or splices, before the connection ends.
 _IDLE_TIMEOUT = 1800.0

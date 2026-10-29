@@ -221,6 +221,7 @@ async def test_upstream_answering_an_upload_from_its_head(
 ) -> None:
     """An upstream that answers a large upload from its head and closes has that answer relayed; silence is a 502."""
     broker_read = asyncio.Event()
+    received = bytearray()
     dial = _relay.open_upstream
 
     async def dial_telling_reads(
@@ -236,7 +237,10 @@ async def test_upstream_answering_an_upload_from_its_head(
 
         async def read_and_tell(n: int = -1) -> bytes:
             data = await read(n)
-            broker_read.set()
+            received.extend(data)
+            # The whole answer, or the close that ends a silent upstream, not a partial head.
+            if not data or answer in received:
+                broker_read.set()
             return data
 
         reader.read = read_and_tell
