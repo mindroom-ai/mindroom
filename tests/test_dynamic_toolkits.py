@@ -1050,9 +1050,14 @@ def test_native_tool_search_omits_fully_deferred_toolkit_instructions(
         model=turn_model(config, _runtime_paths(tmp_path), "code"),
     )
 
-    assert _toolkit(agent, "update_awareness").instructions is None
+    toolkit = _toolkit(agent, "update_awareness")
+    assert toolkit.instructions is None
     assert instruction_marker not in _build_prompt(agent)
     assert _native_deferred_names(agent) == frozenset({"get_mindroom_update_status"})
+    # Native search expands only the function definition, so its description carries the toolkit's instructions.
+    (function,) = toolkit.functions
+    assert function.description is not None
+    assert instruction_marker in function.description
 
 
 def test_fully_deferred_toolkit_omits_function_instructions() -> None:
@@ -1069,7 +1074,7 @@ def test_fully_deferred_toolkit_omits_function_instructions() -> None:
     )
     toolkit = Toolkit(name="deferred", tools=[function])
     adapted = adapt_toolkit(toolkit)
-    deferral, deferred = defer_toolkit("deferred", "", adapted)
+    deferral, deferred = defer_toolkit("deferred", "", adapted, portable_search=True)
 
     assert deferral.function_instructions == {"deferred_tool": "DEFERRED_FUNCTION_INSTRUCTIONS"}
     # An agent offers the deferred toolkit, whose function instructions travel with tool search, and refuses it eager.
@@ -1080,6 +1085,31 @@ def test_fully_deferred_toolkit_omits_function_instructions() -> None:
     )
     # The built toolkit is left as it was built.
     assert toolkit.functions["deferred_tool"].add_instructions is True
+
+
+def test_native_deferral_puts_instructions_in_each_function_description() -> None:
+    """Native tool search expands only definitions, so each deferred function carries its toolkit's instructions."""
+
+    def deferred_tool() -> str:
+        return "deferred"
+
+    function = Function(
+        name="deferred_tool",
+        description="Do the deferred thing.",
+        entrypoint=deferred_tool,
+        instructions="DEFERRED_FUNCTION_INSTRUCTIONS",
+        add_instructions=True,
+    )
+    toolkit = Toolkit(name="deferred", tools=[function], instructions="DEFERRED_TOOLKIT_INSTRUCTIONS")
+    _deferral, deferred = defer_toolkit("deferred", "", adapt_toolkit(toolkit), portable_search=False)
+
+    (deferred_function,) = deferred.functions
+    assert deferred_function.description is not None
+    assert deferred_function.description.startswith("Do the deferred thing.")
+    assert "DEFERRED_TOOLKIT_INSTRUCTIONS" in deferred_function.description
+    assert "DEFERRED_FUNCTION_INSTRUCTIONS" in deferred_function.description
+    assert deferred.instructions is None
+    assert offered_refusal(deferred) is None
 
 
 def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
@@ -1108,7 +1138,7 @@ def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
         tools=[deferred_function],
         instructions="DEFERRED_TOOLKIT_INSTRUCTIONS",
     )
-    _deferral, deferred = defer_toolkit("deferred", "", adapt_toolkit(deferred_toolkit))
+    _deferral, deferred = defer_toolkit("deferred", "", adapt_toolkit(deferred_toolkit), portable_search=True)
 
     assert toolkit_instructions((adapt_toolkit(active_toolkit), deferred)) == (active_toolkit_marker,)
 
@@ -1194,6 +1224,11 @@ async def test_portable_tool_search_returns_rendered_toolkit_instructions(
     assert instruction_marker not in _build_prompt(agent)
     payload = await _search(agent, "update_awareness")
     assert instruction_marker in payload["instructions"]["update_awareness"]
+    # Portable search shows them beside the definitions, so the descriptions do not repeat them.
+    assert all(
+        instruction_marker not in (function.description or "")
+        for function in _toolkit(agent, "update_awareness").functions
+    )
 
 
 @pytest.mark.parametrize(
@@ -1608,7 +1643,12 @@ class _WeatherTools(Toolkit):
 
 def _deferred(toolkit: Toolkit, description: str, domain_name: str | None = None) -> DeferredToolkit:
     """Defer ``toolkit`` and adapt it, as agent construction does, offering every function of it."""
-    deferral, deferred = defer_toolkit(domain_name or toolkit.name, description, adapt_toolkit(toolkit))
+    deferral, deferred = defer_toolkit(
+        domain_name or toolkit.name,
+        description,
+        adapt_toolkit(toolkit),
+        portable_search=True,
+    )
     return DeferredToolkit(deferral, deferred.functions)
 
 

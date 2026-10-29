@@ -52,6 +52,7 @@ On this path, deferred tools stay out of the model's context until the model sea
 The system prompt names the deferred toolkits and tells the model to search them before concluding that a tool is unavailable.
 Discovered tools are called directly.
 Toolkit instructions are omitted from the system prompt when every function in the toolkit is deferred and not `initial`.
+Each deferred function's description carries them instead, so the model reads them when search finds the function.
 
 ## MindRoom Tool Search
 

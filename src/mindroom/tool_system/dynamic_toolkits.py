@@ -35,11 +35,19 @@ class DeferredToolkit:
         return tuple(function.name for function in self.functions)
 
 
-def defer_toolkit(domain_name: str, description: str, toolkit: AdaptedToolkit) -> tuple[ToolDeferral, AdaptedToolkit]:
+def defer_toolkit(
+    domain_name: str,
+    description: str,
+    toolkit: AdaptedToolkit,
+    *,
+    portable_search: bool,
+) -> tuple[ToolDeferral, AdaptedToolkit]:
     """Return what tool search shows of a wire-deferred toolkit beside its functions, and the toolkit without them.
 
     The system prompt is sent before tool search finds a toolkit, so the instructions it and its functions would
     render travel with search results instead.
+    Portable tool search returns them beside the definitions it finds.
+    Native tool search expands only the function definitions, so there each function's description carries them.
     """
     deferral = ToolDeferral(
         domain_name=domain_name,
@@ -47,4 +55,15 @@ def defer_toolkit(domain_name: str, description: str, toolkit: AdaptedToolkit) -
         instructions=toolkit.instructions,
         function_instructions=toolkit.function_instructions,
     )
-    return deferral, replace(toolkit, instructions=None, function_instructions={})
+    functions = toolkit.functions
+    if not portable_search:
+        functions = tuple(
+            replace(function, description=_with_instructions(function, toolkit)) for function in toolkit.functions
+        )
+    return deferral, replace(toolkit, functions=functions, instructions=None, function_instructions={})
+
+
+def _with_instructions(function: ToolFunction, toolkit: AdaptedToolkit) -> str | None:
+    """Return the function's description followed by the instructions its toolkit and the function would render."""
+    parts = (function.description, toolkit.instructions, toolkit.function_instructions.get(function.name))
+    return "\n\n".join(part.strip() for part in parts if part and part.strip()) or None
