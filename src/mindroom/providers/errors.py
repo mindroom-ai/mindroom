@@ -52,9 +52,10 @@ _INVALID_REQUEST_STATUSES = frozenset({400, 404, 413, 422})
 _HTTP_CLIENT_ERROR_RANGE = range(400, 500)
 # The names providers give a throttled request: Anthropic's error type and the Responses code.
 _RATE_LIMIT_NAMES = frozenset({"rate_limit_error", "rate_limit_exceeded"})
-# The names of a 429 for an account that only a change to its billing or limits lets through. OpenAI's codes: prepaid
-# credit used up, a reached organization or project spend limit, and a reached OpenAI-assigned usage limit, besides
-# ``insufficient_quota``, the older code of an account without credit and still the error type of the others.
+# The names of a refusal that only a change to the account's billing or limits lets through, whatever its status.
+# OpenAI's codes: prepaid credit used up, a reached organization or project spend limit, and a reached OpenAI-assigned
+# usage limit, besides ``insufficient_quota``, the older code of an account without credit and still the error type of
+# the others.
 # Moonshot's error type, which it sends without a code, for an account whose balance or token quota ran out or that was
 # disabled. Anthropic's error type for a problem with the organization's billing or payment details, which it sends
 # with a 402, and the ``details.error_code`` of its 429 ``rate_limit_error`` once the organization reached its usage
