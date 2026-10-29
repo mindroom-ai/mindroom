@@ -14,6 +14,7 @@ unavailability, and a request that no longer fits the context window says so.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -40,6 +41,7 @@ from mindroom.llm.errors import (
     ProviderUnavailable,
     RateLimited,
 )
+from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, ReportedUsage, TextDelta, complete
 from mindroom.providers.pipeline import retry as retry_stage
@@ -70,6 +72,9 @@ type Reply = Callable[[], httpx.Response | Exception]
 # a request's preparation, such as borrowing a CLI login in a thread, so it outlasts that on a loaded machine.
 _IDLE_LIMIT_SECONDS = 0.5
 _STALL_SECONDS = 1.0
+_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+)
 _PARTIAL = "partial"
 
 RATE_LIMITED = "⏱️ Rate limited."
@@ -427,6 +432,11 @@ def _early_ends(before_output: Reply, after_output: Reply) -> list[_Case]:
 
 
 _CLAUDE_WEB_SEARCH = {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {}}
+# Anthropic's 400 for an organization without prepaid credit, as the API sends it.
+_CLAUDE_CREDIT_TOO_LOW = (
+    "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase "
+    "credits."
+)
 _CLAUDE_CASES = [
     _Case(
         "http_429",
@@ -513,6 +523,42 @@ _CLAUDE_CASES = [
         1,
     ),
     _Case("http_404", _claude_status(404, "not_found_error", "model: x"), InvalidRequest, ERROR, 1),
+    # The organization's billing stops every request until it changes, so the request is sent once and the reply is
+    # Anthropic's message alone: no prepaid credit left or a spend limit the organization or a workspace set, both a 400
+    # told apart only by their wording, or a billing or payment problem. The docs give only how a spend limit's message
+    # begins and say it then states when access resumes.
+    _Case(
+        "http_400_credit_balance_too_low",
+        _claude_status(400, "invalid_request_error", _CLAUDE_CREDIT_TOO_LOW),
+        ProviderError,
+        f"{ERROR}{_CLAUDE_CREDIT_TOO_LOW}",
+        1,
+        code=QUOTA_EXHAUSTED,
+    ),
+    _Case(
+        "http_400_own_spend_limit",
+        _claude_status(400, "invalid_request_error", "You have reached your specified API usage limits."),
+        ProviderError,
+        f"{ERROR}You have reached your specified API usage limits.",
+        1,
+        code=QUOTA_EXHAUSTED,
+    ),
+    _Case(
+        "http_400_own_workspace_spend_limit",
+        _claude_status(400, "invalid_request_error", "You have reached your specified workspace API usage limits."),
+        ProviderError,
+        f"{ERROR}You have reached your specified workspace API usage limits.",
+        1,
+        code=QUOTA_EXHAUSTED,
+    ),
+    _Case(
+        "http_402_billing_error",
+        _claude_status(402, "billing_error", "There's an issue with your billing or payment information."),
+        ProviderError,
+        f"{ERROR}There's an issue with your billing or payment information.",
+        1,
+        code=QUOTA_EXHAUSTED,
+    ),
     _Case(
         "connect_error",
         _connect_error,
@@ -558,6 +604,14 @@ _CLAUDE_CASES = [
         ProviderError,
         ERROR,
         1,
+    ),
+    _Case(
+        "event_credit_balance_too_low",
+        _claude_stream(_claude_error("invalid_request_error", _CLAUDE_CREDIT_TOO_LOW)),
+        ProviderError,
+        f"{ERROR}{_CLAUDE_CREDIT_TOO_LOW}",
+        1,
+        code=QUOTA_EXHAUSTED,
     ),
     _Case("reset_before_output", _claude_stream(drop=True), ProviderUnavailable, UNAVAILABLE, _PIPELINE),
     _Case(
@@ -1339,6 +1393,28 @@ async def test_a_failed_request_is_retried_and_reported_as_its_row_says(row: Row
     assert get_user_friendly_error_message(raised.value).startswith(row.message)
     if row.code is not None:
         assert raised.value.code == row.code
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", sorted(ROUTE_CONFIGS))
+async def test_a_request_the_account_s_billing_stops_is_not_resent_without_its_media(
+    route: str,
+    tmp_path: Path,
+) -> None:
+    """The image did not cause the failure, so the request is not sent a second time without it."""
+    sent: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return _claude_status(400, "invalid_request_error", _CLAUDE_CREDIT_TOO_LOW)()
+
+    provider = pipeline_provider(_adapter(route, tmp_path, respond))
+    image = Image(content=_PNG, mime_type="image/png")
+
+    with pytest.raises(ProviderError) as raised:
+        await complete(provider, ModelRequest(messages=[Message(role="user", content="Look", images=[image])]))
+
+    assert (raised.value.code, len(sent)) == (QUOTA_EXHAUSTED, 1)
 
 
 # --- A response the provider ended incomplete --------------------------------------------------------------------

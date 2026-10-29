@@ -34,7 +34,7 @@ from anthropic.types.beta import (
 
 from mindroom.constants import PROVIDER_ENV_KEYS
 from mindroom.credentials.sync import get_secret_from_env
-from mindroom.llm.errors import ProviderError
+from mindroom.llm.errors import QUOTA_EXHAUSTED, ProviderError
 from mindroom.llm.provider import (
     STRUCTURED_OUTPUT_TOOL,
     Capabilities,
@@ -551,6 +551,14 @@ _COMMITTED_STREAM_STATUS = 200
 _NO_CREDENTIALS_ERROR = '"Could not resolve authentication method.'
 # The blocks the model writes itself; every other block is a server tool's call or result.
 _MODEL_BLOCK_TYPES = frozenset({"text", "thinking", "redacted_thinking", "tool_use"})
+# The error type Anthropic sends, with a 402 status, for a problem with the organization's billing or payment details.
+_BILLING_ERROR_TYPE = "billing_error"
+# How Anthropic words the 400 ``invalid_request_error`` of a request the organization's billing stops, which carries no
+# code of its own: "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade
+# or purchase credits." for an organization without prepaid credit, and a message that begins "You have reached your
+# specified API usage limits" or "You have reached your specified workspace API usage limits" for a spend limit the
+# organization or a workspace set. No retry passes until the credit or the limit changes.
+_BILLING_STOP_WORDING = ("credit balance is too low", "you have reached your specified")
 
 
 def _progress(event: Any) -> StreamProgress:  # noqa: ANN401 - SDK stream event
@@ -568,20 +576,27 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
     """Return the shared error for an SDK, transport, or Google token failure; any other exception propagates.
 
     The Vertex client mints its Google access token inside the request. An ``error`` event inside the stream arrives
-    with the stream's committed 200 status, so its error type classifies it. The SDK finds a client's credentials
-    only when it sends, so a client without any fails then, as the missing key it is.
+    with the stream's committed 200 status, so its error type classifies it. A request the organization's billing
+    stops is a final error that keeps Anthropic's message alone, which says what to change. The SDK finds a client's
+    credentials only when it sends, so a client without any fails then, as the missing key it is.
     """
     if isinstance(error, TypeError) and str(error).startswith(_NO_CREDENTIALS_ERROR):
         return missing_api_key_error(PROVIDER_ENV_KEYS["anthropic"], provider=provider)
     if (failure := provider_failure(error, provider=provider)) is not None:
         return failure
-    if isinstance(error, anthropic.APIStatusError) and error.status_code == _COMMITTED_STREAM_STATUS:
-        return classify_provider_error(error.message, provider=provider, error_type=_event_error_type(error.body))
     if isinstance(error, anthropic.APIStatusError):
+        body = _ErrorBody.of(error.body)
+        committed = error.status_code == _COMMITTED_STREAM_STATUS
+        status_code = None if committed else error.status_code
+        if body.stops_on_billing():
+            message = body.message or error.message
+            return ProviderError(message, provider=provider, status_code=status_code, code=QUOTA_EXHAUSTED)
+        if committed:
+            return classify_provider_error(error.message, provider=provider, error_type=body.type)
         return classify_provider_error(
             error.message,
             provider=provider,
-            status_code=error.status_code,
+            status_code=status_code,
             retry_after_seconds=retry_after_seconds(error.response.headers),
         )
     if isinstance(error, anthropic.APIError):
@@ -589,11 +604,26 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
     raise error
 
 
-def _event_error_type(body: object) -> str | None:
-    """Return the error type of a stream's ``error`` event body, ``{"type": "error", "error": {"type": ...}}``."""
-    error = as_dict((as_dict(body) or {}).get("error")) or {}
-    error_type = error.get("type")
-    return error_type if isinstance(error_type, str) else None
+@dataclass(frozen=True, slots=True)
+class _ErrorBody:
+    """The ``error`` object of an error response or a stream's ``error`` event, ``{"type": "error", "error": {...}}``."""
+
+    type: str | None
+    message: str | None
+
+    @classmethod
+    def of(cls, body: object) -> _ErrorBody:
+        error = as_dict((as_dict(body) or {}).get("error")) or {}
+        error_type, message = error.get("type"), error.get("message")
+        return cls(
+            type=error_type if isinstance(error_type, str) else None,
+            message=message if isinstance(message, str) else None,
+        )
+
+    def stops_on_billing(self) -> bool:
+        """Return whether the organization's billing refused the request, which no retry passes until it changes."""
+        lowered = (self.message or "").casefold()
+        return self.type == _BILLING_ERROR_TYPE or any(wording in lowered for wording in _BILLING_STOP_WORDING)
 
 
 def _output_event(event: object) -> TextDelta | ReasoningDelta | ToolCallReady | None:
