@@ -251,8 +251,8 @@ async def _local_part(
     if route.upload is None:
         msg = f"The {kind} attachment is too large to send inline to Vertex AI"
         raise InvalidRequest(msg, provider=route.provider)
-    file_mime_type = mime_type(data)
-    return _file_uri(await route.upload(file_path, file_mime_type), file_mime_type)
+    upload_type = mime_type(data)
+    return _file_uri(await route.upload(file_path, upload_type), upload_type)
 
 
 def _media_mime_type(media: Audio | Video, default: str) -> str:
