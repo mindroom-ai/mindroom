@@ -392,7 +392,7 @@ def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, l
         owner_id="engineering",
         created_at=1_723_837_600,
     )
-    storage = create_agent_state_storage("engineering", tmp_path)
+    storage = create_state_storage("engineering", tmp_path, HistoryScope(kind="team", scope_id="engineering"))
     # The member saves before its team run, as a team turn saves them.
     persist_runs(
         storage,
