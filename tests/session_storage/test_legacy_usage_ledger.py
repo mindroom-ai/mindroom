@@ -47,7 +47,7 @@ def _team_agno_2_sessions_db(teams: Path) -> Path:
     names = TableNames.of_team(HistoryScope(kind="team", scope_id="crew"))
     database = names.database_path(teams / names.storage_name)
     database.parent.mkdir(parents=True)
-    fixture = Path(__file__).parent / "fixtures" / "agno_2_6_12_code_sessions.sql"
+    fixture = Path(__file__).resolve().parents[1] / "fixtures" / "agno_2_6_12_code_sessions.sql"
     with closing(sqlite3.connect(database)) as connection, connection:
         connection.executescript(fixture.read_text(encoding="utf-8").replace("code_sessions", names.sessions))
         connection.execute(
