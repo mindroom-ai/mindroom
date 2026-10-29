@@ -19,7 +19,7 @@ import pytest
 from tests.storage_oracle.actions import Scenario
 from tests.storage_oracle.determinism import deterministic
 from tests.storage_oracle.masks import MASKS, MaskedBackend
-from tests.storage_oracle.record import SEQUENCES, decode, digest, first_difference, sequence_id
+from tests.storage_oracle.record import SEQUENCES, decode, digest, first_difference, sequence_id, with_defaults
 
 _PINS = Path(__file__).with_name("native_masks.json")
 
@@ -55,7 +55,7 @@ def compare(path: Path, root: Path) -> Comparison:
                 break
             step = recorded["steps"][index]
             assert outcome == step["outcome"], f"step {index} {action}: outcome {step['outcome']!r} -> {outcome!r}"
-            observed = _json(backend.old_view(backend.observe()))
+            observed = with_defaults(_json(backend.old_view(backend.observe())))
             full = recorded["full"].get(str(index))
             for key, value in observed.items():
                 if digest(value) != step["digests"][key]:
@@ -63,7 +63,7 @@ def compare(path: Path, root: Path) -> Comparison:
                     pytest.fail(f"step {index} {action}: {key}: {where}")
             comparison.compared_steps += 1
         else:
-            final = _json(backend.old_view(backend.observe()))
+            final = with_defaults(_json(backend.old_view(backend.observe())))
             assert first_difference(recorded["final"], final) is None, first_difference(recorded["final"], final)
     comparison.used = backend.used
     return comparison

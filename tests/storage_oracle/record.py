@@ -5,7 +5,8 @@ seed and named sequence was driven through it, keeping each step's outcome, a di
 action, the full observables after every cut (after every action for a named sequence) and after the last action,
 and a dump of the final database. Every storage golden and every legacy input was opened as that store opened it,
 and its sessions' observables kept. That store is gone, so the recordings cannot be made again: a later change to
-the vocabulary adds new seeds against the current store only (spec v4 4.7).
+the vocabulary adds new seeds against the current store only (spec v4 4.7). A comparison shows the keys a stored dict
+leaves out at their defaults (``with_defaults``), which a reader reads the same either way.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.schema import TableNames
 from mindroom.usage.storage import quote_identifier
+from tests.llm.agno_dict_helpers import MESSAGE_DEFAULTS, TOOL_EXECUTION_DEFAULTS
 from tests.session_storage.goldens import STORAGE
 from tests.storage_oracle.determinism import deterministic
 from tests.storage_oracle.observe import observe
@@ -65,6 +67,24 @@ def decode(text: str) -> dict[str, Any]:
     """Return the recording a file holds: key-sorted JSON whose messages and runs are stored once, under ``objects``."""
     data = json.loads(text)
     return cast("dict[str, Any]", _resolve(data["recording"], data["objects"]))
+
+
+def with_defaults(observed: object) -> Any:  # noqa: ANN401 - a JSON value
+    """Return ``observed`` with each message and tool execution showing the keys its stored dict leaves at their defaults.
+
+    The recordings show those keys, since the writers of their time stored every one. A reader reads an absent key as
+    its default, so showing them again changes nothing a reader sees, and a key holding any other value still differs.
+    """
+    if isinstance(observed, list):
+        return [with_defaults(item) for item in observed]
+    if not isinstance(observed, dict):
+        return observed
+    shown = {key: with_defaults(value) for key, value in observed.items()}
+    if "role" in shown and "id" in shown:
+        return {**MESSAGE_DEFAULTS, **shown}
+    if "tool_call_id" in shown and "tool_name" in shown:
+        return {**TOOL_EXECUTION_DEFAULTS, **shown}
+    return shown
 
 
 def first_difference(expected: object, actual: object, path: str = "") -> str | None:

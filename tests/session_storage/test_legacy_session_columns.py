@@ -38,7 +38,7 @@ from mindroom.usage.stats_storage import _decode_session_usage
 from mindroom.usage.storage import SYSTEM_USAGE_OWNER, SYSTEM_USAGE_STORAGE_NAME
 from tests.session_storage.layout_3_readers import observe_database
 from tests.storage_oracle.determinism import deterministic
-from tests.storage_oracle.record import first_difference, storage_name_of
+from tests.storage_oracle.record import first_difference, storage_name_of, with_defaults
 
 if TYPE_CHECKING:
     from mindroom.session_storage.store import ConversationStore
@@ -115,7 +115,7 @@ def _recorded(name: str) -> dict[str, Any]:
 def _observed(name: str, root: Path) -> dict[str, Any]:
     with deterministic() as determinism:
         determinism.at(_STEPS[name])
-        return observe_database(_open(name, root), _OWNERS[name])
+        return with_defaults(observe_database(_open(name, root), _OWNERS[name]))
 
 
 # What every reader reads.
