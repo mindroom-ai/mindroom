@@ -6950,13 +6950,29 @@ async def test_supersession_anchor_accepts_the_revision_mindroom_answered() -> N
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("later_ts", "dropped"),
-    [(30, True), (50, False), (None, False)],
-    ids=["later_message_before_the_note", "later_message_after_the_note", "no_later_message"],
+    ("later_ts", "seen", "noted", "dropped"),
+    [
+        (30, "declined", True, True),
+        (50, "declined", True, False),
+        (None, "declined", True, False),
+        (30, "original", True, False),
+        (30, "answered", True, False),
+        (30, "declined", False, False),
+    ],
+    ids=[
+        "later_message_before_the_note",
+        "later_message_after_the_note",
+        "no_later_message",
+        "call_saw_the_original",
+        "call_saw_an_answered_edit",
+        "no_interrupted_note",
+    ],
 )
 async def test_regeneration_a_restart_cut_short_ends_interrupted_once_a_later_message_drops_it(
     tmp_path: Path,
     later_ts: int | None,
+    seen: str,
+    noted: bool,
     dropped: bool,
 ) -> None:
     """After a restart MindRoom declines an edit another message followed, and the cut-short reply ends interrupted."""
@@ -6976,7 +6992,8 @@ async def test_regeneration_a_restart_cut_short_ends_interrupted_once_a_later_me
             "base_sequence, outcome, claimed_at_ns) VALUES (?, ?, 'answer', ?, ?, 'g', 0, ?, ?)",
             [
                 (principal_id, "turn", "turn", "$root", "completed", 1),
-                (principal_id, "cut", "regeneration", "$edit", "lost", 2),
+                (principal_id, "answered", "regeneration", "$answered-edit", "completed", 2),
+                (principal_id, "cut", "regeneration", "$edit", "lost", 3),
             ],
         )
         database.execute(
@@ -6984,14 +7001,16 @@ async def test_regeneration_a_restart_cut_short_ends_interrupted_once_a_later_me
             "VALUES (?, 'turn', '$root', 'logical', 0)",
             (principal_id,),
         )
-        database.execute(
+        database.executemany(
             "INSERT INTO journal_events (principal_id, event_id, room_id, thread_id, kind, sender, origin_server_ts, "
-            "source_json, membership_epoch, state) VALUES (?, '$edit', '!room:example', '', 'message', "
-            "'@user:example', 20, '{}', 0, 'settled')",
-            (principal_id,),
+            "source_json, membership_epoch, state) VALUES (?, ?, '!room:example', '', 'message', '@user:example', ?, "
+            "'{}', 0, 'settled')",
+            [(principal_id, "$answered-edit", 15), (principal_id, "$edit", 20)],
         )
         database.commit()
+    answered = _source_marker("root:0", "edit:2")
     edited = _source_marker("root:0", "edit:3")
+    call_markers = {"declined": edited, "original": _source_marker("root:0", ORIGINAL_REVISION), "answered": answered}
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
     oracle = ExactReplyOracle(client, "@agent:example", coalescing_threads=True, ledger_path=ledger_path)
     oracle.expect("root:0", "$root", thread=0)
@@ -7002,10 +7021,11 @@ async def test_regeneration_a_restart_cut_short_ends_interrupted_once_a_later_me
         expected_body_for=_short_body_for,
         ledger_path=ledger_path,
         source_current_markers={"$root": edited},
-        source_revision_markers={"$root": {"$edit": edited}},
-        observed_markers_for=lambda call_id: frozenset({edited}) if call_id == 87 else frozenset(),
+        source_revision_markers={"$root": {"$answered-edit": answered, "$edit": edited}},
+        observed_markers_for=lambda call_id: frozenset({call_markers[seen]}) if call_id == 87 else frozenset(),
     )
-    interrupted = f"LIVE-FUZZ call=87\n\n{INTERRUPTED_RESPONSE_NOTE}"
+    body = f"LIVE-FUZZ call=87\n\n{INTERRUPTED_RESPONSE_NOTE}" if noted else "LIVE-FUZZ call=87 segment-000"
+    replace_root = {"m.relates_to": {"rel_type": "m.replace", "event_id": "$root"}}
     events: dict[str, dict[str, Any]] = {
         "$root": {
             "event_id": "$root",
@@ -7014,15 +7034,22 @@ async def test_regeneration_a_restart_cut_short_ends_interrupted_once_a_later_me
             "origin_server_ts": 10,
             "content": {"body": "root", "msgtype": "m.text"},
         },
+        "$answered-edit": {
+            "event_id": "$answered-edit",
+            "sender": "@user:example",
+            "type": "m.room.message",
+            "origin_server_ts": 15,
+            "content": replace_root,
+        },
         "$edit": {
             "event_id": "$edit",
             "sender": "@user:example",
             "type": "m.room.message",
             "origin_server_ts": 20,
-            "content": {"m.relates_to": {"rel_type": "m.replace", "event_id": "$root"}},
+            "content": replace_root,
         },
         "$reply": _agent_reply_event("$root", "$reply", "Thinking..."),
-        "$note": _agent_edit_event("$reply", "$note", interrupted, ts=40),
+        "$note": _agent_edit_event("$reply", "$note", body, ts=40),
     }
     if later_ts is not None:
         events["$later"] = {
@@ -7047,7 +7074,7 @@ async def test_regeneration_a_restart_cut_short_ends_interrupted_once_a_later_me
         auditor._observe_supersession(events, sent_records=sent)
 
         assert oracle.dropped_regenerations == (frozenset({"$reply"}) if dropped else frozenset())
-        assert oracle._reply_body_complete("$reply", interrupted, source_event_id="$root") is dropped
+        assert oracle._reply_body_complete("$reply", body, source_event_id="$root") is dropped
         if dropped:
             assert auditor._assert_final_bodies_complete(events, {"$root": {"$reply"}}) == 0
             # The cut-short attempt answered the edit, so the answer stays bound to its revision.

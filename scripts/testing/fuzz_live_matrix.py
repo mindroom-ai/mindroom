@@ -4748,7 +4748,7 @@ class _SupersessionSnapshot:
     records: Mapping[str, TurnRecord]
     sources: Mapping[str, _SettledJournalSource]
     pending_deliveries: tuple[_PendingSupersessionDelivery, ...]
-    # Edit events a completed regeneration answered.
+    # Edit events a completed regeneration answered; one a restart cut short answered nothing.
     regenerated_edits: frozenset[str] = frozenset()
     # Events the agent recorded redacted.
     redacted: frozenset[str] = frozenset()
@@ -4787,18 +4787,12 @@ def _read_supersession_snapshot(path: Path, principal_id: str) -> _SupersessionS
             ):
                 msg = "malformed supersession outbox row"
                 raise AssertionError(msg)
-            # A regeneration a restart cut short answered nothing: its edit is replayed, and MindRoom declines it
-            # when another message followed meanwhile.
-            regenerated = database.execute(
-                "SELECT span.delivery_id FROM reply_spans AS span WHERE span.principal_id = ? "
-                "AND span.kind = 'regeneration' AND span.outcome = 'completed'",
-                (principal_id,),
-            ).fetchall()
+            answered_edits = _reply_answers(database)[1]
             return _SupersessionSnapshot(
                 records,
                 sources,
                 tuple(_PendingSupersessionDelivery(*row) for row in pending),
-                frozenset(str(row[0]) for row in regenerated),
+                frozenset(edit for edits in answered_edits.values() for edit in edits),
                 redacted,
             )
     except sqlite3.Error as exc:
@@ -4923,7 +4917,7 @@ def _canonical_response_view(
                 _response_payload_completed(payload),
                 timestamp if isinstance(timestamp, int) else None,
             )
-            candidates.append((_replacement_order(event_id, candidate.get("origin_server_ts"), is_edit=edit), view))
+            candidates.append((_replacement_order(event_id, timestamp, is_edit=edit), view))
     return (
         max(candidates, key=lambda candidate: candidate[0])[1]
         if candidates
@@ -5953,8 +5947,8 @@ class FinalStateAuditor:
         decisions = _supersession_decisions(self.oracle.log_path)
         self.oracle._ledger_redactions = snapshot.redacted
         self.oracle.journal_event_states = {event_id: row.state for event_id, row in snapshot.sources.items()}
-        # MindRoom regenerates a reply only for an edit of the latest message of its conversation; it settles
-        # any other edit, such as one of a message it never answered, without a visible effect.
+        # MindRoom regenerates a reply only for an edit of the latest message of its conversation; once it settles
+        # an edit without a completed regeneration, such as one of a message it never answered, nothing more changes.
         self.oracle.declined_edit_sources = frozenset(
             source
             for source, edits in self.pending_edit_markers.items()
@@ -6257,6 +6251,7 @@ class FinalStateAuditor:
             "superseded_interrupted_bodies": len(
                 {proof.interrupted_response_event_id for proof in self.supersession_proofs.values()} - {None},
             ),
+            "dropped_interrupted_regenerations": len(self.dropped_regenerations),
             **ledger_metrics,
         }
 
@@ -6282,10 +6277,7 @@ class FinalStateAuditor:
             # A replay may edit or redact the probe itself later. Any authored
             # probe revision proves capture; the current-source audit above
             # independently enforces the latest revision for live sources.
-            probe_markers = {
-                _source_marker(self.oracle.expected_sources[probe_id], ORIGINAL_REVISION),
-                *self.source_revision_markers.get(probe_id, {}).values(),
-            }
+            probe_markers = self._source_markers(probe_id)
             calls = {
                 observed_call
                 for observed_call, markers in _ModelHandler.observations_snapshot().items()
@@ -6886,7 +6878,7 @@ class FinalStateAuditor:
             raise AssertionError(msg)
 
     def declined_edits(self) -> frozenset[str]:
-        """Return the edits MindRoom settled without regenerating a reply, as it does for an older message's edit."""
+        """Return the edits MindRoom settled without a completed regeneration, as it does for an older message's edit."""
         if self.ledger_path is None or not self.ledger_path.exists():
             return frozenset()
         snapshot = _read_supersession_snapshot(self.ledger_path, journal_principal_id(AGENT_NAME, self.agent_id))
@@ -6932,11 +6924,12 @@ class FinalStateAuditor:
     ) -> str:
         """Return the marker of the source's newest revision MindRoom answered.
 
-        That is its current revision, unless edits MindRoom declined, which
-        regenerate nothing, came after the newest one an answer used. An edit
-        that reached its message while the message still waited in the
-        coalescing queue settles without a regeneration too, but the turn
-        itself answers it, so the model saw its marker.
+        That is its current revision, unless edits MindRoom declined, which no
+        completed regeneration answered, came after the newest one an answer
+        used. A declined edit can still be what an answer shows: one that
+        reached its message while the message waited in the coalescing queue,
+        and one whose regeneration a restart cut short after it showed text.
+        The model saw its marker either way.
         """
         current = self.source_current_markers[source_id]
         revisions = self.source_revision_markers.get(source_id, {})
