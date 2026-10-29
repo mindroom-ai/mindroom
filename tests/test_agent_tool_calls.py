@@ -875,6 +875,77 @@ async def test_shared_cli_authorizer_rejects_revoked_prepared_call(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("edit", "still_permitted"),
+    [
+        ("other_agent_instructions", True),
+        ("own_instructions", True),
+        ("own_model", True),
+        ("own_tools", False),
+        ("own_access", False),
+        ("own_graph_edits", False),
+        ("approval_default", False),
+        ("own_removal", False),
+    ],
+)
+async def test_a_prepared_cli_call_survives_config_edits_that_leave_its_agent_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    edit: str,
+    still_permitted: bool,
+) -> None:
+    """A live reload refuses a prepared CLI call only when it changed what its own agent is given."""
+    effects = []
+
+    def action() -> str:
+        effects.append(True)
+        return "executed"
+
+    catalog = await _catalog(tmp_path, [_function(action)])
+    config = Config(
+        agents={
+            "helper": AgentConfig(display_name="Helper", tools=["shell"], instructions=["Be brief."]),
+            "other": AgentConfig(display_name="Other", instructions=["Be thorough."]),
+        },
+    )
+    current = config.model_copy(deep=True)
+    if edit == "other_agent_instructions":
+        current.agents["other"].instructions = ["Be thorough and kind."]
+    elif edit == "own_instructions":
+        current.agents["helper"].instructions = ["Be very brief."]
+    elif edit == "own_model":
+        current.agents["helper"].model = "other-model"
+    elif edit == "own_tools":
+        current.agents["helper"].tools = []
+    elif edit == "own_access":
+        current.agents["helper"].allow_self_config = True
+    elif edit == "own_graph_edits":
+        current.agents["helper"].knowledge_graph_edits = True
+    elif edit == "approval_default":
+        current.tool_approval.default = "require_approval"
+    else:
+        del current.agents["helper"]
+    runtime = replace(catalog.runtime_context, config=config, config_provider=lambda: current)
+    catalog.runtime_context = runtime
+    binding = await catalog.bind(ToolKey("actions", "action"))
+    monkeypatch.setattr(
+        approval_tools,
+        "is_sender_allowed_for_entity_replies_in_room",
+        lambda *_args, **_kwargs: True,
+    )
+    authorize = approval_tools.authorize_prepared_tool_call(
+        binding,
+        expected_worker_target=runtime.resolve_worker_target(),
+    )
+    if still_permitted:
+        await authorize
+    else:
+        with pytest.raises(PermissionError):
+            await authorize
+    assert effects == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("revocation", [None, "config", "membership", "forged", "stale"])
 async def test_generated_cli_authorization_keeps_exact_owner(
     tmp_path: Path,
@@ -899,7 +970,7 @@ async def test_generated_cli_authorization_keeps_exact_owner(
     )
     if revocation == "config":
         current = config.model_copy(deep=True)
-        current.agents["helper"].display_name = "Changed"
+        current.agents["helper"].tools = ["shell"]
         catalog.runtime_context = replace(runtime, config_provider=lambda: current)
     if revocation == "forged":
         binding = replace(binding, function=adapt_function(Function(name="arbitrary", entrypoint=lambda: "bad")))
