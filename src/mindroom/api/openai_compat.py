@@ -200,22 +200,6 @@ def _openai_team_request_log_context(
     )
 
 
-def _load_config(
-    request: Request,
-    *,
-    runtime_paths: RuntimePaths | None = None,
-) -> tuple[Config, RuntimePaths]:
-    """Load the current runtime config and return it with its path."""
-    config, committed_runtime_paths = config_lifecycle.read_committed_runtime_config(request)
-    if runtime_paths is not None and committed_runtime_paths != runtime_paths:
-        logger.info(
-            "Using bound request runtime snapshot for OpenAI-compatible config load",
-            requested_config_path=str(runtime_paths.config_path),
-            committed_config_path=str(committed_runtime_paths.config_path),
-        )
-    return config, committed_runtime_paths
-
-
 # ---------------------------------------------------------------------------
 # Response models
 # ---------------------------------------------------------------------------
@@ -418,7 +402,7 @@ def _parse_chat_request(
     if isinstance(req, JSONResponse):
         return req
 
-    config, runtime_paths = _load_config(request, runtime_paths=runtime_paths)
+    config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     validation_error = validate_chat_request(req, config)
     if validation_error:
         return validation_error
@@ -566,7 +550,7 @@ async def list_models(
     if isinstance(caller, JSONResponse):
         return caller
 
-    config, runtime_paths = _load_config(request, runtime_paths=runtime_paths)
+    config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
 
     authority = _requester_authority(request, caller.requester_id, config, runtime_paths)
     if isinstance(authority, JSONResponse):

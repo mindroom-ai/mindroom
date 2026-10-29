@@ -143,7 +143,7 @@ def _post_all(tmp_path: Path) -> dict[str, Any]:
     initialize_api_app(app, runtime_paths)
     recorded: dict[str, Any] = {}
     with (
-        patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.config_lifecycle.read_committed_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.providers.registry._build_adapter", new=scripted_route),
         TestClient(app, base_url="http://localhost") as client,
     ):

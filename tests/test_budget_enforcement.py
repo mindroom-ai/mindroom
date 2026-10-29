@@ -337,7 +337,7 @@ def _openai_client(tmp_path: Path, config: Config, *, authenticated: bool) -> It
     app.include_router(openai_compat.router)
     initialize_api_app(app, runtime_paths)
     with (
-        patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.config_lifecycle.read_committed_runtime_config", return_value=(config, runtime_paths)),
         TestClient(app, base_url="http://localhost") as client,
     ):
         yield client

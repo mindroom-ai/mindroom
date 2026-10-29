@@ -1301,7 +1301,7 @@ def _post_openai_compat(config: Config, runtime_paths: RuntimePaths, body: dict[
     app.include_router(openai_compat.router)
     initialize_api_app(app, runtime_paths)
     with (
-        patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.config_lifecycle.read_committed_runtime_config", return_value=(config, runtime_paths)),
         TestClient(app, base_url="http://localhost") as client,
     ):
         response = client.post("/v1/chat/completions", headers={"X-Session-Id": "api-travel"}, json=body)
