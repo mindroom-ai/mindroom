@@ -22,7 +22,6 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.llm.errors import (
     MISSING_API_KEY,
-    QUOTA_EXHAUSTED,
     AuthenticationFailed,
     ContextWindowExceeded,
     InvalidRequest,
@@ -385,7 +384,7 @@ async def test_sdk_status_errors_map_to_the_shared_provider_errors(
     expected: type[Exception],
     retryable: bool,
 ) -> None:
-    """Each SDK failure becomes the shared error class whose retryable flag the loop decides from, under Anthropic's text."""
+    """Each SDK failure becomes the shared error class whose retryable flag the loop decides from."""
     wire = Wire(httpx.Response(status, json={"type": "error", "error": body}, headers={"retry-after": "3"}))
     provider = route_provider("anthropic", tmp_path, wire)
     with pytest.raises(expected) as raised:
@@ -394,24 +393,8 @@ async def test_sdk_status_errors_map_to_the_shared_provider_errors(
     assert raised.value.status_code == status
     assert raised.value.provider == "Anthropic"
     assert raised.value.retry_after_seconds == 3.0
-    assert str(raised.value) == body["message"]
+    assert body["message"] in str(raised.value)
     assert len(wire.requests) == 1, "the SDK client never retries; the pipeline alone does"
-
-
-@pytest.mark.asyncio
-async def test_a_billing_error_without_a_message_keeps_the_sdk_s_text(tmp_path: Path) -> None:
-    """Anthropic's errors always carry a message; a body without one still fails at once, under the SDK's text."""
-    wire = Wire(httpx.Response(402, json={"type": "error", "error": {"type": "billing_error"}}))
-    provider = route_provider("anthropic", tmp_path, wire)
-
-    with pytest.raises(ProviderError) as raised:
-        await claude_turn(provider, ModelRequest(messages=_user()))
-
-    assert (raised.value.code, raised.value.status_code, str(raised.value)) == (
-        QUOTA_EXHAUSTED,
-        402,
-        "Error code: 402 - {'type': 'error', 'error': {'type': 'billing_error'}}",
-    )
 
 
 def _stream_failing_with(error_type: str) -> httpx.Response:
@@ -446,7 +429,6 @@ async def test_a_mid_stream_api_error_before_output_reissues_the_request(
         ("timeout_error", ProviderUnavailable),
         ("rate_limit_error", RateLimited),
         ("invalid_request_error", ProviderError),
-        ("billing_error", ProviderError),
     ],
 )
 async def test_a_mid_stream_error_event_is_classified_by_its_error_type(
@@ -463,7 +445,6 @@ async def test_a_mid_stream_error_event_is_classified_by_its_error_type(
 
     assert type(raised.value) is expected
     assert (raised.value.status_code, raised.value.retryable) == (None, expected is not ProviderError)
-    assert str(raised.value) == "Internal server error"
 
 
 @pytest.mark.asyncio

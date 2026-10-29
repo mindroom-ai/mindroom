@@ -568,11 +568,10 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
     """Return the shared error for an SDK, transport, or Google token failure; any other exception propagates.
 
     The Vertex client mints its Google access token inside the request. An ``error`` event inside the stream arrives
-    with the stream's committed 200 status, so it is classified without a status, by its type. An Anthropic-shaped
-    body gives the shared classifier its message, type, and ``details.error_code``, and the message becomes the
-    error's text, so a reply shows what Anthropic said rather than the SDK's status line and body; any other body keeps
-    the SDK's text. The SDK finds a client's credentials only when it sends, so a client without any fails then, as
-    the missing key it is.
+    with the stream's committed 200 status, so it is classified without a status. The body's error type and
+    ``details.error_code`` name the failure for the classifier, and the error keeps the SDK's text, which repeats the
+    whole body. The SDK finds a client's credentials only when it sends, so a client without any fails then, as the
+    missing key it is.
     """
     if isinstance(error, TypeError) and str(error).startswith(_NO_CREDENTIALS_ERROR):
         return missing_api_key_error(PROVIDER_ENV_KEYS["anthropic"], provider=provider)
@@ -580,9 +579,8 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
         return failure
     if isinstance(error, anthropic.APIStatusError):
         body = _ErrorBody.of(error.body)
-        message = body.message or error.message
         return classify_provider_error(
-            message,
+            error.message,
             provider=provider,
             status_code=None if error.status_code == _COMMITTED_STREAM_STATUS else error.status_code,
             code=body.code,
@@ -596,26 +594,21 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
 
 @dataclass(frozen=True, slots=True)
 class _ErrorBody:
-    """The ``error`` object of an error response or a stream's ``error`` event, ``{"type": "error", "error": {...}}``.
+    """The names of an error response's or a stream ``error`` event's ``error`` object, ``{"type": "error", ...}``.
 
-    ``code`` is the ``details.error_code`` that tells apart failures sharing a type. Any other body, such as the
-    Google error a Vertex AI route can answer with, whose details say why it failed, gives no fields, so the error
-    keeps the SDK's text, which repeats the whole body.
+    ``code`` is the ``details.error_code`` that tells apart failures sharing a type.
     """
 
     type: str | None
-    message: str | None
     code: str | None
 
     @classmethod
     def of(cls, body: object) -> _ErrorBody:
-        envelope = as_dict(body) or {}
-        error = (as_dict(envelope.get("error")) if envelope.get("type") == "error" else None) or {}
+        error = as_dict((as_dict(body) or {}).get("error")) or {}
         details = as_dict(error.get("details")) or {}
-        error_type, message, code = error.get("type"), error.get("message"), details.get("error_code")
+        error_type, code = error.get("type"), details.get("error_code")
         return cls(
             type=error_type if isinstance(error_type, str) else None,
-            message=message if isinstance(message, str) else None,
             code=code if isinstance(code, str) else None,
         )
 

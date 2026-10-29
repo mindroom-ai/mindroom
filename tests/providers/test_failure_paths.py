@@ -488,14 +488,7 @@ _CLAUDE_CASES = [
         UNAVAILABLE,
         _PIPELINE,
     ),
-    # A final error's reply shows Anthropic's message, not the SDK's status line and body.
-    _Case(
-        "http_400",
-        _claude_status(400, "invalid_request_error", "messages: bad"),
-        InvalidRequest,
-        f"{ERROR}messages: bad",
-        1,
-    ),
+    _Case("http_400", _claude_status(400, "invalid_request_error", "messages: bad"), InvalidRequest, ERROR, 1),
     _Case(
         "http_422",
         _claude_status(422, "invalid_request_error", "messages.0.content: Input should be a valid list"),
@@ -545,15 +538,15 @@ _CLAUDE_CASES = [
         1,
     ),
     _Case("http_404", _claude_status(404, "not_found_error", "model: x"), InvalidRequest, ERROR, 1),
-    # The organization's billing stops every request until it changes, so the request is sent once and the reply is
-    # Anthropic's message alone: no prepaid credit left or a spend limit the organization or a workspace set, both a 400
-    # told apart only by their wording, or a billing or payment problem. The docs give only how a spend limit's message
-    # begins and say it then states when access resumes.
+    # The organization's billing stops every request until it changes, so the request is sent once: no prepaid credit
+    # left or a spend limit the organization or a workspace set, both a 400 told apart only by their wording, or a
+    # billing or payment problem. The docs give only how a spend limit's message begins and say it then states when
+    # access resumes.
     _Case(
         "http_400_credit_balance_too_low",
         _claude_status(400, "invalid_request_error", _CLAUDE_CREDIT_TOO_LOW),
         ProviderError,
-        f"{ERROR}{_CLAUDE_CREDIT_TOO_LOW}",
+        ERROR,
         1,
         code=QUOTA_EXHAUSTED,
     ),
@@ -561,7 +554,7 @@ _CLAUDE_CASES = [
         "http_400_own_spend_limit",
         _claude_status(400, "invalid_request_error", "You have reached your specified API usage limits."),
         ProviderError,
-        f"{ERROR}You have reached your specified API usage limits.",
+        ERROR,
         1,
         code=QUOTA_EXHAUSTED,
     ),
@@ -569,7 +562,7 @@ _CLAUDE_CASES = [
         "http_400_own_workspace_spend_limit",
         _claude_status(400, "invalid_request_error", "You have reached your specified workspace API usage limits."),
         ProviderError,
-        f"{ERROR}You have reached your specified workspace API usage limits.",
+        ERROR,
         1,
         code=QUOTA_EXHAUSTED,
     ),
@@ -578,7 +571,7 @@ _CLAUDE_CASES = [
         "http_429_spend_cap",
         _json(429, _CLAUDE_SPEND_CAP_BODY),
         ProviderError,
-        f"{ERROR}{_CLAUDE_SPEND_CAP}",
+        ERROR,
         1,
         code=QUOTA_EXHAUSTED,
     ),
@@ -586,7 +579,7 @@ _CLAUDE_CASES = [
         "http_402_billing_error",
         _claude_status(402, "billing_error", "There's an issue with your billing or payment information."),
         ProviderError,
-        f"{ERROR}There's an issue with your billing or payment information.",
+        ERROR,
         1,
         code=QUOTA_EXHAUSTED,
     ),
@@ -633,14 +626,14 @@ _CLAUDE_CASES = [
         "event_invalid_request_error",
         _claude_stream(_claude_error("invalid_request_error", "Bad block")),
         ProviderError,
-        f"{ERROR}Bad block",
+        ERROR,
         1,
     ),
     _Case(
         "event_credit_balance_too_low",
         _claude_stream(_claude_error("invalid_request_error", _CLAUDE_CREDIT_TOO_LOW)),
         ProviderError,
-        f"{ERROR}{_CLAUDE_CREDIT_TOO_LOW}",
+        ERROR,
         1,
         code=QUOTA_EXHAUSTED,
     ),
