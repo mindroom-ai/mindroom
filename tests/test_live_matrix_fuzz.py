@@ -5939,6 +5939,41 @@ async def test_exact_reply_oracle_ignores_empty_defaultdict_entries() -> None:
         await client.close()
 
 
+@pytest.mark.asyncio
+async def test_exact_reply_oracle_drops_a_reply_its_redaction_removed() -> None:
+    """A placeholder MindRoom removed, as for a replay a newer message superseded, stops being a streaming reply."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example", coalescing_threads=True)
+    auditor = FinalStateAuditor(client, oracle, agent_id="@agent:example", expected_body_for=_short_body_for)
+    try:
+        oracle.expect("op:1", "$source", thread=0)
+        oracle._ingest_event({"event_id": "$source", "sender": "@user:example", "type": "m.room.message"})
+        oracle._ingest_event(_agent_reply_event("$source", "$placeholder", "Thinking..."))
+        assert oracle.incomplete_streaming_sources() == ["$source"]
+        assert oracle.resolve_response_ref("response:op:1") == "$placeholder"
+
+        oracle._ingest_event(
+            {
+                "event_id": "$removal",
+                "sender": "@agent:example",
+                "type": "m.room.redaction",
+                "redacts": "$placeholder",
+                "content": {"redacts": "$placeholder", "reason": "Reply removed"},
+            },
+        )
+
+        assert oracle.incomplete_streaming_sources() == []
+        assert oracle.response_ids["$source"] == set()
+        assert "$placeholder" not in oracle.latest_reply_bodies
+        # A later operation that targets the response, such as a reaction, still reaches the removed event.
+        assert oracle.resolve_response_ref("response:op:1") == "$placeholder"
+        # Live supersession proofs read the same view the final audit reads from `/messages`.
+        assert auditor._canonical_agent_replies(oracle.canonical_events) == {}
+        assert oracle.canonical_events["$placeholder"]["unsigned"]["redacted_because"]["event_id"] == "$removal"
+    finally:
+        await client.close()
+
+
 def test_chaos_validation_blocks_targets_of_redacted_unsettled_responses() -> None:
     """A reply suppressed by source redaction may never be awaited as a target."""
     cross_batch = LiveFuzzScenario(

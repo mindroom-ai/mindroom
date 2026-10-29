@@ -5375,6 +5375,9 @@ class ExactReplyOracle:
         }
         if event_id in self.expected_sources:
             self.observed_sources.add(event_id)
+        if event.get("type") == "m.room.redaction":
+            self._ingest_reply_redaction(event)
+            return
         if event.get("sender") != self.agent_id or event.get("type") != "m.room.message":
             return
         content = event.get("content")
@@ -5382,6 +5385,30 @@ class ExactReplyOracle:
             self._ingest_agent_message(event_id, content)
             for replacement in _bundled_replacement_events(event):
                 self._ingest_event(replacement)
+
+    def _ingest_reply_redaction(self, redaction: Mapping[str, Any]) -> None:
+        """Drop an agent reply its redaction removed, as `/messages` shows it.
+
+        `/sync` delivers the redaction on its own and never resends the reply,
+        so without this a reply MindRoom gave up, such as the placeholder of a
+        replay a newer message superseded, would stay a visible reply forever.
+        An operation that targets the response still reaches the removed event.
+        """
+        content = redaction.get("content")
+        target = redaction.get("redacts")
+        if not isinstance(target, str) and isinstance(content, dict):
+            target = content.get("redacts")
+        if not isinstance(target, str) or self.latest_reply_bodies.pop(target, None) is None:
+            return
+        for reply_event_ids in self.response_ids.values():
+            reply_event_ids.discard(target)
+        reply = self.canonical_events[target]
+        unsigned = reply.get("unsigned")
+        self.canonical_events[target] = {
+            **reply,
+            "content": {},
+            "unsigned": {**(unsigned if isinstance(unsigned, dict) else {}), "redacted_because": dict(redaction)},
+        }
 
     def _ingest_agent_message(self, event_id: str, content: Mapping[str, Any]) -> None:
         """Fold one agent `m.room.message` into reply bodies and thread attributions."""
