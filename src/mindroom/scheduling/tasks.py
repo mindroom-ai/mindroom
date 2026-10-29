@@ -29,8 +29,8 @@ from mindroom.approval.tool_approval import (
     scheduled_call_offers_any_arguments,
 )
 from mindroom.config.resolution import entity_timezone
-from mindroom.constants import ROUTER_AGENT_NAME, SCHEDULED_TASK_EVENT_TYPE
-from mindroom.entity_resolution import current_entity_id, entity_identity_registry, persisted_bot_user_ids
+from mindroom.constants import SCHEDULED_TASK_EVENT_TYPE
+from mindroom.entity_resolution import entity_identity_registry, persisted_bot_user_ids
 from mindroom.failure_text import failure_text
 from mindroom.helper_usage import record_system_usage
 from mindroom.llm.errors import ModelSafeguardRefusal
@@ -828,17 +828,6 @@ async def persist_scheduled_task_state(
     return revision
 
 
-async def _new_task_owner(
-    client: nio.AsyncClient,
-    room_id: str,
-    workflow: ScheduledWorkflow,
-    runtime_paths: RuntimePaths,
-) -> str:
-    """Decide which bot runs a task being saved, with the saving bot as its creator."""
-    router_id = current_entity_id(ROUTER_AGENT_NAME, runtime_paths).full_id
-    return await decide_task_owner(client, room_id, workflow, router_id=router_id)
-
-
 async def _save_pending_scheduled_task(
     client: nio.AsyncClient,
     room_id: str,
@@ -850,9 +839,7 @@ async def _save_pending_scheduled_task(
     task_runtime: ScheduledTaskRuntime | None = None,
 ) -> None:
     """Decide a new task's owner, persist the task with it, and start the task's runner."""
-    if task_runtime is not None:
-        task_runtime.cancel_runner(task_id)
-    owner_id = await _new_task_owner(client, room_id, workflow, runtime_paths)
+    owner_id = await decide_task_owner(client, room_id, workflow, runtime_paths)
     await persist_scheduled_task_state(
         client=client,
         room_id=room_id,
@@ -1533,7 +1520,7 @@ async def schedule_approved_tool_call(
         )
         if not card_reserved:
             return (None, "❌ Could not post an approvable approval card for this call; nothing was scheduled.")
-        owner_id = await _new_task_owner(runtime.client, room_id, workflow, runtime.runtime_paths)
+        owner_id = await decide_task_owner(runtime.client, room_id, workflow, runtime.runtime_paths)
         await persist_scheduled_task_state(
             client=runtime.client,
             room_id=room_id,

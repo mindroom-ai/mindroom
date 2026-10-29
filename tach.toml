@@ -5461,7 +5461,6 @@ depends_on = [
     "mindroom.requester_identity",
     "mindroom.runtime_shutdown",
     "mindroom.scheduling.executor",
-    "mindroom.scheduling.legacy_task_owner",
     "mindroom.scheduling.ownership",
     "mindroom.scheduling.recurring_schedule",
     "mindroom.scheduling.tasks",
@@ -5471,18 +5470,13 @@ depends_on = [
 path = "mindroom.scheduling.ownership"
 depends_on = [
     "mindroom.constants",
+    "mindroom.entity_resolution",
     "mindroom.scheduling.executor",
 ]
 visibility = [
-    "mindroom.scheduling.legacy_task_owner",
     "mindroom.scheduling.runtime",
     "mindroom.scheduling.tasks",
 ]
-
-[[modules]]
-path = "mindroom.scheduling.legacy_task_owner"
-depends_on = ["mindroom.scheduling.ownership"]
-visibility = ["mindroom.scheduling.runtime"]
 
 [[modules]]
 path = "mindroom.scheduling.executor"

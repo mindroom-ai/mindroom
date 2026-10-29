@@ -602,7 +602,7 @@ async def test_checkpoint_retry_rechecks_time_and_task_state(
     failed = False
     pauses = 0
 
-    def fail_final_plan(
+    def fail_plan_of_due_occurrence(
         path: Path,
         workflow_key: str,
         cron: str,
@@ -611,8 +611,8 @@ async def test_checkpoint_retry_rechecks_time_and_task_state(
     ) -> recurring_schedule.RecurringOccurrence:
         nonlocal plans
         plans += 1
-        if stage == "plan" and plans == 2:
-            msg = "temporary final planning failure"
+        if stage == "plan" and plans == 1:
+            msg = "temporary planning failure"
             raise OSError(msg)
         return plan(path, workflow_key, cron, now, grace_seconds)
 
@@ -641,7 +641,7 @@ async def test_checkpoint_retry_rechecks_time_and_task_state(
                 state_key="daily",
             )
 
-    monkeypatch.setattr(recurring_schedule, "_plan", fail_final_plan)
+    monkeypatch.setattr(recurring_schedule, "_plan", fail_plan_of_due_occurrence)
     monkeypatch.setattr(recurring_schedule, "_save", fail_preparation)
     monkeypatch.setattr(scheduling.asyncio, "sleep", change_during_retry)
     await run_until_wait(task, client, tmp_path)

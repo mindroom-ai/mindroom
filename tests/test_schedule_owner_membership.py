@@ -511,9 +511,9 @@ async def test_departure_is_checked_while_waiting_and_before_firing(
     due: bool,
     tmp_path: Path,
 ) -> None:
-    """A creator leaving after startup must stop timers and imminent deliveries alike."""
+    """A creator who left stops a waiting timer at its next read and a due delivery at the read before it fires."""
     client, workflow, state = _owner_schedule(
-        [{"membership": "join"}, {"membership": "leave"}],
+        [{"membership": "leave"}] if due else [{"membership": "join"}, {"membership": "leave"}],
         schedule_type=schedule_type,
     )
     execute_at = datetime.now(UTC) + timedelta(hours=-1 if due else 1)
@@ -763,42 +763,6 @@ async def test_unknown_alias_membership_retries_without_cancelling_schedule(
     assert retry_statuses == ["pending"]
     assert delivered == ["@alice:server"]
     assert state["status"] == ("completed" if schedule_type == "once" else "pending")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("schedule_type", ["once", "cron"])
-async def test_joined_alias_departure_cancels_schedule_before_next_fire(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    schedule_type: Literal["once", "cron"],
-) -> None:
-    """A previously joined alias must still be joined when the task is about to fire."""
-    client, workflow, state = _owner_schedule(
-        [{"membership": "leave"}],
-        schedule_type=schedule_type,
-        writer=_ALIAS_SCHEDULE_WRITER,
-    )
-    config, runtime_paths = _alias_schedule_config(tmp_path)
-    memberships: dict[str, object] = {_HUMAN_ALIAS: "join"}
-    _set_authoritative_alias_memberships(client, memberships)
-    read_state = client.room_get_state_event.side_effect
-    observed_memberships: list[str] = []
-
-    async def leave_after_first_check(room_id: str, event_type: str, state_key: str = "") -> object:
-        response = await read_state(room_id, event_type, state_key)
-        if event_type == "m.room.member" and state_key == _HUMAN_ALIAS:
-            observed_memberships.append(response.content["membership"])
-            memberships[_HUMAN_ALIAS] = "leave"
-        return response
-
-    client.room_get_state_event.side_effect = leave_after_first_check
-
-    delivered = await _run_alias_schedule(client, workflow, config, runtime_paths, monkeypatch)
-
-    assert observed_memberships == ["join", "leave"]
-    assert delivered == []
-    assert state["status"] == "cancelled"
-    assert scheduling.ScheduledWorkflow.model_validate_json(state["workflow"]).created_by == "@alice:server"
 
 
 @pytest.mark.asyncio

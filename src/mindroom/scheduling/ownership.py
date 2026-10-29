@@ -6,12 +6,14 @@ from typing import TYPE_CHECKING
 
 import nio
 
-from mindroom.constants import SCHEDULED_TASK_EVENT_TYPE
+from mindroom.constants import ROUTER_AGENT_NAME, SCHEDULED_TASK_EVENT_TYPE
+from mindroom.entity_resolution import current_entity_id
 from mindroom.scheduling.executor import scheduled_trigger_message_type
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from mindroom.constants import RuntimePaths
     from mindroom.scheduling.tasks import ScheduledWorkflow
 
 
@@ -45,8 +47,7 @@ async def decide_task_owner(
     client: nio.AsyncClient,
     room_id: str,
     workflow: ScheduledWorkflow,
-    *,
-    router_id: str,
+    runtime_paths: RuntimePaths,
 ) -> str:
     """Decide a new task's owner from the room's full state, with the saving bot as its creator.
 
@@ -58,6 +59,7 @@ async def decide_task_owner(
         msg = f"Could not read the state of room {room_id} to choose which bot runs the task: {response}"
         raise ValueError(msg)  # noqa: TRY004 - a failed read is reported like a refused task-state write
     room = room_from_state(room_id, client.user_id, response.events)
+    router_id = current_entity_id(ROUTER_AGENT_NAME, runtime_paths).full_id
     return task_owner(room, workflow, creator_id=client.user_id, router_id=router_id)
 
 

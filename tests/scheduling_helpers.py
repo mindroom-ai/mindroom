@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import nio
@@ -12,6 +13,7 @@ from mindroom.bot import AgentBot
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import MatrixState
+from mindroom.scheduling import runtime as scheduling_runtime
 from mindroom.scheduling.runtime import ScheduledTaskRuntime, _TaskRunner
 
 if TYPE_CHECKING:
@@ -231,7 +233,7 @@ async def run_cron_task(
     *,
     config_provider: Callable[[], Config | None] | None = None,
 ) -> None:
-    """Run one recurring task on a ready router bot; an unregistered runner stops after its first completed fire."""
+    """Run one recurring task on a ready router bot until it ends or completes its first fire."""
     assert workflow.room_id is not None
     runner = task_runner(
         client,
@@ -243,7 +245,21 @@ async def run_cron_task(
         matrix_admin,
         config_provider=config_provider,
     )
-    await runner.run_cron(workflow)
+    complete = scheduling_runtime.complete_recurring_occurrence
+
+    async def complete_then_stop(*args: object, **kwargs: object) -> None:
+        await complete(*args, **kwargs)
+        raise _FiredOnceError
+
+    with (
+        patch.object(scheduling_runtime, "complete_recurring_occurrence", complete_then_stop),
+        suppress(_FiredOnceError),
+    ):
+        await runner.run_cron(workflow)
+
+
+class _FiredOnceError(BaseException):
+    """Ends a test's recurring runner after one completed fire; a BaseException, so the runner reports no failure."""
 
 
 async def runnable_task(

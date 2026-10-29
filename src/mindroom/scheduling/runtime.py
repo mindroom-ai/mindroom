@@ -27,8 +27,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.runtime_shutdown import SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS
 from mindroom.scheduling import executor as scheduling_executor
-from mindroom.scheduling.legacy_task_owner import legacy_task_owner
-from mindroom.scheduling.ownership import room_from_state
+from mindroom.scheduling.ownership import room_from_state, task_owner
 from mindroom.scheduling.recurring_schedule import (
     RecurringCheckpointUnavailableError,
     complete_recurring_occurrence,
@@ -138,33 +137,31 @@ class ScheduledTaskRuntime:
             logger.info("restored_scheduled_tasks", agent=bot.agent_name, room_id=room_id, restored_task_count=restored)
         return restored
 
-    async def _room_pending_tasks(
-        self,
-        client: nio.AsyncClient,
-        room_id: str,
-    ) -> tuple[nio.MatrixRoom, list[tuple[ScheduledTaskRecord, str, str | None]]] | None:
-        """Return a room's full-state view and each pending task with its owner's Matrix ID and entity name."""
+    async def _restore_room(self, bot: _Bot, client: nio.AsyncClient, room_id: str) -> int:
         response = await client.room_get_state(room_id)
         if not isinstance(response, nio.RoomGetStateResponse):
             logger.warning("scheduled_task_room_state_unread", room_id=room_id, error=str(response))
-            return None
-        registry = entity_identity_registry(self._config(), self.runtime_paths)
+            return 0
+        tasks = task_records_with_writers(room_id, response, self.runtime_paths)
+        if not tasks:
+            return 0
+        config = self._config()
+        registry = entity_identity_registry(config, self.runtime_paths)
         router_id = registry.current_id(ROUTER_AGENT_NAME).full_id
         room = room_from_state(room_id, client.user_id, response.events)
-        tasks: list[tuple[ScheduledTaskRecord, str, str | None]] = []
-        for task, writer_id in task_records_with_writers(room_id, response, self.runtime_paths):
-            owner_id = task.owner_id or legacy_task_owner(room, task.workflow, sender=writer_id, router_id=router_id)
-            tasks.append((task, owner_id, registry.current_entity_name_for_user_id(owner_id)))
-        return room, tasks
-
-    async def _restore_room(self, bot: _Bot, client: nio.AsyncClient, room_id: str) -> int:
-        read = await self._room_pending_tasks(client, room_id)
-        if read is None:
-            return 0
-        room, tasks = read
-        config = self._config()
         restored = 0
-        for task, owner_id, owner in tasks:
+        for task, writer_id in tasks:
+            # LEGACY_COMPAT: Scheduled tasks without a stored owner.
+            # Legacy format: Scheduled-task state content without an "owner" field; every task saved before owners
+            #   were stored.
+            # Last legacy release: v2026.10.669 wrote scheduled-task state without an owner; replacement: the next
+            #   release stores the owner's Matrix ID in the task's state content when the task is saved.
+            # Handling: The owner is decided by the current rule over the room's full state, with the task's latest
+            #   state writer standing in for its creator. The field is never written back, so a rewrite keeps the task
+            #   on this rule.
+            # Coverage: tests/test_scheduled_task_runtime.py::test_task_saved_without_an_owner_restores_under_the_rule_over_its_writer.
+            owner_id = task.owner_id or task_owner(room, task.workflow, creator_id=writer_id, router_id=router_id)
+            owner = registry.current_entity_name_for_user_id(owner_id)
             if owner is None:
                 if not room.power_levels.can_user_send_state(client.user_id, SCHEDULED_TASK_EVENT_TYPE):
                     logger.warning(
@@ -215,95 +212,70 @@ class ScheduledTaskRuntime:
         return self._start_runner(bot.agent_name, task.task_id, workflow)
 
     async def fail_removed(self, entity_names: set[str]) -> None:
-        """Fail every pending task an entity removed from the config owns, while its bot still has its client.
+        """Fail the running tasks of entities removed from the config, while their bots still have their clients.
 
-        A removed entity's tasks are never handed to another bot: its runners
-        end, and every pending task it owns in the rooms it joined, running or
-        not, is marked failed while the removed bot says so where the task
-        posts. The reload waits here with response admission closed, so all
-        rooms settle concurrently within the stop budget; a homeserver that
-        stalls past it leaves the rest pending or failed without their notice.
+        A removed entity's tasks are never handed to another bot: each of its
+        runners ends, and its task is marked failed while the removed bot says
+        so where the task posts. The reload waits here with response admission
+        closed, so the tasks settle concurrently within the stop budget; a
+        homeserver that stalls past it leaves the rest pending or failed without
+        their notice.
         """
-        removed = {
-            task_id: runner for task_id, (runner, _task) in self._runners.items() if runner.owner in entity_names
-        }
-        cancelled = [self._runners.pop(task_id)[1] for task_id in removed]
+        removed = [runner for runner, _task in self._runners.values() if runner.owner in entity_names]
+        cancelled = [self._runners.pop(runner.task_id)[1] for runner in removed]
         for task in cancelled:
             task.cancel()
         await asyncio.gather(*cancelled, return_exceptions=True)
         bots = self.bots()
-        rooms: list[tuple[str, _Bot, str]] = []
-        for name in sorted(entity_names):
-            runner_rooms = {runner.room_id for runner in removed.values() if runner.owner == name}
-            bot = bots.get(name)
+        settling = []
+        for runner in removed:
+            bot = bots.get(runner.owner)
             if bot is None or bot.client is None:
-                if runner_rooms:
-                    logger.warning(
-                        "scheduled_tasks_of_removed_owner_left_pending",
-                        owner=name,
-                        room_ids=sorted(runner_rooms),
-                    )
+                logger.warning(
+                    "scheduled_task_of_removed_owner_left_pending",
+                    owner=runner.owner,
+                    task_id=runner.task_id,
+                )
                 continue
-            rooms.extend((name, bot, room_id) for room_id in sorted(runner_rooms | set(bot.client.rooms)))
-        settled: set[tuple[str, str]] = set()
-
-        async def settle(name: str, bot: _Bot, room_id: str) -> None:
-            client = bot.client
-            assert client is not None
-            try:
-                read = await self._room_pending_tasks(client, room_id)
-            except Exception:
-                logger.exception("scheduled_tasks_of_removed_owner_unread", owner=name, room_id=room_id)
-                read = None
-            owned = [
-                (task, owner_id) for task, owner_id, owner in (read[1] if read is not None else ()) if owner == name
-            ]
-            await asyncio.gather(
-                *(self._fail_owner_removed_task(bot, room_id, task.task_id, owner_id) for task, owner_id in owned),
-            )
-            settled.add((name, room_id))
-
+            settling.append(self._fail_owner_removed_task(bot, runner.room_id, runner.task_id, runner.owner))
         try:
             async with asyncio.timeout(SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS):
-                await asyncio.gather(*(settle(name, bot, room_id) for name, bot, room_id in rooms))
+                await asyncio.gather(*settling)
         except TimeoutError:
             logger.warning(
                 "scheduled_tasks_of_removed_owner_unsettled",
-                rooms=sorted(f"{name} {room_id}" for name, _bot, room_id in rooms if (name, room_id) not in settled),
+                owners=sorted(entity_names),
                 timeout_seconds=SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS,
             )
 
     async def _fail_owner_removed_task(self, bot: _Bot, room_id: str, task_id: str, owner: str) -> None:
         """Mark one pending task failed because its owner was removed, and say so where it posts; log any failure."""
-        try:
-            await self._fail_and_announce_owner_removed_task(bot, room_id, task_id, owner)
-        except Exception:
-            logger.exception("scheduled_task_owner_removal_failure_failed", task_id=task_id, owner=owner)
-
-    async def _fail_and_announce_owner_removed_task(self, bot: _Bot, room_id: str, task_id: str, owner: str) -> None:
         client = bot.client
         assert client is not None
-        async with schedule_edit_lock(client, room_id, task_id):
-            task = await _get_pending_task_record(client, room_id, task_id, self.runtime_paths)
-            if task is None:
-                return
-            if task.workflow.pre_approved_call:
-                await withdraw_scheduled_call(task_id, reason=_OWNER_REMOVED_REASON)
-            await _save_task_status(
+        try:
+            async with schedule_edit_lock(client, room_id, task_id):
+                task = await _get_pending_task_record(client, room_id, task_id, self.runtime_paths)
+                if task is None:
+                    return
+                if task.workflow.pre_approved_call:
+                    await withdraw_scheduled_call(task_id, reason=_OWNER_REMOVED_REASON)
+                await _save_task_status(
+                    client,
+                    task,
+                    "failed",
+                    timezone=scheduled_task_timezone(task.workflow, self._config()),
+                    writers=self,
+                )
+            logger.warning("scheduled_task_failed_owner_removed", room_id=room_id, task_id=task_id, owner=owner)
+            await scheduling_executor.send_scheduled_failure_notice(
                 client,
-                task,
-                "failed",
-                timezone=scheduled_task_timezone(task.workflow, self._config()),
-                writers=self,
+                task.workflow,
+                MessageTarget.for_scheduled_task(task.workflow),
+                f"❌ Schedule failed because its agent was removed: {task.workflow.description}\nTask ID: `{task_id}`",
+                bot._conversation_reader,
             )
-        logger.warning("scheduled_task_failed_owner_removed", room_id=room_id, task_id=task_id, owner=owner)
-        await scheduling_executor.send_scheduled_failure_notice(
-            client,
-            task.workflow,
-            MessageTarget.for_scheduled_task(task.workflow),
-            f"❌ Schedule failed because its agent was removed: {task.workflow.description}\nTask ID: `{task_id}`",
-            bot._conversation_reader,
-        )
+        except Exception:
+            logger.exception("scheduled_task_owner_removal_failure_failed", task_id=task_id, owner=owner)
 
     async def release(self, entity_names: set[str]) -> None:
         """Fence entities about to stop, then wait, bounded, for their in-flight Matrix operations.
@@ -341,15 +313,17 @@ class ScheduledTaskRuntime:
         await asyncio.gather(*cancelled, return_exceptions=True)
 
     @asynccontextmanager
-    async def operation(self, entity_name: str) -> AsyncIterator[_Bot]:
-        """Use one entity's bot for Matrix work once it runs, has synced, and is not stopping."""
+    async def operation(self, entity_name: str) -> AsyncIterator[tuple[_Bot, nio.AsyncClient]]:
+        """Use one entity's bot and client for Matrix work once it runs, has synced, and is not stopping."""
         while True:
             bot = self._ready_bot(entity_name)
             if bot is not None:
                 break
             await asyncio.sleep(_OWNER_POLL_INTERVAL_SECONDS)
+        client = bot.client
+        assert client is not None
         with self._tracked(bot):
-            yield bot
+            yield bot, client
 
     @contextmanager
     def other_state_writer(self, room_id: str, *, refused_user_id: str) -> Iterator[nio.AsyncClient | None]:
@@ -398,10 +372,6 @@ class ScheduledTaskRuntime:
         if running is not None and running[1] is asyncio.current_task():
             del self._runners[task_id]
 
-    def _runs(self, task_id: str) -> bool:
-        running = self._runners.get(task_id)
-        return running is not None and running[1] is asyncio.current_task()
-
     def _config(self) -> Config:
         config = self.config_provider()
         if config is None:
@@ -426,9 +396,7 @@ class _TaskRunner:
         task: ScheduledTaskRecord | None = None
         while True:
             try:
-                async with runtime.operation(self.owner) as bot:
-                    client = bot.client
-                    assert client is not None
+                async with runtime.operation(self.owner) as (_bot, client):
                     task = await _get_pending_task_record(
                         client=client,
                         room_id=self.room_id,
@@ -467,15 +435,11 @@ class _TaskRunner:
                                 self.task_id,
                                 reason=SCHEDULE_CANCELLED_REASON,
                             )
-                        await persist_scheduled_task_state(
-                            client=client,
-                            room_id=self.room_id,
-                            task_id=self.task_id,
-                            workflow=current_task.workflow,
+                        await _save_task_status(
+                            client,
+                            current_task,
+                            "cancelled",
                             timezone=scheduled_task_timezone(current_task.workflow, runtime._config()),
-                            owner_id=current_task.owner_id,
-                            status="cancelled",
-                            created_at=current_task.created_at,
                             writers=runtime,
                         )
             except ScheduledTaskStateReadError as exc:
@@ -506,9 +470,7 @@ class _TaskRunner:
 
     async def _checkpoint_identity(self) -> tuple[str, str]:
         """Return the homeserver and account that key the owner's recurring checkpoint."""
-        async with self.runtime.operation(self.owner) as bot:
-            client = bot.client
-            assert client is not None
+        async with self.runtime.operation(self.owner) as (_bot, client):
             return client.homeserver, client.user_id
 
     async def _plan_occurrence(self, workflow: ScheduledWorkflow, cron: str, now: datetime) -> RecurringOccurrence:
@@ -530,9 +492,7 @@ class _TaskRunner:
         workflow: ScheduledWorkflow,
         occurrence: RecurringOccurrence | None = None,
     ) -> scheduling_executor.ScheduledWorkflowOutcome:
-        async with self.runtime.operation(self.owner) as bot:
-            client = bot.client
-            assert client is not None
+        async with self.runtime.operation(self.owner) as (bot, client):
             return await scheduling_executor.execute_scheduled_workflow(
                 client,
                 workflow,
@@ -545,9 +505,7 @@ class _TaskRunner:
             )
 
     async def _send_failure_notice(self, workflow: ScheduledWorkflow, target: MessageTarget, message: str) -> None:
-        async with self.runtime.operation(self.owner) as bot:
-            client = bot.client
-            assert client is not None
+        async with self.runtime.operation(self.owner) as (bot, client):
             await scheduling_executor.send_scheduled_failure_notice(
                 client,
                 workflow,
@@ -559,9 +517,7 @@ class _TaskRunner:
     async def _save_status(self, task: ScheduledTaskRecord, status: str) -> None:
         """Persist a one-time task's final status; a write cut off by its owner's stop is retried once it runs again."""
         while True:
-            async with self.runtime.operation(self.owner) as bot:
-                client = bot.client
-                assert client is not None
+            async with self.runtime.operation(self.owner) as (bot, client):
                 try:
                     await _save_task_status(
                         client,
@@ -582,8 +538,12 @@ class _TaskRunner:
                     return
             logger.warning("scheduled_task_status_write_interrupted_by_owner_stop", task_id=self.task_id, status=status)
 
-    async def run_cron(self, workflow: ScheduledWorkflow) -> None:  # noqa: C901, PLR0911, PLR0912, PLR0915
-        """Run a recurring task based on its cron schedule."""
+    async def run_cron(self, workflow: ScheduledWorkflow) -> None:
+        """Run a recurring task based on its cron schedule.
+
+        Each turn reads the task's current state and plans from it, so an edit
+        replans from the edited workflow and a cancellation ends the runner.
+        """
         task_id = self.task_id
         current_target = MessageTarget.for_scheduled_task(workflow)
         try:
@@ -601,65 +561,18 @@ class _TaskRunner:
                     if not cron_schedule:
                         logger.error("No cron schedule provided for recurring task", task_id=task_id)
                         return
-
                     cron_string = cron_schedule.to_cron_string()
-                    try:
-                        occurrence = await self._plan_occurrence(workflow, cron_string, datetime.now(UTC))
-                    except RecurringCheckpointUnavailableError:
-                        await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
-                        continue
-                    next_run = occurrence.checkpoint.next_run_at
-                    workflow_changed = False
-
-                    while True:
-                        delay = (next_run - datetime.now(UTC)).total_seconds()
-                        if delay <= 0:
-                            break
-                        await asyncio.sleep(min(delay, _TASK_STATE_POLL_INTERVAL_SECONDS))
-
-                        refreshed_task = await self._runnable_task()
-                        if not refreshed_task:
-                            logger.info("Recurring task cancelled while waiting, stopping", task_id=task_id)
-                            return
-
-                        refreshed_workflow = refreshed_task.workflow
-                        if not refreshed_workflow.cron_schedule:
-                            logger.error("No cron schedule provided for recurring task", task_id=task_id)
-                            return
-
-                        if _workflows_differ(workflow, refreshed_workflow):
-                            workflow = refreshed_workflow
-                            current_target = MessageTarget.for_scheduled_task(workflow)
-                            workflow_changed = True
-                            break
-
-                    if workflow_changed:
-                        continue
-
-                    latest_before_execute = await self._runnable_task()
-                    if not latest_before_execute:
-                        logger.info("Recurring task cancelled before execution, stopping", task_id=task_id)
-                        return
-
-                    latest_workflow = latest_before_execute.workflow
-                    if not latest_workflow.cron_schedule:
-                        logger.error("No cron schedule provided for recurring task", task_id=task_id)
-                        return
-                    if _workflows_differ(workflow, latest_workflow):
-                        workflow = latest_workflow
-                        current_target = MessageTarget.for_scheduled_task(workflow)
-                        continue
-
-                    # A timer or state read may have stalled across more due slots.
                     # Cron has second precision; normal subsecond wake-up jitter
                     # must still fire a live timer when catch-up is disabled.
-                    execute_now = datetime.now(UTC).replace(microsecond=0)
+                    now = datetime.now(UTC).replace(microsecond=0)
                     try:
-                        occurrence = await self._plan_occurrence(workflow, cron_string, execute_now)
+                        occurrence = await self._plan_occurrence(workflow, cron_string, now)
                     except RecurringCheckpointUnavailableError:
                         await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
                         continue
-                    if occurrence.checkpoint.next_run_at > execute_now:
+                    delay = (occurrence.checkpoint.next_run_at - datetime.now(UTC)).total_seconds()
+                    if delay > 0:
+                        await asyncio.sleep(min(delay, _TASK_STATE_POLL_INTERVAL_SECONDS))
                         continue
 
                     outcome = await self._execute(workflow, occurrence)
@@ -667,9 +580,6 @@ class _TaskRunner:
                         await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
                         continue
                     await complete_recurring_occurrence(occurrence, cron_string, datetime.now(UTC))
-                    if not self.runtime._runs(task_id):
-                        logger.info("scheduled_task_missing_from_running_tasks", task_id=task_id)
-                        return
         except asyncio.CancelledError:
             with bound_log_context(**current_target.log_context):
                 logger.info("cron_task_cancelled", task_id=task_id)
@@ -710,20 +620,8 @@ class _TaskRunner:
                         break
                     await asyncio.sleep(min(delay, _TASK_STATE_POLL_INTERVAL_SECONDS))
 
-            latest_before_execute = await self._runnable_task()
-            if not latest_before_execute:
-                with bound_log_context(**current_target.log_context):
-                    logger.info("One-time task was cancelled before execution, stopping", task_id=task_id)
-                return
-
-            latest_pending_task = latest_before_execute
-            workflow = latest_before_execute.workflow
-            current_target = MessageTarget.for_scheduled_task(workflow)
+            latest_pending_task = latest_task
             with bound_log_context(**current_target.log_context):
-                if not workflow.execute_at:
-                    logger.error("No execution time provided for one-time task", task_id=task_id)
-                    return
-
                 approval_state = (
                     await _arm_scheduled_call(task_id, workflow, self.runtime._config())
                     if workflow.pre_approved_call
@@ -741,16 +639,10 @@ class _TaskRunner:
                 # After a send, only the status write is retried; the send never repeats.
                 await self._save_status(latest_pending_task, final_status)
         except asyncio.CancelledError:
-            if latest_pending_task is not None and latest_pending_task.workflow is not workflow:
-                workflow = latest_pending_task.workflow
-                current_target = MessageTarget.for_scheduled_task(workflow)
             with bound_log_context(**current_target.log_context):
                 logger.info("one_time_task_cancelled", task_id=task_id)
             raise
         except Exception as e:
-            if latest_pending_task is not None and latest_pending_task.workflow is not workflow:
-                workflow = latest_pending_task.workflow
-                current_target = MessageTarget.for_scheduled_task(workflow)
             with bound_log_context(**current_target.log_context):
                 logger.exception("one_time_task_failed", task_id=task_id)
                 if approval_state == "armed":
@@ -867,8 +759,3 @@ async def _arm_scheduled_call(
     except Exception:
         logger.warning("scheduled_tool_call_arming_failed", task_id=task_id, exc_info=True)
         return "unarmed"
-
-
-def _workflows_differ(left: ScheduledWorkflow, right: ScheduledWorkflow) -> bool:
-    """Return whether two workflows differ in persisted state."""
-    return left.model_dump(mode="json") != right.model_dump(mode="json")

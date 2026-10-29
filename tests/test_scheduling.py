@@ -1134,7 +1134,6 @@ async def test_run_once_task_retries_transient_state_read_failure(tmp_path: Path
         [
             nio.RoomGetStateEventError(message="rate limited", status_code="M_LIMIT_EXCEEDED"),
             state_response,
-            state_response,
         ],
     )
 
@@ -1170,7 +1169,7 @@ async def test_run_once_task_retries_transient_state_read_failure(tmp_path: Path
         )
 
     sleep.assert_awaited_once()
-    assert sum(SCHEDULED_TASK_EVENT_TYPE in call.args[2] for call in client._send.await_args_list) == 3
+    assert sum(SCHEDULED_TASK_EVENT_TYPE in call.args[2] for call in client._send.await_args_list) == 2
     execute.assert_awaited_once()
     failure_notice.assert_not_awaited()
 

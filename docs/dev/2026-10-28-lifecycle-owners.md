@@ -23,7 +23,8 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
   Runners outlive their owner's restarts instead of being cancelled and restored, because a restore races the replacement's own restore on join and a cancelled send has no safe replay; a stopping owner admits no new operation and its operations in flight drain, bounded, before its client closes.
 - A removed entity's scheduled tasks fail; they are never handed to another bot.
   The maintainer decided this: removal is deliberate, and a reminder that silently starts posting as a different agent, with that agent's room access, is worse than one that stops and says why.
-  The removed bot fails every pending task it owns in the rooms it joined, running or not, while it still has its client and before it leaves its rooms, so it can explain in each task's thread; restarts never fail a task.
+  The removed bot fails each task it runs while it still has its client and before it leaves its rooms, so it can explain in each task's thread; restarts never fail a task.
+  A pending task with no runner at removal, because its restore read failed or its runner crashed, is failed later by a bot that may write schedule state in its room, like a task whose agent was removed while MindRoom was stopped; scanning every room the agent joined at removal would cost a full room-state read per room inside the reload for a failure path.
 - Under `mindroom run` the runtime loads each edit once and publishes that load to the embedded dashboard before it waits for any response drain, and also while MindRoom starts, before it can apply anything.
   A dashboard save rewrites the whole file from the config the dashboard holds, so a dashboard that lagged behind the file for a drain would erase the edit.
 
