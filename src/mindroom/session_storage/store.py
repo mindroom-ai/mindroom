@@ -32,7 +32,7 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY,
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
-from mindroom.history.types import HistoryScope, ScopeSummary
+from mindroom.history.types import HistoryScope, ScopeSummary, owner_scope
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.llm.usage import ModelMetrics, RunMetrics, SessionMetrics, TokenCounts
 from mindroom.session_storage.codec import RunColumns, decode_json, run_columns, run_kind, run_record
@@ -658,11 +658,7 @@ def watch_session_row(scope: HistoryScope, session_id: str) -> Iterator[_Session
 def report_created_row(session: ConversationSession) -> None:
     """Tell the block watching this write that the write, now committed, created ``session``'s row."""
     watch = _SESSION_ROW_WATCH.get()
-    if watch is not None and (watch.session_id, watch.scope.kind, watch.scope.scope_id) == (
-        session.session_id,
-        session.kind,
-        session.owner_id,
-    ):
+    if watch is not None and (watch.session_id, watch.scope) == (session.session_id, owner_scope(session)):
         watch.created = True
 
 
