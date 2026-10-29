@@ -483,25 +483,35 @@ async def test_gemini_dedicated_settings_replace_authored_generation_config_keys
 
 @pytest.mark.asyncio
 async def test_gemini_tool_history_keeps_valid_call_ids_and_drops_invalid_ones(tmp_path: Path) -> None:
-    """Gemini matches each result to its call by id, so malformed ids are left out without shifting valid ones."""
-    messages = (
-        Message(role="user", content="Hi"),
-        Message(
-            role="assistant",
-            tool_calls=[
+    """Gemini matches each result to its call by id, so ids dropped as malformed at load go without shifting valid ones.
+
+    A result whose id was dropped still answers its call as a function response.
+    """
+    stored = (
+        {"role": "user", "content": "Hi"},
+        {
+            "role": "assistant",
+            "tool_calls": [
                 {"id": 7, "type": "function", "function": {"name": "invalid", "arguments": "{}"}},
                 {"id": "call-123", "type": "function", "function": {"name": "valid", "arguments": "{}"}},
             ],
-        ),
-        Message(role="tool", tool_call_id="", tool_name="invalid", content="invalid result"),
-        Message(role="tool", tool_call_id="call-123", tool_name="valid", content="valid result"),
+        },
+        {"role": "tool", "tool_call_id": "", "tool_name": "invalid", "content": "invalid result"},
+        {"role": "tool", "tool_call_id": "call-123", "tool_name": "valid", "content": "valid result"},
     )
+    messages = tuple(Message.from_dict(data) for data in stored)
 
     sent, _ = await run_adapter(GEMINI, _request(*messages), tmp_path, gemini_sse(_gemini_chunk({"text": "ok"})))
 
     calls, results = (sent["body"]["contents"][index]["parts"] for index in (1, 2))
-    assert [part["functionCall"].get("id") for part in calls] == [None, "call-123"]
-    assert [part["functionResponse"].get("id") for part in results] == [None, "call-123"]
+    assert [part["functionCall"] for part in calls] == [
+        {"name": "invalid", "args": {}},
+        {"id": "call-123", "name": "valid", "args": {}},
+    ]
+    assert [part["functionResponse"] for part in results] == [
+        {"name": "invalid", "response": {"result": "invalid result"}},
+        {"id": "call-123", "name": "valid", "response": {"result": "valid result"}},
+    ]
 
 
 @pytest.mark.asyncio

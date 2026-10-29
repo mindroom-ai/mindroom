@@ -873,6 +873,7 @@ def _reload_lifecycle(config_path: Path) -> ConfigReloadLifecycle:
         apply_update_plan=_apply_plan,
         response_admission_gate=ResponseAdmissionGate(),
         before_runtime_replacement=AsyncMock(),
+        finish_reload=AsyncMock(),
     )
 
 

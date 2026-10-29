@@ -68,6 +68,7 @@ from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context
 from tests.fakes.scripted_model import ScriptedModel
 from tests.identity_helpers import entity_ids
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -825,7 +826,7 @@ class DelegatingLeader:
             supports_native_tool_approval=True,
             include_interactive_questions=False,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(self.config, self.paths, "leader"),
         )
         hooks = agent_loop_hooks(
             build,

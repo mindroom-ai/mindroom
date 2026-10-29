@@ -89,7 +89,7 @@
   "parsed": {
     "message": {
       "provider_data": {
-        "content_blocks": [
+        "claude_blocks": [
           {
             "id": "srvtoolu_parity",
             "input": {
@@ -125,30 +125,6 @@
           "provider": "Anthropic"
         },
         "mindroom_native_compaction": null,
-        "server_tool_blocks": [
-          {
-            "caller": null,
-            "id": "srvtoolu_parity",
-            "input": {
-              "pattern": "order"
-            },
-            "name": "tool_search_tool_regex",
-            "type": "server_tool_use"
-          },
-          {
-            "content": {
-              "tool_references": [
-                {
-                  "tool_name": "lookup_order",
-                  "type": "tool_reference"
-                }
-              ],
-              "type": "tool_search_tool_search_result"
-            },
-            "tool_use_id": "srvtoolu_parity",
-            "type": "tool_search_tool_result"
-          }
-        ],
         "stop_reason": "tool_use"
       },
       "role": "assistant",

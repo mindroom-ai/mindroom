@@ -111,7 +111,7 @@ def test_google_calendar_default_config_enables_write_methods(tmp_path: Path) ->
         _runtime_paths(tmp_path),
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         worker_target=None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
     )
 
     assert isinstance(tool, GoogleCalendarTools)
@@ -135,7 +135,7 @@ def test_google_calendar_allow_update_enables_write_methods(tmp_path: Path) -> N
         _runtime_paths(tmp_path),
         credentials_manager=credentials_manager,
         worker_target=None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
     )
 
     assert isinstance(tool, GoogleCalendarTools)

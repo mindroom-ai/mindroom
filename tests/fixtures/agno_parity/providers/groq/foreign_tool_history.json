@@ -136,22 +136,18 @@
     "message": {
       "content": "Add a warm layer.",
       "provider_data": {
+        "id": "chatcmpl-parity",
         "mindroom_model": {
           "id": "openai/gpt-oss-120b",
           "provider": "Groq"
-        }
+        },
+        "system_fingerprint": "fp_parity"
       },
       "role": "assistant"
     },
     "metrics": {
       "input_tokens": 42,
       "output_tokens": 12,
-      "provider_metrics": {
-        "completion_time": 0.021,
-        "prompt_time": 0.004,
-        "queue_time": 0.011,
-        "total_time": 0.025
-      },
       "total_tokens": 54
     },
     "stop_reason": "end"
@@ -177,15 +173,16 @@
                 "arguments": "{\"city\": \"Paris\", \"unit\": \"celsius\"}",
                 "name": "get_weather"
               },
-              "id": "toolu_01ForeignParityWeather",
+              "id": "call_00000000000000000000000000000000000",
               "type": "function"
             }
-          ]
+          ],
+          "content": ""
         },
         {
           "role": "tool",
           "content": "{\"city\": \"Paris\", \"forecast\": \"light rain\", \"high_c\": 14}",
-          "tool_call_id": "toolu_01ForeignParityWeather"
+          "tool_call_id": "call_00000000000000000000000000000000000"
         },
         {
           "role": "assistant",

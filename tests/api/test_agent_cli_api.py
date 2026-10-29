@@ -18,6 +18,7 @@ from mindroom.agent_cli.shell_contract import AGENT_CLI_WINDOW_HEADER
 from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from tests.conftest import live_turn_tools_for_test
 from tests.test_agent_tool_calls import _catalog
@@ -44,6 +45,7 @@ async def test_real_api_auth_precedes_validation_and_hides_wrong_owner(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
     )
     registry = TurnToolRegistry()
     registry.register(owner)
@@ -108,6 +110,7 @@ async def test_internal_factory_key_error_is_not_client_validation(tmp_path: Pat
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
     )
     registry = TurnToolRegistry()
     registry.register(owner)
@@ -155,6 +158,7 @@ async def test_live_retry_disconnect_conflict_and_restart_are_owner_scoped(tmp_p
             CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), name, "run"),
             catalog=catalog,
             authorize=authorize,
+            output_file_policy=ToolOutputFilePolicy(tmp_path / name / "workspace"),
         )
         registry.register(owner)
         grant = owner.issue(now_ns=time.time_ns(), expires_at_ns=time.time_ns() + 10**12)

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.atomic_file import atomic_write_file_at
+from mindroom.config.resolution import memory_backend
 from mindroom.constants import RuntimePaths, config_relative_path
 from mindroom.path_confinement import (
     open_directory_within_root,
@@ -63,14 +64,6 @@ class ResolvedAgentWorkspace:
     lexical_root: Path
     context_files: tuple[Path, ...]
     file_memory_path: Path | None
-
-
-@dataclass(frozen=True)
-class _EffectiveAgentWorkspace:
-    root_path: str
-    template_dir: Path | None
-    context_files: tuple[str, ...]
-    file_memory_path: str | None
 
 
 def validate_local_copy_source_path(
@@ -371,28 +364,6 @@ def ensure_workspace_knowledge_links(
         _apply_workspace_knowledge_links(knowledge_fd, knowledge_root, desired_links)
 
 
-def _effective_workspace(
-    agent_name: str,
-    config: Config,
-    *,
-    runtime_paths: RuntimePaths,
-) -> _EffectiveAgentWorkspace | None:
-    agent_config = config.agents.get(agent_name)
-    if agent_config is None or agent_config.private is None:
-        return None
-    private_config = agent_config.private
-    return _EffectiveAgentWorkspace(
-        root_path=private_root_name(agent_name, private_config.root),
-        template_dir=(
-            config_relative_path(private_config.template_dir, runtime_paths)
-            if private_config.template_dir is not None
-            else None
-        ),
-        context_files=tuple(private_config.context_files or ()),
-        file_memory_path="." if config.resolve_entity(agent_name).memory_backend == "file" else None,
-    )
-
-
 def runs_in_dedicated_worker(runtime_paths: RuntimePaths) -> bool:
     """Return whether this process is a sandbox runner pinned to one dedicated worker."""
     return runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]) and bool(
@@ -423,14 +394,12 @@ def _resolve_workspace(
     state_storage_path: Path,
     use_state_storage_path: bool,
     create: bool,
-) -> ResolvedAgentWorkspace | None:
-    agent_config = config.agents.get(agent_name)
-    if agent_config is None:
-        return None
+) -> ResolvedAgentWorkspace:
+    private_config = config.get_agent(agent_name).private
+    file_memory = memory_backend(config, agent_name) == "file"
 
-    if agent_config.private is None:
-        if config.resolve_entity(agent_name).memory_backend != "file":
-            return None
+    if private_config is None:
+        # Every shared agent works in its own workspace; with file memory, its memory files live there too.
         lexical_root = state_storage_path.expanduser() / "workspace"
         root = resolve_workspace_relative_path(
             state_storage_path,
@@ -443,29 +412,30 @@ def _resolve_workspace(
             root=root,
             lexical_root=lexical_root,
             context_files=(),
-            file_memory_path=root,
+            file_memory_path=root if file_memory else None,
         )
 
-    workspace = _effective_workspace(agent_name, config, runtime_paths=runtime_paths)
-    assert workspace is not None
+    root_path = private_root_name(agent_name, private_config.root)
+    template_dir = (
+        config_relative_path(private_config.template_dir, runtime_paths)
+        if private_config.template_dir is not None
+        else None
+    )
 
     if not use_state_storage_path:
         msg = f"Private agent '{agent_name}' requires an active execution identity to resolve requester-local state"
         raise ValueError(msg)
 
-    lexical_root = state_storage_path.expanduser() / workspace.root_path
+    lexical_root = state_storage_path.expanduser() / root_path
     root = resolve_workspace_relative_path(
         state_storage_path,
-        workspace.root_path,
+        root_path,
         field_name="private.root",
     )
-    template_dir = workspace.template_dir
     if create:
         root.mkdir(parents=True, exist_ok=True)
-        if template_dir is not None:
-            assert template_dir is not None
-            if not _template_unavailable_in_sandbox_runner(template_dir, runtime_paths):
-                _copy_workspace_template(root, template_dir=template_dir)
+        if template_dir is not None and not _template_unavailable_in_sandbox_runner(template_dir, runtime_paths):
+            _copy_workspace_template(root, template_dir=template_dir)
 
     context_files = tuple(
         resolve_workspace_relative_path(
@@ -473,25 +443,13 @@ def _resolve_workspace(
             relative_path,
             field_name="private.context_files",
         )
-        for relative_path in workspace.context_files
+        for relative_path in private_config.context_files or ()
     )
-    file_memory_path = (
-        resolve_workspace_relative_path(
-            root,
-            workspace.file_memory_path,
-            field_name="private file memory path",
-        )
-        if workspace.file_memory_path is not None
-        else None
-    )
-    if create and file_memory_path is not None:
-        file_memory_path.mkdir(parents=True, exist_ok=True)
-
     return ResolvedAgentWorkspace(
         root=root,
         lexical_root=lexical_root,
         context_files=context_files,
-        file_memory_path=file_memory_path,
+        file_memory_path=root if file_memory else None,
     )
 
 
@@ -503,8 +461,8 @@ def resolve_agent_workspace_from_state_path(
     state_storage_path: Path,
     use_state_storage_path: bool,
     create: bool = False,
-) -> ResolvedAgentWorkspace | None:
-    """Resolve one agent workspace when the caller already knows the state root."""
+) -> ResolvedAgentWorkspace:
+    """Resolve one agent's workspace when the caller already knows the state root."""
     return _resolve_workspace(
         agent_name,
         config,

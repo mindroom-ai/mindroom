@@ -45,6 +45,7 @@ def _make_lifecycle(
         apply_update_plan=AsyncMock(return_value=True),
         response_admission_gate=gate,
         before_runtime_replacement=AsyncMock(),
+        finish_reload=AsyncMock(),
     )
 
 
@@ -173,7 +174,74 @@ async def test_reload_drains_active_responses_before_applying(
     assert gate.closed is False
 
 
-_AGENT1_YAML = "agents:\n  agent1:\n    display_name: Agent 1\n"
+_AGENT1_YAML = "models:\n  default: {provider: openai, id: test-model}\nagents:\n  agent1:\n    display_name: Agent 1\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("apply_fails", [False, True])
+async def test_a_reload_ends_the_script_launch_fence_once_published_or_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    apply_fails: bool,
+) -> None:
+    """New script launches read the applied config, so a reload releases them only after publishing it or failing."""
+    current_config = Config()
+    new_config = Config(defaults={"enable_streaming": False})
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle.load_config", MagicMock(return_value=new_config))
+    lifecycle = _make_lifecycle(tmp_path, current_config=current_config)
+    applied_when_released: list[Config | None] = []
+    lifecycle.finish_reload = AsyncMock(
+        side_effect=lambda: applied_when_released.append(lifecycle.fully_applied_config),
+    )
+    if apply_fails:
+        lifecycle.apply_update_plan = AsyncMock(side_effect=RuntimeError("apply failed"))
+        with pytest.raises(RuntimeError, match="apply failed"):
+            await lifecycle._update_config()
+    else:
+        await lifecycle._update_config()
+
+    assert applied_when_released == [current_config if apply_fails else new_config]
+
+
+@pytest.mark.asyncio
+async def test_another_update_waiting_for_the_config_lock_starts_after_the_launch_fence_ends(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A plugin reload queued behind a config reload never shares the launch fence that reload then ends."""
+    monkeypatch.setattr(
+        "mindroom.orchestration.config_lifecycle.load_config",
+        MagicMock(return_value=Config(defaults={"enable_streaming": False})),
+    )
+    lifecycle = _make_lifecycle(tmp_path, current_config=Config())
+    applying = asyncio.Event()
+    release_apply = asyncio.Event()
+    order: list[str] = []
+
+    async def apply_plan(*_args: object) -> bool:
+        applying.set()
+        await release_apply.wait()
+        return True
+
+    async def finish_reload() -> None:
+        # The real release runs in its own task, so it yields before it ends the fence.
+        await asyncio.sleep(0)
+        order.append("fence ended")
+
+    async def queued_update() -> None:
+        async with lifecycle.config_update_lock:
+            order.append("queued update")
+
+    lifecycle.apply_update_plan = AsyncMock(side_effect=apply_plan)
+    lifecycle.finish_reload = AsyncMock(side_effect=finish_reload)
+    reload_task = asyncio.create_task(lifecycle._update_config())
+    await asyncio.wait_for(applying.wait(), timeout=1)
+    queued = asyncio.create_task(queued_update())
+    await asyncio.sleep(0)
+    release_apply.set()
+    await asyncio.wait_for(asyncio.gather(reload_task, queued), timeout=1)
+
+    assert order == ["fence ended", "queued update"]
 
 
 @pytest.mark.asyncio

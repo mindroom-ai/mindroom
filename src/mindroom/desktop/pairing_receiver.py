@@ -105,7 +105,7 @@ def register_desktop_pairing_receiver(
     ],
 ) -> None:
     """Register a receiver only for concrete agents configured with Desktop."""
-    if agent_name not in config.agents or "desktop" not in config.resolve_entity(agent_name).available_tools:
+    if agent_name not in config.agents or "desktop" not in config.resolve_agent(agent_name).tools.tool_names:
         return
     receiver = DesktopPairingReceiver(
         client=client,

@@ -7,6 +7,7 @@ import json
 import time
 from collections import ChainMap
 from contextlib import asynccontextmanager, suppress
+from contextvars import Context
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -19,6 +20,7 @@ import nio
 
 from mindroom import constants, interactive
 from mindroom import reply_lifecycle as rl
+from mindroom.background_tasks import create_background_task
 from mindroom.constants import ACTING_REQUESTER_KEY, SKIP_MENTIONS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
@@ -65,6 +67,7 @@ from mindroom.hooks import (
     emit_final_response_transform,
     emit_transform,
 )
+from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
     DeliveredMatrixEvent,
     MatrixDeliveryFailure,
@@ -136,7 +139,7 @@ from mindroom.streaming import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
     from contextlib import AbstractAsyncContextManager
 
     import structlog
@@ -155,6 +158,8 @@ if TYPE_CHECKING:
     from mindroom.streaming import CancelSource, ProgressPublisher, StreamInputChunk
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
+
+logger = get_logger(__name__)
 
 _BEFORE_RESPONSE_HOOK_FAILURE_TEXT = "Response failed. Please retry."
 _PLACEHOLDER_DELIVERY_FAILURE_REASONS = frozenset(
@@ -365,6 +370,10 @@ class ResponseHookService:
     """Own response hook execution around final delivery."""
 
     hook_context: HookContextSupport
+    # Passes each final agent reply on to another surface, or returns None when the reply goes nowhere else, so no
+    # task starts for it. It runs in the background, so a slow surface never holds the response lock that
+    # `emit_after_response` runs under.
+    reply_mirror: Callable[[MessageEnvelope, str], Coroutine[Any, Any, None] | None] | None = None
 
     async def _apply_before_response(
         self,
@@ -426,6 +435,23 @@ class ResponseHookService:
         delivery_kind: Literal["sent", "edited"],
         continue_on_cancelled: bool = False,
     ) -> None:
+        if identity.response_kind == "ai" and self.reply_mirror is not None:
+            try:
+                mirror = self.reply_mirror(identity.response_envelope, response_text)
+                if mirror is not None:
+                    create_background_task(
+                        mirror,
+                        name="reply_mirror",
+                        owner=self.hook_context.runtime,
+                        # Outside the reply's span and context: the mirror is no part of the reply.
+                        context=Context(),
+                    )
+            except Exception:
+                logger.exception(
+                    "Reply mirror failed",
+                    agent=self.hook_context.agent_name,
+                    correlation_id=identity.correlation_id,
+                )
         if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_AFTER_RESPONSE):
             return
         context = AfterResponseContext(

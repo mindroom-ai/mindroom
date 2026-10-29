@@ -36,7 +36,7 @@ def _history(family: str, image_path: Path) -> list[Message]:
         standard_call["thought_signature"] = base64.b64encode(b"retained signature").decode()
     if family == "anthropic":
         standard_turn.provider_data = {
-            "content_blocks": [{"type": "tool_use", "id": "old", "name": "read_file", "input": {"path": "notes.txt"}}],
+            "claude_blocks": [{"type": "tool_use", "id": "old", "name": "read_file", "input": {"path": "notes.txt"}}],
         }
     return [
         Message(role="user", content="Earlier task", from_history=True),

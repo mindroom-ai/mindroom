@@ -37,18 +37,8 @@
     "message": {
       "content": "Your list says to bring an umbrella.",
       "provider_data": {
-        "content_blocks": [
+        "claude_blocks": [
           {
-            "citations": [
-              {
-                "cited_text": "Packing list: umbrella, scarf, walking shoes.",
-                "document_index": 0,
-                "document_title": "packing.txt",
-                "end_char_index": 45,
-                "start_char_index": 0,
-                "type": "char_location"
-              }
-            ],
             "text": "Your list says to bring an umbrella.",
             "type": "text"
           }

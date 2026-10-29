@@ -668,7 +668,7 @@ async def test_the_member_step_runs_a_call_as_it_is_outside_a_matrix_turn() -> N
         middleware=(_as_member("writer", "writer-model"),),
     )
 
-    assert (result, seen) == ("ran", [None])
+    assert (result.value, seen) == ("ran", [None])
 
 
 @pytest.mark.asyncio

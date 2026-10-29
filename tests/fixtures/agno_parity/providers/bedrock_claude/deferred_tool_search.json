@@ -133,7 +133,7 @@
   "parsed": {
     "message": {
       "provider_data": {
-        "content_blocks": [
+        "claude_blocks": [
           {
             "id": "toolu_parity_order",
             "input": {

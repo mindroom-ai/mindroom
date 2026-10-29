@@ -58,7 +58,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_function import ToolOutcome
-from mindroom.tool_system.tool_hooks import BackgroundToolApprovalDenied, build_tool_hook_middleware
+from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 from tests.agent_tool_helpers import tool_policy
 from tests.authorization_helpers import (
@@ -76,6 +76,7 @@ from tests.conftest import (
 from tests.fakes.scripted_model import ScriptedModel
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.tool_job_helpers import job_tool, tool_job_runtime
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -1727,7 +1728,7 @@ async def test_tool_hook_bridge_declines_and_skips_real_tool(tmp_path: Path) -> 
         "Adjust your approach — try a different tool or different arguments."
     )
     assert next_func.await_count == 0
-    assert result == ToolOutcome(content=declined, is_error=True)
+    assert result == ToolOutcome(content=declined, is_error=True, refused_by="plugin_hook")
     assert after_seen == [(True, declined, None)]
 
 
@@ -1763,7 +1764,7 @@ async def test_a_denied_background_script_call_reaches_the_after_call_hooks_as_a
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
     assert next_func.await_count == 0
-    assert result == BackgroundToolApprovalDenied(reason="Not tonight.")
+    assert result == ToolOutcome(content="Not tonight.", is_error=True, refused_by="approval")
     assert after_seen == [
         (
             True,
@@ -1959,7 +1960,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
             execution_identity=execution_identity,
             hook_registry=bot.hook_registry,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, runtime_paths_for(config), "code"),
         )
         echo = build.spec.functions["echo"]
 
@@ -2224,7 +2225,7 @@ async def test_create_agent_runs_the_hook_policy_around_its_tool_calls(
             execution_identity=None,
             hook_registry=registry,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, runtime_paths_for(config), "code"),
         )
 
         echo = build.spec.functions["echo"]

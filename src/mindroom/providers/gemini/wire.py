@@ -164,7 +164,7 @@ async def format_contents(
 
 
 def _is_tool_result(message: Message) -> bool:
-    return message.role == "tool" and message.tool_call_id is not None and message.tool_name is not None
+    return message.role == "tool" and message.tool_name is not None
 
 
 def _message_parts(message: Message, role: str) -> list[dict[str, Any]]:
@@ -189,10 +189,7 @@ def _message_parts(message: Message, role: str) -> list[dict[str, Any]]:
 def _function_response(result: ToolResultView) -> dict[str, Any]:
     """Return one result as a function response; a failed call's content goes under ``error``, as the API documents."""
     response = {"error": result.content} if result.is_error else {"result": result.content}
-    function_response: dict[str, Any] = {"name": result.name, "response": response}
-    if call_id := _provider_id(result.call_id):
-        function_response["id"] = call_id
-    return function_response
+    return _without_none(name=result.name, response=response, id=result.call_id)
 
 
 async def _with_media(message: Message, parts: list[dict[str, Any]], route: MediaRoute) -> list[dict[str, Any]]:
@@ -202,10 +199,6 @@ async def _with_media(message: Message, parts: list[dict[str, Any]], route: Medi
     files = [part for file in message.files or () if (part := await _file_part(file, route)) is not None]
     # Google recommends videos before the prompt; each video is placed first, so the last one leads.
     return [*reversed(videos), *parts, *images, *audio, *files]
-
-
-def _provider_id(value: object) -> str | None:
-    return value if isinstance(value, str) and value else None
 
 
 def _stored_parts(stored: list[Any], tool_calls: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -235,7 +228,7 @@ def _text_part(text: str, provider_data: Mapping[str, Any] | None) -> dict[str, 
 
 def _function_call_part(call: Mapping[str, Any]) -> dict[str, Any]:
     function = call["function"]
-    function_call = _without_none(name=function["name"], args=call_arguments(function), id=_provider_id(call.get("id")))
+    function_call = _without_none(name=function["name"], args=call_arguments(function), id=call.get("id"))
     part: dict[str, Any] = {"function_call": function_call}
     if "thought_signature" in call:
         part["thought_signature"] = base64.b64decode(call["thought_signature"])

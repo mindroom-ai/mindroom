@@ -28,9 +28,10 @@ from mindroom.config.personal_agents import (
     read_personal_agent_roster,
     read_personal_agent_roster_file,
 )
+from mindroom.config.resolution import authored_tool_entries
+from mindroom.config.slack import slack_answering_agents
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.personal_agents import (
     _append_personal_agent_roster_entry,
     _GeneratedAgentError,
@@ -42,8 +43,8 @@ from mindroom.personal_agents import (
     provision_created_agent,
     update_generated_agent,
 )
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
-from mindroom.workers.backends import docker_projection
+from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.workers.runtime import build_worker_launch_config
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -121,7 +122,7 @@ def test_chosen_tools_turn_defaults_off(tmp_path: Path) -> None:
     config = _config(tmp_path)
     data, _ = _generated_agent_data(config, "creator", GeneratedAgentEdits(tools=["calculator"]))
     child = _validated_child(data, tmp_path)
-    assert [entry.name for entry in child._get_agent_authored_tool_configs("child")] == ["calculator"]
+    assert [entry.name for entry in authored_tool_entries(child, "child")] == ["calculator"]
     assert child.tool_ceiling("child") == ("calculator",)
 
 
@@ -275,6 +276,20 @@ def _with_template() -> dict[str, Any]:
     return deepcopy(BASE) | {"personal_agents": {"mind": deepcopy(PERSONAL_TEMPLATE)}}
 
 
+def _slack_creator() -> dict[str, Any]:
+    """A config whose creator answers Slack mentions in its room and may create agents."""
+    data = deepcopy(BASE)
+    data["slack"] = {"email_domain": "example.com", "matrix_user_id_template": "@{localpart}:localhost"}
+    data["agents"]["creator"]["tools"].append({"slack": {"channels": ["C0123ABCD"], "room": "lobby"}})
+    data["agents"]["creator"]["created_agents_per_owner"] = 3
+    return data
+
+
+def _slack_overrides(config: Config, agent_name: str) -> dict[str, Any]:
+    (entry,) = (entry for entry in authored_tool_entries(config, agent_name) if entry.name == "slack")
+    return entry.tool_config_overrides
+
+
 def _skipped(logs: list[dict[str, Any]]) -> list[tuple[str, str]]:
     return [(log["agent_name"], log["reason"]) for log in logs if log["event"] == "created_agent_skipped"]
 
@@ -286,7 +301,7 @@ def test_a_created_agent_loads_from_its_creator(tmp_path: Path) -> None:
     assert agent.display_name == "Research"
     assert agent.model == "default"
     assert agent.access.users == [OWNER, CO_OWNER]
-    assert [entry.name for entry in config._get_agent_authored_tool_configs("creator_research")] == ["shell"]
+    assert [entry.name for entry in authored_tool_entries(config, "creator_research")] == ["shell"]
     assert config.generated_agent("creator_research") == GeneratedAgentInfo(
         created=True,
         allowed_tools=("calculator", "shell"),
@@ -302,7 +317,7 @@ def test_personal_agent_edits_apply_at_load(tmp_path: Path) -> None:
     config = _load(tmp_path, _with_template(), entries=[_personal(edits=edits), _personal(CO_OWNER)])
     alice = config.agents["mind_alice"]
     assert alice.display_name == "Scout"
-    assert [entry.name for entry in config._get_agent_authored_tool_configs("mind_alice")] == ["calculator"]
+    assert [entry.name for entry in authored_tool_entries(config, "mind_alice")] == ["calculator"]
     # The owner may add back shell from defaults.tools, which the edit removed.
     assert config.tool_ceiling("mind_alice") == ("calculator", "shell")
     assert config.generated_agent("mind_alice") == GeneratedAgentInfo(
@@ -332,7 +347,7 @@ def test_a_created_agent_chooses_from_its_creators_granted_tools(tmp_path: Path)
             ),
         ],
     )
-    assert [entry.name for entry in config._get_agent_authored_tool_configs("mind_alice_research")] == ["shell"]
+    assert [entry.name for entry in authored_tool_entries(config, "mind_alice_research")] == ["shell"]
     assert config.tool_ceiling("mind_alice_research") == ("calculator", "shell")
 
 
@@ -344,10 +359,8 @@ def test_a_tool_that_brings_others_keeps_the_creators_settings_for_them(tmp_path
     edits = GeneratedAgentEdits(display_name="Research", tools=["matrix_message"])
     config = _load(tmp_path, data, created=[_created(edits=edits)])
     for name in ("creator", "creator_research"):
-        surface = visible_tool_surface(agent_name=name, config=config)
-        assert {entry.name: entry.tool_config_overrides for entry in surface.runtime_tool_configs}["attachments"] == (
-            restricted
-        )
+        candidates = resolve_agent_tools(config, name).candidates()
+        assert {entry.name: entry.tool_config_overrides for entry in candidates}["attachments"] == restricted
 
 
 def test_a_tool_the_creator_lost_is_dropped_at_load(tmp_path: Path) -> None:
@@ -359,7 +372,7 @@ def test_a_tool_the_creator_lost_is_dropped_at_load(tmp_path: Path) -> None:
     entry = _created(edits=GeneratedAgentEdits(display_name="Research", tools=["calculator", "shell"]))
     with capture_logs() as logs:
         config = _load(tmp_path, data, created=[entry])
-    assert [entry.name for entry in config._get_agent_authored_tool_configs("creator_research")] == ["calculator"]
+    assert [entry.name for entry in authored_tool_entries(config, "creator_research")] == ["calculator"]
     dropped = [log for log in logs if log["event"] == "generated_agent_tool_dropped"]
     assert [(log["agent_name"], log["tools"]) for log in dropped] == [("creator_research", ["shell"])]
 
@@ -413,6 +426,23 @@ def test_a_created_entry_with_a_reserved_name_is_skipped_alone(tmp_path: Path) -
     assert "generated_agents_invalid" not in [log["event"] for log in logs]
 
 
+def test_a_stored_agent_from_a_slack_answering_creator_loads_without_the_creators_room(tmp_path: Path) -> None:
+    """A roster entry copies the creator's Slack channels but not its room, so it loads beside the other created agents."""
+    created = [
+        _created(),
+        _created(agent_name="creator_writer", edits=GeneratedAgentEdits(tools=["slack"])),
+        _created(agent_name="creator_reader", edits=GeneratedAgentEdits(tools=["calculator"])),
+    ]
+    with capture_logs() as logs:
+        config = _load(tmp_path, _slack_creator(), created=created)
+    assert "generated_agents_invalid" not in [log["event"] for log in logs]
+    assert {"creator_research", "creator_writer", "creator_reader"} <= set(config.agents)
+    for name in ("creator_research", "creator_writer"):
+        assert _slack_overrides(config, name) == {"channels": ["C0123ABCD"]}
+    assert _slack_overrides(config, "creator") == {"channels": ["C0123ABCD"], "room": "lobby"}
+    assert [answering.agent for answering in slack_answering_agents(config)] == ["creator"]
+
+
 def test_an_invalid_pass_two_falls_back_to_pass_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A generated agent that fails validation leaves the pass-one config, so loading never breaks."""
     monkeypatch.setattr(generated_agents, "_generated_agent_data", lambda *_args, **_kwargs: ({"display_name": 5}, []))
@@ -446,19 +476,13 @@ def test_authored_dump_leaves_out_created_agents(tmp_path: Path) -> None:
     assert revalidated.agents == config.agents
 
 
-def test_the_runtime_hands_docker_workers_the_generated_agents_of_each_config_it_commits(tmp_path: Path) -> None:
-    """Docker workers project created agents from the one config the runtime runs, not from the file on disk."""
+def test_dedicated_workers_launch_with_the_generated_agents_of_the_applied_config(tmp_path: Path) -> None:
+    """Docker and Kubernetes workers project created agents from the config the runtime applied, not the file."""
     config = _load(tmp_path, created=[_created()])
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path))
 
-    orchestrator._commit_config(config)
+    agents = build_worker_launch_config(config, tool_validation_snapshot={}).config_data["agents"]
 
-    assert orchestrator.config is config
-    published = docker_projection._COMMITTED_GENERATED_AGENTS[
-        personal_agent_roster_path(test_runtime_paths(tmp_path)).resolve()
-    ]
-    assert published == config.generated_agent_data()
-    assert "creator_research" in published
+    assert {"creator", "creator_research"} <= set(agents)
 
 
 @pytest.mark.parametrize("change", ["edit", "remove"])
@@ -615,7 +639,7 @@ async def test_a_tool_that_cannot_be_deferred_can_be_chosen(tmp_path: Path, tool
         reloaded = Config.validate_with_runtime(deepcopy(data), paths)
     assert "generated_agents_invalid" not in [log["event"] for log in logs]
     for name in ("creator_research", "creator_writer"):
-        assert tool in [entry.name for entry in reloaded._get_agent_authored_tool_configs(name)]
+        assert tool in [entry.name for entry in authored_tool_entries(reloaded, name)]
 
 
 @pytest.mark.asyncio
@@ -727,7 +751,27 @@ async def test_create_names_the_agent_after_its_creator_and_registers_it(tmp_pat
     ]
     reloaded = Config.validate_with_runtime(deepcopy(BASE), paths)
     assert reloaded.generated_agent("creator_research") is not None
-    assert [entry.name for entry in reloaded._get_agent_authored_tool_configs("creator_research")] == ["shell"]
+    assert [entry.name for entry in authored_tool_entries(reloaded, "creator_research")] == ["shell"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tools", [None, ["slack"]])
+async def test_a_slack_answering_creator_creates_an_agent_without_its_room(
+    tmp_path: Path,
+    tools: list[str] | None,
+) -> None:
+    """The created agent reads the creator's Slack channels, has no room to answer in, and loads."""
+    config = Config.validate_with_runtime(_slack_creator(), test_runtime_paths(tmp_path))
+    paths = test_runtime_paths(tmp_path)
+
+    await _create(config, paths, _register(), tools=tools)
+
+    assert [entry.agent_name for entry in read_personal_agent_roster_file(paths).created] == ["creator_research"]
+    reloaded = Config.validate_with_runtime(_slack_creator(), paths)
+    assert reloaded.generated_agent("creator_research") is not None
+    assert _slack_overrides(reloaded, "creator_research") == {"channels": ["C0123ABCD"]}
+    assert _slack_overrides(reloaded, "creator") == {"channels": ["C0123ABCD"], "room": "lobby"}
+    assert _slack_overrides(config, "creator") == {"channels": ["C0123ABCD"], "room": "lobby"}
 
 
 @pytest.mark.asyncio

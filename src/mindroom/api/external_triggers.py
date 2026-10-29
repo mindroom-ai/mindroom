@@ -14,6 +14,13 @@ from pydantic import ValidationError
 from mindroom.api import config_lifecycle
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
+from mindroom.delivery_replay import (
+    DeliveryEventClaim,
+    DeliveryReplayScopeFullError,
+    DeliveryReplayStore,
+    DeliveryReplayStoreError,
+    DeliveryThreadKeyClaim,
+)
 from mindroom.external_triggers.auth import (
     TriggerAuthError,
     TriggerSignatureHeaders,
@@ -25,18 +32,12 @@ from mindroom.external_triggers.models import (
     ExternalTriggerAcceptedResponse,
     ExternalTriggerPayload,
 )
-from mindroom.external_triggers.replay_store import (
-    ExternalTriggerEventClaim,
-    ExternalTriggerReplayScopeFullError,
-    ExternalTriggerReplayStore,
-    ExternalTriggerReplayStoreError,
-    ExternalTriggerThreadKeyClaim,
-)
 from mindroom.external_triggers.store import (
     ExternalTriggerRecordNotDeliverableError,
     ExternalTriggerStore,
     ExternalTriggerStoreError,
     TriggerDeliverySnapshot,
+    external_trigger_replay_store,
 )
 from mindroom.logging_config import get_logger
 from mindroom.response_admission import (
@@ -198,7 +199,7 @@ async def _claim_and_execute_trigger(
         now=now,
         ttl_seconds=_IN_PROGRESS_EVENT_ID_TTL_SECONDS,
     )
-    if event_claim is ExternalTriggerEventClaim.DELIVERED:
+    if event_claim is DeliveryEventClaim.DELIVERED:
         await _consume_single_use_trigger(snapshot, runtime_paths)
         return ExternalTriggerAcceptedResponse(
             accepted=True,
@@ -206,7 +207,7 @@ async def _claim_and_execute_trigger(
             trigger_id=snapshot.trigger_id,
             event_id=event_id,
         )
-    if event_claim is ExternalTriggerEventClaim.IN_PROGRESS:
+    if event_claim is DeliveryEventClaim.IN_PROGRESS:
         raise HTTPException(status_code=409, detail="External trigger event is already in progress")
     await _require_current_replay_scope(replay_store, snapshot, event_id, runtime_paths)
 
@@ -282,7 +283,7 @@ async def _claim_and_execute_trigger(
 
 
 async def _claim_thread_key(
-    replay_store: ExternalTriggerReplayStore,
+    replay_store: DeliveryReplayStore,
     snapshot: TriggerDeliverySnapshot,
     thread_key: str,
     event_id: str,
@@ -303,14 +304,14 @@ async def _claim_thread_key(
         # A refused thread claim must not leave the event id stuck in progress.
         await _release_event_id_best_effort(replay_store, snapshot.replay_scope, event_id)
         raise
-    if thread_claim is ExternalTriggerThreadKeyClaim.PENDING:
+    if thread_claim is DeliveryThreadKeyClaim.PENDING:
         await _release_event_id_best_effort(replay_store, snapshot.replay_scope, event_id)
         raise HTTPException(status_code=409, detail="External trigger thread is being opened by another delivery")
     return continue_thread_event_id, thread_reservation
 
 
 async def _require_current_replay_scope(
-    replay_store: ExternalTriggerReplayStore,
+    replay_store: DeliveryReplayStore,
     snapshot: TriggerDeliverySnapshot,
     event_id: str,
     runtime_paths: RuntimePaths,
@@ -340,10 +341,10 @@ def _trigger_store(runtime_paths: RuntimePaths) -> ExternalTriggerStore:
     return ExternalTriggerStore(runtime_paths)
 
 
-def _replay_store(runtime_paths: RuntimePaths) -> ExternalTriggerReplayStore:
+def _replay_store(runtime_paths: RuntimePaths) -> DeliveryReplayStore:
     if runtime_paths.control_state_root is None:
         raise HTTPException(status_code=503, detail="External trigger replay store is not available")
-    return ExternalTriggerReplayStore(runtime_paths.control_state_root)
+    return external_trigger_replay_store(runtime_paths.control_state_root)
 
 
 def _validate_snapshot_policy_and_auth(
@@ -450,14 +451,14 @@ async def _in_replay_executor(call: Callable[_P, _T], *args: _P.args, **kwargs: 
 async def _run_replay_store_call(call: Callable[_P, _T], *args: _P.args, **kwargs: _P.kwargs) -> _T:
     try:
         return await _in_replay_executor(call, *args, **kwargs)
-    except ExternalTriggerReplayScopeFullError as exc:
+    except DeliveryReplayScopeFullError as exc:
         raise HTTPException(status_code=429, detail="External trigger replay limit reached") from exc
-    except ExternalTriggerReplayStoreError as exc:
+    except DeliveryReplayStoreError as exc:
         raise HTTPException(status_code=503, detail="External trigger replay store is not available") from exc
 
 
 async def _rollback_failed_delivery(
-    replay_store: ExternalTriggerReplayStore,
+    replay_store: DeliveryReplayStore,
     snapshot: TriggerDeliverySnapshot,
     event_id: str,
     thread_key: str | None,
@@ -490,7 +491,7 @@ async def _rollback_failed_delivery(
 
 
 async def _release_event_id_best_effort(
-    store: ExternalTriggerReplayStore,
+    store: DeliveryReplayStore,
     replay_scope: str,
     event_id: str,
 ) -> None:

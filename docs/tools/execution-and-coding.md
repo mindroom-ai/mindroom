@@ -41,12 +41,12 @@ Only a worker isolates `shell`, `python`, and `docker`, because they execute cod
 
 ### Workspace and tool output files
 
-When an agent has a workspace, it is the working directory (`base_dir`) of `file`, `shell`, `coding`, and worker-routed `python`, and generated files and charts are saved inside it.
+Every agent has a workspace: `agents/<agent>/workspace/` in the storage directory, or the requester's private root for a [`private`](../configuration/agents.md#private-instances) agent.
+It is the working directory (`base_dir`) of `file`, `shell`, `coding`, and worker-routed `python`, and generated files and charts are saved inside it.
 `python` in the primary process resolves its file functions against the workspace, but the code it runs uses the process's current directory, so relative paths such as `open("data.csv")` may miss workspace files.
-`base_dir` is managed by MindRoom and cannot be set inline in `config.yaml`; without a workspace, `shell` and `python` use the process's current directory, and so do `file` and `coding` under `file_access: unrestricted`.
-Under the default `file_access: workspace`, `file` and `coding` of an agent without a workspace refuse every path outside its shared directories, except in a worker with worker-specific storage (Docker and Kubernetes workers, and `static_runner` calls of agents with a [`worker_scope`](../deployment/sandbox-proxy.md#worker-scopes)), where they use that worker's own directory; give the agent a workspace with `memory_backend: file` or a `private` configuration.
+`base_dir` is managed by MindRoom and cannot be set inline in `config.yaml`.
 
-Agents with a workspace also get an optional `mindroom_output_path` argument on supported tools.
+Supported tools also take an optional `mindroom_output_path` argument.
 Set it to a workspace-relative file path to save the tool's full output to that file and return a short receipt to the model instead.
 The path must name a file inside the workspace; absolute paths, `..`, paths that start with `~` or contain `$` or `%`, symlinks, and paths inside a `.git` directory are refused.
 Without `mindroom_output_path`, outputs larger than `defaults.tool_output_auto_save_threshold_bytes` (integer, at least 1, default `51200`, which is 50 KiB) are saved under `mindroom_tool_outputs/` in the workspace, and the model receives the path, size, format, a preview, and a note to read the file in parts, because reading it whole would only save it again.
@@ -61,7 +61,6 @@ agents:
     display_name: Code
     role: Edit code, run local checks, and export artifacts
     model: sonnet
-    memory_backend: file
     tools:
       - coding
       - shell:
@@ -110,7 +109,6 @@ Prefer [`coding`](#coding) for code-editing agents.
 ```yaml
 agents:
   editor:
-    memory_backend: file  # gives the agent a workspace for file paths
     tools:
       - file:
           enable_delete_file: true
@@ -233,7 +231,6 @@ Paths follow the agent's [`file_access`](../architecture/security-posture.md#fil
 ```yaml
 agents:
   code:
-    memory_backend: file  # gives the agent a workspace for file paths
     tools:
       - coding
 ```
@@ -390,7 +387,6 @@ PDF and DOCX generation are disabled when `reportlab` or `python-docx` is unavai
 Files are also saved to disk when `output_directory` is set or `save_files` is `true`.
 Saved files go into `output_directory` inside the agent workspace, or the workspace root when only `save_files` is set, and overwrite files of the same name.
 `output_directory` must be a relative path that stays inside the workspace.
-Agents without a workspace cannot save generated files; the files exist only in the tool result.
 
 ### Configuration
 
@@ -430,7 +426,6 @@ Bar, line, and pie charts accept a dict, a list of dicts, or a JSON string; scat
 Each function saves a PNG in `output_dir` inside the agent workspace and returns the file path.
 A chart's `filename` must be a plain file name; when omitted, the chart is named after its type and numbered, such as `bar_chart_3.png`.
 Charts overwrite files of the same name, and `output_dir` is created when missing.
-Agents without a workspace cannot save charts.
 Because charts are in the workspace, `attachments` and `matrix_message` can send them under the default `file_access: workspace`.
 
 ### Configuration

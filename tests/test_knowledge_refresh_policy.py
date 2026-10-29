@@ -50,7 +50,6 @@ def _config(
     return bind_runtime_paths(
         Config(
             agents={"helper": AgentConfig(display_name="Helper", knowledge_bases=["docs"])},
-            models={},
             knowledge_bases={
                 "docs": KnowledgeBaseConfig(path=str(docs_path), git=git, poll_interval_seconds=poll_interval_seconds),
             },

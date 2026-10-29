@@ -85,7 +85,7 @@ def _available_choices(
             continue
         available = {
             tool
-            for tool in context.config.resolve_entity(name).available_tools
+            for tool in context.config.resolve_agent(name).tools.tool_names
             if tool in metadata and metadata[tool].mcp_available
         }
         previous_tools = previous.get(name, ()) if previous is not None else None

@@ -82,6 +82,7 @@ nav = [
       { "Messaging & Social" = "tools/messaging-and-social.md" },
       { "Project Management" = "tools/project-management.md" },
       { "Atlassian Cloud" = "tools/atlassian.md" },
+      { "Slack" = "tools/slack.md" },
       { "Microsoft 365" = "tools/microsoft-365.md" },
       { "Calendar & Tasks" = "tools/calendar-and-scheduling.md" },
       { "Mem0 & Zep" = "tools/memory-and-storage.md" },

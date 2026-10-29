@@ -80,6 +80,7 @@ from tests.history_helpers import (
 )
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -174,7 +175,14 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
     helper_results: list[object] = []
 
     async def add(self: CalculatorTools, a: float, b: float) -> str:
-        helper = create_agent("helper", config, paths, identity, knowledge=None, active_model_name=None)
+        helper = create_agent(
+            "helper",
+            config,
+            paths,
+            identity,
+            knowledge=None,
+            model=turn_model(config, paths, "helper"),
+        )
         helper_results.append(await _run_room_agent_turn(helper_context, helper, "Sample task."))
         if outcome == "cancel":
             raise asyncio.CancelledError

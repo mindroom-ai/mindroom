@@ -107,6 +107,8 @@ class ConfigReloadLifecycle:
     apply_update_plan: Callable[[Config, ConfigUpdatePlan, tuple[str, ...]], Awaitable[bool]]
     response_admission_gate: ResponseAdmissionGate
     before_runtime_replacement: Callable[[], Awaitable[None]]
+    # Releases the background script launch fence a reload took; launches read the applied config this publishes.
+    finish_reload: Callable[[], Awaitable[None]]
     # Shared with manual plugin reloads and MCP catalog-change handling so no
     # two publication flows can interleave their read-plan-apply sequences.
     config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -126,6 +128,11 @@ class ConfigReloadLifecycle:
     # A transition target that may have published only part of its runtime state.
     _incomplete_config: Config | None = field(default=None, init=False, repr=False)
     status: ConfigReloadStatus = field(default_factory=ConfigReloadStatus, init=False)
+
+    @property
+    def fully_applied_config(self) -> Config | None:
+        """Return the last config whose complete update plan returned, never a pending or failed transition."""
+        return self._fully_applied_config
 
     def record_applied(self, config: Config) -> None:
         """Acknowledge source bytes only after their complete runtime publication."""
@@ -271,20 +278,26 @@ class ConfigReloadLifecycle:
         """Restore the last-good state when needed, then apply the requested config."""
         updated = False
         async with self.config_update_lock:
-            if repair_config is not None:
-                self._incomplete_config = repair_config
-                updated = await self._apply_config_transition(repair_config, fully_applied_config)
-                self._incomplete_config = None
-            if fully_applied_config.runtime_model_dump() != requested_config.runtime_model_dump():
-                self._incomplete_config = requested_config
-                requested_updated = await self._apply_config_transition(
-                    fully_applied_config,
-                    requested_config,
-                    requested_transition,
-                )
-                updated = updated or requested_updated
-                self._incomplete_config = None
-            self._fully_applied_config = requested_config
+            try:
+                if repair_config is not None:
+                    self._incomplete_config = repair_config
+                    updated = await self._apply_config_transition(repair_config, fully_applied_config)
+                    self._incomplete_config = None
+                if fully_applied_config.runtime_model_dump() != requested_config.runtime_model_dump():
+                    self._incomplete_config = requested_config
+                    requested_updated = await self._apply_config_transition(
+                        fully_applied_config,
+                        requested_config,
+                        requested_transition,
+                    )
+                    updated = updated or requested_updated
+                    self._incomplete_config = None
+                self._fully_applied_config = requested_config
+            finally:
+                # New script launches read the applied config, so the reload's launch fence ends only once it is
+                # published or the reload failed, and still under the lock, so a plugin reload waiting for it never
+                # shares a fence this reload then ends.
+                await self.finish_reload()
         return updated
 
     async def _apply_config_transition(

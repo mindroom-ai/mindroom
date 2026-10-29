@@ -44,7 +44,6 @@ from mindroom.tool_system.runtime_context import (
     list_tool_runtime_attachment_ids,
 )
 from mindroom.tool_system.sandbox_proxy import (
-    attachment_save_uses_worker,
     inline_attachment_byte_limit,
     save_attachment_to_worker,
     view_file_from_worker,
@@ -461,14 +460,15 @@ class AttachmentTools(Toolkit):
         *,
         runtime_paths: RuntimePaths | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
-        worker_tools_override: list[str] | None = None,
+        workspace_in_worker: bool = False,
         tool_output_workspace_root: Path | None = None,
         file_access: FileAccess = "workspace",
     ) -> None:
         self._runtime_paths = runtime_paths
         self._worker_target = worker_target
         self._file_access = file_access
-        self._worker_tools_override = worker_tools_override
+        # Whether the agent's workspace-path tools run in a worker, away from runtime attachment storage.
+        self._workspace_in_worker = workspace_in_worker
         self._tool_output_workspace_root = tool_output_workspace_root
         super().__init__(
             name="attachments",
@@ -512,21 +512,15 @@ class AttachmentTools(Toolkit):
             result = await self._view_path_image(context, path)
         return await asyncio.to_thread(finalize_tool_media, result)
 
-    def _tools_use_worker(self, context: ToolRuntimeContext) -> bool:
-        """Return whether this agent's workspace tools run in a worker, away from runtime attachment storage."""
-        return attachment_save_uses_worker(
-            runtime_paths=self._runtime_paths or context.runtime_paths,
-            worker_tools_override=self._worker_tools_override,
-        )
-
     async def _view_path_image(self, context: ToolRuntimeContext, path: str) -> ToolValue:
         runtime_paths = self._runtime_paths or context.runtime_paths
         metadata: dict[str, object] = {"tool": "view_file", "path": path}
-        if self._tools_use_worker(context):
+        if self._workspace_in_worker:
             try:
                 result = await asyncio.to_thread(
                     view_file_from_worker,
                     runtime_paths=runtime_paths,
+                    runtime_config=context.config,
                     worker_target=self._worker_target,
                     workspace_root=self._tool_output_workspace_root,
                     path=path,
@@ -567,7 +561,7 @@ class AttachmentTools(Toolkit):
         requested_attachment_ids, attachments, missing_attachment_ids, error = _get_attachment_listing(
             context,
             target,
-            tools_use_worker=self._tools_use_worker(context),
+            tools_use_worker=self._workspace_in_worker,
         )
         if error is not None:
             return _attachment_tool_payload("error", message=error)
@@ -617,7 +611,7 @@ class AttachmentTools(Toolkit):
         requested_attachment_ids, attachments, missing_attachment_ids, error = _get_attachment_listing(
             context,
             requested_attachment_id,
-            tools_use_worker=self._tools_use_worker(context),
+            tools_use_worker=self._workspace_in_worker,
         )
         if error is not None:
             return _attachment_tool_payload("error", message=error)
@@ -687,7 +681,7 @@ class AttachmentTools(Toolkit):
             if self._tool_output_workspace_root is not None
             else None
         )
-        return self._tools_use_worker(context), local_policy
+        return self._workspace_in_worker, local_policy
 
     def _validate_output_path_before_save(
         self,
@@ -753,12 +747,12 @@ class AttachmentTools(Toolkit):
                 worker_receipt = await asyncio.to_thread(
                     save_attachment_to_worker,
                     runtime_paths=runtime_paths,
+                    runtime_config=context.config,
                     worker_target=self._worker_target,
+                    workspace_root=self._tool_output_workspace_root,
                     attachment_id=requested_attachment_id,
                     mindroom_output_path=output_path,
                     payload_bytes=payload_bytes,
-                    mime_type=attachment.mime_type,
-                    filename=attachment.filename,
                 )
             except Exception as exc:
                 return _attachment_tool_payload("error", attachment_id=requested_attachment_id, message=str(exc))
@@ -840,5 +834,5 @@ class AttachmentTools(Toolkit):
         return _attachment_tool_payload(
             "ok",
             attachment_id=attachment_record.attachment_id,
-            attachment=_attachment_record_payload(attachment_record, tools_use_worker=self._tools_use_worker(context)),
+            attachment=_attachment_record_payload(attachment_record, tools_use_worker=self._workspace_in_worker),
         )

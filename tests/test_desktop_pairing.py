@@ -338,6 +338,7 @@ def test_pairing_receiver_registration_owns_desktop_enablement_check(tmp_path: P
     runtime_paths = test_runtime_paths(tmp_path)
     config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "defaults": {"tools": []},
             "agents": {
                 "computer": {
@@ -385,6 +386,7 @@ def test_setup_command_uses_public_homeserver_and_access_flag(
     runtime_paths = test_runtime_paths(tmp_path)
     config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "defaults": {"tools": []},
             "agents": {
                 "computer": {
@@ -453,6 +455,7 @@ def test_confirmation_keeps_claim_retryable_when_controller_lookup_fails(
     runtime_paths = test_runtime_paths(tmp_path)
     config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "defaults": {"tools": []},
             "agents": {"computer": {"display_name": "Computer", "role": "Operate apps", "tools": ["desktop"]}},
         },
@@ -498,6 +501,7 @@ def test_chat_confirmation_saves_only_the_initiating_requester_agent_scope(
     runtime_paths = test_runtime_paths(tmp_path)
     config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "defaults": {"tools": []},
             "agents": {
                 "computer": {

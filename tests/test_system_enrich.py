@@ -41,6 +41,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams.envelope import prepare_materialized_team_execution
 from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers, build_team_spec, resolve_exact_team_members
 from mindroom.teams.spec import TeamMode
+from mindroom.turn_model import ModelScope, resolve_turn_model
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -359,7 +360,7 @@ def _team_members(config: Config, monkeypatch: pytest.MonkeyPatch) -> ResolvedEx
         runtime_paths=runtime_paths_for(config),
         execution_identity=None,
         refresh_scheduler=None,
-        active_model_names=None,
+        active_model_names=dict.fromkeys(["code", "research"], "default"),
     )
 
 
@@ -416,7 +417,7 @@ async def test_a_team_turn_renders_system_enrichment_for_the_leader_and_every_me
         thread_history=[],
         config=config,
         runtime_paths=runtime_paths_for(config),
-        runtime_model=config.resolve_runtime_model(entity_name=None),
+        runtime_model=resolve_turn_model(config, runtime_paths_for(config), ModelScope(entity=None), None),
         response_sender_id="@mindroom_code:localhost",
         current_sender_id=None,
         configured_team_name=None,
@@ -449,7 +450,7 @@ async def test_a_prepared_team_turn_sends_the_prompt_without_unseen_context(
         thread_history=[],
         config=config,
         runtime_paths=runtime_paths_for(config),
-        runtime_model=config.resolve_runtime_model(entity_name=None),
+        runtime_model=resolve_turn_model(config, runtime_paths_for(config), ModelScope(entity=None), None),
         response_sender_id="@mindroom_code:localhost",
         current_sender_id=None,
         configured_team_name=None,

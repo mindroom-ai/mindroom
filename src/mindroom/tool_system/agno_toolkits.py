@@ -133,9 +133,8 @@ _FUNCTION_FIELDS: Mapping[tuple[str, ...], Literal["mapped", "ignored"] | _Rejec
 
 # AGNO_COMPAT: Agno toolkits' default instructions name functions the agent may not be offered.
 # Reason: Agno 3.0.9's ReasoningTools, ZepTools, DaytonaTools, GoogleCalendarTools, and GmailTools build default
-# instructions that name functions their enable switches can leave out, SlackTools names list_users whenever it offers
-# a messaging function, and the function filters MindRoom applies after construction can remove any named function, so
-# the prompt would tell the model to call a function it does not have.
+# instructions that name functions their enable switches can leave out, and the function filters MindRoom applies after
+# construction can remove any named function, so the prompt would tell the model to call a function it does not have.
 # Upstream issue: Tracking gap; searches of Agno's issues and PRs for these toolkits' instructions found no match.
 # Upstream PR: No matching fix has been verified.
 # Remove when: a toolkit's default instructions name only the functions an agent is offered, so its row can go, and
@@ -168,18 +167,6 @@ _DEFAULT_INSTRUCTION_FUNCTIONS: dict[str, frozenset[str]] = {
     ),
     "agno.tools.google.gmail.GmailTools": frozenset({"create_draft_email", "send_email", "send_email_reply"}),
     "agno.tools.reasoning.ReasoningTools": frozenset({"analyze", "think"}),
-    "agno.tools.slack.SlackTools": frozenset(
-        {
-            "get_channel_history",
-            "get_channel_info",
-            "get_thread",
-            "list_users",
-            "search_messages",
-            "search_workspace",
-            "send_message",
-            "send_message_thread",
-        },
-    ),
     "agno.tools.zep.ZepTools": frozenset({"add_zep_message", "get_zep_memory", "search_zep_memory"}),
 }
 

@@ -38,6 +38,7 @@ from mindroom.skill_learning.transcript import conversation_messages, render_tra
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.tool_system.tool_schema import validated_entrypoint
+from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -236,12 +237,15 @@ def _replay_model_name(
         return model_name
     if captured is not None:
         return captured.model_name
-    return config.resolve_runtime_model(
-        entity_name=agent_name,
-        active_model_name=None,
-        room_id=identity.room_id if identity is not None else None,
-        thread_id=identity.resolved_thread_id if identity is not None else None,
-        runtime_paths=runtime_paths,
+    return resolve_turn_model(
+        config,
+        runtime_paths,
+        ModelScope(
+            entity=agent_name,
+            room_id=identity.room_id if identity is not None else None,
+            thread_id=identity.resolved_thread_id if identity is not None else None,
+        ),
+        None,
     ).model_name
 
 

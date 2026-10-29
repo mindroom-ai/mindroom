@@ -20,12 +20,15 @@ from mindroom.llm.provider import ModelRequest, complete
 from mindroom.providers.anthropic import messages as claude_messages
 from mindroom.providers.anthropic.messages import build_provider as build_claude_provider
 from mindroom.providers.anthropic.prompt_cache import native_tool_search_supported, prepare_request_body
+from mindroom.providers.anthropic.repairs import replay_safe_blocks
 from mindroom.providers.anthropic.settings import ClaudeSettings
 from mindroom.providers.cache_ladder import MAX_CACHE_MARKERS, has_cache_marker, prompt_cache_control
+from mindroom.providers.claude_wire_blocks import RebuiltBlock
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.gemini.settings import GeminiSettings
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.ollama.settings import OllamaSettings
+from mindroom.providers.openai.build import accepted_extra_kwargs
 from mindroom.providers.openai.build import build_provider as build_openai_provider
 from mindroom.providers.openai.settings import ChatSettings, ResponsesSettings
 from mindroom.providers.registry import build_model_provider
@@ -367,6 +370,23 @@ def test_thinking_and_empty_text_never_carry_a_marker() -> None:
     assert prepared["messages"][0]["content"][0]["cache_control"] == _FIVE_MINUTES
 
 
+def test_only_a_stored_assistant_block_carries_a_marker() -> None:
+    """Text a stored Claude response holds can take a rung; text rebuilt from a message's fields cannot."""
+    stored = _text("stored answer")
+    rebuilt = RebuiltBlock(text="rebuilt answer", type="text")
+
+    def marked(answer: dict[str, Any]) -> list[bool]:
+        messages = [
+            {"role": "user", "content": [_text("earlier turn")]},
+            {"role": "assistant", "content": [answer]},
+            {"role": "user", "content": [_text("this turn")]},
+        ]
+        return [has_cache_marker(message["content"][0]) for message in _prepared({"messages": messages})["messages"]]
+
+    assert marked(stored) == [False, True, True]
+    assert marked(rebuilt) == [True, False, True]
+
+
 def test_the_ladder_never_mutates_the_request_it_marks() -> None:
     """Markers are added to copies, never to stored messages or reusable tool definitions."""
     body = {"messages": [{"role": "user", "content": [_text("hello")]}], "tools": [_tool("demo_tool")]}
@@ -496,26 +516,24 @@ def _replayed_blocks(body: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def test_replayed_search_results_carry_only_request_fields() -> None:
-    """Response-only fields stored with a search result are dropped, and the stored history keeps them."""
-    body = _replayed(_SEARCH_USE, _DIRTY_SEARCH_RESULT, _text("found it"), tools=["get_weather"])
+    """A search result's response-only fields are left out of the replayed shape, without changing the input."""
+    blocks = [dict(_SEARCH_USE), dict(_DIRTY_SEARCH_RESULT), _text("found it")]
 
-    assert _replayed_blocks(body) == [_SEARCH_USE, _SEARCH_RESULT, _text("found it")]
-    assert "citations" in body["messages"][0]["content"][1]
+    assert replay_safe_blocks(blocks) == [_SEARCH_USE, _SEARCH_RESULT, _text("found it")]
+    assert "citations" in blocks[1]
 
 
 def test_only_orphaned_search_uses_are_removed() -> None:
     """A regex search without its result in the same turn goes; other server tools and paired searches stay."""
-    body = _replayed(
-        _ORPHAN_SEARCH_USE,
+    blocks = [dict(block) for block in (_ORPHAN_SEARCH_USE, _OTHER_SERVER_TOOL_USE, _SEARCH_USE, _DIRTY_SEARCH_RESULT)]
+
+    assert replay_safe_blocks([*blocks, _text("found it")]) == [
         _OTHER_SERVER_TOOL_USE,
         _SEARCH_USE,
-        _DIRTY_SEARCH_RESULT,
+        _SEARCH_RESULT,
         _text("found it"),
-        tools=["get_weather"],
-    )
-
-    assert _replayed_blocks(body) == [_OTHER_SERVER_TOOL_USE, _SEARCH_USE, _SEARCH_RESULT, _text("found it")]
-    assert body["messages"][0]["content"][0] == _ORPHAN_SEARCH_USE
+    ]
+    assert blocks[0] == _ORPHAN_SEARCH_USE
 
 
 def test_references_to_tools_the_request_no_longer_offers_are_dropped() -> None:
@@ -920,6 +938,45 @@ def test_a_retired_max_retries_fails_config_load_with_its_reason(tmp_path: Path,
         f"models.default: Unsupported extra_kwargs for provider '{provider}': max_retries was removed; "
         "MindRoom retries a failed model request itself, so remove the setting."
     )
+
+
+@pytest.mark.parametrize("provider", ["openai", "openrouter", "llama_cpp", "groq"])
+def test_a_retired_role_map_fails_config_load_with_its_reason(tmp_path: Path, provider: str) -> None:
+    """The role map is gone, so a model that sets it is told how requests name the system prompt and what to do."""
+    role_map = {"system": "system", "user": "user", "assistant": "assistant", "tool": "tool"}
+    data = {"models": {"default": {"provider": provider, "id": "m", "extra_kwargs": {"role_map": role_map}}}}
+
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        Config.validate_with_runtime(data, _runtime_paths(tmp_path))
+
+    assert str(exc_info.value) == (
+        f"models.default: Unsupported extra_kwargs for provider '{provider}': role_map was removed; "
+        "Chat Completions requests send the system prompt as developer with provider openai and as system with every "
+        "other provider, so remove the setting, or use provider llama_cpp with the base_url of an OpenAI-compatible "
+        "server that rejects the developer role."
+    )
+
+
+_MODELS_DOC = Path(__file__).resolve().parents[1] / "docs" / "configuration" / "models.md"
+
+
+@pytest.mark.parametrize(
+    ("row", "provider"),
+    [
+        ("`openai` with Chat Completions, `zai`, `llama_cpp`", "llama_cpp"),
+        ("`groq`", "groq"),
+        ("`cerebras`", "cerebras"),
+    ],
+    ids=["chat", "groq", "cerebras"],
+)
+def test_the_models_page_lists_the_keys_each_chat_route_accepts(tmp_path: Path, row: str, provider: str) -> None:
+    """The accepted-keys table of the models page names exactly the ``extra_kwargs`` keys the route accepts."""
+    lines = _MODELS_DOC.read_text(encoding="utf-8").splitlines()
+    [cell] = [line.split("|")[2] for line in lines if line.startswith(f"| {row} |")]
+
+    documented = {key.strip().strip("`") for key in cell.split(",")}
+
+    assert documented == accepted_extra_kwargs(ModelConfig(provider=provider, id="m"), _runtime_paths(tmp_path))
 
 
 _NOT_A_MAPPING = "extra_kwargs.client_params must be a mapping, not str"

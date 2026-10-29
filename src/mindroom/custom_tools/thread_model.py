@@ -7,7 +7,6 @@ from typing import Literal
 from agno.tools import Toolkit
 
 from mindroom.authorization import addressable_responder_names
-from mindroom.budgets.monitor import budget_model
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.thread_models import (
     clear_thread_model_override,
@@ -15,6 +14,7 @@ from mindroom.thread_models import (
     set_thread_model_override,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
 
 _MODEL_SWITCH_WHENS = ("after-toolcall", "next-turn")
 
@@ -137,15 +137,17 @@ class ThreadModelTools(Toolkit):
             entity_names=self._addressable_entities(context),
             config=context.config,
         )
-        budgeted_model_name = budget_model(
+        budgeted_model_name = resolve_turn_model(
             context.config,
             context.runtime_paths,
-            context.budget_monitor,
-            context.requester_id,
-            model_name,
+            ModelScope(entity=context.agent_name, explicit=model_name),
             # Only a switch for the current response chooses a reply model now.
-            log_fallback=when == "after-toolcall",
-        )
+            TurnBudget(
+                monitor=context.budget_monitor,
+                requester_id=context.requester_id,
+                log_fallback=when == "after-toolcall",
+            ),
+        ).model_name
         if when == "after-toolcall" and budgeted_model_name != model_name:
             model = context.config.models[budgeted_model_name]
             return self._payload(

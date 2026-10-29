@@ -80,7 +80,7 @@
     "message": {
       "content": "Pack a light rain jacket and comfortable shoes.",
       "provider_data": {
-        "content_blocks": [
+        "claude_blocks": [
           {
             "text": "Pack a light rain jacket and comfortable shoes.",
             "type": "text"

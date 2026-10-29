@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Protocol, TypedDict, cast, runtime_checkable
 from weakref import WeakValueDictionary
 
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
+from mindroom.config.resolution import agent_policy
 from mindroom.constants import CONTROL_STATE_PATH_ENV
 from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
@@ -56,12 +57,13 @@ from mindroom.shell.supervisor import (
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.sandbox_proxy import runner_config_snapshot, sandbox_proxy_config
 from mindroom.tool_system.worker_routing import (
-    agent_workspace_root_path,
     build_agent_toolkit_worker_target,
     serialize_tool_execution_identity,
 )
+from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import ScriptResourceProfileName, WorkerHandle, WorkerSpec
+from mindroom.workers.runtime import current_worker_launch_config
 from mindroom.workers.worker_retirement import remove_directory_tree_at
 
 if TYPE_CHECKING:
@@ -387,7 +389,7 @@ class ScriptRunManager:
             else WorkerSpec(
                 worker_key=_require_worker_key(worker_key),
                 private_agent_names=worker_target.private_agent_names,
-                mirrored_credential_services=frozenset(),
+                mirror_grantable_credentials=False,
                 state_scope_worker_key=worker_target.worker_key,
                 resource_profile=selected_profile,
             )
@@ -403,7 +405,7 @@ class ScriptRunManager:
                     max_concurrent_runs=effective_limits.max_concurrent_runs,
                     worker_spec=worker_spec,
                 )
-            run, worker_spec = self._bind_admitted_worker_profile(
+            run, worker_spec = await self._bind_admitted_worker_profile(
                 context,
                 run=run,
                 worker_spec=_require_worker_spec(worker_spec),
@@ -420,7 +422,7 @@ class ScriptRunManager:
         finally:
             await self._release_launch_admission()
 
-    def _bind_admitted_worker_profile(
+    async def _bind_admitted_worker_profile(
         self,
         context: ToolRuntimeContext,
         *,
@@ -428,7 +430,16 @@ class ScriptRunManager:
         worker_spec: WorkerSpec,
         requested_profile: ScriptResourceProfileName | None,
     ) -> tuple[ScriptRunRecord, WorkerSpec]:
-        """Bind persisted quantities to the same refreshed backend that creates the worker."""
+        """Bind persisted quantities to the same refreshed backend that creates the worker.
+
+        Read once admitted, the launch names the authority the worker launches with: a reload that changes it waits
+        for admitted launches and fences new ones until it is published, and any other reload leaves it unchanged.
+        """
+        # Deriving the launch can build the tool validation snapshot, so it stays off the event loop.
+        try:
+            launch = await asyncio.to_thread(current_worker_launch_config, context.runtime_paths)
+        except WorkerBackendError as exc:
+            raise ScriptRunManagerError(str(exc)) from exc
         backend = _require_script_launch_backend(self._worker_backend_for(None), context.runtime_paths)
         profile, requests, limits = _resolve_script_resource_profile(backend, requested_profile)
         return (
@@ -437,7 +448,8 @@ class ScriptRunManager:
                 worker_backend_locator=backend.cleanup_locator,
                 recovery_signature=script_recovery_signature(
                     backend=self.worker_backend,
-                    config=context.config,
+                    # The config the worker launches with, so recovery binds to the authority it actually got.
+                    config=launch.config,
                     agent_name=context.agent_name,
                     gateway_url=self.gateway_url,
                     resource_profile=profile,
@@ -1190,21 +1202,13 @@ class ScriptRunManager:
 
 
 def _agent_workspace(context: ToolRuntimeContext) -> Path:
-    execution_identity = build_execution_identity_from_runtime_context(context)
-    runtime = resolve_agent_runtime(
+    return resolve_agent_runtime(
         context.agent_name,
         context.config,
         context.runtime_paths,
-        execution_identity=execution_identity,
+        execution_identity=build_execution_identity_from_runtime_context(context),
         create=True,
-    )
-    workspace = (
-        runtime.workspace.root
-        if runtime.workspace is not None
-        else agent_workspace_root_path(context.runtime_paths.storage_root, context.agent_name)
-    )
-    workspace.mkdir(parents=True, exist_ok=True)
-    return workspace.resolve()
+    ).workspace.root
 
 
 def _resolve_and_read_workspace_source(context: ToolRuntimeContext, relative_path: str) -> bytes:
@@ -1214,8 +1218,9 @@ def _resolve_and_read_workspace_source(context: ToolRuntimeContext, relative_pat
 
 def _require_supported_private_script_worker_scope(context: ToolRuntimeContext) -> None:
     agent_config = context.config.get_agent(context.agent_name)
-    if agent_config.private is not None and context.config.resolve_entity(context.agent_name).execution_scope != (
-        "user_agent"
+    if (
+        agent_config.private is not None
+        and agent_policy(context.config, context.agent_name).effective_execution_scope != "user_agent"
     ):
         msg = "Background-script workers for private agents require private.per=user_agent."
         raise ScriptRunManagerError(msg)

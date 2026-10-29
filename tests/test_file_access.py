@@ -7,7 +7,14 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.file_access import AuthorizedFile, resolve_agent_file
+from mindroom.file_access import (
+    AuthorizedFile,
+    UploadSourceError,
+    checked_upload_source,
+    open_upload_source,
+    read_upload_source,
+    resolve_agent_file,
+)
 from mindroom.path_confinement import open_regular_file_within_root
 
 if TYPE_CHECKING:
@@ -169,3 +176,69 @@ def test_symlink_loops_are_reported_as_value_errors(tmp_path: Path, mode: FileAc
     (workspace / "loop").symlink_to(workspace / "loop")
     with pytest.raises(ValueError, match="attachment"):
         resolve_agent_file("loop", workspace_root=workspace, file_access=mode, field_name="attachment")
+
+
+def _upload_workspace(tmp_path: Path) -> Path:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    return workspace
+
+
+def test_an_upload_source_over_the_limit_is_refused(tmp_path: Path) -> None:
+    """An upload is refused by its size before any request, with the size and the limit in the message."""
+    workspace = _upload_workspace(tmp_path)
+    (workspace / "big.bin").write_bytes(b"0123456789")
+
+    with pytest.raises(UploadSourceError) as excinfo:
+        checked_upload_source("big.bin", workspace_root=workspace, file_access="workspace", max_bytes=4)
+
+    assert excinfo.value.code == "too_large"
+    assert str(excinfo.value) == f"{(workspace / 'big.bin').resolve()} is 10 bytes; the limit is 4 bytes."
+
+
+def test_an_open_upload_source_has_its_size(tmp_path: Path) -> None:
+    """A streamed upload sends the size of the file it opened."""
+    workspace = _upload_workspace(tmp_path)
+    (workspace / "doc.bin").write_bytes(b"0123")
+    source = checked_upload_source("doc.bin", workspace_root=workspace, file_access="workspace", max_bytes=4)
+
+    with open_upload_source(source, 4) as (handle, size):
+        assert (handle.read(), size) == (b"0123", 4)
+    (workspace / "doc.bin").write_bytes(b"0123456789")
+    with pytest.raises(UploadSourceError) as grown, open_upload_source(source, 4):
+        pass
+    assert grown.value.code == "too_large"
+
+
+def test_reading_an_upload_source_refuses_a_file_swapped_or_grown_after_the_check(tmp_path: Path) -> None:
+    """A file that grew or became a link after its check is refused, without following the link."""
+    workspace = _upload_workspace(tmp_path)
+    (workspace / "doc.bin").write_bytes(b"0123")
+    (tmp_path / "secret.bin").write_bytes(b"secret")
+    source = checked_upload_source("doc.bin", workspace_root=workspace, file_access="workspace", max_bytes=4)
+
+    assert read_upload_source(source, 4) == b"0123"
+    (workspace / "doc.bin").write_bytes(b"0123456789")
+    with pytest.raises(UploadSourceError) as grown:
+        read_upload_source(source, 4)
+    (workspace / "doc.bin").unlink()
+    (workspace / "doc.bin").symlink_to(tmp_path / "secret.bin")
+    with pytest.raises(UploadSourceError) as swapped:
+        read_upload_source(source, 100)
+
+    assert grown.value.code == "too_large"
+    assert swapped.value.code == "invalid_local_path"
+
+
+def test_an_upload_source_outside_the_workspace_is_refused(tmp_path: Path) -> None:
+    """Under the default file_access, an upload outside the workspace is refused with the path rule's message."""
+    workspace = _upload_workspace(tmp_path)
+    (tmp_path / "secret.txt").write_bytes(b"secret")
+
+    with pytest.raises(UploadSourceError) as excinfo:
+        checked_upload_source("../secret.txt", workspace_root=workspace, file_access="workspace", max_bytes=100)
+
+    assert excinfo.value.code == "invalid_local_path"
+    assert str(excinfo.value).startswith(
+        "local_path '../secret.txt' must be an existing file inside the agent workspace",
+    )

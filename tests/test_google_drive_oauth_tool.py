@@ -258,7 +258,7 @@ def test_google_drive_model_functions_do_not_collide_with_local_file_tools(tmp_p
             runtime_paths,
             credentials_manager=credentials_manager,
             worker_target=None,
-            disable_sandbox_proxy=True,
+            runs_in_worker=False,
         )
         for tool_name in ("file", "coding", "google_drive")
     ]
@@ -284,7 +284,7 @@ def test_google_drive_write_config_defaults_enabled_and_can_disable(tmp_path: Pa
         "google_drive",
         runtime_paths,
         credentials_manager=credentials_manager,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         tool_output_workspace_root=tmp_path,
         worker_target=None,
     )
@@ -293,7 +293,7 @@ def test_google_drive_write_config_defaults_enabled_and_can_disable(tmp_path: Pa
         runtime_paths,
         credentials_manager=credentials_manager,
         tool_config_overrides={"write": False},
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         tool_output_workspace_root=tmp_path,
         worker_target=None,
     )
@@ -337,7 +337,7 @@ def test_google_drive_download_uses_namespaced_model_function(tmp_path: Path) ->
         runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         tool_config_overrides={"download_file": True},
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         tool_output_workspace_root=tmp_path,
         worker_target=None,
     )
@@ -354,7 +354,7 @@ def test_google_drive_download_disabled_without_workspace(tmp_path: Path) -> Non
         runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         tool_config_overrides={"download_file": True},
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         tool_output_workspace_root=None,
         worker_target=None,
     )
@@ -663,7 +663,7 @@ def test_google_drive_stored_token_without_client_config_connects_on_invocation(
         runtime_paths,
         credentials_manager=credentials_manager,
         worker_target=None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
     )
     assert isinstance(tool, GoogleDriveTools)
 
@@ -696,7 +696,7 @@ def test_google_drive_mismatched_client_id_connects_on_invocation(tmp_path: Path
         runtime_paths,
         credentials_manager=credentials_manager,
         worker_target=None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
     )
     assert isinstance(tool, GoogleDriveTools)
 
@@ -722,7 +722,7 @@ def test_google_drive_saved_numeric_config_is_coerced_before_tool_init(tmp_path:
         runtime_paths,
         credentials_manager=credentials_manager,
         worker_target=None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
     )
 
     assert isinstance(tool, GoogleDriveTools)
@@ -745,7 +745,7 @@ def test_google_drive_blank_numeric_config_uses_tool_default(tmp_path: Path) -> 
         runtime_paths,
         credentials_manager=credentials_manager,
         worker_target=None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
     )
 
     assert isinstance(tool, GoogleDriveTools)

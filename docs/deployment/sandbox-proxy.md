@@ -140,6 +140,8 @@ Install proxied plugin tools in the runner image, or mount only the plugin direc
 
 Use this to run the primary runtime on the host, including with `uvx mindroom run`, and give each worker key its own persistent Docker container, without Kubernetes.
 A container is reused until its launch configuration changes.
+That covers only the config fields and files the worker sees, so edits to models, prompts, or other agents do not restart it, and an edit reaches workers once MindRoom has applied it.
+A change to the registered tools, such as adding a plugin or an MCP server, restarts every Docker worker on its next use, which ends background commands running in it.
 Idle containers keep running unless `MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS` is set to a positive interval, which then stops containers idle longer than `MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS`.
 When MindRoom shuts down, it removes its worker containers but keeps each worker's files, and the worker's next call starts a new container.
 
@@ -186,7 +188,7 @@ To verify, ask two agents to run `hostname`, then list the worker containers:
 docker ps --format '{{.Names}}\t{{.ID}}' | grep '^mindroom-worker'
 ```
 
-Each worker gets a read-only copy of the [live config snapshot](#live-config-snapshots) built from `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH`, together with the config-relative plugins and knowledge it needs.
+Each worker gets a read-only copy of the [live config snapshot](#live-config-snapshots) of the config MindRoom has applied, together with the config-relative plugins and knowledge it needs, resolved against the directory of `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH`.
 Agent-scoped workers get only their agent and its assigned knowledge bases, while `worker_scope: user` workers get every agent that shares them.
 Workers never see `~/.mindroom` or the config-adjacent `.env`.
 The called tool's own inline overrides still reach the worker, but if it needs a secret from `.env` or from elsewhere in `config.yaml`, provide it through a [credential lease](#credential-leases), [environment passthrough](#shell-environment-and-path), or `MINDROOM_DOCKER_WORKER_ENV_JSON` instead.
@@ -226,7 +228,7 @@ Worker pods can reach the primary API over the pod network, so the runtime chart
 
 Run the same MindRoom release in the primary runtime and in every runner and worker image.
 MindRoom refuses dedicated Docker and Kubernetes worker images whose protocol does not match the primary runtime, and replaces the worker once before failing, so a worker left running under a mutable tag such as `:latest` from a release with another worker protocol is replaced on its next use.
-A Docker worker is recreated from a fresh pull of the configured image, while a Kubernetes worker gets a new pod, which pulls the tag again only under the [worker image pull policy](kubernetes.md#worker-settings) `Always`.
+A Docker worker from an older release is recreated from a fresh pull of the configured image, and one from a newer release without a pull, while a Kubernetes worker gets a new pod, which pulls the tag again only under the [worker image pull policy](kubernetes.md#worker-settings) `Always`.
 If the pull fails, as it does for a locally built tag such as `mindroom:dev`, or the image is still incompatible, rebuild the image from the checkout the primary runs from or select the published tag that matches your MindRoom version.
 A worker from a newer release is refused too, and its error reports a higher protocol than the expected one, for example a `:latest` worker that started after a release the primary does not run yet; upgrade the primary to that release, or pin one release tag for both.
 A `static_runner` sandbox runner on another protocol is refused too, and every call routed to it fails until it runs the primary's release; MindRoom checks the runner when the primary first routes a call to it, so restart the primary after replacing a running runner with another release.
@@ -277,7 +279,7 @@ agents:
 The tools that default to workers when no list is set are `browser_mcp`, `coding`, `docker`, `file`, `python`, and `shell`.
 Any other registered tool can be listed in `worker_tools`, except tools that need the primary runtime or room context, which stay in the primary runtime even when listed.
 These include the Matrix, scheduling, todo, attachment, and thread tools, `gmail` and the other Google tools, `github`, `atlassian`, `slack`, `spotify`, `homeassistant`, `reasoning`, `daytona`, `e2b`, `mem0`, `claude_agent`, `config_manager`, `oauth_connections`, and `agent_vault_access`, plus `browserbase`, `composio`, `duckdb`, `pandas`, `sql`, and `zep`, which keep a session, connection, or other state between calls.
-The built-in `memory`, `delegate`, `self_config`, and `agent_manager` tools also always run in the primary runtime.
+The built-in `memory`, `delegate`, `self_config`, and `agent_manager` tools and configured MCP `mcp_<server_id>` tools also always run in the primary runtime.
 The `browser` tool chooses per call: `target: desktop` stays in the primary runtime, while `target: host` follows the worker routing.
 
 ### Execution modes
@@ -330,7 +332,7 @@ What a worker can see depends on the backend:
 - **Dedicated Docker and Kubernetes workers** mount only the workspaces listed in the [scope table](#worker-scopes), the shared directories of the agents they serve, their own scratch space, and read-only assigned knowledge, never the sessions or memory beside the workspaces.
   For private agents they mount only the private root (`private.root`), never the state root around it.
 
-When an agent has a workspace (the `file` memory backend or `private`), `shell`, `file`, `python`, and `coding` use it as their default working directory (`base_dir`); this is a convenience, not a boundary.
+`shell`, `file`, `python`, and `coding` use the agent's workspace as their default working directory (`base_dir`); this is a convenience, not a boundary.
 
 A missing or linked workspace is not mounted.
 Assigned knowledge that is missing, reached through a link, or inside another agent's workspace, a private instance, a shared directory the worker does not mount, or a worker root is not mounted either, and the worker sees an empty knowledge folder.
@@ -557,7 +559,7 @@ To deploy that backend without Helm, see [Worker settings](kubernetes.md#worker-
 | `MINDROOM_DOCKER_WORKER_PORT` | Sandbox-runner port inside the container | `8766` |
 | `MINDROOM_DOCKER_WORKER_STORAGE_MOUNT_PATH` | Worker root mount path inside the container | `/app/worker` |
 | `MINDROOM_DOCKER_WORKER_CONFIG_PATH` | Config path inside the container | `/app/config-host/config.yaml` |
-| `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` | Host `config.yaml` from which each worker's projected config is built | Resolved `MINDROOM_CONFIG_PATH` when it exists |
+| `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` | Path of `config.yaml` on the Docker host, whose directory the relative paths in each worker's projected config resolve against | Resolved `MINDROOM_CONFIG_PATH` when it exists |
 | `MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS` | Idle time before a worker container may be cleaned up | `1800` |
 | `MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS` | Maximum wait for a new worker to become ready | `60` |
 | `MINDROOM_DOCKER_WORKER_NAME_PREFIX` | Prefix for worker container names, which use it lowercased, with each run of characters other than letters, digits, and `-` replaced by one `-`, and cut to 38 characters; a longer prefix logs a warning | `mindroom-worker` |

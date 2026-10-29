@@ -29,7 +29,6 @@ from mindroom.redaction import redact_sensitive_data
 from mindroom.runtime_resolution import record_private_instance_owner, resolve_agent_storage
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
-    agent_workspace_root_path,
     parse_tool_execution_identity_payload,
     serialize_tool_execution_identity,
 )
@@ -524,8 +523,6 @@ def _resolve_workspace(
         state_storage_path=resolved.state_root,
         use_state_storage_path=resolved.execution.policy.private_workspace_enabled,
     )
-    if workspace is None:
-        return agent_workspace_root_path(runtime_paths.storage_root, agent_name), resolved.state_root
     return workspace.root, resolved.state_root
 
 

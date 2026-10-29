@@ -78,10 +78,11 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
 from mindroom.teams.members import resolve_exact_team_members
 from mindroom.tool_jobs.execution import agent_tool_middleware
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.construction import get_toolkit_construction
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
+from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_state_root_path,
@@ -100,6 +101,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workspaces import _copy_workspace_template, validate_workspace_template_dir
 from tests.identity_helpers import persist_entity_accounts
 from tests.tool_approval_helpers import gated_functions
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -195,14 +197,17 @@ def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) ->
     """Create an agent with the test config's explicit runtime context."""
     from tests.conftest import runtime_paths_for  # noqa: PLC0415
 
+    runtime_paths = runtime_paths_for(config)
     execution_identity = cast("ToolExecutionIdentity | None", kwargs.pop("execution_identity", None))
     kwargs.setdefault("supports_native_tool_approval", True)
+    if "model" not in kwargs:
+        kwargs["model"] = turn_model(config, runtime_paths, agent_name)
     return create_agent(
         agent_name,
         config,
-        runtime_paths_for(config),
+        runtime_paths,
         execution_identity=execution_identity,
-        **({"knowledge": None, "active_model_name": None} | kwargs),
+        **({"knowledge": None} | kwargs),
     )
 
 
@@ -220,6 +225,7 @@ def test_managed_entity_power_user_ids_for_room_includes_configured_teams(tmp_pa
                     rooms=["ops"],
                 ),
             },
+            models={"default": ModelConfig(provider="openai", id="gpt-5.6-luna")},
         ),
         runtime_paths,
     )
@@ -236,6 +242,7 @@ def test_get_rooms_for_entity_uses_authored_entity_rooms_only(tmp_path: Path) ->
     config = _bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["lobby"])},
+            models={"default": ModelConfig(provider="openai", id="gpt-5.6-luna")},
         ),
         runtime_paths,
     )
@@ -428,10 +435,6 @@ def test_config_round_trips_structured_agent_tool_entries() -> None:
 
     agent_config = config.agents["openclaw"]
     assert agent_config.tool_names == ["shell", "browser"]
-    assert agent_config.get_tool_overrides("shell") == {
-        "extra_env_passthrough": ["GITEA_TOKEN", "WHISPER_URL"],
-        "shell_path_prepend": ["/run/wrappers/bin"],
-    }
     assert config.authored_model_dump()["agents"]["openclaw"]["tools"] == [
         {
             "shell": {
@@ -441,7 +444,8 @@ def test_config_round_trips_structured_agent_tool_entries() -> None:
         },
         "browser",
     ]
-    assert config.resolve_entity("openclaw").tool_runtime_overrides("shell") == {
+    candidates = {entry.name: entry for entry in resolve_agent_tools(config, "openclaw").candidates()}
+    assert candidates["shell"].tool_config_overrides == {
         "extra_env_passthrough": "GITEA_TOKEN, WHISPER_URL",
         "shell_path_prepend": "/run/wrappers/bin",
     }
@@ -543,7 +547,6 @@ def test_tool_execution_environment_explains_dedicated_worker_scope(
         worker_routed_tool_names=("shell",),
         worker_scope=worker_scope,
         file_access="workspace",
-        has_workspace=True,
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
         shared_directories=(),
@@ -564,7 +567,6 @@ def test_tool_execution_environment_explains_static_runner_without_persistence_c
         worker_routed_tool_names=("shell",),
         worker_scope="user_agent",
         file_access="workspace",
-        has_workspace=True,
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
         shared_directories=(),
@@ -590,7 +592,6 @@ def test_tool_execution_environment_explains_docker_idle_lifecycle(tmp_path: Pat
         worker_routed_tool_names=("shell",),
         worker_scope="user_agent",
         file_access="workspace",
-        has_workspace=True,
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
         shared_directories=(),
@@ -601,27 +602,15 @@ def test_tool_execution_environment_explains_docker_idle_lifecycle(tmp_path: Pat
 
 
 @pytest.mark.parametrize(
-    ("file_access", "has_workspace", "expected"),
+    ("file_access", "expected"),
     [
-        ("workspace", True, "- File access for path tools: `workspace` (agent workspace and attachments only)."),
-        (
-            "workspace",
-            False,
-            "- File access for path tools: `workspace` "
-            "(this agent has no workspace, so path tools in the primary runtime reach only attachments).",
-        ),
-        ("unrestricted", True, "- File access for path tools: `unrestricted` (any path the tool's process can reach)."),
-        (
-            "unrestricted",
-            False,
-            "- File access for path tools: `unrestricted` (any path the tool's process can reach).",
-        ),
+        ("workspace", "- File access for path tools: `workspace` (agent workspace and attachments only)."),
+        ("unrestricted", "- File access for path tools: `unrestricted` (any path the tool's process can reach)."),
     ],
 )
 def test_tool_execution_environment_reports_file_access(
     tmp_path: Path,
     file_access: str,
-    has_workspace: bool,
     expected: str,
 ) -> None:
     """The model should learn which files its path tools may use and which tools are never confined."""
@@ -632,7 +621,6 @@ def test_tool_execution_environment_reports_file_access(
             worker_routed_tool_names=worker_routed,
             worker_scope=None,
             file_access=file_access,
-            has_workspace=has_workspace,
             unconfined_tool_names=("python", "shell"),
             primary_only_unconfined_tool_names=("duckdb",),
             shared_directories=(),
@@ -648,7 +636,7 @@ def test_tool_execution_environment_reports_file_access(
 def test_agent_role_lists_the_shared_directories_the_agent_reaches(
     tmp_path: Path,
 ) -> None:
-    """An agent without a workspace learns that its path tools reach its shared directories, and each one's access."""
+    """An agent learns which shared directories its path tools reach, and each one's access."""
     runtime_paths = _runtime_paths(tmp_path)
     config = _bind_runtime_paths(_test_config(), runtime_paths)
     create_shared_directory(runtime_paths, owner="general", name="report")
@@ -664,46 +652,9 @@ def test_agent_role_lists_the_shared_directories_the_agent_reaches(
         f"`{shares / 'general' / 'report'}` (from general, read-only)."
     ) in _role(calculator)
     assert f"- Shared directories: `{shares / 'general' / 'report'}` (yours, read-write)." in _role(general)
-    file_access_line = (
-        "- File access for path tools: `workspace` (this agent has no workspace, "
-        "so path tools in the primary runtime reach only attachments and the shared directories below)."
-    )
+    file_access_line = "- File access for path tools: `workspace` (agent workspace and attachments only)."
     assert file_access_line in _role(calculator)
     assert file_access_line in _role(general)
-
-
-@pytest.mark.parametrize(
-    "process_env",
-    [{"MINDROOM_WORKER_BACKEND": "kubernetes"}, {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox:8766"}],
-)
-def test_no_workspace_line_omits_shared_directories_primary_tools_cannot_reach(
-    tmp_path: Path,
-    process_env: dict[str, str],
-) -> None:
-    """Beside workers, primary-process path tools reach no shared directory, so the line names only attachments."""
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env=process_env,
-    )
-
-    rendered = _render_tool_execution_environment(
-        runtime_paths=runtime_paths,
-        local_tool_names=("file",),
-        worker_routed_tool_names=("shell",),
-        worker_scope=None,
-        file_access="workspace",
-        has_workspace=False,
-        unconfined_tool_names=("shell",),
-        primary_only_unconfined_tool_names=(),
-        shared_directories=("`/shares/general/report` (yours, read-write)",),
-    )
-
-    assert (
-        "- File access for path tools: `workspace` (this agent has no workspace, "
-        "so path tools in the primary runtime reach only attachments)."
-    ) in rendered
-    assert "- Shared directories: `/shares/general/report` (yours, read-write)." in rendered
 
 
 def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(tmp_path: Path) -> None:
@@ -714,7 +665,6 @@ def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(t
         worker_routed_tool_names=(),
         worker_scope=None,
         file_access="workspace",
-        has_workspace=True,
         unconfined_tool_names=(),
         primary_only_unconfined_tool_names=(),
         shared_directories=(),
@@ -834,7 +784,7 @@ def test_unreadable_oauth_credentials_leave_agent_reset_tool_available(
         execution_identity=identity,
         supports_native_tool_approval=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "general"),
     )
 
     toolkits = {tool.name: tool for tool in agent.spec.toolkits}
@@ -950,7 +900,7 @@ def test_openclaw_compat_expands_to_implied_tools() -> None:
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
 
-    assert config.resolve_entity("summary").available_tools == [
+    assert config.resolve_agent("summary").tools.tool_names == (
         "openclaw_compat",
         "shell",
         "coding",
@@ -961,7 +911,7 @@ def test_openclaw_compat_expands_to_implied_tools() -> None:
         "matrix_message",
         "attachments",
         "matrix_room",
-    ]
+    )
 
 
 def test_openclaw_compat_expansion_dedupes_preserving_order() -> None:
@@ -975,7 +925,7 @@ def test_openclaw_compat_expansion_dedupes_preserving_order() -> None:
     ]
     config.defaults.tools = ["openclaw_compat", "python", "scheduler"]
 
-    assert config.resolve_entity("summary").available_tools == [
+    assert config.resolve_agent("summary").tools.tool_names == (
         "browser",
         "openclaw_compat",
         "shell",
@@ -987,7 +937,7 @@ def test_openclaw_compat_expansion_dedupes_preserving_order() -> None:
         "matrix_message",
         "attachments",
         "matrix_room",
-    ]
+    )
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -1003,7 +953,7 @@ def test_create_agent_uses_native_tool_lookups_for_openclaw_compat(
     _create_agent_for_test("summary", config=config)
 
     looked_up_tools = [call.args[0] for call in mock_get_tool_by_name.call_args_list]
-    assert looked_up_tools == config.resolve_entity("summary").available_tools
+    assert looked_up_tools == list(config.resolve_agent("summary").tools.tool_names)
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -1082,8 +1032,8 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         tool_config_overrides: dict[str, object] | None = None,
         tool_init_overrides: dict[str, object] | None = None,
         runtime_overrides: dict[str, object] | None = None,
-        shared_storage_root_path: object | None = None,
-        worker_tools_override: list[str] | None = None,
+        runs_in_worker: bool | None = None,
+        workspace_in_worker: bool = False,
         allowed_shared_services: frozenset[str] | None = None,
         tool_output_workspace_root: object | None = None,
         agent_state_root: object | None = None,
@@ -1097,8 +1047,8 @@ def test_create_agent_continues_when_implied_tool_import_fails(
             tool_config_overrides,
             tool_init_overrides,
             runtime_overrides,
-            shared_storage_root_path,
-            worker_tools_override,
+            runs_in_worker,
+            workspace_in_worker,
             allowed_shared_services,
             tool_output_workspace_root,
             agent_state_root,
@@ -1140,8 +1090,8 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
         tool_config_overrides: dict[str, object] | None = None,
         tool_init_overrides: dict[str, object] | None = None,
         runtime_overrides: dict[str, object] | None = None,
-        shared_storage_root_path: object | None = None,
-        worker_tools_override: list[str] | None = None,
+        runs_in_worker: bool | None = None,
+        workspace_in_worker: bool = False,
         allowed_shared_services: frozenset[str] | None = None,
         tool_output_workspace_root: object | None = None,
         agent_state_root: object | None = None,
@@ -1155,8 +1105,8 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
             tool_config_overrides,
             tool_init_overrides,
             runtime_overrides,
-            shared_storage_root_path,
-            worker_tools_override,
+            runs_in_worker,
+            workspace_in_worker,
             allowed_shared_services,
             tool_output_workspace_root,
             agent_state_root,
@@ -1232,6 +1182,8 @@ def test_create_agent_expands_openclaw_compat_for_worker_tool_overrides(
     mock_get_tool_by_name: MagicMock,
 ) -> None:
     """Worker override list should receive expanded tool names including openclaw_compat."""
+    from tests.conftest import runtime_paths_for  # noqa: PLC0415
+
     mock_get_tool_by_name.return_value = MagicMock()
     config = _test_config()
     config.agents["summary"].tools = ["openclaw_compat"]
@@ -1240,10 +1192,14 @@ def test_create_agent_expands_openclaw_compat_for_worker_tool_overrides(
 
     _create_agent_for_test("summary", config=config)
 
-    expected_worker_tools = config.expand_tool_names(["openclaw_compat"])
-    worker_overrides = [call.kwargs["worker_tools_override"] for call in mock_get_tool_by_name.call_args_list]
-    assert worker_overrides
-    assert all(override == expected_worker_tools for override in worker_overrides)
+    expected_worker_tools = tuple(config.expand_tool_names(["openclaw_compat"]))
+    assert resolve_agent_tools(config, "summary").facts.worker_tools == expected_worker_tools
+    placement = tool_placement(runtime_paths_for(config))
+    placements = {call.args[0]: call.kwargs["runs_in_worker"] for call in mock_get_tool_by_name.call_args_list}
+    assert placements
+    assert placements == {
+        tool_name: placement.runs_in_worker(tool_name, expected_worker_tools) for tool_name in placements
+    }
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -1287,11 +1243,9 @@ def test_direct_agent_toolkit_exposes_output_redirect_for_workspace_agent(tmp_pa
 
     toolkit = build_agent_toolkit(
         "memory",
-        agent_name="general",
-        config=config,
+        agent_tools=resolve_agent_tools(config, "general"),
+        placement=tool_placement(runtime_paths),
         runtime_paths=runtime_paths,
-        worker_tools=[],
-        runtime_overrides=None,
         agent_runtime=agent_runtime,
         execution_identity=None,
     )
@@ -1318,11 +1272,9 @@ def test_direct_agent_toolkit_records_its_construction(tmp_path: Path, tool_name
 
     toolkit = build_agent_toolkit(
         tool_name,
-        agent_name="general",
-        config=config,
+        agent_tools=resolve_agent_tools(config, "general"),
+        placement=tool_placement(runtime_paths),
         runtime_paths=runtime_paths,
-        worker_tools=[],
-        runtime_overrides=None,
         agent_runtime=agent_runtime,
         execution_identity=None,
     )
@@ -1338,27 +1290,12 @@ def test_memory_toolkit_is_omitted_when_agent_memory_is_disabled(tmp_path: Path)
     runtime_paths = _runtime_paths(tmp_path)
     config = _bind_runtime_paths(_test_config(), runtime_paths)
     config.memory.backend = "mem0"
+    config.agents["general"].tools = ["memory"]
+    assert "memory" in [entry.name for entry in resolve_agent_tools(config, "general").candidates()]
+
     config.agents["general"].memory_backend = "none"
-    agent_runtime = resolve_agent_runtime(
-        "general",
-        config,
-        runtime_paths,
-        execution_identity=None,
-        create=True,
-    )
 
-    toolkit = build_agent_toolkit(
-        "memory",
-        agent_name="general",
-        config=config,
-        runtime_paths=runtime_paths,
-        worker_tools=[],
-        runtime_overrides=None,
-        agent_runtime=agent_runtime,
-        execution_identity=None,
-    )
-
-    assert toolkit is None
+    assert "memory" not in [entry.name for entry in resolve_agent_tools(config, "general").candidates()]
 
 
 def test_resolve_agent_workspace_uses_canonical_agent_workspace_for_file_memory(tmp_path: Path) -> None:
@@ -1769,9 +1706,8 @@ def test_resolve_agent_runtime_uses_shared_agent_roots_for_shared_agents(tmp_pat
     assert runtime.execution.is_private is False
     assert runtime.execution.worker_key is None
     assert runtime.state_root == agent_state_root_path(tmp_path, "general")
-    assert runtime.workspace is None
-    assert runtime.tool_base_dir is None
-    assert runtime.file_memory_root is None
+    assert runtime.workspace.root == agent_workspace_root_path(tmp_path, "general")
+    assert runtime.workspace.file_memory_path is None
 
 
 def test_resolve_agent_runtime_routes_shared_sessions_to_explicit_session_storage(tmp_path: Path) -> None:
@@ -1865,13 +1801,12 @@ def test_resolve_agent_runtime_keeps_user_scope_worker_key_for_shared_agents(tmp
     assert runtime.execution.execution_scope == "user"
     assert runtime.execution.worker_key == resolve_worker_key("user", identity, agent_name="general")
     assert runtime.state_root == agent_state_root_path(tmp_path, "general")
-    assert runtime.workspace is None
-    assert runtime.tool_base_dir is None
-    assert runtime.file_memory_root is None
+    assert runtime.workspace.root == agent_workspace_root_path(tmp_path, "general")
+    assert runtime.workspace.file_memory_path is None
 
 
-def test_resolve_agent_runtime_requires_explicit_shared_execution_identity(tmp_path: Path) -> None:
-    """Shared worker scope should not infer worker keys from ambient runtime context."""
+def test_resolve_agent_runtime_without_identity_keeps_shared_roots_under_the_tenant_worker(tmp_path: Path) -> None:
+    """Without a request, a shared agent's execution uses its tenant's shared worker, and its state stays shared."""
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
@@ -1884,9 +1819,9 @@ def test_resolve_agent_runtime_requires_explicit_shared_execution_identity(tmp_p
 
     assert runtime.execution.is_private is False
     assert runtime.execution.execution_scope == "shared"
-    assert runtime.execution.worker_key is None
+    assert runtime.execution.worker_key == "v1:tenant-123:shared:general"
     assert runtime.state_root == agent_state_root_path(tmp_path, "general")
-    assert runtime.workspace is None
+    assert runtime.workspace.root == agent_workspace_root_path(tmp_path, "general")
 
 
 def test_resolve_agent_runtime_uses_private_instance_roots_for_private_agents(
@@ -1927,10 +1862,8 @@ def test_resolve_agent_runtime_uses_private_instance_roots_for_private_agents(
     assert runtime.execution.is_private is True
     assert runtime.execution.worker_key == expected_worker_key
     assert runtime.state_root == (private_instance_scope_root_path(tmp_path, expected_worker_key) / "general")
-    assert runtime.workspace is not None
     assert runtime.workspace.root == runtime.state_root / "mind_data"
-    assert runtime.tool_base_dir == runtime.workspace.root
-    assert runtime.file_memory_root == runtime.workspace.root
+    assert runtime.workspace.file_memory_path == runtime.workspace.root
 
 
 def test_dedicated_worker_runtime_resolution_never_writes_the_private_identity_record(tmp_path: Path) -> None:
@@ -2070,7 +2003,7 @@ def test_resolve_agent_runtime_creates_workspace_knowledge_links_for_private_bas
     )
 
     assert runtime.workspace is not None
-    private_base_id = config.resolve_entity("general").private_knowledge_base_id
+    private_base_id = config.resolve_agent("general").policy.private_knowledge_base_id
     assert private_base_id is not None
     knowledge_link = runtime.workspace.root / "knowledge" / private_base_id
     assert knowledge_link.is_symlink()
@@ -2266,7 +2199,7 @@ def test_resolve_agent_runtime_skips_workspace_knowledge_links_for_private_root_
     )
 
     assert runtime.workspace is not None
-    private_base_id = config.resolve_entity("general").private_knowledge_base_id
+    private_base_id = config.resolve_agent("general").policy.private_knowledge_base_id
     assert private_base_id is not None
     knowledge_link = runtime.workspace.root / "knowledge" / private_base_id
     assert not knowledge_link.exists()
@@ -2423,7 +2356,7 @@ def test_create_agent_does_not_pass_browser_specific_runtime_overrides(
 def test_create_agent_passes_authored_shell_runtime_overrides(
     mock_get_tool_by_name: MagicMock,
 ) -> None:
-    """Authored per-agent shell overrides should be converted into runtime kwargs."""
+    """Authored per-agent shell list settings should reach the constructor as validated settings."""
     mock_get_tool_by_name.return_value = MagicMock()
 
     config = _test_config()
@@ -2439,10 +2372,10 @@ def test_create_agent_passes_authored_shell_runtime_overrides(
 
     _create_agent_for_test("general", config=config)
 
-    runtime_overrides_by_tool = {
-        call.args[0]: call.kwargs.get("runtime_overrides") for call in mock_get_tool_by_name.call_args_list
+    settings_by_tool = {
+        call.args[0]: call.kwargs.get("tool_config_overrides") for call in mock_get_tool_by_name.call_args_list
     }
-    assert runtime_overrides_by_tool["shell"] == {
+    assert settings_by_tool["shell"] == {
         "extra_env_passthrough": "GITEA_TOKEN, WHISPER_URL",
         "shell_path_prepend": "/run/wrappers/bin",
     }
@@ -2472,54 +2405,22 @@ def _tool_entrypoints(build: AgentBuild) -> dict[str, Callable[..., str]]:
     return {name: function.entrypoint for name, function in build.spec.functions.items()}
 
 
-def test_agent_without_a_workspace_cannot_read_the_run_directory(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A shared agent without file memory has no workspace, so its file tools refuse the process working directory."""
-    run_directory = _run_directory_with_secret(tmp_path, monkeypatch)
-    runtime_paths = _runtime_paths(tmp_path / "storage")
-
-    # Both toolkits offer `read_file`, so each is checked in an agent offered it alone.
-    agent = _agent_offered("file", runtime_paths)
-    file_tools, coding = _tool_entrypoints(agent), _tool_entrypoints(_agent_offered("coding", runtime_paths))
-    results = [
-        *(file_tools["read_file"](path) for path in (".env", str(run_directory / ".env"))),
-        *(coding["read_file"](path) for path in (".env", str(run_directory / ".env"))),
-        file_tools["list_files"](),
-        file_tools["search_files"]("*"),
-        file_tools["search_content"]("run-directory-secret"),
-        coding["ls"](),
-        coding["grep"]("run-directory-secret"),
-        coding["find_files"]("*"),
-        file_tools["save_file"]("x", "planted.txt"),
-        coding["write_file"]("planted.txt", "x"),
-    ]
-    assert all(
-        result.startswith("Error: Path '") and "requires an agent workspace; file_access is 'workspace'." in result
-        for result in results
-    )
-    assert not (run_directory / "planted.txt").exists()
-    assert (
-        "- File access for path tools: `workspace` "
-        "(this agent has no workspace, so path tools in the primary runtime reach only attachments)."
-    ) in _role(agent)
-
-
+@pytest.mark.parametrize("file_memory", [True, False])
 def test_agent_workspace_file_tools_stay_inside_the_workspace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    file_memory: bool,
 ) -> None:
-    """With file memory the same tools work in the agent workspace and still refuse the run directory."""
+    """Whatever its memory backend, an agent's file tools work in its workspace and refuse the run directory."""
     run_directory = _run_directory_with_secret(tmp_path, monkeypatch)
     runtime_paths = _runtime_paths(tmp_path / "storage")
     workspace = agent_workspace_root_path(runtime_paths.storage_root, "general")
     workspace.mkdir(parents=True)
     (workspace / "notes.md").write_text("workspace notes\n", encoding="utf-8")
 
-    agent = _agent_offered("file", runtime_paths, file_memory=True)
+    agent = _agent_offered("file", runtime_paths, file_memory=file_memory)
     file_tools = _tool_entrypoints(agent)
-    coding = _tool_entrypoints(_agent_offered("coding", runtime_paths, file_memory=True))
+    coding = _tool_entrypoints(_agent_offered("coding", runtime_paths, file_memory=file_memory))
     assert file_tools["read_file"]("notes.md") == "workspace notes\n"
     assert "workspace notes" in coding["read_file"]("notes.md")
     assert coding["write_file"]("draft.md", "draft\n").startswith("Wrote")
@@ -2616,13 +2517,11 @@ def test_openclaw_compat_implies_matrix_message_tool() -> None:
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.resolve_entity("summary").available_tools
+    effective_tools = config.resolve_agent("summary").tools.tool_names
     assert "openclaw_compat" in effective_tools
     assert "matrix_message" in effective_tools
 
-    runtime_toolkits = [
-        entry.name for entry in visible_tool_surface(agent_name="summary", config=config).runtime_tool_configs
-    ]
+    runtime_toolkits = [entry.name for entry in resolve_agent_tools(config, "summary").candidates()]
     assert "openclaw_compat" in runtime_toolkits
     assert "matrix_message" in runtime_toolkits
 
@@ -2633,7 +2532,7 @@ def test_openclaw_compat_implied_matrix_message_does_not_duplicate() -> None:
     config.agents["summary"].tools = ["openclaw_compat", "matrix_message"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.resolve_entity("summary").available_tools
+    effective_tools = config.resolve_agent("summary").tools.tool_names
     assert effective_tools.count("matrix_message") == 1
 
 
@@ -2643,8 +2542,8 @@ def test_matrix_message_implies_attachments_and_matrix_room_tools() -> None:
     config.agents["summary"].tools = ["matrix_message"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.resolve_entity("summary").available_tools
-    assert effective_tools == ["matrix_message", "attachments", "matrix_room"]
+    effective_tools = config.resolve_agent("summary").tools.tool_names
+    assert effective_tools == ("matrix_message", "attachments", "matrix_room")
 
 
 def test_matrix_message_implied_attachments_does_not_duplicate() -> None:
@@ -2653,7 +2552,7 @@ def test_matrix_message_implied_attachments_does_not_duplicate() -> None:
     config.agents["summary"].tools = ["matrix_message", "attachments"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.resolve_entity("summary").available_tools
+    effective_tools = config.resolve_agent("summary").tools.tool_names
     assert effective_tools.count("attachments") == 1
 
 
@@ -2683,9 +2582,13 @@ def test_get_agent_summary() -> None:
 
 def test_get_agent_unknown() -> None:
     """Tests that an unknown agent raises a ValueError."""
+    from tests.conftest import runtime_paths_for  # noqa: PLC0415
+
     config = _test_config()
+    # The turn model names an explicit model, so the build itself is what rejects the unknown agent.
+    model = turn_model(config, runtime_paths_for(config), "unknown", "default")
     with pytest.raises(ValueError, match="Unknown agent: unknown"):
-        _create_agent_for_test("unknown", config=config)
+        _create_agent_for_test("unknown", config=config, model=model)
 
 
 def test_get_agent_uses_storage_path_for_sessions(tmp_path: Path) -> None:
@@ -2814,8 +2717,8 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
         tool_config_overrides: dict[str, object] | None = None,
         tool_init_overrides: dict[str, object] | None = None,
         runtime_overrides: dict[str, object] | None = None,
-        shared_storage_root_path: object | None = None,
-        worker_tools_override: list[str] | None = None,
+        runs_in_worker: bool | None = None,
+        workspace_in_worker: bool = False,
         allowed_shared_services: frozenset[str] | None = None,
         tool_output_workspace_root: object | None = None,
         agent_state_root: object | None = None,
@@ -2828,8 +2731,8 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
             tool_config_overrides,
             tool_init_overrides,
             runtime_overrides,
-            shared_storage_root_path,
-            worker_tools_override,
+            runs_in_worker,
+            workspace_in_worker,
             allowed_shared_services,
             tool_output_workspace_root,
             agent_state_root,
@@ -3141,6 +3044,7 @@ def test_load_context_files_refuses_planted_workspace_entries(tmp_path: Path, pl
             runtime_paths,
             agent_name="general",
             storage_path=storage_path,
+            workspace_root=agent_workspace_root_path(storage_path, "general"),
         )
 
     assert [chunk.body for chunk in loaded] == ["own user notes"]
@@ -3167,6 +3071,7 @@ def test_load_context_files_reads_a_huge_workspace_file_up_to_its_cap(
         _runtime_paths(storage_path),
         agent_name="general",
         storage_path=storage_path,
+        workspace_root=agent_workspace_root_path(storage_path, "general"),
     )
 
     assert [chunk.body for chunk in loaded] == [("soul " * 4).strip()]
@@ -3186,6 +3091,7 @@ def test_context_files_in_a_workspace_reached_through_a_link_are_refused(tmp_pat
             _runtime_paths(storage_path),
             agent_name="general",
             storage_path=storage_path,
+            workspace_root=agent_workspace_root_path(storage_path, "general"),
         )
 
     assert loaded == []
@@ -3205,6 +3111,7 @@ def test_load_context_files_truncates_a_workspace_file_above_one_mebibyte(tmp_pa
             _runtime_paths(storage_path),
             agent_name="general",
             storage_path=storage_path,
+            workspace_root=agent_workspace_root_path(storage_path, "general"),
         )
 
     assert len(chunk.body) == 1 << 20
@@ -3243,6 +3150,7 @@ def test_load_context_files_keeps_internal_workspace_links(tmp_path: Path) -> No
         _runtime_paths(storage_path),
         agent_name="general",
         storage_path=storage_path,
+        workspace_root=agent_workspace_root_path(storage_path, "general"),
     )
 
     assert [(chunk.title, chunk.body) for chunk in loaded] == [
@@ -3272,6 +3180,7 @@ def test_load_context_files_prefers_projected_assets_over_workspace_shadows(
         runtime_paths,
         agent_name="general",
         storage_path=storage_path,
+        workspace_root=agent_workspace_root_path(storage_path, "general"),
     )
 
     assert len(loaded) == 1
@@ -3845,7 +3754,7 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
         runtime_paths=runtime_paths,
         execution_identity=alice_identity,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "general"),
     )
     alice_worker_key = resolve_worker_key("user", alice_identity)
     assert alice_worker_key is not None
@@ -3859,7 +3768,7 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
         runtime_paths=runtime_paths,
         execution_identity=alice_identity,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "general"),
     )
 
     bob_agent = create_agent(
@@ -3868,7 +3777,7 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
         runtime_paths=runtime_paths,
         execution_identity=bob_identity,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "general"),
     )
     bob_worker_key = resolve_worker_key("user", bob_identity)
     assert bob_worker_key is not None
@@ -3922,7 +3831,7 @@ def test_create_agent_private_template_dir_does_not_imply_context_files(
         runtime_paths=runtime_paths,
         execution_identity=identity,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "general"),
     )
 
     assert "Template user." not in _role(agent)
@@ -3966,7 +3875,7 @@ def test_create_agent_loads_private_workspace_skills(
         runtime_paths=runtime_paths,
         execution_identity=identity,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "general"),
     )
 
     assert agent.prompt.skills_block is not None
@@ -3992,7 +3901,7 @@ def test_create_agent_private_root_requires_execution_identity(
             runtime_paths=_runtime_paths(tmp_path),
             execution_identity=None,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, _runtime_paths(tmp_path), "general"),
         )
 
     assert not (tmp_path / "mind_data").exists()
@@ -4307,7 +4216,7 @@ def test_create_agent_disable_runtime_capabilities_omits_all_tools_and_skills(
             execution_identity=None,
             disable_runtime_capabilities=True,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, runtime_paths, "general"),
         )
 
     assert built_tools == []
@@ -4361,7 +4270,7 @@ def test_create_agent_disable_runtime_capabilities_does_not_materialize_private_
         persist_runtime_state=False,
         disable_runtime_capabilities=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "general"),
     )
 
     assert agent.spec.toolkits == ()
@@ -4419,7 +4328,10 @@ def test_config_rejects_legacy_agent_memory_dir_field() -> None:
     """Legacy memory_dir field must fail fast to avoid silent drops."""
     with pytest.raises(
         ValidationError,
-        match=re.escape("Agent field 'memory_dir' was removed. Use 'context_files' and memory.backend=file instead."),
+        match=re.escape(
+            "Agent field 'memory_dir' was removed. Every agent works in its own workspace: list the files it "
+            "always loads in 'context_files', and set memory_backend=file to keep its memory files there.",
+        ),
     ):
         Config(
             agents={
@@ -4576,8 +4488,8 @@ def test_config_resolves_per_agent_memory_backend_override() -> None:
         memory={"backend": "mem0"},
     )
 
-    assert config.resolve_entity("general").memory_backend == "mem0"
-    assert config.resolve_entity("writer").memory_backend == "file"
+    assert config.resolve_scope("general").memory_backend == "mem0"
+    assert config.resolve_scope("writer").memory_backend == "file"
 
 
 def test_config_reports_mixed_memory_backend_usage() -> None:
@@ -4591,8 +4503,8 @@ def test_config_reports_mixed_memory_backend_usage() -> None:
     )
 
     assert config.uses_file_memory() is True
-    assert config.resolve_entity("general").memory_backend == "file"
-    assert config.resolve_entity("writer").memory_backend == "mem0"
+    assert config.resolve_scope("general").memory_backend == "file"
+    assert config.resolve_scope("writer").memory_backend == "mem0"
 
 
 def test_config_rejects_memory_file_path_even_with_mem0_backend() -> None:
@@ -4707,26 +4619,16 @@ def test_file_mode_agent_instructions_list_workspace_knowledge_path(tmp_path: Pa
     assert "search_knowledge_base" in rendered_instructions
 
 
-def test_workspace_agent_instructions_include_skill_authoring_guidance(tmp_path: Path) -> None:
-    """Agents with workspace-rooted tools should learn they can author skills in their workspace."""
+@pytest.mark.parametrize("memory_backend", ["file", "mem0"])
+def test_workspace_agent_instructions_include_skill_authoring_guidance(tmp_path: Path, memory_backend: str) -> None:
+    """Every agent works in its own workspace, so each learns it can author skills there, whatever its memory."""
     runtime_paths = _runtime_paths(tmp_path)
     config = _bind_runtime_paths(_test_config(), runtime_paths)
-    config.agents["general"].memory_backend = "file"
+    config.agents["general"].memory_backend = memory_backend
 
     agent = _create_agent_for_test("general", config)
 
     assert WORKSPACE_SKILL_AUTHORING_PROMPT in agent.prompt.instructions
-
-
-def test_agent_without_workspace_omits_skill_authoring_guidance(tmp_path: Path) -> None:
-    """Agents without a workspace should not be told to write workspace skill files."""
-    runtime_paths = _runtime_paths(tmp_path)
-    config = _bind_runtime_paths(_test_config(), runtime_paths)
-    config.agents["general"].memory_backend = "mem0"
-
-    agent = _create_agent_for_test("general", config)
-
-    assert WORKSPACE_SKILL_AUTHORING_PROMPT not in agent.prompt.instructions
 
 
 @pytest.mark.parametrize("also_valid", [False, True])
@@ -5147,7 +5049,7 @@ def test_config_accepts_private_knowledge_path_dot_for_private_root() -> None:
         },
     )
 
-    private_base_id = config.resolve_entity("mind").private_knowledge_base_id
+    private_base_id = config.resolve_agent("mind").policy.private_knowledge_base_id
     assert private_base_id is not None
     assert config.get_knowledge_base_config(private_base_id).path == "."
 
@@ -5287,9 +5189,9 @@ def test_config_private_and_shared_knowledge_coexist() -> None:
         },
     )
 
-    private_base_id = config.resolve_entity("mind").private_knowledge_base_id
+    private_base_id = config.resolve_agent("mind").policy.private_knowledge_base_id
     assert private_base_id is not None
-    assert config.resolve_entity("mind").knowledge_base_ids == ["company_docs", private_base_id]
+    assert config.resolve_agent("mind").knowledge_base_ids == ("company_docs", private_base_id)
     private_config = config.get_knowledge_base_config(private_base_id)
     assert private_config.path == "memory"
 
@@ -5308,8 +5210,8 @@ def test_template_dir_does_not_imply_private_knowledge() -> None:
         },
     )
 
-    assert config.resolve_entity("mind").private_knowledge_base_id is None
-    assert config.resolve_entity("mind").knowledge_base_ids == []
+    assert config.resolve_agent("mind").policy.private_knowledge_base_id is None
+    assert config.resolve_agent("mind").knowledge_base_ids == ()
 
 
 def test_get_private_knowledge_base_agent_requires_active_private_knowledge() -> None:
@@ -5495,7 +5397,7 @@ def test_team_member_matches_solo_agent_construction() -> None:
         runtime_paths,
         execution_identity=None,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "calculator"),
     )
     members = resolve_exact_team_members(
         ["calculator"],
@@ -5503,7 +5405,7 @@ def test_team_member_matches_solo_agent_construction() -> None:
         runtime_paths=runtime_paths,
         execution_identity=None,
         refresh_scheduler=None,
-        active_model_names=None,
+        active_model_names={"calculator": turn_model(config, runtime_paths, "calculator").model_name},
     )
     member = members.build("calculator", members.model_names["calculator"])
     assert member.prompt.role == solo.prompt.role

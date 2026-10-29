@@ -77,6 +77,7 @@ Under **MCP gateway**, select **All tools** for an agent or choose tools individ
 
 Tools that share a service connection share its OAuth controls, and tools that need a Matrix room or an agent conversation, such as `claude_agent`, are labeled **MindRoom only** and are not exposed.
 A shared agent's configured worker and credential scopes still decide whose service connection runs a call.
+For the `slack` tool, see [Slack over MCP](https://docs.mindroom.chat/tools/slack/#mcp).
 When managed account provisioning is enabled, users without an active provisioned account see an access notice instead of MCP controls until an administrator provisions them; their ordinary connections remain available.
 [Connections sessions from MindRoom Chat](https://docs.mindroom.chat/connections-portal/#open-it-from-mindroom-chat) carry no email, so with managed account provisioning they reach the MCP controls, and in built-in authorization mode client consent, through the one active account whose `userName` the trusted upstream email template maps to their Matrix user.
 Without such a template, when trusted upstream auth uses a signed Matrix claim, or when several accounts map to the same user, those users see that notice and need trusted upstream sign-in for them.
@@ -327,6 +328,7 @@ Tool errors arrive as an `error` object with a `code` inside a successful MCP re
 | `unauthorized` | Agent access or selection changed, or the agent runs tools with shared credentials and is not [opted in](#agent-eligibility); check Connections |
 | `tool_unavailable` | The tool could not be loaded or failed; its outcome may be unknown |
 | `tool_declined` | A MindRoom plugin declined the call, so it did not run; `message` gives the plugin's reason |
+| `tool_failed` | The tool ran and reported that the call failed; `message` gives the tool's own explanation |
 | `schema_too_large`, `result_too_large` | The schema or result exceeds the size limit |
 | `busy` | A concurrency limit is full |
 | `duplicate_request` | A call with the same request ID is already running |

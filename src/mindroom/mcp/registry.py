@@ -149,6 +149,8 @@ def _tool_metadata(server_id: str, server_config: MCPServerConfig) -> ToolMetada
         category=ToolCategory.DEVELOPMENT,
         # A local stdio server is an operator-launched program that file_access cannot confine.
         file_access=ToolFileAccess.UNCONFINED if server_config.transport == "stdio" else ToolFileAccess.NONE,
+        # Worker configs carry no MCP servers, so only the primary can reach them.
+        requires_primary_runtime=True,
         status=ToolStatus.REQUIRES_CONFIG if is_oauth else ToolStatus.AVAILABLE,
         setup_type=SetupType.OAUTH if is_oauth else SetupType.NONE,
         auth_provider=auth_provider,

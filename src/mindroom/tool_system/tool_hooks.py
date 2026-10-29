@@ -10,13 +10,14 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar, copy_context
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
@@ -49,7 +50,7 @@ from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.worker_routing import active_tool_execution_identity
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
     from concurrent.futures import Executor
 
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, ToolApprovalDecision
@@ -74,13 +75,6 @@ _DECLINED_RESULT_TEMPLATE = (
     "Adjust your approach — try a different tool or different arguments."
 )
 _ToolHookResult = Any
-
-
-@dataclass(frozen=True, slots=True)
-class BackgroundToolApprovalDenied:
-    """Typed background result that the broker publishes as a terminal denial."""
-
-    reason: str
 
 
 # The approval callback between before-call hooks and the tool body: the terminal decision for one automation origin.
@@ -148,6 +142,24 @@ def track_sync_tool_completion(tracker: SyncToolCompletionTracker | None) -> Ite
         yield
     finally:
         _SYNC_TOOL_COMPLETION_TRACKER.reset(token)
+
+
+@asynccontextmanager
+async def owned_sync_tool_completion(executor: Executor | None = None) -> AsyncIterator[None]:
+    """Keep the synchronous body one call starts in this block until it finishes, even when the call is cancelled.
+
+    The owner's resources then never go away under a body still running. The body's own failure already reached the
+    call as its result, so waiting for it never raises again. Owners that hand their resources to a retained cleanup
+    when cancelled, such as the MCP gateway and the script broker, track the body themselves instead.
+    """
+    tracker = SyncToolCompletionTracker(executor=executor)
+    try:
+        with track_sync_tool_completion(tracker):
+            yield
+    finally:
+        started = tracker.started_task()
+        if started is not None:
+            await wait_for_future_until_complete(asyncio.gather(started, return_exceptions=True))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -624,7 +636,7 @@ async def _execute_bridge(  # noqa: C901, PLR0915
     async def decline(outcome: str, declined_result: str) -> ToolOutcome:
         await finish(outcome, timing.result_ready(), result=declined_result, blocked=True)
         # The call answers as failed, so the model reads the decline as one.
-        return ToolOutcome(content=declined_result, is_error=True)
+        return ToolOutcome(content=declined_result, is_error=True, refused_by="plugin_hook")
 
     if has_before_hooks:
         before_hooks_started_at = time.perf_counter()
@@ -644,7 +656,7 @@ async def _execute_bridge(  # noqa: C901, PLR0915
             reason = denial_note_for(decision.reason)
             declined_result = _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=reason)
             await finish("blocked_approval", timing.result_ready(), result=declined_result, blocked=True)
-            return BackgroundToolApprovalDenied(reason=reason)
+            return ToolOutcome(content=reason, is_error=True, refused_by="approval")
 
     # Collected only once the call may run, so a hook computes values such as short-lived tokens just before the body,
     # and declines the call when it cannot.
@@ -754,10 +766,11 @@ def build_tool_hook_middleware(
 
     The call reaches its entrypoint only through ``call_next``, so a plugin before-hook or environment hook that
     declines it, a revoked grant, or a Stop committed while the call was being recorded keeps the tool from running; a
-    declined call returns a failed ``ToolOutcome`` with the decline's text. A background script's call passes its
-    ``origin`` and the ``approval_gate`` that asks its requester; a call its requester denied returns
-    ``BackgroundToolApprovalDenied`` without running. A call that may run collects its environment hooks once, and the
-    shell commands it runs, locally or in a worker, get what they set.
+    declined call returns a failed ``ToolOutcome`` with the decline's text, ``refused_by="plugin_hook"``. A background
+    script's call passes its ``origin`` and the ``approval_gate`` that asks its requester; a call its requester denied
+    returns a failed ``ToolOutcome`` with the denial's reason, ``refused_by="approval"``, without running. A call that
+    may run collects its environment hooks once, and the shell commands it runs, locally or in a worker, get what they
+    set.
     """
     has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
     has_after_hooks = hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL)

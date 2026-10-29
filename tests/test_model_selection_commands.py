@@ -21,8 +21,8 @@ from mindroom.config.models import ModelConfig
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import command_result_content_to_dict
-from mindroom.teams.members import TeamTurnModelSelection, resolve_team_turn_models
 from mindroom.thread_models import resolve_thread_model_override, set_thread_model_override
+from mindroom.turn_model import ModelScope, TeamTurnModelSelection, resolve_team_turn_models, resolve_turn_model
 from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import make_test_command_handler_context
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, runtime_paths_for, test_runtime_paths
@@ -388,11 +388,11 @@ def restricted_config(tmp_path: Path) -> Config:
 def resolved_thread_models(config: Config, paths: RuntimePaths) -> dict[str, str]:
     """Return the model each agent of ``restricted_config`` runs with in the ``$root`` thread."""
     return {
-        name: config.resolve_runtime_model(
-            entity_name=name,
-            room_id=ROOM,
-            thread_id="$root",
-            runtime_paths=paths,
+        name: resolve_turn_model(
+            config,
+            paths,
+            ModelScope(entity=name, room_id=ROOM, thread_id="$root"),
+            None,
         ).model_name
         for name in ("helper", "restricted")
     }
@@ -449,12 +449,11 @@ def test_team_thread_override_governs_members_a_team_only_requester_reaches(tmp_
     _run_model_command(config, "expensive", USER)
 
     assert resolve_team_turn_models(
-        "squad",
-        ["code"],
-        ROOM,
         config,
         runtime_paths_for(config),
-        thread_id="$root",
+        ModelScope(entity="squad", room_id=ROOM, thread_id="$root"),
+        ["code"],
+        None,
     ) == TeamTurnModelSelection(team_model_name="expensive", member_model_names={"code": "expensive"})
 
 

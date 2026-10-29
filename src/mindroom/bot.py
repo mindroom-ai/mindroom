@@ -17,6 +17,7 @@ from tenacity import retry, retry_if_exception_type, retry_if_not_exception_type
 from mindroom.approval.inbound import handle_tool_approval_action, parse_approval_response_event
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
+from mindroom.config.resolution import entity_timezone
 from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_live_bot
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
 from mindroom.event_journal.legacy_turn_rows import legacy_responses_file_path
@@ -38,6 +39,7 @@ from mindroom.hooks import (
     send_hook_message,
 )
 from mindroom.hooks.ingress import IngressHookRunner
+from mindroom.integrations import reply_mirror_for
 from mindroom.matrix.decrypt_diagnostics import DecryptionDiagnostics
 from mindroom.matrix.durable_ingestion import run_ingestion_pump
 from mindroom.matrix.durable_membership import change_local_membership
@@ -544,7 +546,7 @@ class AgentBot:
         self._journal_principal = principal
 
         def format_local_timestamp(timestamp_ms: float | None) -> str | None:
-            return format_timestamp_ms(timestamp_ms, timezone=self.config.get_entity_timezone(self.agent_name))
+            return format_timestamp_ms(timestamp_ms, timezone=entity_timezone(self.config, self.agent_name))
 
         self._knowledge_access_support = KnowledgeAccessSupport(
             runtime=self._runtime_view,
@@ -676,6 +678,13 @@ class AgentBot:
                 redact_message_event=self._redact_message_event,
                 response_hooks=ResponseHookService(
                     hook_context=self._hook_context_support,
+                    # Reads the live config, which a reload replaces.
+                    reply_mirror=lambda envelope, response_text: reply_mirror_for(
+                        envelope,
+                        response_text,
+                        config=self.config,
+                        runtime_paths=self.runtime_paths,
+                    ),
                 ),
                 outbox=principal,
                 turn_handoff=self._journal_dispatcher.release_delivered_turn_sources,

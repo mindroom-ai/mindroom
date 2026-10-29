@@ -94,11 +94,11 @@ def test_agent_timezone_overrides_the_global_timezone_and_falls_back_to_it() -> 
         teams={"crew": TeamConfig(display_name="Crew", role="Pair", agents=["atlas", "nova"])},
     )
 
-    assert config.get_entity_timezone("atlas") == "Europe/Amsterdam"
-    assert config.get_entity_timezone("nova") == "America/Los_Angeles"
-    assert config.get_entity_timezone("crew") == "America/Los_Angeles"
-    assert config.get_entity_timezone("router") == "America/Los_Angeles"
-    assert config.get_entity_timezone(None) == "America/Los_Angeles"
+    assert config.resolve_scope("atlas").timezone == "Europe/Amsterdam"
+    assert config.resolve_scope("nova").timezone == "America/Los_Angeles"
+    assert config.resolve_scope("crew").timezone == "America/Los_Angeles"
+    assert config.resolve_scope("router").timezone == "America/Los_Angeles"
+    assert config.resolve_scope(None).timezone == "America/Los_Angeles"
 
 
 @pytest.mark.parametrize("zone", ["Mars/Olympus_Mons", "", "../etc/localtime"])

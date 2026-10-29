@@ -56,7 +56,7 @@ Each run keeps the limits and `allowed_tools` value in effect when it started.
 - A non-empty `allowed_tools` list restricts the script to those toolkits, and their functions run without approval.
 - An empty list lets the script call every eligible toolkit on the agent, but each call waits for approval unless a `tool_approval` rule auto-approves it.
 - Unknown or ineligible toolkit names, including `*`, make `start_script` fail with an error.
-- The `browser`, `script`, `agent_manager`, `claude_agent`, `compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `memory`, `self_config`, and `skill_manage` toolkits are never available to scripts, even when the agent has them.
+- The `browser`, `script`, `agent_manager`, `claude_agent`, `compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `memory`, `self_config`, `skill_manage`, and `slack` toolkits are never available to scripts, even when the agent has them.
 - Listing `config_manager` or `scheduler` in `allowed_tools` does not auto-approve their calls; only a `tool_approval` rule can.
 - Operator [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules are checked first, so a matching `require_approval` rule still pauses the call, and functions that declare their own confirmation still ask for it.
 - Only the original requester can approve or deny a script's call, and approval cards for a cancelled or finished run are settled without running the call.
@@ -239,11 +239,10 @@ Cancelling a run cannot roll back a side effect a tool already started; such a c
 
 Kubernetes runs keep running through primary restarts, compatible upgrades, and config reloads that do not affect their owner.
 An upgraded image applies only to new runs; existing runs stay on the image they started with.
-While MindRoom starts up or replaces its worker backend, new launches return an error and must be retried once MindRoom is ready, while SDK calls from running scripts are retried automatically.
+While MindRoom starts up, or applies a config reload that changes a script agent's access, new launches return an error and must be retried once MindRoom is ready, while SDK calls from running scripts are retried automatically.
 Keep the isolated gateway address stable across upgrades.
 
 Docker and local runs are interrupted by every primary restart.
-Worker-backend replacement also interrupts Docker runs.
 
 A run is also interrupted when:
 

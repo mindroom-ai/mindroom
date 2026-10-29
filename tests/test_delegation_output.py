@@ -110,8 +110,7 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
         ],
     )
     ScriptedAgents({"child": child}, by_session={"parent": parent}).install(monkeypatch)
-    workspace = resolve_agent_runtime("leader", config, paths, identity).tool_base_dir
-    assert workspace is not None
+    workspace = resolve_agent_runtime("leader", config, paths, identity).workspace.root
     options = {"config": config, "runtime_paths": paths, "identity": identity}
     result_tool_name = "run_subagent"
     run_id = "parent-run"

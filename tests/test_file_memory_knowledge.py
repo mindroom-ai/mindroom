@@ -8,6 +8,7 @@ import pytest
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
+from mindroom.config.resolution import memory_search
 from mindroom.knowledge.file_memory_knowledge import (
     resolve_agent_file_memory_knowledge,
     resolve_file_memory_knowledge,
@@ -39,7 +40,6 @@ def test_memory_and_agent_resolvers_share_base_and_index_identity(tmp_path: Path
     config = bind_runtime_paths(
         Config(
             agents={"alpha": AgentConfig(display_name="Alpha")},
-            models={},
             memory={
                 "backend": "file",
                 "search": {
@@ -51,7 +51,7 @@ def test_memory_and_agent_resolvers_share_base_and_index_identity(tmp_path: Path
         runtime_paths,
     )
     root = agent_workspace_root_path(runtime_paths.storage_root, "alpha")
-    search_config = config.resolve_entity("alpha").memory_search
+    search_config = memory_search(config, "alpha")
 
     memory_resolution = resolve_file_memory_knowledge(
         scope_user_id=agent_scope_user_id("alpha"),
@@ -99,7 +99,6 @@ def test_agent_resolver_returns_none_for_non_agent_before_runtime_resolution(
     config = bind_runtime_paths(
         Config(
             agents={"alpha": AgentConfig(display_name="Alpha")},
-            models={},
             memory={"backend": "file", "search": {"mode": "semantic"}},
         ),
         runtime_paths,
@@ -138,7 +137,6 @@ def test_agent_resolver_requires_file_backend_and_semantic_mode(
     config = bind_runtime_paths(
         Config(
             agents={"alpha": AgentConfig(display_name="Alpha")},
-            models={},
             memory={"backend": backend, "search": {"mode": mode}},
         ),
         runtime_paths,
@@ -166,7 +164,6 @@ def test_private_agent_resolver_fails_closed_and_scopes_requesters(tmp_path: Pat
                     private=AgentPrivateConfig(per="user", root="mind_data"),
                 ),
             },
-            models={},
             memory={"backend": "file", "search": {"mode": "semantic"}},
         ),
         runtime_paths,

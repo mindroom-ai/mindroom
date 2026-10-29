@@ -45,13 +45,15 @@ def reject_legacy_agent_fields(value: object) -> object:
             msg = "Agent field 'knowledge_base' was removed. Use 'knowledge_bases' (list) instead."
             raise ValueError(msg)
         if "memory_dir" in value:
-            msg = "Agent field 'memory_dir' was removed. Use 'context_files' and memory.backend=file instead."
+            msg = (
+                "Agent field 'memory_dir' was removed. Every agent works in its own workspace: list the files it "
+                "always loads in 'context_files', and set memory_backend=file to keep its memory files there."
+            )
             raise ValueError(msg)
         if "memory_file_path" in value:
             msg = (
-                "Agent field 'memory_file_path' was removed. File-backed agent memory now lives in the "
-                "canonical agent workspace root; keep memory_backend=file and configure context_files "
-                "relative to that workspace."
+                "Agent field 'memory_file_path' was removed. With memory_backend=file, an agent's memory files "
+                "live in its workspace root; configure context_files relative to that workspace."
             )
             raise ValueError(msg)
         if "sandbox_tools" in value:
@@ -153,8 +155,21 @@ def retired_tool_override(overrides: Mapping[str, object]) -> tuple[str, str] | 
 #   the SDK clients' configurable retries are off.
 # Handling: Reject it at config load on every provider, naming the key and saying to remove it.
 # Coverage: tests/test_extra_kwargs.py::test_a_retired_max_retries_fails_config_load_with_its_reason.
+# LEGACY_COMPAT: Retired role_map setting of Chat Completions models.
+# Legacy format: models.<name>.extra_kwargs.role_map on a Chat Completions route, Agno's OpenAIChat field mapping each
+#   message role to the role a request sends.
+# Last legacy release: v2026.10.663, which accepted it as a typed Chat setting, as Agno's model classes did through
+#   v2026.10.498; replacement: unreleased; requests send the system prompt as developer on provider openai and as
+#   system on every other Chat Completions provider, and every other role as it is.
+# Handling: Reject it at config load on every provider, naming the key and saying what to do instead.
+# Coverage: tests/test_extra_kwargs.py::test_a_retired_role_map_fails_config_load_with_its_reason.
 _RETIRED_MODEL_SETTINGS = {
     "max_retries": "MindRoom retries a failed model request itself, so remove the setting",
+    "role_map": (
+        "Chat Completions requests send the system prompt as developer with provider openai and as system with every "
+        "other provider, so remove the setting, or use provider llama_cpp with the base_url of an OpenAI-compatible "
+        "server that rejects the developer role"
+    ),
 }
 
 

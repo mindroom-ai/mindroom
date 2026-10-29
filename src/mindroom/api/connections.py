@@ -198,8 +198,9 @@ def _agent_connections(
     services: dict[str, ConnectionService] = {}
     tools: list[ConnectionTool] = []
     config = user.config
-    entity = config.resolve_entity(agent_name)
-    for tool_name in entity.available_tools:
+    resolved = config.resolve_agent(agent_name)
+    shared_scope = resolved.policy.effective_execution_scope in {None, "shared"}
+    for tool_name in resolved.tools.tool_names:
         tool = metadata.get(tool_name)
         if tool is None:
             continue
@@ -216,7 +217,7 @@ def _agent_connections(
         )
         if provider is None:
             continue
-        shared = not provider.requester_scoped_credentials and entity.execution_scope in {None, "shared"}
+        shared = not provider.requester_scoped_credentials and shared_scope
         service = services.setdefault(
             provider.id,
             ConnectionService(
@@ -240,9 +241,7 @@ def _agent_connections(
         agent_display_name=agent.display_name,
         is_shared=agent.private is None,
         can_use=agent_name in user.agent_names,
-        managers=(
-            list(agent.credential_managers) if names_managers and entity.execution_scope in {None, "shared"} else []
-        ),
+        managers=list(agent.credential_managers) if names_managers and shared_scope else [],
         mcp_available=agent_name in user.gateway_agent_names,
         services=list(services.values()),
         tools=tools,
