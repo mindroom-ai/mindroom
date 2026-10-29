@@ -387,6 +387,138 @@ async def test_a_nested_worker_call_keeps_capacity_on_the_gateway_pool_until_its
             await gateway_toolkits.drain_gateway_tool_cleanup()
 
 
+def _routed_sibling(context: AgentToolContext) -> Toolkit:  # noqa: F811
+    """Return a toolkit whose one synchronous function is worker-routed, as the sandbox proxy wraps it."""
+
+    def inner() -> str:
+        return "local"
+
+    sibling = Toolkit(name="sibling", tools=[inner])
+    sibling.async_functions = {
+        name: sandbox_proxy._wrap_async_proxy(
+            function,
+            "sibling",
+            name,
+            runtime_paths=context.runtime_paths,
+            credentials_manager=None,
+        )
+        for name, function in {**sibling.functions, **sibling.async_functions}.items()
+    }
+    return sibling
+
+
+async def test_a_cancelled_call_with_two_nested_worker_calls_keeps_capacity_until_both_return(
+    context: AgentToolContext,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The call is answered at once, and its slot stays held until the second of its two requests returns."""
+    starts = [threading.Event(), threading.Event()]
+    releases = [threading.Event(), threading.Event()]
+    finished = [threading.Event(), threading.Event()]
+    order = iter(range(2))
+    lock = threading.Lock()
+
+    def proxy(**_kwargs: object) -> str:
+        with lock:
+            index = next(order)
+        starts[index].set()
+        try:
+            assert releases[index].wait(5)
+            return "done"
+        finally:
+            finished[index].set()
+
+    sibling = _routed_sibling(context)
+
+    async def work() -> list[str]:
+        inner = toolkit_functions(sibling)["inner"]
+        return list(await asyncio.gather(inner(), inner()))
+
+    monkeypatch.setattr(sandbox_proxy, "_call_proxy_sync", proxy)
+    monkeypatch.setattr(
+        agents,
+        "build_agent_toolkit",
+        lambda *_args, **_kwargs: Toolkit(name="calculator", tools=[work]),
+    )
+
+    async def dispatch(_request: Request, _name: str, arguments: dict[str, object]) -> dict[str, object]:
+        if arguments.get("query") == "probe":
+            return {"ok": True}
+        return await gateway.invoke_tool(context, toolkit="calculator", function="work", arguments={})
+
+    async with _client(dispatch, max_active_calls=1) as client:
+        first = asyncio.create_task(client.post("/mcp", json=_call(1)))
+        try:
+            for started in starts:
+                await _wait(started)
+            await client.post("/mcp", json=_cancel(1))
+            assert _code(await asyncio.wait_for(first, 2)) == "cancelled"
+            releases[0].set()
+            await _wait(finished[0])
+            await asyncio.sleep(0.2)
+            assert _code(await client.post("/mcp", json=_call(2, arguments={"query": "probe"}))) == "busy"
+            releases[1].set()
+            await _wait(finished[1])
+            await gateway_toolkits.drain_gateway_tool_cleanup()
+            assert _code(await client.post("/mcp", json=_call(3, arguments={"query": "probe"}))) is None
+        finally:
+            for release in releases:
+                release.set()
+            await asyncio.gather(first, return_exceptions=True)
+            await gateway_toolkits.drain_gateway_tool_cleanup()
+
+
+async def test_a_nested_worker_call_still_queued_when_its_call_ends_never_runs(
+    context: AgentToolContext,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Work a gateway call submitted that the pool had not begun when the call ended never runs after its cleanup."""
+    first_started, release_first = threading.Event(), threading.Event()
+    requests: list[str] = []
+    detached: list[asyncio.Task[object]] = []
+
+    def proxy(**_kwargs: object) -> str:
+        requests.append(threading.current_thread().name)
+        if len(requests) == 1:
+            first_started.set()
+            assert release_first.wait(5)
+        return "done"
+
+    sibling = _routed_sibling(context)
+
+    async def work() -> str:
+        inner = toolkit_functions(sibling)["inner"]
+        detached.append(asyncio.create_task(inner()))
+        await _wait(first_started)
+        # Queued behind the first on the gateway's only thread.
+        detached.append(asyncio.create_task(inner()))
+        await asyncio.sleep(0)
+        return "returned"
+
+    monkeypatch.setattr(sandbox_proxy, "_call_proxy_sync", proxy)
+    monkeypatch.setattr(gateway_toolkits, "_TOOL_EXECUTOR", ThreadPoolExecutor(max_workers=1))
+    monkeypatch.setattr(
+        agents,
+        "build_agent_toolkit",
+        lambda *_args, **_kwargs: Toolkit(name="calculator", tools=[work]),
+    )
+    try:
+        result = await asyncio.wait_for(
+            gateway.invoke_tool(context, toolkit="calculator", function="work", arguments={}),
+            timeout=5,
+        )
+        release_first.set()
+        await gateway_toolkits.drain_gateway_tool_cleanup()
+        await asyncio.gather(*detached, return_exceptions=True)
+    finally:
+        release_first.set()
+        await asyncio.gather(*detached, return_exceptions=True)
+        await gateway_toolkits.drain_gateway_tool_cleanup()
+
+    assert result == {"result": "returned"}
+    assert len(requests) == 1
+
+
 async def test_cancelled_google_scholar_search_keeps_capacity_until_the_scrape_returns(
     context: AgentToolContext,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,

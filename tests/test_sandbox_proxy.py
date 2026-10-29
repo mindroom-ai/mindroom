@@ -1114,7 +1114,7 @@ async def test_a_worker_routed_toolkit_function_runs_more_than_once_inside_one_t
         restore()
 
     assert results == ["sandbox-result"] * 4
-    assert [task.done() for task in tracker.started_tasks()] == [True] * 4
+    assert [task.done() for task in tracker.settle()] == [True] * 4
 
 
 @pytest.mark.asyncio
@@ -1157,7 +1157,7 @@ async def test_a_cancelled_toolkit_function_call_returns_at_once_and_leaves_its_
             with contextlib.suppress(asyncio.CancelledError):
                 async with asyncio.timeout(2):
                     await call
-            [leaf] = tracker.started_tasks()
+            [leaf] = tracker.settle()
             held = not leaf.done()
             releases[0].set()
             assert await leaf == "sandbox-result"
@@ -1224,7 +1224,7 @@ async def test_a_plugins_timeout_around_a_toolkit_function_call_fires_on_time(
             elapsed = time.monotonic() - began
     finally:
         releases[0].set()
-        await asyncio.gather(*tracker.started_tasks(), return_exceptions=True)
+        await asyncio.gather(*tracker.settle(), return_exceptions=True)
         restore()
 
     assert elapsed < 5

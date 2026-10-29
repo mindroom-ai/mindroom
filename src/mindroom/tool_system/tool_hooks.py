@@ -108,11 +108,6 @@ class _StartClaim:
             self._cancelled_before_start = True
             return True
 
-    def started(self) -> bool:
-        """Return whether the real entrypoint has begun."""
-        with self._lock:
-            return self._started
-
 
 @dataclass(slots=True)
 class SyncToolCompletionTracker:
@@ -132,10 +127,28 @@ class SyncToolCompletionTracker:
         init=False,
         repr=False,
     )
+    _settled: bool = field(default=False, init=False, repr=False)
 
-    def started_tasks(self) -> list[asyncio.Task[_ToolHookResult]]:
-        """Return the completion task of each leaf whose real entrypoint has begun."""
-        return [task for claim, task in self._leaves if claim.started()]
+    def _track(self, claim: _StartClaim, task: asyncio.Task[_ToolHookResult]) -> None:
+        """Hold one leaf for the owner, or keep it from ever starting once the owner has settled the call."""
+        if not self._settled:
+            self._leaves.append((claim, task))
+        elif claim.cancel_before_start():
+            task.cancel()
+
+    def settle(self) -> list[asyncio.Task[_ToolHookResult]]:
+        """End the call for its owner: no leaf starts from now on, and return the ones whose entrypoint began.
+
+        Every owner calls this on every way its call ends, then waits for or retains what it returns.
+        """
+        self._settled = True
+        started: list[asyncio.Task[_ToolHookResult]] = []
+        for claim, task in self._leaves:
+            if claim.cancel_before_start():
+                task.cancel()
+            else:
+                started.append(task)
+        return started
 
 
 _SYNC_TOOL_COMPLETION_TRACKER: ContextVar[SyncToolCompletionTracker | None] = ContextVar(
@@ -167,7 +180,7 @@ async def owned_sync_tool_completion(executor: Executor | None = None) -> AsyncI
         with track_sync_tool_completion(tracker):
             yield
     finally:
-        if started := tracker.started_tasks():
+        if started := tracker.settle():
             await wait_for_future_until_complete(asyncio.gather(*started, return_exceptions=True))
 
 
@@ -343,7 +356,7 @@ async def run_sync_tool_entrypoint(call: Callable[[], _ToolHookResult]) -> _Tool
     task = asyncio.create_task(offload(), name="sync-tool-entrypoint")
     if tracker is None:
         return await task
-    tracker._leaves.append((claim, task))
+    tracker._track(claim, task)
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:

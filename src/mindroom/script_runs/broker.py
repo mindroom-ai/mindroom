@@ -608,7 +608,7 @@ class ScriptToolBroker:
         toolkit = prepared.toolkit
         function = prepared.function
         completion_tracker = SyncToolCompletionTracker()
-        cleanup_transferred = False
+        cancelled = False
 
         async def execute_function() -> CallResult:
             with tool_runtime_context(context), track_sync_tool_completion(completion_tracker):
@@ -658,14 +658,15 @@ class ScriptToolBroker:
                 operation=execute_function,
             )
         except asyncio.CancelledError:
-            if pending := [task for task in completion_tracker.started_tasks() if not task.done()]:
-                self._retain_toolkit_cleanup(pending, toolkit)
-            else:
-                self._retain_toolkit_close(toolkit)
-            cleanup_transferred = True
+            cancelled = True
             raise
         finally:
-            if not cleanup_transferred:
+            # A body the call started that still runs, after a cancel or beside a failure, keeps the toolkit.
+            if pending := [task for task in completion_tracker.settle() if not task.done()]:
+                self._retain_toolkit_cleanup(pending, toolkit)
+            elif cancelled:
+                self._retain_toolkit_close(toolkit)
+            else:
                 await self._close_toolkit_owned(toolkit)
 
     async def _current_execution_decision(

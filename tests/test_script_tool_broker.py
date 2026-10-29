@@ -1504,6 +1504,59 @@ async def test_cancelled_call_keeps_its_toolkit_until_every_nested_body_returns(
 
 
 @pytest.mark.asyncio
+async def test_failed_call_keeps_its_toolkit_until_a_sibling_body_returns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call that fails while another synchronous body it started still runs keeps its toolkit until that returns."""
+    entered, release, close_started = threading.Event(), threading.Event(), threading.Event()
+
+    def running() -> int:
+        entered.set()
+        release.wait()
+        return 0
+
+    def failing() -> int:
+        assert entered.wait(SETTLE_TIMEOUT_SECONDS)
+        msg = "the second body failed"
+        raise RuntimeError(msg)
+
+    class SiblingBodiesToolkit(Toolkit):
+        _requires_connect = True
+
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        def connect(self) -> None:
+            return None
+
+        def close(self) -> None:
+            close_started.set()
+
+        async def add(self, a: int, b: int) -> int:
+            first, second = await asyncio.gather(run_sync_tool_entrypoint(running), run_sync_tool_entrypoint(failing))
+            return a + b + first + second
+
+    _replace_calculator_toolkit(monkeypatch, SiblingBodiesToolkit)
+    broker, token = _broker(tmp_path, events=[])
+    request = _request(call_id="failed-with-running-sibling")
+    try:
+        call = await asyncio.wait_for(_call_through_gateway(broker, request, token), timeout=SETTLE_TIMEOUT_SECONDS)
+        close_started_while_sibling_ran = await asyncio.to_thread(close_started.wait, 0.2)
+        release.set()
+        close_did_start = await asyncio.to_thread(close_started.wait, SETTLE_TIMEOUT_SECONDS)
+    finally:
+        release.set()
+    cleanup_drained = await drain_script_tool_cleanup(broker, timeout_seconds=SETTLE_TIMEOUT_SECONDS)
+
+    assert call.state is ScriptCallState.FAILED
+    assert close_started_while_sibling_ran is False
+    assert close_did_start is True
+    assert cleanup_drained is True
+    await _assert_cleanup_forgotten(broker)
+
+
+@pytest.mark.asyncio
 async def test_cancelled_sync_close_keeps_one_owner_through_repeated_cancellation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

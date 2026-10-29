@@ -220,7 +220,8 @@ async def run_toolkit_operation[T](
         cancelled = True
         raise
     finally:
-        leaves = [pending] if pending is not None else tracker.started_tasks()
+        settled = tracker.settle()
+        leaves = [pending] if pending is not None else settled
         waiting = asyncio.gather(*leaves, return_exceptions=True) if leaves else None
         cleanup = _close_after(waiting, toolkit) if waiting is not None else _close(toolkit)
         close_task = _retain(cleanup)
