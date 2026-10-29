@@ -857,7 +857,7 @@ def serialize_tool_trace(
 # Legacy format: an entry of the internal tool trace a reply record stores (``serialize_tool_trace(...,
 # include_internal=True)``) with ``scope_key`` ``team`` for a team leader's call or ``agent:<id>`` for a member's,
 # where ``<id>`` is the member's id in the version-2 team snapshot stored beside the trace.
-# Last legacy release: v2026.10.674, whose ``_internal_fields`` (``tool_system/events.py``) stored the scope the team
+# Last legacy release: v2026.10.677, whose ``_internal_fields`` (``tool_system/events.py``) stored the scope the team
 # presentation (``teams/presentation.py``) gave each call; replacement: the next release, which stores a member's call
 # with ``member_id``, the member's config name, and a leader's call with neither key.
 # Handling: ``team`` reads as no member and ``agent:<id>`` as member ``<id>``, which the version-2 snapshot's reader

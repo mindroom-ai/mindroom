@@ -35,7 +35,7 @@ def _is_v2_member(member: object) -> bool:
 # that ``config_name``, and whose ``separate_next_scopes`` name a member slot as ``agent:<id>`` and the consensus as
 # ``team``; the tool trace stored with it names each member call's slot by that ``<id>`` too (the trace's own
 # ``LEGACY_COMPAT`` rule in ``tool_system/events.py`` reads its ``scope_key``).
-# Last legacy release: v2026.10.674, whose ``TeamStreamPresentation.to_state`` (``teams/presentation.py``) wrote it, as
+# Last legacy release: v2026.10.677, whose ``TeamStreamPresentation.to_state`` (``teams/presentation.py``) wrote it, as
 # the Agno runtime did before it; replacement: the next release, whose version-3 snapshot keys each member by its
 # config name alone and lists the slots a hidden tool call separates as ``separate_next_slots``, a member's config
 # name or null for the consensus.
