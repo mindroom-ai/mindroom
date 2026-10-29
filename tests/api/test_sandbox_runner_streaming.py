@@ -23,6 +23,7 @@ from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_system.progress import report_tool_progress, tool_progress_reporter
+from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteResponse
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -65,7 +66,7 @@ def _fake_tool(monkeypatch: pytest.MonkeyPatch, entrypoint: Callable[..., object
 
 
 def _stream(client: TestClient, **request: Any) -> list[dict[str, Any]]:  # noqa: ANN401
-    body = {"tool_name": "fake", "function_name": "call", **request}
+    body = {"protocol": WORKER_PROTOCOL_VERSION, "tool_name": "fake", "function_name": "call", **request}
     with client.stream("POST", _EXECUTE, headers=_HEADERS, json=body) as response:
         assert response.status_code == 200
         return [json.loads(line) for line in response.iter_lines() if line]
@@ -294,9 +295,9 @@ def test_a_spawned_child_runs_a_job_request_as_part_of_that_job(monkeypatch: pyt
     """A per-request child binds the job its request belongs to before running the tool."""
     seen: list[bool] = []
 
-    async def fake_execute(*_args: object, **_kwargs: object) -> sandbox_runner_module.SandboxRunnerExecuteResponse:
+    async def fake_execute(*_args: object, **_kwargs: object) -> ExecuteResponse:
         seen.append(job_owns_execution())
-        return sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="done")
+        return ExecuteResponse(ok=True, result="done")
 
     monkeypatch.setattr(sandbox_runner_module, "_execute_prepared_request_inprocess", fake_execute)
     monkeypatch.setattr(sandbox_runner_module, "_ensure_registry_loaded_with_config", lambda *_args: None)
@@ -375,7 +376,7 @@ async def test_a_dropped_stream_cancels_the_call(monkeypatch: pytest.MonkeyPatch
 
     _fake_tool(monkeypatch, entrypoint)
     sent = await _drive_until_disconnect(
-        {"tool_name": "fake", "function_name": "call"},
+        {"protocol": WORKER_PROTOCOL_VERSION, "tool_name": "fake", "function_name": "call"},
         disconnect_after=started.is_set,
     )
 
@@ -393,7 +394,13 @@ async def test_a_dropped_stream_kills_a_worker_shell_command(monkeypatch: pytest
     command = f"echo $$ > {shlex.quote(str(pid_file))}; sleep 300"
 
     sent = await _drive_until_disconnect(
-        {"tool_name": "shell", "function_name": "run_shell_command", "args": [command], "run_as_job": True},
+        {
+            "protocol": WORKER_PROTOCOL_VERSION,
+            "tool_name": "shell",
+            "function_name": "run_shell_command",
+            "args": [command],
+            "run_as_job": True,
+        },
         disconnect_after=lambda: pid_file.exists() and bool(pid_file.read_text()),
     )
 

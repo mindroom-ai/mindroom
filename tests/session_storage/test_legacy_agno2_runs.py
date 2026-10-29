@@ -54,7 +54,7 @@ def _agno_2_database(tmp_path: Path) -> Path:
 
 
 def _converted(db_file: Path) -> ConversationStore:
-    prepare_conversation_database(db_file, _NAMES)
+    prepare_conversation_database(db_file, _NAMES, agent_name=None)
     return ConversationStore(db_file)
 
 
@@ -300,7 +300,7 @@ def test_owners_migrating_at_once_move_the_blob_runs_once(tmp_path: Path) -> Non
 
     def migrate(_index: int) -> None:
         start.wait()
-        prepare_conversation_database(db_file, _NAMES)
+        prepare_conversation_database(db_file, _NAMES, agent_name=None)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(migrate, range(4)))
@@ -325,7 +325,7 @@ def test_a_move_that_fails_part_way_leaves_the_database_as_agno_2_left_it(
     with monkeypatch.context() as patch:
         patch.setattr(legacy_compaction_state, "move_blob_runs_to_rows", move_then_fail)
         with pytest.raises(sqlite3.OperationalError, match="disk is full"):
-            prepare_conversation_database(db_file, _NAMES)
+            prepare_conversation_database(db_file, _NAMES, agent_name=None)
 
     with closing(sqlite3.connect(db_file)) as connection:
         assert list(connection.iterdump()) == before

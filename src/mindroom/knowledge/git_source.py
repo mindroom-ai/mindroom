@@ -48,9 +48,9 @@ from mindroom.knowledge.redaction import (
     embedded_http_userinfo,
     fully_unquoted,
     redact_credentials_in_text,
-    redact_url_credentials,
 )
 from mindroom.logging_config import get_logger
+from mindroom.redaction import redact_url_credentials
 from mindroom.tool_system.worker_routing import SHARED_DIRECTORIES_DIRNAME, shared_storage_root
 
 if TYPE_CHECKING:

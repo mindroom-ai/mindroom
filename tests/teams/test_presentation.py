@@ -10,20 +10,20 @@ import pytest
 
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.llm.events import ReportedCall, TextDelta, ToolCompleted, ToolStarted
-from mindroom.llm.messages import Message
-from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
+from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.redaction import redact_sensitive_text
 from mindroom.response_turn import PausedAttempt
+from mindroom.teams.attempt import TeamAttempt
 from mindroom.teams.presentation import (
     TeamStreamPresentation,
     apply_team_event,
-    finished_run_text,
     format_team_header,
     render_team_member_slots,
     strip_team_display,
     url_safe_member_id,
 )
 from mindroom.teams.runtime import MemberEvent
+from tests.teams.squad import resolved_members, scripted, team_spec
 
 
 def _presentation(*, show_tool_calls: bool = False) -> TeamStreamPresentation:
@@ -137,39 +137,15 @@ def test_members_without_a_consensus_get_the_no_consensus_note_once_finished_and
     assert format_team_header(["Ledger", "Scout"]) == "🤝 **Team Response** (Ledger, Scout):\n\n"
 
 
-def test_a_finished_run_without_content_reads_as_the_text_its_model_wrote() -> None:
-    """A run whose content is empty shows the text its own model requests wrote.
-
-    An earlier reply in the thread reaches the run's input as an assistant message no model answered, so it is not
-    the run's text.
-    """
-    answered = {"mindroom_model": {"id": "scout-model", "provider": "Synthetic"}}
-    scout = RunRecord(
-        run_id="scout-run",
-        agent_id="scout",
-        agent_display_name="Scout",
-        messages=[
-            Message(role="assistant", content="\n\nAn earlier reply."),
-            Message(role="user", content="Find vendors."),
-            Message(role="assistant", content="Three vendors.", provider_data=answered),
-            Message(role="assistant", tool_calls=[{"id": "call-1"}], provider_data=answered),
-            Message(role="tool", content="two more", tool_call_id="call-1"),
-            Message(role="assistant", content="Two more.", provider_data=answered),
-        ],
-    )
-
-    assert finished_run_text(scout) == "Three vendors.\n\nTwo more."
-
-
 _RAW_FAILURE = "checker provider down: api_key=example-secret"
 
 
-@pytest.mark.parametrize("source", ["live", "loaded"])
-def test_a_failed_member_run_shows_its_redacted_reason(source: str) -> None:
-    """A member whose run failed shows why, credentials redacted, whether its record is live or loaded from storage.
+@pytest.mark.parametrize("source", ["current", "stored-before-errors"])
+def test_a_failed_member_shows_its_redacted_reason_in_the_team_document(source: str) -> None:
+    """A member whose run failed shows why, credentials redacted, whether its record carries an error or predates it.
 
-    The live record carries the reason the loop recorded, though its model wrote text first; a loaded one holds only
-    its stored content, the raw error, since the model wrote nothing.
+    A current record carries the reason the loop recorded, though its model wrote text first; one stored before
+    failed runs stored their error holds only its content, the raw error, since the model wrote nothing.
     """
     reason = redact_sensitive_text(_RAW_FAILURE)
     checker = RunRecord(
@@ -177,14 +153,28 @@ def test_a_failed_member_run_shows_its_redacted_reason(source: str) -> None:
         agent_id="checker",
         agent_display_name="Checker",
         status=RunStatus.error,
-        content="I will check." if source == "live" else _RAW_FAILURE,
-        error=reason if source == "live" else None,
+        content="I will check." if source == "current" else _RAW_FAILURE,
+        error=reason if source == "current" else None,
     )
 
-    text = finished_run_text(checker)
+    presentation = TeamStreamPresentation.new(["checker"], ["Checker"], show_tool_calls=False)
+    attempt = TeamAttempt(
+        run_id="team-run",
+        members=resolved_members({"checker": "Checker"}),
+        team=team_spec("squad", "Squad", scripted("leader-model"), "You lead the squad.", ()),
+        presentation=presentation,
+        team_name="squad",
+        runtime_model_name="default",
+        prepared_history=None,
+    )
+    apply_team_event(presentation, TextDelta("Unchecked."))
 
-    assert text == reason
-    assert "example-secret" not in text
+    attempt.show_failure_reasons(
+        TeamRunRecord(run_id="team-run", content="Unchecked.", ended_member_runs=[checker], team_id=None),
+    )
+    document = presentation.text_without_tool_markers(finished=True)
+    assert document == f"**Checker**: {reason}\n\n\n**Team Consensus**:\n\nUnchecked."
+    assert "example-secret" not in document
 
 
 def test_hidden_tool_calls_separate_the_text_that_follows_them_and_survive_the_snapshot() -> None:

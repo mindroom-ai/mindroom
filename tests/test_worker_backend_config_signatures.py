@@ -641,8 +641,8 @@ def test_docker_signature_changes_when_one_field_changes(
     )
 
 
-def test_docker_signature_changes_with_auth_token_and_grantable_credentials(tmp_path: Path) -> None:
-    """Auth token and grantable-credential changes must invalidate the Docker cache signature."""
+def test_docker_signature_changes_with_auth_token(tmp_path: Path) -> None:
+    """An auth token change must invalidate the Docker cache signature."""
     runtime_paths = _runtime_paths(tmp_path, _MINIMAL_DOCKER_ENV)
     base = docker_backend_config_signature(
         runtime_paths,
@@ -654,12 +654,6 @@ def test_docker_signature_changes_with_auth_token_and_grantable_credentials(tmp_
         runtime_paths,
         auth_token="rotated-token",  # noqa: S106
         storage_path=runtime_paths.storage_root,
-    )
-    assert base != docker_backend_config_signature(
-        runtime_paths,
-        auth_token=_TEST_AUTH_TOKEN,
-        storage_path=runtime_paths.storage_root,
-        worker_grantable_credentials=frozenset({"OPENAI_API_KEY"}),
     )
 
 

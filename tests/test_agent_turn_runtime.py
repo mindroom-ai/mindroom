@@ -614,7 +614,7 @@ async def test_a_provider_error_stores_an_error_record_and_streams_the_friendly_
     assert "Rate limited" in text
     [failed] = replaced
     assert failed.status is RunStatus.error
-    assert failed.content == "slow down"
+    assert (failed.content, failed.error) == (None, "slow down")
     record = _stored(reply)
     assert is_interrupted_replay_run(record)
     assert (record.metadata or {})["mindroom_original_status"] == "error"
@@ -649,7 +649,7 @@ async def test_an_error_record_never_repeats_an_earlier_answer(
     assert "Rate limited" in text
     [failed] = replaced
     assert failed.status is RunStatus.error
-    assert failed.content == "slow down"
+    assert (failed.content, failed.error) == (None, "slow down")
     assert all("green pixel" not in str(message.content) for message in failed.messages if message.role == "assistant")
     record = _stored(reply)
     assert all("green pixel" not in str(message.content) for message in record.messages if message.role == "assistant")
@@ -1190,7 +1190,7 @@ async def test_a_third_cut_off_response_fails_the_run(
     assert streamed_text(chunks)
     [failed] = replaced
     assert failed.status is RunStatus.error
-    assert "output limit" in str(failed.content)
+    assert "output limit" in str(failed.error)
 
 
 @pytest.mark.asyncio
@@ -1212,7 +1212,7 @@ async def test_a_safeguard_refusal_is_stored_and_reported_as_an_error(
     assert streamed_text(chunks)
     [failed] = replaced
     assert failed.status is RunStatus.error
-    assert failed.content == MODEL_SAFEGUARD_REFUSAL_MESSAGE
+    assert (failed.content, failed.error) == (None, MODEL_SAFEGUARD_REFUSAL_MESSAGE)
 
 
 @pytest.mark.asyncio

@@ -22,6 +22,7 @@ from mindroom.redaction import (
     redact_log_event,
     redact_sensitive_data,
     redact_sensitive_text,
+    redact_url_credentials,
 )
 from tests.cpu_budget_helpers import cpu_budget
 
@@ -1530,3 +1531,89 @@ def test_many_pem_markers_in_a_megabyte_are_scanned_in_linear_time() -> None:
         redacted = redact_sensitive_data({"content": f"A private key follows.\n{certificates}{key * key_count}"})
 
     assert redacted == {"content": f"A private key follows.\n{certificates}{(REDACTED + chr(10)) * key_count}"}
+
+
+@pytest.mark.parametrize(
+    ("url", "redacted"),
+    [
+        ("https://user:password@example.com/repo.git", "https://***@example.com/repo.git"),
+        ("https://ghp_secret:x-oauth-basic@example.com/repo.git", "https://***@example.com/repo.git"),
+        ("https://username@example.com/repo.git", "https://***@example.com/repo.git"),
+        ("ssh://git@example.com/repo.git", "ssh://***@example.com/repo.git"),
+        ("ssh://user:pass@example.com/repo.git", "ssh://***@example.com/repo.git"),
+        ("git+https://user:pass@example.com/repo.git", "git+https://***@example.com/repo.git"),
+        ("https://example.com/repo.git?token=secret#frag-secret", "https://example.com/repo.git"),
+        (
+            "https://user:password@example.com/org/repo.git;token=secret?query=secret#frag-secret",
+            "https://***@example.com/org/repo.git",
+        ),
+        ("http://127.0.0.1:8188/view?filename=cat.png#preview", "http://127.0.0.1:8188/view"),
+        ("http://[::1]:9000/bucket/cat.png?X-Amz-Signature=abc", "http://[::1]:9000/bucket/cat.png"),
+        ("https://media.example/a;session=abc/cat.png;v=1", "https://media.example/a"),
+        ("https://user:hunter2\uff20example.com/repo.git", "***"),
+        ("https://exa\uff1aple.com/repo.git", "***"),
+        ("relative/path?token=abc", "relative/path?token=abc"),
+    ],
+    ids=[
+        "password",
+        "token-username",
+        "username",
+        "ssh-username",
+        "ssh-password",
+        "compound-scheme",
+        "query-and-fragment",
+        "path-parameters-query-and-fragment",
+        "port",
+        "ipv6",
+        "path-parameters",
+        "unparseable",
+        "unparseable-without-userinfo",
+        "no-scheme",
+    ],
+)
+def test_a_redacted_url_keeps_its_scheme_host_port_and_path(url: str, redacted: str) -> None:
+    """Userinfo is masked, path parameters, query, and fragment go, and an unparseable URL goes whole.
+
+    A value without a scheme or host is kept.
+    """
+    assert redact_url_credentials(url) == redacted
+
+
+# Text the parser rejects as a URL that holds no userinfo: a sentence running on from a host without a path, and an at
+# sign after the host.
+_REJECTED_WITHOUT_USERINFO = {
+    "chinese-question-mark": "请看https://github.com，里面有详细说明。你觉得怎么样？",  # noqa: RUF001
+    "chinese-colon": "我在https://example.com上找到了答案：用这个方法就行。",  # noqa: RUF001
+    "japanese-colon": "公式サイトhttps://example.jpを参照してください。質問：",  # noqa: RUF001
+    "at-sign-in-path": "我看https://example.com：见/docs@v2说明",  # noqa: RUF001
+    "at-sign-in-query": "我看https://example.com：见?ref=a@b说明",  # noqa: RUF001
+    "at-sign-in-fragment": "我看https://example.com：见#a@b说明",  # noqa: RUF001
+}
+
+
+@pytest.mark.parametrize("text", list(_REJECTED_WITHOUT_USERINFO.values()), ids=list(_REJECTED_WITHOUT_USERINFO))
+def test_text_the_parser_rejects_as_a_url_stays_unless_it_could_hide_userinfo(text: str) -> None:
+    """A URL in running text reaches the next ASCII space, so the sentence after a bare host stays as it was."""
+    assert redact_sensitive_text(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "redacted"),
+    [
+        ("fatal: https://user:hunter2\uff20example.com/repo.git failed", "fatal: *** failed"),
+        ("connect postgresql://user:pw@[::1/db now", "connect *** now"),
+    ],
+    ids=["fullwidth-at", "unbalanced-ipv6-userinfo"],
+)
+def test_a_url_the_parser_rejects_goes_whole_when_it_could_hide_userinfo(text: str, redacted: str) -> None:
+    """An at sign before the host, once NFKC-normalised, may end a password, so the whole URL goes."""
+    assert redact_sensitive_text(text) == redacted
+
+
+def test_the_log_redactor_hides_a_url_the_parser_rejects_whole() -> None:
+    """A fullwidth at sign (U+FF20) before the host makes the parse fail, which must not let the password through."""
+    url = "https://user:hunter2\uff20example.com/repo.git"
+
+    redacted = redact_log_event(None, "warning", {"event": "git_failed", "url": url, "error": f"cannot reach '{url}'"})
+
+    assert redacted == {"event": "git_failed", "url": "***", "error": "cannot reach '***'"}

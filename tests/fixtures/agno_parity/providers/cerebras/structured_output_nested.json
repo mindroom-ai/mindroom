@@ -203,10 +203,20 @@
     "message": {
       "content": "{\"cron_schedule\": {\"day\": \"*\", \"hour\": \"5\", \"minute\": \"30\", \"month\": \"*\", \"weekday\": \"1-5\"}, \"description\": \"Weekday Paris packing check\", \"execute_at\": null, \"history_limit\": 0, \"is_conditional\": false, \"message\": \"@travel_agent Check the Paris forecast and say what to pack.\", \"new_thread\": true, \"schedule_type\": \"cron\"}",
       "provider_data": {
+        "id": "chatcmpl-parity",
         "mindroom_model": {
           "id": "gpt-oss-120b",
           "provider": "Cerebras"
-        }
+        },
+        "model_extra": {
+          "time_info": {
+            "completion_time": 0.01,
+            "prompt_time": 0.002,
+            "queue_time": 0.001,
+            "total_time": 0.013
+          }
+        },
+        "system_fingerprint": "fp_parity"
       },
       "role": "assistant"
     },

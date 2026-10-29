@@ -158,7 +158,7 @@ def observe(
             lambda: sorted(read_scope_seen_event_ids(store, session, scope)) if session is not None else [],
         ),
         "redaction_candidates": _safely(
-            lambda: sorted(_read_scope_history_event_ids(store, session, scope)) if session is not None else [],
+            lambda: sorted(_read_scope_history_event_ids(store, session)) if session is not None else [],
         ),
         "folded_tool_call_ids": _safely(lambda: _folded_tool_call_ids(store, session_id, folded_of)),
         "list_runs": list_error

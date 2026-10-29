@@ -37,7 +37,6 @@ from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
 from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider
 from mindroom.knowledge.indexing_config import knowledge_git_dir
 from mindroom.knowledge.manager import KnowledgeManager
-from mindroom.knowledge.redaction import redact_url_credentials
 from mindroom.knowledge.refresh_locks import refresh_source_root_lock
 from mindroom.knowledge.refresh_runner import (
     _refresh_knowledge_binding as refresh_knowledge_binding,
@@ -53,6 +52,7 @@ from mindroom.knowledge.registry import (
     source_root_for_published_index_key,
 )
 from mindroom.knowledge.vector_store import KnowledgeCollection, list_collection_names
+from mindroom.redaction import redact_url_credentials
 from tests.conftest import runtime_paths_for
 from tests.knowledge_test_support import (
     _config,

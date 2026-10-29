@@ -133,7 +133,8 @@ def _bound_probe_client_timeout(embedder: Embedder) -> None:
 
     The installed OpenAI SDK defaults allow a 600-second read timeout plus
     retries, which would hang `mindroom doctor` and pin probe threads for
-    minutes; normal runtime embedding traffic keeps the SDK defaults.
+    minutes; runtime searches and memory keep the SDK defaults, and only a
+    knowledge refresh, which retries itself, turns its retries off.
     """
     from mindroom.embeddings.openai_embedder import OpenAIEmbedder  # noqa: PLC0415
 

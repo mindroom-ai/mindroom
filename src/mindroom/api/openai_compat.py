@@ -89,7 +89,6 @@ from mindroom.teams.members import (
     build_team_spec,
     resolve_exact_team_members,
 )
-from mindroom.teams.presentation import finished_run_text
 from mindroom.teams.runtime import MemberEvent, team_usage_runs
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
@@ -1175,7 +1174,7 @@ async def _non_stream_team_completion(
         return error_response(500, "Team execution failed", error_type="server_error")
     record = records.terminal(team_name)
     # The leader's answer, the text a streamed team completion sends; members' text reaches the client through it.
-    response_text = finished_run_text(record)
+    response_text = record.handover_content or ""
 
     if is_error_response(response_text):
         logger.warning("Team response returned error", team=team_name, error=response_text)

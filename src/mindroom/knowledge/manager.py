@@ -1592,7 +1592,7 @@ class KnowledgeManager:
         run = _CandidateRun(
             checkpoint=checkpoint,
             collection=opened.collection,
-            embedder=RefreshEmbedder(create_configured_embedder(self.config, self.runtime_paths)),
+            embedder=RefreshEmbedder(create_configured_embedder(self.config, self.runtime_paths, caller_retries=True)),
             baseline_revision=baseline_revision,
             retired_collection=published_collection,
             completed=dict(checkpoint.completed),

@@ -28,6 +28,7 @@ from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_sc
 from mindroom.session_storage.schema import TableNames, table_names
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.storage import quote_identifier
+from tests.llm.agno_dict_helpers import PAUSED_NOTICE_OPENINGS
 from tests.storage_oracle.actions import Scenario
 from tests.storage_oracle.backend import SESSION_ID
 from tests.storage_oracle.determinism import deterministic
@@ -66,10 +67,16 @@ MASKS: dict[str, str] = {
     "force_request_moves_into_metadata": "spec v4 4.5 and decision 5 (W9): a manual compaction request queued in the "
     "session state becomes its scope's metadata flag",
     "session_columns_encoded_once": "spec v4 4.5: session columns Agno 2 encoded twice are stored encoded once",
+    "paused_notice_reads_as_no_content": "#3106: a run whose content is a paused notice reads with no content "
+    "(``mindroom.llm.legacy_run_content``)",
 }
 # The masks each golden and legacy input uses; every other input compares unmasked.
 _PINS: dict[str, set[str]] = {
     "goldens/agent_code": {"stored_copy_hides_folded_messages"},
+    "goldens/agent_helper": {"paused_notice_reads_as_no_content"},
+    "goldens/agent_helper__before_run-delegation-approved": {"paused_notice_reads_as_no_content"},
+    "goldens/team_squad": {"paused_notice_reads_as_no_content"},
+    "goldens/team_squad__before_team-approved": {"paused_notice_reads_as_no_content"},
     "goldens/agno2_migrated": {"session_columns_encoded_once"},
     "goldens/agno_2_6_12_code_sessions": {"session_columns_encoded_once"},
     "legacy/captured__legacy_agno2_runs__an_unreadable_blob_is_cleared_without_rows": {"session_columns_encoded_once"},
@@ -229,6 +236,15 @@ def _rows_fill_records(recorded: dict[str, Any], observed: dict[str, Any], sessi
             used.add("row_ids_fill_the_record")
 
 
+def _paused_notices_read_as_no_content(recorded: dict[str, Any], observed: dict[str, Any], used: set[str]) -> None:
+    for run in _runs(observed):
+        assert not str(run.get("content", "")).startswith(PAUSED_NOTICE_OPENINGS), run["run_id"]
+    for run in _runs(recorded):
+        if str(run.get("content", "")).startswith(PAUSED_NOTICE_OPENINGS):
+            del run["content"]
+            used.add("paused_notice_reads_as_no_content")
+
+
 def _drop_history_copies(recorded: dict[str, Any], observed: dict[str, Any], used: set[str]) -> None:
     for run in _runs(observed):
         assert not any(message.get("from_history") for message in run["messages"]), run["run_id"]
@@ -359,6 +375,7 @@ def _mask_session(
 ) -> set[str]:
     """Show one session's recorded and observed observables as one store would; return the runs the fold mask hid."""
     _rows_fill_records(recorded, observed, session_id, used)
+    _paused_notices_read_as_no_content(recorded, observed, used)
     _session_columns_encoded_once(recorded, observed, used)
     _force_requests_in_metadata(recorded, observed, used)
     _drop_history_copies(recorded, observed, used)

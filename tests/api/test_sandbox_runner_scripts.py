@@ -79,7 +79,7 @@ def runner_client(
     )
     prepared = prepare_worker_request(
         worker_key=_WORKER_KEY,
-        tool_init_overrides={},
+        base_dir=None,
         runtime_paths=runtime_paths,
         agent_policies={},
         runner_token=_TOKEN,
@@ -405,7 +405,7 @@ router:
     )
     prepared = prepare_worker_request(
         worker_key=worker_key,
-        tool_init_overrides={},
+        base_dir=None,
         runtime_paths=runtime_paths,
         agent_policies={},
         private_agent_names=frozenset({"watcher"}),
@@ -524,7 +524,7 @@ router:
     )
     prepared = prepare_worker_request(
         worker_key=worker_key,
-        tool_init_overrides={},
+        base_dir=None,
         runtime_paths=runtime_paths,
         agent_policies={},
         private_agent_names=frozenset(),
@@ -1041,7 +1041,7 @@ def seeded_script_worker(
     assert "watcher" not in sandbox_runner_module.app_runtime_config(app).agents
     prepared = prepare_worker_request(
         worker_key=worker_key,
-        tool_init_overrides={},
+        base_dir=None,
         runtime_paths=runtime_paths,
         agent_policies={},
         private_agent_names=frozenset({"watcher"}),

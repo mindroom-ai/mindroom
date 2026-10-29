@@ -73,7 +73,7 @@
     "message": {
       "content": "Checking the forecast. ",
       "provider_data": {
-        "content_blocks": [
+        "claude_blocks": [
           {
             "text": "Checking the forecast. ",
             "type": "text"

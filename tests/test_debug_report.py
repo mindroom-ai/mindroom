@@ -398,7 +398,7 @@ def test_read_runs_reads_converted_goldens_and_names_unconverted_databases(tmp_p
     assert unconverted.error.count("not converted to the current storage layout") == len(databases)
 
     for store, database in zip(goldens, databases, strict=True):
-        prepare_conversation_database(database, store.names)
+        prepare_conversation_database(database, store.names, agent_name=None)
         assert database.with_name(f"{database.name}{BACKUP_SUFFIX}").is_file()
     converted = _read_runs(tmp_path, ids)
 

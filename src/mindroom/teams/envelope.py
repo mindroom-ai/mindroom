@@ -73,7 +73,6 @@ from mindroom.teams.members import (
 from mindroom.teams.presentation import (
     NO_TEAM_RESPONSE,
     TeamStreamPresentation,
-    finished_run_text,
     format_team_header,
 )
 from mindroom.teams.resume import TeamResume, continued_team_pause, drive_team_delegations
@@ -614,7 +613,7 @@ class _TeamTurn:
             # A quiet scheduled check that found nothing replies with the bare token, which delivery then suppresses,
             # instead of a team document around it.
             # The document's trace stays, as the streamed reply keeps it.
-            shown = finished_run_text(record).strip()
+            shown = (record.handover_content or "").strip()
             yield StructuredStreamChunk(content=shown, tool_trace=None)
         # The finished reply adds what no live chunk showed: a failed member run's reason, or the no-consensus note
         # when only members spoke.
@@ -627,8 +626,8 @@ class _TeamTurn:
         """Whether a quiet scheduled turn's leader answered with the no-report token while no member found anything."""
         return (
             self.ctx.allow_no_report_response
-            and is_silent_schedule_no_report_response(finished_run_text(record))
-            and not any(finished_run_text(member).strip() for member in record.ended_member_runs)
+            and is_silent_schedule_no_report_response(record.handover_content or "")
+            and not any((member.handover_content or "").strip() for member in record.ended_member_runs)
         )
 
     def run_metadata_content(self, attempt: TeamAttempt, status: RunStatus) -> dict[str, Any] | None:
@@ -652,8 +651,7 @@ class _TeamTurn:
     def resolve_paused(self, attempt: TeamAttempt, record: TeamRunRecord) -> PausedAttempt:
         """Return the pause the lifecycle owner asks the requester about, in the document its events built.
 
-        The pause freezes that document, which does not show the paused notices its runs hold as their content
-        (``paused_content``, ``team_paused_content``); the approval card says what it waits for.
+        The pause freezes that document; the approval card says what it waits for.
         """
         paused = paused_attempt_from_response(record, toolkit_owners=attempt.team.tool_owners())
         if paused is None:
@@ -695,7 +693,7 @@ class _TeamTurn:
         rendered = header + (body_text or NO_TEAM_RESPONSE)
         replayable_text = rendered if has_visible_output else ""
         if self.silent_no_report(record):
-            replayable_text = finished_run_text(record).strip()
+            replayable_text = (record.handover_content or "").strip()
         logger.info(
             "team_response_preview",
             agents=attempt.members.display_names,

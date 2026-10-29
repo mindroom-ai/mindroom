@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import unquote, urlparse, urlunparse
 
 from mindroom.git_urls import credential_free_repo_url
-from mindroom.redaction import URL_PATTERN
+from mindroom.redaction import URL_PATTERN, redact_url_credentials
 
 if TYPE_CHECKING:
     from urllib.parse import ParseResult
@@ -46,7 +46,6 @@ __all__ = [
     "embedded_http_userinfo",
     "fully_unquoted",
     "redact_credentials_in_text",
-    "redact_url_credentials",
 ]
 
 
@@ -96,35 +95,6 @@ def _inspectable_url(value: str) -> ParseResult | None:
         return urlparse(value)
     except ValueError:
         return None
-
-
-def redact_url_credentials(value: str) -> str:
-    """Redact URL credentials for any parsed URL scheme.
-
-    Never raises. A URL that cannot be parsed is replaced wholesale rather than
-    returned unchanged: unparseable is not the same as credential-free, because
-    the thing defeating the parse can be the userinfo separator itself.
-    """
-    parsed = _inspectable_url(value)
-    if parsed is None:
-        return "***"
-    if not parsed.scheme or not parsed.netloc:
-        return value
-
-    if "@" in parsed.netloc:
-        _userinfo, host = parsed.netloc.rsplit("@", 1)
-        netloc = f"***@{host}"
-    else:
-        netloc = parsed.netloc
-    return urlunparse(
-        parsed._replace(
-            netloc=netloc,
-            path=_strip_path_params(parsed.path),
-            params="",
-            query="",
-            fragment="",
-        ),
-    )
 
 
 def redact_credentials_in_text(value: str) -> str:

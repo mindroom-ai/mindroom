@@ -77,7 +77,7 @@
     "message": {
       "content": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
       "provider_data": {
-        "content_blocks": [
+        "claude_blocks": [
           {
             "text": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
             "type": "text"

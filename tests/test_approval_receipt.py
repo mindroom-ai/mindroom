@@ -316,8 +316,7 @@ async def test_a_chat_resume_sends_the_call_under_the_id_its_receipt_names(
 ) -> None:
     """A Chat server's call reaches the model under the receipt's id, though the server omitted it or broke Chat's rule.
 
-    Requests of the ``openai`` Chat dialect, which llama.cpp uses, send only ``call_`` ids of at most 40 characters,
-    so the server's own id cannot be the one named.
+    Chat requests send only ``call_`` ids of at most 40 characters, so the server's own id cannot be the one named.
     """
     built = golden_provider(
         {

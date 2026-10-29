@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from mindroom.failure_text import failure_text
 from mindroom.llm.errors import (
     MISSING_API_KEY,
+    TOKENS_PER_MINUTE,
     AuthenticationFailed,
     ContextWindowExceeded,
     ModelSafeguardRefusal,
@@ -103,6 +104,11 @@ def _provider_error_message(error: ProviderError, safe_error: str) -> str:
     if isinstance(error, AuthenticationFailed):
         provider_hint = f" ({error.provider})" if error.provider else ""
         return f"❌ Authentication failed{provider_hint}: {safe_error}"
+    if isinstance(error, ContextWindowExceeded) and error.code == TOKENS_PER_MINUTE:
+        return (
+            "⚠️ This request is larger than the account's tokens-per-minute limit. "
+            "Start a new thread or compact the conversation, then try again."
+        )
     if isinstance(error, ContextWindowExceeded):
         return (
             "⚠️ The conversation no longer fits the model's context window. "

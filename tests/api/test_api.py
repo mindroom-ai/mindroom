@@ -943,18 +943,12 @@ async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
     second_runtime = constants.resolve_primary_runtime_paths(config_path=tmp_path / "second.yaml", process_env={})
     cleanup_paths: list[Path] = []
 
-    class _FakeRuntimeConfig:
-        def get_worker_grantable_credentials(self) -> frozenset[str]:
-            return constants.DEFAULT_WORKER_GRANTABLE_CREDENTIALS
-
     def _fake_cleanup(
         runtime_paths: constants.RuntimePaths,
         *,
-        runtime_config: object | None = None,
         touch_live_workers: Callable[[WorkerBackend], None] | None = None,
         computer_worker_keys: frozenset[str] = frozenset(),
     ) -> int:
-        del runtime_config
         assert touch_live_workers is None
         assert computer_worker_keys == frozenset()
         cleanup_paths.append(runtime_paths.config_path)
@@ -967,20 +961,10 @@ async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
     async def _fake_to_thread(func: Callable[..., int], *args: object, **kwargs: object) -> int:
         return func(*args, **kwargs)
 
-    def _read_current_runtime_config(
-        api_app: FastAPI,
-    ) -> tuple[_FakeRuntimeConfig, constants.RuntimePaths]:
-        return _FakeRuntimeConfig(), main._app_runtime_paths(api_app)
-
     main.initialize_api_app(main.app, first_runtime)
     monkeypatch.setattr(main, "_worker_cleanup_interval_seconds", lambda _runtime_paths: 0.01)
     monkeypatch.setattr(main, "_cleanup_workers_once", _fake_cleanup)
     monkeypatch.setattr(main.asyncio, "to_thread", _fake_to_thread)
-    monkeypatch.setattr(
-        main.config_lifecycle,
-        "read_app_committed_runtime_config",
-        _read_current_runtime_config,
-    )
 
     await main._worker_cleanup_loop(stop_event, main.app, idle_poll_interval_seconds=0.01)
 
@@ -1321,9 +1305,7 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
         lambda *_args, **_kwargs: nullcontext(worker_manager),
     )
 
-    runtime_paths = main._app_runtime_paths(main.app)
-    runtime_config = Config.validate_with_runtime({}, runtime_paths)
-    assert main._cleanup_workers_once(runtime_paths, runtime_config=runtime_config) == 1
+    assert main._cleanup_workers_once(main._app_runtime_paths(main.app)) == 1
 
 
 def test_worker_cleanup_once_reconciles_drifted_worker_templates(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1347,9 +1329,7 @@ def test_worker_cleanup_once_reconciles_drifted_worker_templates(monkeypatch: py
         "lease_configured_primary_worker_manager",
         lambda *_args, **_kwargs: nullcontext(worker_manager),
     )
-    runtime_paths = main._app_runtime_paths(main.app)
-    runtime_config = Config.validate_with_runtime({}, runtime_paths)
-    main._cleanup_workers_once(runtime_paths, runtime_config=runtime_config)
+    main._cleanup_workers_once(main._app_runtime_paths(main.app))
 
     assert maintained_managers == [worker_manager]
 

@@ -47,7 +47,7 @@ from mindroom.runtime_state import clear_api_server_address, set_api_server_addr
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.workers.backends.docker import DockerWorkerBackend
-from mindroom.workers.runtime import shutdown_primary_worker_manager
+from mindroom.workers.runtime import bind_worker_launch_config_source, shutdown_primary_worker_manager
 from tests.conftest import bind_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import PLUGIN, ScriptedProvider, offered_tools
@@ -219,6 +219,8 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
             original_remove(backend, container)
 
     patch.setattr(DockerWorkerBackend, "_remove_container", remove_with_capture)
+    # This run owns the applied config its workers launch from, until the worker manager has shut down.
+    worker_launch_binding = ExitStack()
     try:
         primary_dir = data / "primary"
         primary_dir.mkdir()
@@ -278,6 +280,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         setup_logging(runtime_paths=paths)
         runtime_logs = paths.storage_root / "logs"
         config = runtime.config
+        worker_launch_binding.enter_context(bind_worker_launch_config_source(lambda: config))
 
         config.plugins = [PluginEntryConfig(path=str(plugin_dir))]
         config.administrators = [runtime.requester_id]
@@ -508,6 +511,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
     finally:
         for operation in (
             shutdown_primary_worker_manager,
+            worker_launch_binding.close,
             patch.undo,
             clear_api_server_address,
         ):

@@ -499,7 +499,7 @@ async def test_a_sync_tool_call_stops_at_its_cancelled_jobs_checkpoint(cancelled
                 await run_tool_call(function, {}, context, middleware=middleware)
             assert results == []
         else:
-            assert await run_tool_call(function, {}, context, middleware=middleware) == "done"
+            assert (await run_tool_call(function, {}, context, middleware=middleware)).value == "done"
             assert results == ["executed"]
 
 
