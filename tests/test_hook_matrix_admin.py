@@ -744,6 +744,8 @@ async def test_emit_config_reloaded_context_includes_matrix_admin(tmp_path: Path
         SimpleNamespace(
             client=router_client,
             _hook_send_message=AsyncMock(),
+            runtime_started_at=0.0,
+            _hook_agent_message_snapshot=AsyncMock(),
         ),
     )
 

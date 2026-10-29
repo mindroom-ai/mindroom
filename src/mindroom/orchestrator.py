@@ -1315,7 +1315,7 @@ class _MultiAgentOrchestrator:
             await self._approval_recovery.mark_router_ready()
         if self.config is not None and self.config.personal_agent_instance(bot.agent_name) is not None:
             router = self.agent_bots.get(ROUTER_AGENT_NAME)
-            if isinstance(router, AgentBot):
+            if router is not None:
                 router.personal_room_target_ready()
         self._schedule_ready_turn_dispatch_recovery()
 
@@ -1507,11 +1507,9 @@ class _MultiAgentOrchestrator:
             config=plan.new_config,
             runtime_paths=self.runtime_paths,
             correlation_id=f"config-reload:{uuid4().hex}",
-            runtime_started_at=(router_bot.runtime_started_at if isinstance(router_bot, AgentBot) else time.time()),
+            runtime_started_at=router_bot.runtime_started_at if router_bot is not None else time.time(),
             message_sender=self.hook_message_sender(),
-            agent_message_snapshot_reader=(
-                router_bot._hook_agent_message_snapshot if isinstance(router_bot, AgentBot) else None
-            ),
+            agent_message_snapshot_reader=router_bot._hook_agent_message_snapshot if router_bot is not None else None,
             matrix_admin=self.hook_matrix_admin(),
             room_state_querier=self.hook_room_state_querier(),
             room_state_putter=self.hook_room_state_putter(),
