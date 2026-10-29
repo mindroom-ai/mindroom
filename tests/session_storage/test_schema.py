@@ -11,7 +11,14 @@ import pytest
 
 from mindroom.history.types import HistoryScope
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql, agno_schema_sql
-from mindroom.session_storage.schema import LOG_VERSION, TableNames, create_log_schema, log_schema_sql, table_names
+from mindroom.session_storage.schema import (
+    LOG_VERSION,
+    TableNames,
+    create_log_schema,
+    log_schema_sql,
+    quote_identifier,
+    table_names,
+)
 from tests.session_storage.goldens import golden_stores
 
 if TYPE_CHECKING:
@@ -39,6 +46,16 @@ def test_storage_v2_names_the_runs_table_of_agno_like_every_other() -> None:
     names = AgnoTableNames("agno")
 
     assert (names.runs, names.log_runs) == ("agno_runs", "agno_sessions_log_runs")
+
+
+def test_a_quoted_identifier_names_one_table_whatever_characters_it_holds() -> None:
+    """A name holding a double quote still names one table: the quote is doubled inside the quoted identifier."""
+    name = 'say "hi"'
+    with closing(sqlite3.connect(":memory:")) as connection:
+        connection.execute(f"CREATE TABLE {quote_identifier(name)} (value)")
+
+        assert table_names(connection) == {name}
+    assert quote_identifier(name) == '"say ""hi"""'
 
 
 def test_a_databases_file_is_named_after_its_storage_name(tmp_path: Path) -> None:
