@@ -23,6 +23,7 @@ from tests.conftest import (
     orchestrator_runtime_paths,
     runtime_paths_for,
 )
+from tests.matrix_state_helpers import save_matrix_state
 
 
 def _config_with_runtime_paths(tmp_path: Path, **config_data: object) -> Config:
@@ -366,7 +367,7 @@ class TestDMPreservationDuringCleanup:
             "pw",
             domain=config.get_domain(runtime_paths),
         )
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
         members = [f"@mindroom_configured_agent_oldns:{config.get_domain(runtime_paths)}"]
 
         with (
@@ -395,7 +396,7 @@ class TestDMPreservationDuringCleanup:
         state = MatrixState.load(runtime_paths=runtime_paths)
         for name in ("router", "agent", "team", "retired"):
             state.add_account(f"agent_{name}", f"mindroom_{name}", TEST_PASSWORD, domain=domain)
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
         client = AsyncMock(user_id=f"@mindroom_router:{domain}")
         client.room_kick.return_value = nio.RoomKickResponse()
         room_id = "!dynamic:server"
@@ -431,7 +432,7 @@ class TestDMPreservationDuringCleanup:
         runtime_paths = runtime_paths_for(config)
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_agent", "actual_agent", "pw", domain=config.get_domain(runtime_paths))
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         with (
             patch("mindroom.matrix.room_cleanup.get_room_members", return_value=["@actual_agent:remote.example"]),
@@ -515,7 +516,7 @@ class TestDMPreservationDuringCleanup:
         # Persist a root space in MatrixState so cleanup can detect it
         state = MatrixState.load(runtime_paths=rp)
         state.set_space_room_id(root_space_id)
-        state.save(runtime_paths=rp)
+        save_matrix_state(state, rp)
 
         # The router bot is a member of the root space
         members = ["@mindroom_router:server"]
@@ -555,7 +556,7 @@ class TestDMPreservationDuringCleanup:
         # Persist root space
         state = MatrixState.load(runtime_paths=rp)
         state.set_space_room_id(root_space_id)
-        state.save(runtime_paths=rp)
+        save_matrix_state(state, rp)
 
         joined_rooms = [root_space_id, "!lobby:server"]
 

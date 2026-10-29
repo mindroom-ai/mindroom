@@ -194,6 +194,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
+from tests.matrix_state_helpers import save_matrix_state
 from tests.reply_span_helpers import paused_for_approval, response_span
 from tests.response_runner_helpers import (
     _bot,
@@ -1412,7 +1413,7 @@ async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycl
     grant_room_id = "!grant:localhost"
     state = MatrixState.load(runtime_paths=runner.deps.runtime_paths)
     state.add_room("grant", grant_room_id, "#grant:localhost", "Grant")
-    state.save(runtime_paths=runner.deps.runtime_paths)
+    save_matrix_state(state, runner.deps.runtime_paths)
     membership_client = AsyncMock()
     membership_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
     membership_client.joined_members.return_value = nio.JoinedMembersResponse(

@@ -67,6 +67,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.identity_helpers import fixture_entity_matrix_id, persist_entity_accounts
+from tests.matrix_state_helpers import save_matrix_state
 from tests.reply_span_helpers import final_in_span, seed_finished_reply
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.response_runner_helpers import streamed_answer
@@ -1270,7 +1271,7 @@ async def test_bot_ignores_agent_edits_from_actual_persisted_id_after_drift(tmp_
     runtime_paths = runtime_paths_for(config)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_helper_agent", "actual_helper_agent", "pw", domain="example.com")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     bot = make_test_agent_bot(
         agent_user=agent_user,

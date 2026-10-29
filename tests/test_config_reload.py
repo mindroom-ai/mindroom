@@ -71,6 +71,7 @@ from tests.conftest import (
     test_runtime_paths,
     unwrap_extracted_collaborator,
 )
+from tests.matrix_state_helpers import save_matrix_state
 from tests.test_personal_agents_config import BASE as PERSONAL_AGENTS_BASE
 from tests.test_personal_agents_config import _entry as personal_agent_entry
 
@@ -1321,7 +1322,7 @@ async def test_update_config_validates_internal_user_collision_before_publish(tm
         requested_username="mindroom_user",
         domain="localhost",
     )
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
     orchestrator = _MultiAgentOrchestrator(runtime_paths)
     orchestrator.config = current_config
     install_bots(orchestrator, {ROUTER_AGENT_NAME: MagicMock(), "general": MagicMock()})
@@ -1370,7 +1371,7 @@ async def test_prepare_entity_accounts_retries_transient_create_agent_user_failu
         state = MatrixState.load(runtime_paths=test_paths)
         actual_username = f"actual_{entity_name}"
         state.add_account(f"agent_{entity_name}", actual_username, TEST_PASSWORD, domain="localhost")
-        state.save(runtime_paths=test_paths)
+        save_matrix_state(state, test_paths)
         return AgentMatrixUser(
             agent_name=entity_name,
             user_id=f"@{actual_username}:localhost",
@@ -1428,7 +1429,7 @@ async def test_prepare_entity_accounts_requests_personal_agent_username(tmp_path
         actual_username = username or f"actual_{entity_name}"
         state = MatrixState.load(runtime_paths=paths)
         state.add_account(f"agent_{entity_name}", actual_username, TEST_PASSWORD, domain="localhost")
-        state.save(runtime_paths=paths)
+        save_matrix_state(state, paths)
         return AgentMatrixUser(
             agent_name=entity_name,
             user_id=f"@{actual_username}:localhost",
@@ -1449,7 +1450,7 @@ def test_preflight_account_provisioning_checks_personal_agent_username(tmp_path:
     config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
     state = MatrixState.load(runtime_paths=paths)
     state.add_account("agent_other", "alice.mind", TEST_PASSWORD, domain="localhost")
-    state.save(runtime_paths=paths)
+    save_matrix_state(state, paths)
     orchestrator = _MultiAgentOrchestrator(paths)
 
     with pytest.raises(PermanentStartupError, match=r"'alice\.mind'"):
@@ -1478,7 +1479,7 @@ async def test_prepare_entity_accounts_rejects_duplicate_persisted_matrix_ids(tm
     state.add_account("agent_router", "actual_router", TEST_PASSWORD, domain="localhost")
     state.add_account("agent_general", "shared_bot", TEST_PASSWORD, domain="localhost")
     state.add_account("agent_writer", "shared_bot", TEST_PASSWORD, domain="localhost")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
     orchestrator = _MultiAgentOrchestrator(runtime_paths)
     calls: list[str] = []
 
@@ -1530,7 +1531,7 @@ async def test_prepare_entity_accounts_rejects_internal_user_entity_id_collision
         requested_username="mindroom_user",
         domain="localhost",
     )
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
     orchestrator = _MultiAgentOrchestrator(runtime_paths)
 
     async def existing_user(

@@ -65,6 +65,7 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.matrix_state_helpers import save_matrix_state
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.threading_helpers import seed_thread_history
 
@@ -376,7 +377,7 @@ class TestAgentBot(AgentBotTestBase):
         async def _login_with_duplicate_identity(*_args: object, **_kwargs: object) -> object:
             state = MatrixState.load(runtime_paths=runtime_paths)
             state.add_account("agent_general", "actual_writer", TEST_PASSWORD, domain="localhost")
-            state.save(runtime_paths=runtime_paths)
+            save_matrix_state(state, runtime_paths)
             return _owned_login(mock_client)
 
         mock_login.side_effect = _login_with_duplicate_identity

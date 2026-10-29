@@ -17,6 +17,7 @@ from mindroom.config.main import Config, load_config
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_identifiers import managed_space_alias_localpart
 from tests.conftest import TEST_PASSWORD, load_config_yaml
+from tests.matrix_state_helpers import save_matrix_state
 
 _RUNTIME_GLOBAL_NAMES = {
     "MATRIX_HOMESERVER",
@@ -745,7 +746,7 @@ class TestResolveConfigRelativePath:
         runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path.resolve())
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_router", "mindroom_router", TEST_PASSWORD, domain="localhost")
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
         config_path.write_text(
             (
                 "models:\n"
@@ -771,7 +772,7 @@ class TestResolveConfigRelativePath:
         runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path.resolve())
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_general", "actual_general", TEST_PASSWORD, domain="localhost")
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
         config_path.write_text(
             (
                 "models:\n"
@@ -1102,7 +1103,7 @@ class TestRuntimeContextConsumers:
             config_path=first_config,
             storage_path=first_storage,
         )
-        MatrixState().save(runtime_paths=first_runtime_paths)
+        save_matrix_state(MatrixState(), first_runtime_paths)
         assert constants_mod.tracking_dir(first_runtime_paths) == first_storage / "tracking"
         assert constants_mod.matrix_state_file(runtime_paths=first_runtime_paths) == first_storage / "matrix_state.yaml"
 
@@ -1110,7 +1111,7 @@ class TestRuntimeContextConsumers:
             config_path=second_config,
             storage_path=second_storage,
         )
-        MatrixState().save(runtime_paths=second_runtime_paths)
+        save_matrix_state(MatrixState(), second_runtime_paths)
         assert constants_mod.tracking_dir(second_runtime_paths) == second_storage / "tracking"
         assert (
             constants_mod.matrix_state_file(runtime_paths=second_runtime_paths) == second_storage / "matrix_state.yaml"

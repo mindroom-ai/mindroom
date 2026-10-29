@@ -35,6 +35,7 @@ from mindroom.runtime_shutdown import (
 from mindroom.session_storage.agent_storage import create_state_storage
 from tests.conftest import install_bots, make_ingress_facts, unwrap_extracted_collaborator
 from tests.journal_helpers import admit_dispatch_event
+from tests.matrix_state_helpers import save_matrix_state
 from tests.response_runner_helpers import _bot, _plain_request, _target
 from tests.test_edit_regenerator import (
     AGENT_NAME,
@@ -202,7 +203,7 @@ async def test_shutdown_closes_callbacks_before_membership_invalidation(  # noqa
     bot.config.agents["general"].access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", "!grant:localhost", "#grant:localhost", "Grant")
-    state.save(runtime_paths=bot.runtime_paths)
+    save_matrix_state(state, bot.runtime_paths)
     membership_client = AsyncMock(spec=nio.AsyncClient)
     membership_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!grant:localhost"])
     membership_client.joined_members.return_value = nio.JoinedMembersResponse(

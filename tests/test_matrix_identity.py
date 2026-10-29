@@ -22,10 +22,11 @@ from mindroom.matrix.identity import (
     parse_historical_matrix_user_id,
     try_parse_historical_matrix_user_id,
 )
-from mindroom.matrix.state import MatrixState, _write_matrix_state_file
+from mindroom.matrix.state import MatrixState, _write_matrix_state_file, update_matrix_state
 from mindroom.matrix_identifiers import agent_username_localpart, unnamespaced_agent_name_from_username_localpart
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -194,7 +195,7 @@ class TestMatrixID:
         domain = self.config.get_domain(runtime_paths)
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_calculator", "actual_calculator", "pw", domain=domain)
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         assert _entity_name(f"@actual_calculator:{domain}", self.config, runtime_paths) == "calculator"
         assert _entity_name(f"@user:{domain}", self.config, runtime_paths) is None
@@ -207,7 +208,7 @@ class TestMatrixID:
         domain = self.config.get_domain(runtime_paths)
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_router", "actual_router", "pw", domain=domain)
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         mid = MatrixID.parse(f"@actual_router:{domain}")
         assert mid.username == "actual_router"
@@ -293,7 +294,7 @@ class TestHelperFunctions:
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_calculator", "actual_calculator", "pw", domain=domain)
         state.add_account("agent_general", "actual_general", "pw", domain=domain)
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         assert _is_entity_id(f"@actual_calculator:{domain}", self.config, runtime_paths) is True
         assert _is_entity_id(f"@actual_general:{domain}", self.config, runtime_paths) is True
@@ -309,7 +310,7 @@ class TestHelperFunctions:
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_calculator", "actual_calculator", "pw", domain=domain)
         state.add_account("agent_general", "actual_general", "pw", domain=domain)
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         assert _entity_name(f"@actual_calculator:{domain}", self.config, runtime_paths) == "calculator"
         assert _entity_name(f"@actual_general:{domain}", self.config, runtime_paths) == "general"
@@ -324,7 +325,7 @@ class TestHelperFunctions:
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_calculator", "mindroom_calculator", "pw", domain=domain)
         state.add_account("agent_general", "mindroom_general_oldns", "pw", domain=domain)
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         assert (
             _entity_name(
@@ -344,7 +345,7 @@ class TestHelperFunctions:
         account_key = managed_account_key("general")
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account(account_key, "mindroom_general_oldns", "pw", domain=domain)
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         assert account_key == "agent_general"
         assert managed_account_user_id(account_key, domain, runtime_paths) == f"@mindroom_general_oldns:{domain}"
@@ -359,7 +360,7 @@ class TestHelperFunctions:
         state.add_account("agent_router", "mindroom_router", "pw", domain=domain)
         state.add_account("agent_calculator", "actual_calculator", "pw", domain=domain)
         state.add_account("agent_general", "mindroom_general_oldns", "pw", domain=domain)
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         ids = entity_ids(self.config, runtime_paths)
 
@@ -485,17 +486,17 @@ class TestHelperFunctions:
 
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_general", "mindroom_general", "pw", domain=domain)
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         assert yaml.safe_load(state_file.read_text(encoding="utf-8"))["accounts"]["agent_general"]["domain"] == domain
         assert not state_file.with_name("matrix_state.yaml.lock").exists()
 
-    def test_matrix_state_save_keeps_existing_file_when_temp_write_is_interrupted(
+    def test_matrix_state_update_keeps_existing_file_when_the_write_is_interrupted(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A failed Matrix state write should not leave partial YAML behind."""
+        """A failed Matrix state write leaves the previous file and no partial file behind."""
         self.config = _bind_runtime_paths(self.config, tmp_path)
         runtime_paths = runtime_paths_for(self.config)
         domain = self.config.get_domain(runtime_paths)
@@ -503,28 +504,26 @@ class TestHelperFunctions:
 
         original_state = MatrixState.load(runtime_paths=runtime_paths)
         original_state.add_account("agent_general", "mindroom_general", "pw", domain=domain)
-        original_state.save(runtime_paths=runtime_paths)
+        save_matrix_state(original_state, runtime_paths)
         original_contents = state_file.read_text(encoding="utf-8")
 
         class _InterruptedWriteError(RuntimeError):
             """Sentinel write failure used to simulate an interrupted persistence attempt."""
 
-        def _partial_dump(*args: object, **kwargs: object) -> None:  # noqa: ARG001
-            file_obj = args[1]
-            assert hasattr(file_obj, "write")
-            file_obj.write("accounts:\n  partial")
-            file_obj.flush()
+        def _interrupted_replace(*_args: object, **_kwargs: object) -> None:
             raise _InterruptedWriteError
 
-        replacement_state = MatrixState.load(runtime_paths=runtime_paths)
-        replacement_state.add_account("agent_other", "mindroom_other", "pw", domain=domain)
-        monkeypatch.setattr("mindroom.matrix.state.yaml_io.safe_dump", _partial_dump)
+        monkeypatch.setattr("mindroom.atomic_file.os.replace", _interrupted_replace)
 
         with pytest.raises(_InterruptedWriteError):
-            replacement_state.save(runtime_paths=runtime_paths)
+            update_matrix_state(
+                runtime_paths,
+                lambda state: state.add_account("agent_other", "mindroom_other", "pw", domain=domain),
+            )
 
         assert state_file.read_text(encoding="utf-8") == original_contents
         assert MatrixState.load(runtime_paths=runtime_paths).accounts["agent_general"].username == "mindroom_general"
+        assert [path.name for path in state_file.parent.iterdir() if path.name.endswith(".tmp")] == []
 
     def test_entity_name_ignores_removed_persisted_username(self, tmp_path: Path) -> None:
         """Persisted usernames for removed agents must not stay live-managed."""
@@ -533,7 +532,7 @@ class TestHelperFunctions:
         domain = self.config.get_domain(runtime_paths)
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_removed", "mindroom_removed", "pw", domain=domain)
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         assert _entity_name(f"@mindroom_removed:{domain}", self.config, runtime_paths) is None
         assert _is_entity_id(f"@mindroom_removed:{domain}", self.config, runtime_paths) is False

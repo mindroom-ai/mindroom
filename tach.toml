@@ -3234,8 +3234,10 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix.state"
 depends_on = [
+    "mindroom.atomic_file",
     "mindroom.constants",
     "mindroom.matrix.legacy_state",
+    "mindroom.matrix_identifiers",
 ]
 
 [[modules]]

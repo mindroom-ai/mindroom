@@ -59,6 +59,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import entity_ids
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -324,7 +325,7 @@ async def test_matrix_message_send_resolves_room_alias_before_send(tmp_path: Pat
     ctx = _make_context(storage_path=tmp_path, thread_id=None)
     state = MatrixState()
     state.add_room("ops", room_id="!ops:localhost", alias="#ops:localhost", name="Ops")
-    state.save(runtime_paths=ctx.runtime_paths)
+    save_matrix_state(state, ctx.runtime_paths)
     _load_matrix_state_file_cached.cache_clear()
 
     with (

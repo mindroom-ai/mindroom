@@ -61,6 +61,7 @@ from tests.api.conftest import (
     use_trusted_upstream_runtime,
 )
 from tests.conftest import failed_config_load
+from tests.matrix_state_helpers import save_matrix_state
 from tests.oauth_test_utils import publish_oauth_credentials
 from tests.test_personal_agents_config import _entry as personal_agent_entry
 
@@ -1478,7 +1479,7 @@ def test_get_personal_agents_lists_active_pending_and_removed_template_entries(
     )
     matrix_state = MatrixState.load(runtime_paths=runtime_paths)
     matrix_state.add_account("agent_mind_alice_smith", "mindroom_mind_alice_smith_old", None, domain="example.org")
-    matrix_state.save(runtime_paths=runtime_paths)
+    save_matrix_state(matrix_state, runtime_paths)
 
     response = test_client.get("/api/config/personal-agents")
 
@@ -3643,7 +3644,7 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
     )
     matrix_state = MatrixState.load(runtime_paths=runtime_paths)
     matrix_state.add_account("agent_assistant", "mindroom_assistant_prod1", "pw", domain="localhost")
-    matrix_state.save(runtime_paths=runtime_paths)
+    save_matrix_state(matrix_state, runtime_paths)
     main.initialize_api_app(main.app, runtime_paths)
 
     async def _idle_watch_config(

@@ -89,6 +89,7 @@ from mindroom.token_budget import approximate_o200k_tokens
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, build_tool_execution_identity
 from mindroom.usage.stats import collect_admin_usage
 from tests.conftest import test_runtime_paths
+from tests.matrix_state_helpers import save_matrix_state
 from tests.providers.bare_adapter import bare_adapter
 
 if TYPE_CHECKING:
@@ -1462,7 +1463,7 @@ async def test_manager_accepts_call_member_authorized_by_grant_room(tmp_path: Pa
     runtime_paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_room("grant", ROOM_ID, "#grant:example.org", "Grant")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[ROOM_ID])
     client.joined_members.return_value = nio.JoinedMembersResponse(
         members=[nio.RoomMember("@alice:example.org", None, None)],
@@ -1498,7 +1499,7 @@ async def test_manager_leaves_active_call_when_cross_room_grant_is_revoked(tmp_p
     runtime_paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(
         members=[nio.RoomMember("@alice:example.org", None, None)],
@@ -1554,7 +1555,7 @@ async def test_manager_starts_observed_call_after_grant_snapshot_becomes_ready(t
     runtime_paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
     memberships = AgentReplyMembershipIndex()
     memberships.invalidate(config, reason="startup")
     manager = _manager(
@@ -1593,7 +1594,7 @@ async def test_manager_starts_observed_call_after_live_grant_join(tmp_path: Path
     runtime_paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(members=[], room_id=grant_room_id)
     memberships = AgentReplyMembershipIndex()
@@ -1823,7 +1824,7 @@ async def test_reply_revocation_stops_call_while_admission_is_closed(
     runtime_paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(
         members=[nio.RoomMember("@alice:example.org", None, None)],
@@ -1901,7 +1902,7 @@ async def test_reply_revocation_cancels_an_inflight_call_start(tmp_path: Path) -
     runtime_paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(
         members=[nio.RoomMember("@alice:example.org", None, None)],
@@ -5553,7 +5554,7 @@ def test_calls_config_rejects_agents_sharing_a_resolved_room(tmp_path: Path) -> 
     runtime_paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_room("voice", ROOM_ID, "#voice:example.org", "Voice")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     with pytest.raises(ValueError, match=r"calls\.agents configures multiple agents for room"):
         Config.validate_with_runtime(

@@ -117,6 +117,7 @@ from tests.conftest import (
     published_config_load,
     runtime_paths_for,
 )
+from tests.matrix_state_helpers import save_matrix_state
 
 
 def test_running_entity_client_returns_only_running_bot_clients(tmp_path: Path) -> None:
@@ -277,7 +278,7 @@ async def test_invalidation_during_post_refresh_effects_skips_positive_reconcili
     orchestrator.config = config
     state = MatrixState.load(runtime_paths=orchestrator.runtime_paths)
     state.add_room("grant", room_id, "#grant:localhost", "Grant")
-    state.save(runtime_paths=orchestrator.runtime_paths)
+    save_matrix_state(state, orchestrator.runtime_paths)
     client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(
@@ -2450,7 +2451,7 @@ class TestMultiAgentOrchestrator:
         state = MatrixState.load(runtime_paths=runtime_paths_for(config))
         state.add_room("room1", "!room1:localhost", "#room1:localhost", "Room 1")
         state.add_room("room2", "!room2:localhost", "#room2:localhost", "Room 2")
-        state.save(runtime_paths=runtime_paths_for(config))
+        save_matrix_state(state, runtime_paths_for(config))
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
         orchestrator.config = config
 
@@ -2513,7 +2514,7 @@ class TestMultiAgentOrchestrator:
         state = MatrixState.load(runtime_paths=runtime_paths_for(config))
         state.add_room("one", "!room1:localhost", "#one:localhost", "One")
         state.add_room("two", "!room2:localhost", "#two:localhost", "Two")
-        state.save(runtime_paths=runtime_paths_for(config))
+        save_matrix_state(state, runtime_paths_for(config))
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
         orchestrator.config = config
         router_bot = MagicMock()
@@ -2596,7 +2597,7 @@ class TestMultiAgentOrchestrator:
         state = MatrixState.load(runtime_paths=runtime_paths_for(config))
         state.add_room("room1", "!room1:localhost", "#room1:localhost", "Room 1")
         state.add_room("room2", "!room2:localhost", "#room2:localhost", "Room 2")
-        state.save(runtime_paths=runtime_paths_for(config))
+        save_matrix_state(state, runtime_paths_for(config))
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
         orchestrator.config = config
 
@@ -2656,7 +2657,7 @@ class TestMultiAgentOrchestrator:
         state.add_account(INTERNAL_USER_ACCOUNT_KEY, "mindroom_user", "internal-password")
         state.add_room("room1", "!room1:localhost", "#room1:localhost", "Room 1")
         state.add_room("room2", "!room2:localhost", "#room2:localhost", "Room 2")
-        state.save(runtime_paths=orchestrator.runtime_paths)
+        save_matrix_state(state, orchestrator.runtime_paths)
 
         room_members: dict[str, set[str] | None] = {
             "!room1:localhost": None,
@@ -2703,7 +2704,7 @@ class TestMultiAgentOrchestrator:
         install_bots(orchestrator, {"router": router_bot})
         state = MatrixState.load(runtime_paths=orchestrator.runtime_paths)
         state.add_room("lobby", "!room1:localhost", "#lobby:localhost", "Lobby")
-        state.save(runtime_paths=orchestrator.runtime_paths)
+        save_matrix_state(state, orchestrator.runtime_paths)
 
         async def mock_get_room_members(_client: AsyncMock, _room_id: str) -> set[str]:
             return {"@mindroom_router:localhost"}
@@ -2744,7 +2745,7 @@ class TestMultiAgentOrchestrator:
 
         state = MatrixState.load(runtime_paths=orchestrator.runtime_paths)
         state.add_account(INTERNAL_USER_ACCOUNT_KEY, "legacy_internal_user", "legacy-password")
-        state.save(runtime_paths=orchestrator.runtime_paths)
+        save_matrix_state(state, orchestrator.runtime_paths)
 
         async def mock_get_room_members(_client: AsyncMock, _room_id: str) -> set[str]:
             return {"@mindroom_general:localhost", "@mindroom_router:localhost"}

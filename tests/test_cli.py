@@ -27,6 +27,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, _register_user
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -202,7 +203,7 @@ class TestUserAccountManagement:
         state.add_account(INTERNAL_USER_ACCOUNT_KEY, DEFAULT_INTERNAL_USERNAME, "existing_password")
 
         runtime_paths = _runtime_paths(tmp_path)
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         with (
             patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
@@ -240,7 +241,7 @@ class TestUserAccountManagement:
         state.add_account(INTERNAL_USER_ACCOUNT_KEY, DEFAULT_INTERNAL_USERNAME, "wrong_password")
 
         runtime_paths = _runtime_paths(tmp_path)
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         with (
             patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
@@ -323,7 +324,7 @@ class TestUserAccountManagement:
         custom_config = Config(mindroom_user={"username": "alice", "display_name": "Alice Smith"})
 
         runtime_paths = _runtime_paths(tmp_path)
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
         with (
             patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
             patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
@@ -363,7 +364,7 @@ def test_mindroom_user_username_rejects_persisted_router_collision(tmp_path: Pat
     runtime_paths = _runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_router", "mindroom_router", TEST_PASSWORD, domain="localhost")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     with pytest.raises(ValueError, match="conflicts with router 'router'"):
         Config.model_validate(
@@ -398,7 +399,7 @@ def test_mindroom_user_username_rejects_persisted_agent_username_collision(tmp_p
     runtime_paths = _runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_assistant", "actual_assistant", TEST_PASSWORD, domain="localhost")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     with pytest.raises(ValueError, match="conflicts with agent 'assistant'"):
         Config.model_validate(
@@ -421,7 +422,7 @@ def test_mindroom_user_username_allows_prepared_agent_proposal_name(tmp_path: Pa
     runtime_paths = _runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_assistant", "actual_assistant", TEST_PASSWORD, domain="localhost")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     config = Config.model_validate(
         {

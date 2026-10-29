@@ -100,6 +100,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workspaces import _copy_workspace_template, validate_workspace_template_dir
 from tests.identity_helpers import persist_entity_accounts
+from tests.matrix_state_helpers import save_matrix_state
 from tests.tool_approval_helpers import gated_functions
 from tests.turn_model_helpers import turn_model
 
@@ -363,7 +364,7 @@ def test_agent_identity_prompt_uses_persisted_current_matrix_id(tmp_path: Path) 
     )
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_general", "mindroom_general_oldns", "pw", domain="localhost")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     agent = _create_agent_for_test("general", config)
 

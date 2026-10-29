@@ -23,6 +23,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.tool_system.events import _TOOL_TRACE_KEY, ToolTraceEntry
 from tests.cpu_budget_helpers import cpu_budget
 from tests.identity_helpers import actual_entity_usernames, persist_entity_accounts
+from tests.matrix_state_helpers import save_matrix_state
 
 _BOUND_RUNTIME_PATHS: dict[int, constants_mod.RuntimePaths] = {}
 
@@ -400,7 +401,7 @@ class TestMentionParsing:
         config = _make_config(runtime_paths)
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_general", "actual_general_live", "pw", domain="localhost")
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         content = _format_message_with_mentions(
             config,
@@ -423,7 +424,7 @@ class TestMentionParsing:
         config = _make_config(runtime_paths)
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_general", "actual_general_live", "pw", domain="localhost")
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         content = _format_message_with_mentions(
             config,
@@ -446,7 +447,7 @@ class TestMentionParsing:
         config = _make_config(runtime_paths)
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_general", "actual_general_live", "pw", domain="localhost")
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         content = _format_message_with_mentions(
             config,
@@ -469,7 +470,7 @@ class TestMentionParsing:
         config = _make_config(runtime_paths)
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_router", "actual_router_live", "pw", domain="localhost")
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         content = _format_message_with_mentions(
             config,
@@ -495,7 +496,7 @@ class TestMentionParsing:
         config = _make_config(runtime_paths)
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_general", "actual_general_live", "pw", domain="localhost")
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         content = _format_message_with_mentions(
             config,
@@ -518,7 +519,7 @@ class TestMentionParsing:
         config = _make_config(runtime_paths)
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_general", "actual_general_live", "pw", domain="localhost")
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         content = _format_message_with_mentions(
             config,
@@ -886,7 +887,7 @@ class TestMentionParsing:
         )
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_mindroom_dev", "actual_mindroom_dev_oldns", "pw", domain="localhost")
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         text = "@mindroom_dev help"
         processed, mentions, _markdown = _parse_mentions_in_text(text, config)

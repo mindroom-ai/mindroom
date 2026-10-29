@@ -9,6 +9,7 @@ from mindroom import constants
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.state import MatrixState, _load_matrix_state_file_cached, matrix_state_for_runtime
 from tests.conftest import test_runtime_paths
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     import os
@@ -18,7 +19,7 @@ def _seed_state(runtime_paths: constants.RuntimePaths, room_key: str, room_id: s
     """Persist one MatrixState and return the on-disk path used by the cache."""
     state = MatrixState()
     state.add_room(room_key, room_id=room_id, alias=f"#{room_key}:localhost", name=room_key)
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
     return constants.matrix_state_file(runtime_paths=runtime_paths)
 
 
@@ -50,7 +51,7 @@ def test_matrix_state_cache_invalidates_after_write(tmp_path: Path) -> None:
 
     fresh = MatrixState.load(runtime_paths=runtime_paths)
     fresh.add_room("research", room_id="!research:localhost", alias="#research:localhost", name="research")
-    fresh.save(runtime_paths=runtime_paths)
+    save_matrix_state(fresh, runtime_paths)
 
     second = matrix_state_for_runtime(runtime_paths)
     assert second is not first

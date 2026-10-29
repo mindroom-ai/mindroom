@@ -22,6 +22,7 @@ from mindroom.slack.delivery import SlackRuntime
 from mindroom.slack.oauth import slack_oauth_provider
 from mindroom.slack.watches import SlackWatch, SlackWatchStore, _watch_id_for
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+from tests.matrix_state_helpers import save_matrix_state
 from tests.oauth_test_utils import publish_oauth_credentials
 
 if TYPE_CHECKING:
@@ -191,7 +192,7 @@ def install_slack_state(runtime_paths: RuntimePaths, *, app_token: str | None = 
     manager.save_credentials("slack_oauth_client", {"client_id": "slack-client", "client_secret": "slack-secret"})
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_room("launch", LAUNCH_ROOM, "#launch:example.org", "Launch")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
 
 def entity_id(config: Config, runtime_paths: RuntimePaths, name: str) -> str:

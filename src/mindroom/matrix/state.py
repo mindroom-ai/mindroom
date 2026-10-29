@@ -1,19 +1,25 @@
 """Pydantic models for Matrix state."""
 
 import os
+import threading
+from collections.abc import Callable
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 from time import monotonic
 
 from pydantic import BaseModel, Field, field_serializer
 
 from mindroom import constants, yaml_io
+from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.matrix.legacy_state import normalize_legacy_matrix_state
+from mindroom.matrix_identifiers import extract_server_name_from_homeserver
 
 _MATRIX_STATE_STAT_TTL_SECONDS = 1.0
 _matrix_state_write_generation = 0
+# Serializes read-modify-write cycles across threads; the event loop gets the
+# same guarantee from ``update_matrix_state`` never awaiting.
+_matrix_state_update_lock = threading.Lock()
 
 
 class MatrixAccount(BaseModel):
@@ -50,22 +56,12 @@ class MatrixState(BaseModel):
 
     @classmethod
     def load(cls, runtime_paths: constants.RuntimePaths) -> "MatrixState":
-        """Load state from file.
+        """Return a private copy of the cached state, for a reader that edits it locally.
 
-        Reads come from a process-wide cache keyed by the state file path,
-        in-process write generation, and a short-TTL file signature. A deep
-        copy is returned so callers may safely mutate the result before
-        ``save`` without polluting the cache.
+        Changes to the copy never reach the file; ``update_matrix_state`` is the
+        only writer.
         """
         return matrix_state_for_runtime(runtime_paths).model_copy(deep=True)
-
-    def save(self, runtime_paths: constants.RuntimePaths) -> None:
-        """Save state to file."""
-        # Use Pydantic's model_dump with custom serializer for datetime
-        data = self.model_dump(mode="json")
-
-        state_file = constants.matrix_state_file(runtime_paths=runtime_paths)
-        _write_matrix_state_file(state_file, data)
 
     def get_account(self, key: str) -> MatrixAccount | None:
         """Get an account by key."""
@@ -123,13 +119,28 @@ class MatrixState(BaseModel):
         self.space_room_id = room_id
 
 
+def update_matrix_state[T](runtime_paths: constants.RuntimePaths, mutate: Callable[[MatrixState], T]) -> T:
+    """Apply one change to the persisted state and save it, returning what ``mutate`` returns.
+
+    The file is read fresh and saved before anything else can run, because
+    every writer replaces the whole file: a copy held across an await would
+    overwrite whatever another writer saved meanwhile, such as the device and
+    token of a bot that logged in while the root space was being created.
+    ``mutate`` must not block or wait on anything.
+    """
+    state_file = constants.matrix_state_file(runtime_paths=runtime_paths)
+    with _matrix_state_update_lock:
+        state = _load_matrix_state_file(state_file, current_domain=_current_runtime_domain(runtime_paths))
+        result = mutate(state)
+        _write_matrix_state_file(state_file, state.model_dump(mode="json"))
+    return result
+
+
 def matrix_state_for_runtime(runtime_paths: constants.RuntimePaths) -> MatrixState:
     """Return persisted Matrix state cached by write generation and file signature.
 
-    The returned object is shared across callers; **read-only callers** should
-    prefer this helper for the lowest overhead. Callers that intend to mutate
-    the result must use :py:meth:`MatrixState.load`, which returns a deep copy
-    backed by the same cache.
+    The returned object is shared across callers and must not be mutated;
+    ``update_matrix_state`` changes the file.
     """
     state_file = constants.matrix_state_file(runtime_paths=runtime_paths)
     return _load_matrix_state_file_cached(
@@ -239,12 +250,7 @@ def _load_matrix_state_file_cached(
 
 def _current_runtime_domain(runtime_paths: constants.RuntimePaths) -> str:
     """Return the current Matrix server name for one runtime context."""
-    if server_name := constants.runtime_matrix_server_name(runtime_paths):
-        return server_name
-
-    homeserver = constants.runtime_matrix_homeserver(runtime_paths)
-    server_part = homeserver.split("://", 1)[1] if "://" in homeserver else homeserver
-    return server_part.split(":", 1)[0]
+    return extract_server_name_from_homeserver(constants.runtime_matrix_homeserver(runtime_paths), runtime_paths)
 
 
 def _load_matrix_state_file(state_file: Path, *, current_domain: str) -> MatrixState:
@@ -261,39 +267,14 @@ def _load_matrix_state_file(state_file: Path, *, current_domain: str) -> MatrixS
 
 
 def _write_matrix_state_file(state_file: Path, data: dict[str, object]) -> None:
-    """Atomically persist Matrix state without cross-process advisory locking."""
+    """Atomically replace the state file and invalidate this process's cached reads."""
     global _matrix_state_write_generation
 
     state_file.parent.mkdir(parents=True, exist_ok=True)
-    temp_path: Path | None = None
+    payload = yaml_io.safe_dump(data, default_flow_style=False, sort_keys=False).encode("utf-8")
+    directory_fd = os.open(state_file.parent, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        with NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=state_file.parent,
-            prefix=f".{state_file.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as temp_file:
-            temp_path = Path(temp_file.name)
-            yaml_io.safe_dump(data, temp_file, default_flow_style=False, sort_keys=False)
-            temp_file.flush()
-            os.fsync(temp_file.fileno())
-        temp_path.replace(state_file)
-        _matrix_state_write_generation += 1
-        _fsync_directory(state_file.parent)
-    finally:
-        if temp_path is not None and temp_path.exists():
-            temp_path.unlink()
-
-
-def _fsync_directory(path: Path) -> None:
-    """Flush a directory entry after an atomic file replacement."""
-    try:
-        directory_fd = os.open(path, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(directory_fd)
+        atomic_write_bytes_at(directory_fd, state_file.name, payload, temp_prefix=f".{state_file.name}.")
     finally:
         os.close(directory_fd)
+    _matrix_state_write_generation += 1

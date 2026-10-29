@@ -16,6 +16,7 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.state import MatrixState
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -102,7 +103,7 @@ def _current_room_runtime_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
 def _persist_room(runtime_paths: RuntimePaths, room_key: str, room_id: str) -> None:
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_room(room_key, room_id, f"#{room_key}:example.com", room_key.title())
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
 
 def _joined_members(room_id: str, *user_ids: str) -> nio.JoinedMembersResponse:

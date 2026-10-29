@@ -65,6 +65,7 @@ from tests.conftest import (
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import actual_entity_usernames, entity_ids, entity_name_for_id, persist_entity_accounts
 from tests.journal_helpers import admit_dispatch_event
+from tests.matrix_state_helpers import save_matrix_state
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.response_runner_helpers import streamed_answer
 
@@ -972,7 +973,7 @@ class TestRoutingRegression:
         runtime_paths = runtime_paths_for(test_config)
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_news", "mindroom_news_oldns", "pw", domain=test_config.get_domain(runtime_paths))
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         router_agent = AgentMatrixUser(
             agent_name="router",

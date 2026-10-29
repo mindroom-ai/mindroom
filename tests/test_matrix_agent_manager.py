@@ -39,6 +39,7 @@ from mindroom.matrix.users import (
 from mindroom.matrix_identifiers import agent_username_localpart
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -246,7 +247,7 @@ class TestMatrixUserManagement:
         runtime_paths.config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
         state = MatrixState()
         state.add_account("agent_test", "mindroom_test", "test_pass")
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         # Verify the file was written correctly
         with (file_path.parent / "matrix_state.yaml").open() as f:
@@ -272,22 +273,19 @@ class TestMatrixUserManagement:
         creds = _get_agent_credentials("nonexistent", runtime_paths)
         assert creds is None
 
-    @patch("mindroom.matrix.state.MatrixState.save")
-    @patch("mindroom.matrix.state.MatrixState.load")
-    def test_save_agent_credentials(self, mock_load: MagicMock, mock_save: MagicMock, tmp_path: Path) -> None:
-        """Test saving agent credentials."""
-        mock_state = MatrixState()
-        mock_state.add_account("bot", "bot", "pass")
-        mock_load.return_value = mock_state
+    def test_save_agent_credentials(self, tmp_path: Path) -> None:
+        """Saving one agent's credentials adds its account and keeps the others."""
         runtime_paths = _runtime_paths(tmp_path)
+        existing = MatrixState()
+        existing.add_account("bot", "bot", "pass")
+        save_matrix_state(existing, runtime_paths)
 
         _save_agent_credentials("calculator", "mindroom_calculator", "calc_pass", runtime_paths)
 
-        # Verify the account was added
-        assert "agent_calculator" in mock_state.accounts
-        assert mock_state.accounts["agent_calculator"].username == "mindroom_calculator"
-        assert mock_state.accounts["agent_calculator"].password == "calc_pass"  # noqa: S105
-        mock_save.assert_called_once()
+        accounts = MatrixState.load(runtime_paths=runtime_paths).accounts
+        assert set(accounts) == {"bot", "agent_calculator"}
+        assert accounts["agent_calculator"].username == "mindroom_calculator"
+        assert accounts["agent_calculator"].password == "calc_pass"  # noqa: S105
 
 
 class TestMatrixRegistration:
@@ -1446,7 +1444,7 @@ class TestAgentUserCreation:
             requested_username="old_internal",
             domain="localhost",
         )
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         with pytest.raises(PermanentMatrixStartupError, match=r"mindroom_user\.username cannot be changed"):
             await create_agent_user(
@@ -1601,7 +1599,7 @@ space_room_id: null
                 requested_username=matrix_username,
                 domain="localhost",
             )
-            state.save(runtime_paths=runtime_paths)
+            save_matrix_state(state, runtime_paths)
             created_accounts.append(agent_name)
             return AgentMatrixUser(
                 agent_name=agent_name,

@@ -33,7 +33,7 @@ from mindroom.matrix.client_room_admin import (
     leave_room,
 )
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_room_state
-from mindroom.matrix.state import MatrixState
+from mindroom.matrix.state import update_matrix_state
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, INTERNAL_USER_AGENT_NAME, AgentMatrixUser, login_agent_user
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
@@ -184,19 +184,12 @@ def _add_room(
     runtime_paths: RuntimePaths,
 ) -> None:
     """Add a new room to the state."""
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_room(room_key, room_id, alias, name)
-    state.save(runtime_paths=runtime_paths)
+    update_matrix_state(runtime_paths, lambda state: state.add_room(room_key, room_id, alias, name))
 
 
 def _remove_room(room_key: str, runtime_paths: RuntimePaths) -> bool:
     """Remove a room from the state."""
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    if room_key in state.rooms:
-        del state.rooms[room_key]
-        state.save(runtime_paths=runtime_paths)
-        return True
-    return False
+    return update_matrix_state(runtime_paths, lambda state: state.rooms.pop(room_key, None) is not None)
 
 
 async def _reconcile_joined_existing_room(
@@ -559,15 +552,18 @@ async def _ensure_root_space_exists(
     if not config.matrix_space.enabled:
         return None
 
-    state = MatrixState.load(runtime_paths=runtime_paths)
+    # Read once and write only after the awaits below, through the one writer:
+    # a copy saved after them would overwrite whatever another writer, such as
+    # a bot logging in, saved meanwhile.
+    known_space_room_id = matrix_state.matrix_state_for_runtime(runtime_paths).space_room_id
     joined_room_ids = await get_joined_rooms(client) or []
-    if state.space_room_id and state.space_room_id in joined_room_ids:
-        return state.space_room_id
+    if known_space_room_id and known_space_room_id in joined_room_ids:
+        return known_space_room_id
 
     server_name = extract_server_name_from_homeserver(client.homeserver, runtime_paths=runtime_paths)
     alias_localpart = managed_space_alias_localpart(runtime_paths=runtime_paths)
     full_alias = f"#{alias_localpart}:{server_name}"
-    resolution = await _resolve_managed_alias(client, full_alias, state.space_room_id or None)
+    resolution = await _resolve_managed_alias(client, full_alias, known_space_room_id or None)
     if resolution is _AliasResolution.RETRY_LATER:
         return None
     if isinstance(resolution, str):
@@ -580,9 +576,8 @@ async def _ensure_root_space_exists(
                 space_alias=full_alias,
             )
             return None
-        if state.space_room_id != space_room_id:
-            state.set_space_room_id(space_room_id)
-            state.save(runtime_paths=runtime_paths)
+        if known_space_room_id != space_room_id:
+            update_matrix_state(runtime_paths, lambda state: state.set_space_room_id(space_room_id))
         return space_room_id
 
     space_room_id = await create_space(
@@ -592,8 +587,7 @@ async def _ensure_root_space_exists(
         topic=_ROOT_SPACE_TOPIC,
     )
     if space_room_id is not None:
-        state.set_space_room_id(space_room_id)
-        state.save(runtime_paths=runtime_paths)
+        update_matrix_state(runtime_paths, lambda state: state.set_space_room_id(space_room_id))
     return space_room_id
 
 

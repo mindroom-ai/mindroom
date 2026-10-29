@@ -14,6 +14,7 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -107,7 +108,7 @@ async def membership_index(
         room_id = f"!{room_key}:example.com"
         room_ids[room_key] = room_id
         state.add_room(room_key, room_id, f"#{room_key}:example.com", room_key.title())
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     client = AsyncMock()
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=list(room_ids.values()))

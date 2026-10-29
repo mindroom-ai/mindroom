@@ -38,7 +38,7 @@ from mindroom.matrix.client_session import (
 )
 from mindroom.matrix.cross_signing import ensure_agent_cross_signing
 from mindroom.matrix.identity import MatrixID, managed_account_key, parse_current_matrix_user_id
-from mindroom.matrix.state import MatrixState, matrix_state_for_runtime
+from mindroom.matrix.state import matrix_state_for_runtime, update_matrix_state
 from mindroom.matrix_identifiers import agent_username_localpart, extract_server_name_from_homeserver
 
 logger = get_logger(__name__)
@@ -232,22 +232,23 @@ def _save_agent_credentials(
         access_token: Optional Matrix access token to persist with the account
 
     """
-    state = MatrixState.load(runtime_paths=runtime_paths)
     agent_key = managed_account_key(agent_name)
     server_name = domain or extract_server_name_from_homeserver(
         runtime_matrix_homeserver(runtime_paths),
         runtime_paths=runtime_paths,
     )
-    state.add_account(
-        agent_key,
-        username,
-        password,
-        requested_username=requested_username,
-        domain=server_name,
-        device_id=device_id,
-        access_token=access_token,
+    update_matrix_state(
+        runtime_paths,
+        lambda state: state.add_account(
+            agent_key,
+            username,
+            password,
+            requested_username=requested_username,
+            domain=server_name,
+            device_id=device_id,
+            access_token=access_token,
+        ),
     )
-    state.save(runtime_paths=runtime_paths)
     logger.info("agent_credentials_saved", agent=agent_name)
 
 

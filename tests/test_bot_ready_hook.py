@@ -59,6 +59,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.journal_membership_helpers import admit_room_membership
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -502,7 +503,7 @@ async def test_router_departure_revokes_grant_before_timeline_admission(
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", room_id, "#grant:localhost", "Grant")
     state.add_room("second-grant", second_room_id, "#second-grant:localhost", "Second Grant")
-    state.save(runtime_paths=bot.runtime_paths)
+    save_matrix_state(state, bot.runtime_paths)
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id, second_room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(
@@ -583,7 +584,7 @@ async def test_detached_router_invalidation_during_post_refresh_effects_revokes_
     bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", room_id, "#grant:localhost", "Grant")
-    state.save(runtime_paths=bot.runtime_paths)
+    save_matrix_state(state, bot.runtime_paths)
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(
@@ -631,7 +632,7 @@ async def test_router_authoritative_departure_revokes_grant_before_membership_fe
     bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", room_id, "#grant:localhost", "Grant")
-    state.save(runtime_paths=bot.runtime_paths)
+    save_matrix_state(state, bot.runtime_paths)
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(
@@ -681,7 +682,7 @@ async def test_router_leave_then_rejoin_in_one_sync_requires_grant_refresh(tmp_p
     bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", room_id, "#grant:localhost", "Grant")
-    state.save(runtime_paths=bot.runtime_paths)
+    save_matrix_state(state, bot.runtime_paths)
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(
@@ -735,7 +736,7 @@ async def test_router_final_invite_revokes_grant_before_timeline_admission(
     bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", room_id, "#grant:localhost", "Grant")
-    state.save(runtime_paths=bot.runtime_paths)
+    save_matrix_state(state, bot.runtime_paths)
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(
@@ -780,7 +781,7 @@ async def test_grant_user_revocation_waits_for_durable_live_admission(
     bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", grant_room_id, "#grant:localhost", "Grant")
-    state.save(runtime_paths=bot.runtime_paths)
+    save_matrix_state(state, bot.runtime_paths)
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(
@@ -839,7 +840,7 @@ async def test_grant_user_join_waits_for_durable_timeline_admission(
     bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", room_id, "#grant:localhost", "Grant")
-    state.save(runtime_paths=bot.runtime_paths)
+    save_matrix_state(state, bot.runtime_paths)
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(
@@ -881,7 +882,7 @@ async def test_live_membership_replay_retries_an_unfinished_reconciliation(tmp_p
     bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", room_id, "#grant:localhost", "Grant")
-    state.save(runtime_paths=bot.runtime_paths)
+    save_matrix_state(state, bot.runtime_paths)
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(
@@ -932,7 +933,7 @@ async def test_recovered_membership_does_not_grant_reply_access(tmp_path: Path) 
     bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", room_id, "#grant:localhost", "Grant")
-    state.save(runtime_paths=bot.runtime_paths)
+    save_matrix_state(state, bot.runtime_paths)
     index = bot._runtime_view.agent_reply_memberships
     admission = _validated_timeline_admission(
         bot,
@@ -1003,7 +1004,7 @@ async def test_grant_user_join_then_revoke_applies_in_durable_order(
     bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", room_id, "#grant:localhost", "Grant")
-    state.save(runtime_paths=bot.runtime_paths)
+    save_matrix_state(state, bot.runtime_paths)
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(

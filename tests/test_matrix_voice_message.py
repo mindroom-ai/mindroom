@@ -29,6 +29,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -212,7 +213,7 @@ async def test_matrix_voice_message_resolves_room_alias_before_send(tmp_path: Pa
     context = _context(tmp_path, thread_id=None)
     state = MatrixState()
     state.add_room("ops", room_id="!ops:localhost", alias="#ops:localhost", name="Ops")
-    state.save(runtime_paths=context.runtime_paths)
+    save_matrix_state(state, context.runtime_paths)
     _load_matrix_state_file_cached.cache_clear()
 
     with (

@@ -26,6 +26,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle, PersonalRoomTarget
 from tests.conftest import test_runtime_paths
+from tests.matrix_state_helpers import save_matrix_state
 from tests.test_personal_agents_config import BASE as PERSONAL_AGENTS_BASE
 from tests.test_personal_agents_config import _entry as personal_agent_entry
 
@@ -53,7 +54,7 @@ def coordination(tmp_path: Path) -> Coordination:
     paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(paths)
     state.add_room("lobby", "!lobby:localhost", "#lobby:localhost", "Lobby")
-    state.save(paths)
+    save_matrix_state(state, paths)
     client = SimpleNamespace(
         user_id="@mindroom_router:localhost",
         joined_members=AsyncMock(
@@ -96,7 +97,7 @@ def template_coordination(tmp_path: Path) -> TemplateCoordination:
     paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(paths)
     state.add_room("lobby", "!lobby:localhost", "#lobby:localhost", "Lobby")
-    state.save(paths)
+    save_matrix_state(state, paths)
     client = SimpleNamespace(
         user_id="@mindroom_router:localhost",
         joined_members=AsyncMock(
@@ -920,7 +921,7 @@ async def test_reload_during_backfill_keeps_new_onboarding_room_pending(
     original.rooms["new"] = original.rooms["lobby"].model_copy()
     state = MatrixState.load(lifecycle.runtime_paths)
     state.add_room("new", "!new:localhost", "#new:localhost", "New")
-    state.save(lifecycle.runtime_paths)
+    save_matrix_state(state, lifecycle.runtime_paths)
     started = asyncio.Event()
     release = asyncio.Event()
     membership_reads = []
@@ -1119,7 +1120,7 @@ async def test_template_join_by_an_unpublished_mindroom_account_settles_without_
     if recorded_in == "matrix_state":
         state = MatrixState.load(paths)
         state.add_account("agent_mind_bob", "mindroom_mind_bob", None, domain="localhost")
-        state.save(paths)
+        save_matrix_state(state, paths)
     else:
         _append_personal_agent_roster_entry(paths, personal_agent_entry("@bob:localhost"))
     bot_id = "@mindroom_mind_bob:localhost"

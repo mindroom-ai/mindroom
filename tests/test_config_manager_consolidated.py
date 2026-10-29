@@ -43,6 +43,7 @@ from tests.conftest import (
     write_config_yaml,
 )
 from tests.identity_helpers import persist_entity_accounts
+from tests.matrix_state_helpers import save_matrix_state
 from tests.test_generated_agents import BASE as GENERATED_BASE
 from tests.test_generated_agents import _created as created_entry
 from tests.test_generated_agents import _load as load_generated
@@ -1584,7 +1585,7 @@ class TestConsolidatedConfigManager:
             runtime_paths = resolve_runtime_paths(config_path=config_path, process_env={})
             matrix_state = MatrixState.load(runtime_paths=runtime_paths)
             matrix_state.add_account("agent_assistant", "mindroom_assistant", "pw", domain="localhost")
-            matrix_state.save(runtime_paths=runtime_paths)
+            save_matrix_state(matrix_state, runtime_paths)
             cm = _config_manager(config_path)
             result = cm.manage_agent(
                 operation="create",
