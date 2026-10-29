@@ -280,7 +280,8 @@ Callbacks follow `external_trigger_policy` and count toward `max_triggers_per_ow
 When finished, run: bash /path/to/callback_1234.sh "<short result summary>"
 ```
 
-The script lives in the agent's workspace, and the path is where the agent's shell finds it, whether that shell runs in MindRoom or in a worker.
+The script lives in the agent's workspace, and the path is where the agent's shell finds it when that shell runs in MindRoom or in a dedicated worker.
+A shared `static_runner` sandbox cannot see agent workspaces, so a background task started from a shell there cannot run the script.
 The script needs only Bash and curl.
 It posts the summary to the room and thread where the callback was minted, which wakes the agent.
 After a successful delivery the callback is used up and the script deletes itself; if delivery fails, the script remains so it can be run again.
