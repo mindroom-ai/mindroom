@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -36,10 +36,11 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.response_attempt_helpers import install_direct_response_admission
+from tests.response_runner_helpers import streamed_answer
 from tests.threading_helpers import seed_thread_history
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, AsyncIterator
     from pathlib import Path
 
 
@@ -180,12 +181,19 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
                 should_use_streaming=AsyncMock(return_value=True),
             ),
         ):
-            mock_send_streaming_response.return_value = StreamTransportOutcome(
+            transport = StreamTransportOutcome(
                 last_physical_stream_event_id="$response",
-                terminal_status="completed",
                 rendered_body="15% of 200 is 30",
                 visible_body_state="visible_body",
             )
+
+            async def consume_stream(*args: object, **_kwargs: object) -> StreamTransportOutcome:
+                # The turn's stream starts the agent once the streamer reads it.
+                async for _chunk in cast("AsyncIterator[object]", args[4]):
+                    pass
+                return transport
+
+            mock_send_streaming_response.side_effect = consume_stream
             await bot._on_message(room, message_event)
             await drain_coalescing(bot)
 
@@ -195,25 +203,24 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
         ai_ctx = mock_ai.call_args.args[0]
         assert ai_ctx.entity_label == "calculator"
         assert (
-            ai_kwargs["prompt"]
-            == f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
+            ai_ctx.prompt == f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
         )
         assert (
-            ai_kwargs["model_prompt"]
+            ai_ctx.model_prompt
             == f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
         )
-        assert ai_kwargs["current_timestamp_ms"] == 1234567890.0
+        assert ai_ctx.current_timestamp_ms == 1234567890.0
         assert ai_ctx.session_id == f"{test_room_id}:$thread_root:localhost"
-        assert ai_kwargs["thread_history"] == []
-        assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
-        assert ai_kwargs["config"] == config
+        assert ai_ctx.thread_history == []
+        assert mock_ai.call_args.args[1].storage_root == runtime_paths_for(config).storage_root
+        assert mock_ai.call_args.args[2] == config
         assert ai_ctx.room_id == test_room_id
-        assert ai_kwargs["knowledge"] is None
+        assert ai_ctx.knowledge is None
         assert ai_ctx.requester_id == test_user_id
-        assert ai_kwargs["media"] == MediaInputs()
+        assert ai_ctx.media == MediaInputs()
         assert ai_ctx.reply_to_event_id == "$test_event:localhost"
-        assert ai_kwargs["show_tool_calls"] is True
-        assert ai_kwargs["run_metadata_collector"] == {}
+        assert ai_ctx.show_tool_calls is True
+        assert ai_kwargs["sinks"].run_metadata_collector == {}
 
         mock_send_streaming_response.assert_awaited_once()
         send_args = mock_send_streaming_response.await_args.args
@@ -305,7 +312,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
     with (
         patch("mindroom.bot.login_agent_owned_session") as mock_login,
         patch("mindroom.config.main.load_config", return_value=mock_config),
-        patch("mindroom.turn_controller.select_ad_hoc_team_mode", new=AsyncMock()) as mock_select_mode,
+        patch("mindroom.turns.dispatch.select_ad_hoc_team_mode", new=AsyncMock()) as mock_select_mode,
     ):
         mock_client = make_matrix_client_mock(user_id=mock_calculator_agent.user_id)
         mock_client.user_id = mock_calculator_agent.user_id
@@ -317,6 +324,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         mock_select_mode.return_value = TeamMode.COLLABORATE
 
         config = _make_config(tmp_path)
+        config.defaults.enable_streaming = False
 
         bot = make_test_agent_bot(
             mock_calculator_agent,
@@ -324,7 +332,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             config,
             runtime_paths_for(config),
             rooms=[test_room_id],
-            enable_streaming=False,
         )
         install_direct_response_admission(bot)
         install_runtime_journal_support(bot)
@@ -391,7 +398,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
         mock_ai = AsyncMock(return_value="20% of 300 is 60")
         with patch_response_runner_module(
-            ai_response=mock_ai,
+            stream_agent_response=streamed_answer(mock_ai),
             should_use_streaming=AsyncMock(return_value=False),
         ):
             await bot._on_message(room, message_event)
@@ -460,8 +467,8 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         mock_ai = AsyncMock()
         mock_team_response = AsyncMock(return_value="Team response")
         with patch_response_runner_module(
-            ai_response=mock_ai,
-            team_response=mock_team_response,
+            stream_agent_response=streamed_answer(mock_ai),
+            team_response_stream=streamed_answer(mock_team_response),
             should_use_streaming=AsyncMock(return_value=False),
         ):
             await bot._on_message(room, message_event_2)
@@ -533,7 +540,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
             mock_ai = AsyncMock(return_value="20% of 300 is 60")
             with patch_response_runner_module(
-                ai_response=mock_ai,
+                stream_agent_response=streamed_answer(mock_ai),
                 should_use_streaming=AsyncMock(return_value=False),
             ):
                 await bot._on_message(room, message_event_with_mention)
@@ -544,24 +551,25 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             ai_kwargs = mock_ai.call_args.kwargs
             ai_ctx = mock_ai.call_args.args[0]
             assert ai_ctx.entity_label == "calculator"
-            assert ai_kwargs["prompt"] == f"@mindroom_calculator:{domain} What about 20% of 300?"
-            assert ai_kwargs["model_prompt"] == f"@mindroom_calculator:{domain} What about 20% of 300?"
-            assert ai_kwargs["current_timestamp_ms"] == 1234567890.0
+            assert ai_ctx.prompt == f"@mindroom_calculator:{domain} What about 20% of 300?"
+            assert ai_ctx.model_prompt == f"@mindroom_calculator:{domain} What about 20% of 300?"
+            assert ai_ctx.current_timestamp_ms == 1234567890.0
             assert ai_ctx.session_id == f"{test_room_id}:{thread_root_id}"
-            assert ai_kwargs["thread_history"][0].body.startswith("[")
-            assert ai_kwargs["thread_history"][0].body.endswith("What's 10% of 100?")
-            assert ai_kwargs["thread_history"][1].body == "10% of 100 is 10"
-            assert ai_kwargs["thread_history"][2].body == "I can also help"
-            assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
-            assert ai_kwargs["config"] == config
+            assert ai_ctx.thread_history[0].body.startswith("[")
+            assert ai_ctx.thread_history[0].body.endswith("What's 10% of 100?")
+            assert ai_ctx.thread_history[1].body == "10% of 100 is 10"
+            assert ai_ctx.thread_history[2].body == "I can also help"
+            assert mock_ai.call_args.args[1].storage_root == runtime_paths_for(config).storage_root
+            assert mock_ai.call_args.args[2] == config
             assert ai_ctx.room_id == test_room_id
-            assert ai_kwargs["knowledge"] is None
+            assert ai_ctx.knowledge is None
             assert ai_ctx.requester_id == test_user_id
-            assert ai_kwargs["media"] == MediaInputs()
+            assert ai_ctx.media == MediaInputs()
             assert ai_ctx.reply_to_event_id == f"$test_event2:{domain}"
-            assert ai_kwargs["show_tool_calls"] is True
-            assert ai_kwargs["tool_trace_collector"] == []
-            assert ai_kwargs["run_metadata_collector"] == {}
+            assert ai_ctx.show_tool_calls is True
+            # The runner collects the trace from the stream itself; the turn writes its record.
+            assert ai_kwargs["sinks"].turn_recorder is not None
+            assert ai_kwargs["sinks"].run_metadata_collector == {}
 
             # Verify a response stays in the target thread.
             sent_contents = [call.kwargs["content"] for call in bot.client.room_send.call_args_list]
@@ -578,48 +586,46 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
 async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
     """Test that the orchestrator manages multiple agents correctly."""
-    with patch("mindroom.orchestrator.load_config") as mock_from_yaml:
-        mock_config = MagicMock()
-        mock_config.agents = {
-            "calculator": MagicMock(display_name="CalculatorAgent", rooms=["room1"]),
-            "general": MagicMock(display_name="GeneralAgent", rooms=["room1"]),
-        }
-        mock_config.teams = {}
-        bind_mock_config_event_journal(mock_config)
-        mock_from_yaml.return_value = mock_config
+    mock_config = MagicMock()
+    mock_config.agents = {
+        "calculator": MagicMock(display_name="CalculatorAgent", rooms=["room1"]),
+        "general": MagicMock(display_name="GeneralAgent", rooms=["room1"]),
+    }
+    mock_config.teams = {}
+    bind_mock_config_event_journal(mock_config)
 
-        with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
-            orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
-            await orchestrator.initialize()
+    with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+        await orchestrator.initialize(mock_config)
 
-            # Verify agents were created (2 agents + 1 router)
-            assert len(orchestrator.agent_bots) == 3
-            assert "calculator" in orchestrator.agent_bots
-            assert "general" in orchestrator.agent_bots
-            assert "router" in orchestrator.agent_bots
+        # Verify agents were created (2 agents + 1 router)
+        assert len(orchestrator.agent_bots) == 3
+        assert "calculator" in orchestrator.agent_bots
+        assert "general" in orchestrator.agent_bots
+        assert "router" in orchestrator.agent_bots
 
-            # Test that agents can be started
-            with (
-                patch("mindroom.bot.login_agent_owned_session") as mock_login,
-                patch("mindroom.bot.AgentBot.ensure_user_account", new=AsyncMock()),
-            ):
-                mock_client = AsyncMock()
-                mock_client.add_event_callback = MagicMock()
-                mock_client.add_response_callback = MagicMock()
-                mock_client.user_id = "@mindroom_calculator:localhost"
-                mock_client.join = AsyncMock(return_value=nio.JoinResponse(room_id="!test:localhost"))
-                # Don't run sync_forever, just verify setup
-                mock_client.sync_forever = AsyncMock()
-                mock_login.return_value = owned_matrix_login(mock_client)
+        # Test that agents can be started
+        with (
+            patch("mindroom.bot.login_agent_owned_session") as mock_login,
+            patch("mindroom.bot.AgentBot.ensure_user_account", new=AsyncMock()),
+        ):
+            mock_client = AsyncMock()
+            mock_client.add_event_callback = MagicMock()
+            mock_client.add_response_callback = MagicMock()
+            mock_client.user_id = "@mindroom_calculator:localhost"
+            mock_client.join = AsyncMock(return_value=nio.JoinResponse(room_id="!test:localhost"))
+            # Don't run sync_forever, just verify setup
+            mock_client.sync_forever = AsyncMock()
+            mock_login.return_value = owned_matrix_login(mock_client)
 
-                # Manually start agents without running sync_forever
-                for bot in orchestrator.agent_bots.values():
-                    await bot.start()
+            # Manually start agents without running sync_forever
+            for bot in orchestrator.agent_bots.values():
+                await bot.start()
 
-                # Verify all agents were started (2 agents + 1 router = 3)
-                assert mock_login.call_count == 3
-                assert all(bot.running for bot in orchestrator.agent_bots.values())
-                assert all(bot.client is not None for bot in orchestrator.agent_bots.values())
+            # Verify all agents were started (2 agents + 1 router = 3)
+            assert mock_login.call_count == 3
+            assert all(bot.running for bot in orchestrator.agent_bots.values())
+            assert all(bot.client is not None for bot in orchestrator.agent_bots.values())
 
 
 @pytest.mark.asyncio

@@ -397,13 +397,18 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
             mode = resolve_agent_mode(paths, state_root, "helper", runtime.session_id)
             with tool_runtime_context(runtime):
                 return await ai.ai_response(
-                    replace(_turn_context(), session_id=runtime.session_id, agent_mode=mode, run_id=None),
-                    prompt=prompt,
-                    runtime_paths=paths,
-                    config=config,
-                    execution_identity=identity,
-                    supports_native_tool_approval=True,
-                    show_tool_calls=True,
+                    replace(
+                        _turn_context(),
+                        session_id=runtime.session_id,
+                        agent_mode=mode,
+                        run_id=None,
+                        prompt=prompt,
+                        execution_identity=identity,
+                        supports_native_tool_approval=True,
+                        show_tool_calls=True,
+                    ),
+                    paths,
+                    config,
                 )
 
         provider.steps = ["standard history sentinel"]
@@ -471,7 +476,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         assert "same-agent persistent note" in str(final_request.messages)
         assert "standard history sentinel" in str(final_request.messages)
         assert "read_file" in offered_tools(final_request)
-        assert len(storage.load_session(runtime.session_id, "agent").runs) == 3
+        assert len(storage.load_session(runtime.session_id).runs) == 3
         results["steps"].append("standard mode reads identical workspace note and prior history")
         # The standard parent runs a minimal copy of itself, which uses the real CLI in the same ordinary worker.
         provider.steps = [
@@ -498,7 +503,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         audit.capture(
             "history",
             runtime.session_id,
-            json.dumps([run.to_dict() for run in storage.load_session(runtime.session_id, "agent").runs], default=str),
+            json.dumps([run.to_dict() for run in storage.load_session(runtime.session_id).runs], default=str),
         )
         results["requests"] = len(provider.requests)
     except BaseException as exc:

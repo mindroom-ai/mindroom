@@ -23,11 +23,11 @@ from cryptography.hazmat.primitives.serialization import (
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mindroom.config.validation import non_empty_stripped
+from mindroom.delivery_replay import DeliveryReplayStore
 from mindroom.durable_write import write_json_file_durable
 from mindroom.entity_resolution import configured_routable_entity_names_for_room
 from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.external_triggers.policy import is_external_trigger_administrator
-from mindroom.external_triggers.replay_store import ExternalTriggerReplayStore
 from mindroom.file_locks import advisory_file_lock
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import resolve_room_id
@@ -238,7 +238,7 @@ class ExternalTriggerStore:
         self._root = runtime_paths.control_state_root / _EXTERNAL_TRIGGER_STATE_DIR
         self._store_path = self._root / _TRIGGER_RECORDS_FILENAME
         self._lock_path = self._root / f"{_TRIGGER_RECORDS_FILENAME}.lock"
-        self._replay_store = ExternalTriggerReplayStore(runtime_paths.control_state_root)
+        self._replay_store = external_trigger_replay_store(runtime_paths.control_state_root)
 
     @property
     def store_path(self) -> Path:
@@ -538,6 +538,12 @@ class ExternalTriggerStore:
         except OSError as exc:
             msg = "external trigger store is unavailable"
             raise ExternalTriggerStoreError(msg) from exc
+
+
+def external_trigger_replay_store(control_state_root: Path) -> DeliveryReplayStore:
+    """Return the replay store for external trigger deliveries, including the shared file older releases wrote."""
+    state_dir = control_state_root / _EXTERNAL_TRIGGER_STATE_DIR
+    return DeliveryReplayStore(root=state_dir / "replay", legacy_shared_file=state_dir / "replay.json")
 
 
 def _replay_scope(record: ExternalTriggerRecord) -> str:

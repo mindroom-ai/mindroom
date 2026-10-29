@@ -111,7 +111,6 @@ from mindroom.response_runner import (
 )
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt
 from mindroom.streaming import PROGRESS_PLACEHOLDER
-from mindroom.teams.members import select_model_for_team
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.events import body_without_tool_markers
@@ -120,6 +119,7 @@ from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
     runtime_context_from_dispatch_context,
 )
+from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
@@ -132,6 +132,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import RunRequirement
     from mindroom.message_target import MessageTarget
     from mindroom.post_response_effects import PostResponseEffectsDeps
+    from mindroom.reply_turn.inbox import InboxResponses
     from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleCoordinator
     from mindroom.response_runner import PreparedResponseRuntime, ResponseRunnerDeps
     from mindroom.streaming import ProgressPublisher
@@ -215,6 +216,8 @@ class _ResponseHost(Protocol):
     """What the approval lifecycle uses of the response runner that hosts it."""
 
     deps: ResponseRunnerDeps
+    # The runner's inbox, which owns the resume a released approval source starts.
+    inbox: InboxResponses
 
     def client(self) -> nio.AsyncClient: ...
 
@@ -281,16 +284,6 @@ class _ResponseHost(Protocol):
         locked_operation: Callable[[MessageTarget, object], Awaitable[str | None]],
         signal_queued_message: bool,
     ) -> str | None: ...
-
-    def track_inbox_response(
-        self,
-        response: Coroutine[Any, Any, None],
-        *,
-        name: str,
-        room_id: str,
-        recovery_proof_ready: Callable[[], bool | Awaitable[bool]],
-        source_event_ids: tuple[str, ...],
-    ) -> asyncio.Task[None]: ...
 
 
 @dataclass
@@ -920,7 +913,7 @@ class ApprovalContinuationRunner:
                 self.host.client(),
                 claimed.room_id,
                 requester_user_id=claimed.requester_id,
-                enable_streaming=self.deps.runtime.enable_streaming,
+                enable_streaming=self.deps.runtime.config.defaults.enable_streaming,
             )
             else nullcontext()
         )
@@ -1297,15 +1290,17 @@ class ApprovalContinuationRunner:
                         run_id=continuation.run_id,
                         user_id=continuation.requester_id,
                         configured_team_name=continuation.entity_name,
-                        model_name=select_model_for_team(
-                            continuation.entity_name,
-                            continuation.room_id,
+                        model_name=resolve_turn_model(
                             self.deps.runtime.config,
                             self.deps.runtime_paths,
-                            thread_id=continuation.thread_id,
-                        )
-                        if continuation.runtime_model_name is None
-                        else continuation.runtime_model_name,
+                            ModelScope(
+                                entity=continuation.entity_name,
+                                room_id=continuation.room_id,
+                                thread_id=continuation.thread_id,
+                                explicit=continuation.runtime_model_name,
+                            ),
+                            None,
+                        ).model_name,
                         decisions=decisions,
                         denial_reasons=denial_reasons,
                         refresh_scheduler=self.host.knowledge_refresh_scheduler(),
@@ -1519,7 +1514,7 @@ class ApprovalContinuationRunner:
 
         resume = self._resume_approval_source(source_event_id)
         try:
-            self.host.track_inbox_response(
+            self.host.inbox.track_inbox_response(
                 resume,
                 name=f"approval_resume:{continuation.approval_id}:{continuation.generation}",
                 recovery_proof_ready=lambda: True,

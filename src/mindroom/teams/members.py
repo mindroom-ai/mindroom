@@ -29,8 +29,8 @@ from mindroom.teams.formation import (
 )
 from mindroom.teams.prompt import render_leader_system_messages
 from mindroom.teams.spec import MemberBuild, TeamMember, TeamSpec
-from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
+from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -67,14 +67,6 @@ class ResolvedExactTeamMembers:
     build: Callable[[str, str], AgentBuild] = field(repr=False, compare=False)
 
 
-@dataclass(frozen=True)
-class TeamTurnModelSelection:
-    """Model aliases frozen together for one team turn."""
-
-    team_model_name: str
-    member_model_names: dict[str, str]
-
-
 def resolve_exact_team_members(
     requested_agent_names: list[str],
     *,
@@ -82,7 +74,7 @@ def resolve_exact_team_members(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
-    active_model_names: Mapping[str, str] | None,
+    active_model_names: Mapping[str, str],
     include_openai_compat_guidance: bool = False,
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] | None = None,
     supports_native_tool_approval: bool = False,
@@ -105,27 +97,17 @@ def resolve_exact_team_members(
         if unavailable_bases is not None:
             unavailable_bases.update(knowledge_resolution.unavailable)
         knowledge[agent_name] = knowledge_resolution.knowledge
-    model_names = (
-        {agent_name: active_model_names[agent_name] for agent_name in requested_agent_names}
-        if active_model_names is not None
-        else {
-            agent_name: config.resolve_runtime_model(
-                entity_name=agent_name,
-                room_id=execution_identity.room_id if execution_identity is not None else None,
-                thread_id=execution_identity.resolved_thread_id if execution_identity is not None else None,
-                runtime_paths=runtime_paths,
-            ).model_name
-            for agent_name in requested_agent_names
-        }
-    )
+    model_names = {agent_name: active_model_names[agent_name] for agent_name in requested_agent_names}
 
     def build(agent_name: str, model_name: str) -> AgentBuild:
+        # The team turn froze each member's model; the build runs it as chosen.
+        model = resolve_turn_model(config, runtime_paths, ModelScope(entity=agent_name, explicit=model_name), None)
         return create_agent(
             agent_name,
             config,
             runtime_paths,
             execution_identity=execution_identity,
-            active_model_name=model_name,
+            model=model,
             knowledge=knowledge[agent_name],
             include_interactive_questions=False,
             include_openai_compat_guidance=include_openai_compat_guidance,
@@ -145,26 +127,6 @@ def resolve_exact_team_members(
 def requested_team_agent_names(agent_names: Sequence[str]) -> list[str]:
     """Return the requested team members, excluding router placeholders."""
     return [name for name in agent_names if name != ROUTER_AGENT_NAME]
-
-
-def resolve_team_member_model_names(
-    agent_names: Sequence[str],
-    room_id: str | None,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    *,
-    thread_id: str | None = None,
-) -> dict[str, str]:
-    """Resolve every exact team member's model alias without yielding control."""
-    return {
-        agent_name: config.resolve_runtime_model(
-            entity_name=agent_name,
-            room_id=room_id,
-            thread_id=thread_id,
-            runtime_paths=runtime_paths,
-        ).model_name
-        for agent_name in requested_team_agent_names(agent_names)
-    }
 
 
 def resolve_team_members(
@@ -219,62 +181,6 @@ def allow_direct_private_team_agents(
         and execution_identity is not None
         and execution_identity.channel == "matrix"
         and bool(execution_identity.requester_id)
-    )
-
-
-def select_model_for_team(
-    team_name: str,
-    room_id: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    *,
-    thread_id: str | None = None,
-) -> str:
-    """Return the model for a team in a room: the thread override, the persisted or configured room model, else the team's."""
-    model_name = config.resolve_runtime_model(
-        entity_name=team_name,
-        room_id=room_id,
-        thread_id=thread_id,
-        runtime_paths=runtime_paths,
-    ).model_name
-    logger.info("selected_team_model", team_name=team_name, model_name=model_name)
-    return model_name
-
-
-def resolve_team_turn_models(
-    team_name: str,
-    member_names: Sequence[str],
-    room_id: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    *,
-    thread_id: str | None = None,
-    active_model_name: str | None = None,
-) -> TeamTurnModelSelection:
-    """Freeze the coordinator and member model aliases in one synchronous snapshot."""
-    # A configured team's access reaches its members, so its thread override governs them during its turns.
-    if active_model_name is None and thread_id is not None and team_name in config.teams:
-        active_model_name = resolve_thread_model_override(runtime_paths, thread_id, config=config).active.get(team_name)
-    if active_model_name is not None:
-        return TeamTurnModelSelection(
-            team_model_name=active_model_name,
-            member_model_names=dict.fromkeys(member_names, active_model_name),
-        )
-    return TeamTurnModelSelection(
-        team_model_name=select_model_for_team(
-            team_name,
-            room_id,
-            config,
-            runtime_paths,
-            thread_id=thread_id,
-        ),
-        member_model_names=resolve_team_member_model_names(
-            member_names,
-            room_id,
-            config,
-            runtime_paths,
-            thread_id=thread_id,
-        ),
     )
 
 
@@ -452,7 +358,7 @@ def build_team_spec(
         execution_identity=execution_identity,
     )
     label = materialized_team_label(members.display_names)
-    team_view = config.resolve_entity(configured_team_name)
+    team_scope = config.resolve_scope(configured_team_name)
     jobs = team_background_jobs(config, runtime_paths, execution_identity)
     team_members = tuple(
         _team_member(agent_name, members, system_enrichment, config=config, runtime_paths=runtime_paths)
@@ -464,7 +370,7 @@ def build_team_spec(
         model=model,
         system_messages=(),
         toolkits=() if jobs is None else (jobs.controls,),
-        max_tool_calls_per_turn=team_view.max_tool_calls_per_turn,
+        max_tool_calls_per_turn=team_scope.max_tool_calls_per_turn,
     )
     turn_context = appended_context(render_session_context(config, timezone), system_enrichment)
     team_config = config.teams.get(configured_team_name) if configured_team_name is not None else None
@@ -483,7 +389,7 @@ def build_team_spec(
     )
     return BuiltTeam(
         spec=TeamSpec(leader=replace(leader, system_messages=system_messages), mode=mode, members=team_members),
-        history_settings=team_view.history_settings,
+        history_settings=team_scope.history_settings,
         timezone=timezone,
         leader_middleware=() if jobs is None else jobs.middleware,
         leader_jobs=None if jobs is None else jobs.actor,
@@ -493,14 +399,10 @@ def build_team_spec(
 __all__ = [
     "BuiltTeam",
     "ResolvedExactTeamMembers",
-    "TeamTurnModelSelection",
     "allow_direct_private_team_agents",
     "build_team_spec",
     "materialized_team_label",
     "requested_team_agent_names",
     "resolve_exact_team_members",
-    "resolve_team_member_model_names",
     "resolve_team_members",
-    "resolve_team_turn_models",
-    "select_model_for_team",
 ]

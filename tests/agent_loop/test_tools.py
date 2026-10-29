@@ -236,13 +236,12 @@ def test_paused_calls_carry_their_pause_flags_and_the_batch_pauses() -> None:
     )
 
     plain, confirmation, external_call = (call.execution for call in batch.planned)
-    assert plain.to_dict() == {
-        **plain.to_dict(),
-        "requires_confirmation": None,
-        "external_execution_required": None,
-        "approval_type": None,
-        "external_execution_silent": None,
-    }
+    assert (
+        plain.requires_confirmation,
+        plain.external_execution_required,
+        plain.approval_type,
+        plain.external_execution_silent,
+    ) == (None, None, None, None)
     assert (confirmation.requires_confirmation, confirmation.approval_type, confirmation.external_execution_silent) == (
         True,
         "mindroom_policy",

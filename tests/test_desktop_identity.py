@@ -14,7 +14,7 @@ from mindroom.desktop.identity import (
     controller_identity_for_live_bot,
 )
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from tests.conftest import test_runtime_paths
+from tests.conftest import swap_fleet_bot, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -95,12 +95,12 @@ def test_orchestrator_resolver_tracks_live_bot_replacement(tmp_path: Path) -> No
     orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path))
     first = _live_bot(fingerprint="first")
     replacement = _live_bot(fingerprint="replacement")
-    orchestrator.agent_bots["computer"] = first
+    orchestrator.fleet.add("computer", first)
 
     assert orchestrator.desktop_controller_identity("computer").ed25519 == "first"
 
     first.running = False
-    orchestrator.agent_bots["computer"] = replacement
+    swap_fleet_bot(orchestrator, "computer", replacement)
     assert orchestrator.desktop_controller_identity("computer").ed25519 == "replacement"
 
 

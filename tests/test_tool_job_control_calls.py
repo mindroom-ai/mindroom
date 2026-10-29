@@ -56,7 +56,7 @@ async def test_model_control_preserves_timing_across_human_followup(  # noqa: PL
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
-    toolkit = get_tool_by_name("thread_model", paths, worker_target=None, disable_sandbox_proxy=True)
+    toolkit = get_tool_by_name("thread_model", paths, worker_target=None, runs_in_worker=False)
     tools = toolkit_job_tools(toolkit, authored_name="thread_model", snapshot=authority_snapshot(config, "leader"))
     started, release = asyncio.Event(), asyncio.Event()
     signal = asyncio.Event()

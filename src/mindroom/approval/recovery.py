@@ -69,23 +69,38 @@ class ApprovalRecovery:
             return f"Requesting agent '{entity_name}' could not start and is unavailable."
         if self.entity_configured is None or self.entity_configured(entity_name):
             return None
-        return f"Requesting agent '{entity_name}' is no longer available."
+        return _removed_entity_reason(entity_name)
 
     async def reconcile_unavailable_entities(self, entity_names: Iterable[str]) -> None:
         """Fail closed continuations whose owner cannot ever run them."""
         names = set(entity_names)
-        if not names:
-            return
-        if not await self._reconcile_unavailable_owner_pages(names):
-            self._startup_cleanup_done = False
-            self._schedule_startup_cleanup_retry()
+        if names and await self._reconcile_unavailable_owner_pages(names, self._unavailable_entity_reason):
+            self._retry_unsettled_owners()
 
-    async def _reconcile_unavailable_owner_pages(self, entity_names: set[str] | None) -> bool:
-        """Settle unavailable owners across one complete cursor scan."""
+    async def reconcile_removed_entities(self, entity_names: set[str]) -> set[str]:
+        """Settle the continuations of entities being removed, before the config that removes them is published.
+
+        Returns the entities whose settlement is still unresolved. No retry is
+        scheduled here: a retry would judge them by the config still in force,
+        which lists them, so the caller settles them again once the removal is
+        published.
+        """
+        return await self._reconcile_unavailable_owner_pages(entity_names, _removed_entity_reason)
+
+    def _retry_unsettled_owners(self) -> None:
+        self._startup_cleanup_done = False
+        self._schedule_startup_cleanup_retry()
+
+    async def _reconcile_unavailable_owner_pages(
+        self,
+        entity_names: set[str] | None,
+        reason_for: Callable[[str], str | None],
+    ) -> set[str]:
+        """Settle unavailable owners across one complete cursor scan; return the owners left unsettled."""
         journal = None if self.journal_provider is None else self.journal_provider()
         if journal is None:
-            return True
-        complete = True
+            return set()
+        unsettled: set[str] = set()
         cursor: str | None = None
         while True:
             owners = await journal.approval_continuations(limit=_UNAVAILABLE_OWNER_SCAN_LIMIT, after=cursor)
@@ -95,12 +110,12 @@ class ApprovalRecovery:
             for principal_id, continuation in owners:
                 if entity_names is not None and continuation.entity_name not in entity_names:
                     continue
-                reason = self._unavailable_entity_reason(continuation.entity_name)
-                if reason is not None:
-                    complete = await self._discard_unavailable(principal_id, continuation, reason) and complete
+                reason = reason_for(continuation.entity_name)
+                if reason is not None and not await self._discard_unavailable(principal_id, continuation, reason):
+                    unsettled.add(continuation.entity_name)
             if len(owners) < _UNAVAILABLE_OWNER_SCAN_LIMIT:
                 break
-        return complete
+        return unsettled
 
     async def _discard_unavailable(
         self,
@@ -196,7 +211,10 @@ class ApprovalRecovery:
             cards_recovered = await self._recover_approval_cards_on_startup()
             owners_settled = False
             try:
-                owners_settled = await self._reconcile_unavailable_owner_pages(None)
+                owners_settled = not await self._reconcile_unavailable_owner_pages(
+                    None,
+                    self._unavailable_entity_reason,
+                )
             except Exception:
                 logger.warning(
                     "tool_approval_unavailable_owner_cleanup_failed",
@@ -265,3 +283,7 @@ class ApprovalRecovery:
         self._startup_cleanup_retry_delay = min(delay * 2, _STARTUP_CLEANUP_MAX_RETRY_SECONDS)
         await asyncio.sleep(delay)
         await self._run_startup_cleanup_if_ready()
+
+
+def _removed_entity_reason(entity_name: str) -> str:
+    return f"Requesting agent '{entity_name}' is no longer available."

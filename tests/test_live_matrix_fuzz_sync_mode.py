@@ -106,11 +106,9 @@ def test_restart_profile_config_really_replaces_both_bots(mode: Literal["classic
         plan = build_config_update_plan(
             current_config=old,
             new_config=new,
-            configured_entities=entities,
-            existing_entities=entities,
-            agent_bots={entity: AsyncMock() for entity in entities},
+            bots={entity: AsyncMock() for entity in entities},
         )
-        assert plan.entities_to_restart == {"general", "router"}
+        assert plan.restart == {"general", "router"}
         assert new.matrix_sync == old.matrix_sync
     finally:
         stack.close()

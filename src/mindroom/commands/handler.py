@@ -30,7 +30,6 @@ from mindroom.entity_resolution import (
     entity_identity_registry,
     persisted_bot_user_ids,
 )
-from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.room_membership import cached_member_ids, room_membership_is_complete
@@ -54,6 +53,7 @@ from mindroom.tool_jobs.client_cancel import (
     person_may_cancel,
 )
 from mindroom.tool_jobs.runtime import get_background_runtime
+from mindroom.turn_record import TurnRecord
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -65,10 +65,10 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.desktop.identity import DesktopControllerIdentity
-    from mindroom.hooks import HookMatrixAdmin
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
     from mindroom.model_selection import CommandResultContent
+    from mindroom.scheduling.runtime import ScheduledTaskRuntime
     from mindroom.tool_jobs.runtime import BackgroundJob
     from mindroom.tool_system.plugins import PluginReloadResult
 
@@ -150,10 +150,9 @@ def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) ->
         runtime_paths=context.runtime_paths,
         room=room,
         conversation_reader=context.conversation_reader,
-        matrix_admin=context.matrix_admin,
         agent_reply_memberships=context.agent_reply_memberships,
         responder_candidates_for_room=context.responder_candidates_for_room,
-        config_provider=context.config_provider,
+        task_runtime=context.scheduled_tasks,
     )
 
 
@@ -201,16 +200,16 @@ class CommandHandlerContext:
     agent_reply_memberships: AgentReplyMembershipIndex
     responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]]
     reload_plugins: Callable[[], Awaitable[PluginReloadResult]] | None = None
-    matrix_admin: HookMatrixAdmin | None = None
     controller_identity: Callable[[str], DesktopControllerIdentity] | None = None
-    config_provider: Callable[[], Config | None] | None = None
+    # Runs saved schedules; None without an orchestrator, where schedules are saved but not run.
+    scheduled_tasks: ScheduledTaskRuntime | None = None
 
 
 def _format_agent_description(agent_name: str, config: Config) -> str:
     """Format a concise agent description for the welcome message."""
     if agent_name in config.agents:
         agent_config = config.agents[agent_name]
-        tool_names = config.resolve_entity(agent_name).available_tools
+        tool_names = config.resolve_agent(agent_name).tools.tool_names
         desc_parts = []
 
         # Add role first
@@ -509,7 +508,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 client=context.client,
                 room_id=room.room_id,
                 runtime_paths=context.runtime_paths,
-                matrix_admin=context.matrix_admin,
+                task_runtime=context.scheduled_tasks,
             )
         else:
             # Cancel specific task
@@ -519,7 +518,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 room_id=room.room_id,
                 task_id=task_id,
                 runtime_paths=context.runtime_paths,
-                matrix_admin=context.matrix_admin,
+                task_runtime=context.scheduled_tasks,
             )
 
     elif command.type in {CommandType.JOBS, CommandType.CANCEL_JOB}:

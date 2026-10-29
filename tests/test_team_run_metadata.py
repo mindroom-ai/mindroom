@@ -78,12 +78,9 @@ def _delegate(metrics: Any) -> list[ScriptStep]:  # noqa: ANN401
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 async def test_a_team_reply_publishes_the_leader_s_identity_and_the_whole_team_s_usage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    stream: bool,
 ) -> None:
     """Usage sums the leader's requests and the member's run; the duration stays the leader's, which spans both."""
     team = _team(
@@ -97,7 +94,7 @@ async def test_a_team_reply_publishes_the_leader_s_identity_and_the_whole_team_s
     )
     collector: dict[str, Any] = {}
 
-    text = await team.reply(stream=stream, run_metadata_collector=collector)
+    text = await team.respond(run_metadata_collector=collector)
 
     assert "Member answer" in text
     payload = collector[AI_RUN_METADATA_KEY]
@@ -117,12 +114,9 @@ async def test_a_team_reply_publishes_the_leader_s_identity_and_the_whole_team_s
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 async def test_a_team_reply_s_context_reads_the_leader_s_last_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    stream: bool,
 ) -> None:
     """The context block shows what the leader's last request held, not the whole team's summed input."""
     team = _team(
@@ -137,7 +131,7 @@ async def test_a_team_reply_s_context_reads_the_leader_s_last_request(
     team.config.models["default"].context_window = 10_000
     collector: dict[str, Any] = {}
 
-    await team.reply(stream=stream, run_metadata_collector=collector)
+    await team.respond(run_metadata_collector=collector)
 
     payload = collector[AI_RUN_METADATA_KEY]
     assert payload["usage"]["input_tokens"] == 1350
@@ -150,12 +144,9 @@ async def test_a_team_reply_s_context_reads_the_leader_s_last_request(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 async def test_a_failed_team_reply_still_publishes_the_usage_it_was_billed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    stream: bool,
 ) -> None:
     """Billed tokens of a failed turn reach the metadata, with the error status."""
 
@@ -171,7 +162,7 @@ async def test_a_failed_team_reply_still_publishes_the_usage_it_was_billed(
     )
     collector: dict[str, Any] = {}
 
-    text = await team.reply(stream=stream, run_metadata_collector=collector)
+    text = await team.respond(run_metadata_collector=collector)
 
     assert "provider exploded" in text
     payload = collector[AI_RUN_METADATA_KEY]

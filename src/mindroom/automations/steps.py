@@ -38,8 +38,8 @@ class AutomationContext:
     ``requester_id`` is the requester whose private instance of a private agent this run maintains, and
     ``execution_identity`` the identity that resolves that instance for memory and knowledge helpers; both are None for a
     shared agent.
-    ``workspace`` is the workspace root, which may not exist yet: a shared agent's, or None for a shared agent without
-    file memory, which has no workspace, and for a private agent the requester's private root, and
+    ``workspace`` is the workspace root, which may not exist yet: the agent's own for a shared agent and the requester's
+    private root for a private agent, and
     ``state_dir`` is the automation state directory of the agent or private instance in primary storage, outside the
     workspace, which the automation creates when it first writes there.
     """
@@ -52,7 +52,7 @@ class AutomationContext:
     settings: Mapping[str, Any]
     requester_id: str | None
     execution_identity: ToolExecutionIdentity | None
-    workspace: Path | None
+    workspace: Path
     state_dir: Path
 
 

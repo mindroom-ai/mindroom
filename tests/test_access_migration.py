@@ -462,7 +462,11 @@ def test_load_config_migrates_single_file_after_validation(tmp_path: Path) -> No
     from mindroom.constants import resolve_runtime_paths  # noqa: PLC0415
 
     config_path = Path(tmp_path) / "config.yaml"
-    original = """agents:
+    original = """models:
+  default:
+    provider: openai
+    id: test-model
+agents:
   code:
     display_name: Code
     role: Writes code
@@ -508,6 +512,7 @@ matrix_room_access:
 
     migrated = yaml_io.safe_load(config_path.read_text(encoding="utf-8"))
     assert migrated == {
+        "models": {"default": {"provider": "openai", "id": "test-model"}},
         "agents": {
             "code": {
                 "display_name": "Code",

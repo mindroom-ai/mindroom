@@ -11,6 +11,7 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
+from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.matrix.presence import is_user_online, should_use_streaming
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_runner import ResponseRequest
@@ -253,17 +254,15 @@ class TestBotIntegration:
     """Test bot integration with presence-based streaming."""
 
     @pytest.mark.asyncio
-    @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.matrix.presence.is_user_online")
     async def test_bot_uses_streaming_when_user_online(
         self,
         mock_is_user_online: AsyncMock,
-        mock_stream_agent_response: AsyncMock,
-        mock_ai_response: AsyncMock,
+        mock_stream_agent_response: Mock,
         tmp_path: Path,
     ) -> None:
-        """Test that bot uses streaming when user is online."""
+        """Test that bot streams its reply when user is online."""
         # Setup mocks
         mock_is_user_online.return_value = True
 
@@ -273,7 +272,6 @@ class TestBotIntegration:
             yield " response"
 
         mock_stream_agent_response.return_value = mock_streaming_response()
-        mock_ai_response.return_value = "Test response"
 
         # Create bot with streaming enabled
         from mindroom.config.agent import AgentConfig  # noqa: PLC0415
@@ -287,6 +285,10 @@ class TestBotIntegration:
                             model="gpt-6-astra",
                             rooms=["#test:localhost"],
                         ),
+                    },
+                    models={
+                        "default": {"provider": "openai", "id": "test-model"},
+                        "gpt-6-astra": {"provider": "openai", "id": "gpt-6-astra"},
                     },
                 ),
             ),
@@ -310,14 +312,6 @@ class TestBotIntegration:
         install_runtime_journal_support(bot)
         expected_config = config
 
-        async def mock_send_message_result(
-            _client: object,
-            _room_id: str,
-            content: dict,
-        ) -> object:
-            assert config is expected_config
-            return delivered_matrix_event("$stream", content)
-
         async def mock_edit_message_result(
             _client: object,
             _room_id: str,
@@ -330,8 +324,19 @@ class TestBotIntegration:
 
         # Simulate a message from a user
         with (
-            patch("mindroom.streaming.send_message_result", side_effect=mock_send_message_result),
             patch("mindroom.streaming.edit_message_result", side_effect=mock_edit_message_result),
+            patch.object(
+                DeliveryGateway,
+                "deliver_stream",
+                autospec=True,
+                side_effect=DeliveryGateway.deliver_stream,
+            ) as deliver_stream,
+            patch.object(
+                DeliveryGateway,
+                "deliver_final",
+                autospec=True,
+                side_effect=DeliveryGateway.deliver_final,
+            ) as deliver_final,
         ):
             await bot._response_runner.generate_response(
                 ResponseRequest(
@@ -353,25 +358,28 @@ class TestBotIntegration:
                 ),
             )
 
-        # Should have used streaming since user is online
+        # Should have streamed the reply since user is online
         mock_stream_agent_response.assert_called_once()
-        mock_ai_response.assert_not_called()
+        deliver_stream.assert_awaited_once()
+        deliver_final.assert_not_awaited()
 
     @pytest.mark.asyncio
-    @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.matrix.presence.is_user_online")
     async def test_bot_uses_non_streaming_when_user_offline(
         self,
         mock_is_user_online: AsyncMock,
-        mock_stream_agent_response: AsyncMock,
-        mock_ai_response: AsyncMock,
+        mock_stream_agent_response: Mock,
         tmp_path: Path,
     ) -> None:
-        """Test that bot uses non-streaming when user is offline."""
+        """Test that bot delivers its reply whole when user is offline."""
         # Setup mocks
         mock_is_user_online.return_value = False
-        mock_ai_response.return_value = "Test response"
+
+        async def mock_streaming_response() -> AsyncIterator[str]:
+            yield "Test response"
+
+        mock_stream_agent_response.return_value = mock_streaming_response()
 
         # Create bot with streaming enabled
         from mindroom.config.agent import AgentConfig  # noqa: PLC0415
@@ -385,6 +393,10 @@ class TestBotIntegration:
                             model="gpt-6-astra",
                             rooms=["#test:localhost"],
                         ),
+                    },
+                    models={
+                        "default": {"provider": "openai", "id": "test-model"},
+                        "gpt-6-astra": {"provider": "openai", "id": "gpt-6-astra"},
                     },
                 ),
             ),
@@ -408,26 +420,42 @@ class TestBotIntegration:
         install_runtime_journal_support(bot)
 
         # Simulate a message from a user
-        await bot._response_runner.generate_response(
-            ResponseRequest(
-                sources=ResponseSources(
-                    pending_event_ids=("$msg123",),
-                    logical_source_event_ids=("$msg123",),
-                ),
-                prompt="Hello bot",
-                thread_history=[],
-                user_id="@user:localhost",
-                response_envelope=request_envelope(
-                    room_id="!test:localhost",
-                    reply_to_event_id="$msg123",
-                    thread_id="$thread123",
+        with (
+            patch.object(
+                DeliveryGateway,
+                "deliver_stream",
+                autospec=True,
+                side_effect=DeliveryGateway.deliver_stream,
+            ) as deliver_stream,
+            patch.object(
+                DeliveryGateway,
+                "deliver_final",
+                autospec=True,
+                side_effect=DeliveryGateway.deliver_final,
+            ) as deliver_final,
+        ):
+            await bot._response_runner.generate_response(
+                ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$msg123",),
+                        logical_source_event_ids=("$msg123",),
+                    ),
                     prompt="Hello bot",
+                    thread_history=[],
                     user_id="@user:localhost",
-                    agent_name="test_agent",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$msg123",
+                        thread_id="$thread123",
+                        prompt="Hello bot",
+                        user_id="@user:localhost",
+                        agent_name="test_agent",
+                    ),
                 ),
-            ),
-        )
+            )
 
-        # Should have used non-streaming since user is offline
-        mock_ai_response.assert_called_once()
-        mock_stream_agent_response.assert_not_called()
+        # Should have delivered the collected reply whole since user is offline
+        mock_stream_agent_response.assert_called_once()
+        deliver_final.assert_awaited_once()
+        assert deliver_final.await_args.args[1].response_text == "Test response"
+        deliver_stream.assert_not_awaited()

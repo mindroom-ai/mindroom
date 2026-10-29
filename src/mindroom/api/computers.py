@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 import aiohttp
@@ -48,23 +48,6 @@ class ComputerRuntime:
     authorize: Callable[[str, str, str], Awaitable[ComputerTarget]]
     config_generation: int
     config: Config = field(repr=False)
-
-
-def rebind_computer_runtime(app: FastAPI, preload: config_lifecycle.ApiSnapshot, *, loaded: bool) -> None:
-    """Keep a prebound authorizer across initial API configuration publication."""
-    state = config_lifecycle.app_state(app)
-    runtime = state.computer_runtime
-    if runtime is None or preload.runtime_config is not None or preload.config_load_result is not None:
-        return
-    if loaded:
-        state.computer_runtime = replace(
-            runtime,
-            config_generation=config_lifecycle.require_api_state(app).snapshot.generation,
-        )
-    else:
-        state.computer_runtime = None
-        if state.computer_sessions is not None:
-            state.computer_sessions.close_all()
 
 
 class _ComputerRoute(APIRoute):

@@ -67,6 +67,7 @@ from tests.authorization_helpers import (
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
+    install_bots,
     install_model_providers,
     make_conversation_reader_mock,
     make_relation_lookup,
@@ -76,6 +77,7 @@ from tests.conftest import (
 from tests.fakes.scripted_model import ScriptedModel
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.tool_job_helpers import job_tool, tool_job_runtime
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -1198,7 +1200,7 @@ async def test_tool_hook_contexts_expose_router_backed_matrix_admin(tmp_path: Pa
     )
 
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
-    orchestrator.agent_bots = {"router": router_bot, "code": bot}
+    install_bots(orchestrator, {"router": router_bot, "code": bot})
     bot.orchestrator = orchestrator
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [before, after])])
@@ -1315,7 +1317,7 @@ async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_rou
     router_bot.client.room_get_state_event.return_value = SimpleNamespace(content={"name": "Router Lobby"})
     router_bot.client.room_put_state.return_value = object()
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
-    orchestrator.agent_bots = {"router": router_bot, "code": bot}
+    install_bots(orchestrator, {"router": router_bot, "code": bot})
     bot.orchestrator = orchestrator
 
     @hook(EVENT_TOOL_BEFORE_CALL)
@@ -1959,7 +1961,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
             execution_identity=execution_identity,
             hook_registry=bot.hook_registry,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, runtime_paths_for(config), "code"),
         )
         echo = build.spec.functions["echo"]
 
@@ -2224,7 +2226,7 @@ async def test_create_agent_runs_the_hook_policy_around_its_tool_calls(
             execution_identity=None,
             hook_registry=registry,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, runtime_paths_for(config), "code"),
         )
 
         echo = build.spec.functions["echo"]

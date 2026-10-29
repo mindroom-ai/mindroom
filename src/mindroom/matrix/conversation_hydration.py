@@ -206,9 +206,9 @@ def _redaction_target(event: nio.Event) -> str | None:
 
     The second shape is confined to events this projection could be storing. A
     redaction preserves its target's ``type``, so the type check is enough to
-    say so, and without it a redacted reaction or state event would tombstone
-    itself -- a durable row naming an event no visible message ever had, which
-    deletes nothing and has to be read past forever after.
+    say so, and without it a redacted reaction or state event would record a
+    redaction of itself -- a durable row naming an event no visible message
+    ever had, which deletes nothing and has to be read past forever after.
     """
     if isinstance(event, nio.RedactionEvent):
         # A redaction is never encrypted, so a decrypted one is a sender's claim the homeserver never checked.

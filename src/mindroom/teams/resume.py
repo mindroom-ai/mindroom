@@ -18,6 +18,7 @@ from mindroom.ai import run_delegated_child_response
 from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import approval_decisions, with_resumed_turn_log_context
 from mindroom.approval.tool_owners import require_original_toolkit, required_approval_tool_names
+from mindroom.config.resolution import entity_timezone
 from mindroom.delegation.execution import drive_delegation_stream, has_delegation_state
 from mindroom.delegation.state import member_call_id, member_delegation_card, pending_call_slot
 from mindroom.helper_usage import helper_usage_context
@@ -48,6 +49,7 @@ from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.turn_model import ModelScope, resolve_team_turn_models
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
@@ -227,19 +229,14 @@ def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAtt
     card of a member's own delegation call adds no marker: the member's slot already shows that call pending under
     its own id, and the resume finishes it there. Every other call waits under its own id.
     """
-    member_names = presentation.config_names_by_id.values()
+    member_ids = presentation.member_ids
     for requirement in paused.requirements:
-        if member_delegation_card(requirement, member_names):
+        if member_delegation_card(requirement, member_ids):
             continue
-        member_id, _ = pending_call_slot(requirement, member_names)
-        call = requirement.tool_execution.call
-        if member_id is None:
-            presentation.start_tool("team", call)
-        else:
-            presentation.start_member_tool(
-                presentation.resolve_member_id(member_id, requirement.member_display_name),
-                call,
-            )
+        member_id, _ = pending_call_slot(requirement, member_ids)
+        if member_id is not None:
+            member_id = presentation.resolve_member_id(member_id, requirement.member_display_name)
+        presentation.start_tool(requirement.tool_execution.call, member_id=member_id)
     return replace(
         paused,
         response_text=presentation.render_body(finished=False),
@@ -335,6 +332,7 @@ async def continue_paused_team_run(
                         config=config,
                         runtime_paths=runtime_paths,
                         execution_identity=execution_identity,
+                        delegation_depth=0,
                     ),
                 )
                 for name in member_names
@@ -347,7 +345,20 @@ async def continue_paused_team_run(
             execution_identity=execution_identity,
             refresh_scheduler=refresh_scheduler,
             supports_native_tool_approval=True,
-            active_model_names=member_model_names,
+            # A pause a resume made saves no member models, so its own resume resolves them by the team rule.
+            active_model_names=member_model_names
+            if member_model_names is not None
+            else resolve_team_turn_models(
+                config,
+                runtime_paths,
+                ModelScope(
+                    entity=configured_team_name,
+                    room_id=execution_identity.room_id,
+                    thread_id=execution_identity.resolved_thread_id,
+                ),
+                member_names,
+                None,
+            ).member_model_names,
             required_tool_names={name: task.result() for name, task in required_tool_tasks.items()},
         )
         if team_name is None:
@@ -361,7 +372,7 @@ async def continue_paused_team_run(
             execution_identity=execution_identity,
             model_name=model_name,
             configured_team_name=team_name,
-            timezone=config.get_entity_timezone(configured_team_name),
+            timezone=entity_timezone(config, configured_team_name),
         )
         await _build_paused_members(built.spec, persisted)
         native = restore_native_history(built.spec.leader.model, persisted_run=persisted, session=scope.session)

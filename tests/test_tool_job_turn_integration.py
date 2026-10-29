@@ -93,7 +93,7 @@ async def test_consumed_results_leave_no_receipts_in_session_state(tmp_path: Pat
             patch.object(runtime, "acknowledge_wait", wraps=runtime.acknowledge_wait) as acknowledge,
         ):
             runs = [await run_turn(topic) for topic in topics]
-        session = storage.load_session(context.session_id, "agent")
+        session = storage.load_session(context.session_id)
         assert session is not None
         assert not session.session_state
         assert len(storage.list_runs(context.session_id)) == len(topics)

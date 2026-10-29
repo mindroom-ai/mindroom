@@ -2195,6 +2195,10 @@ agents:
     knowledge_bases: [docs]
   other:
     display_name: Other
+models:
+  default:
+    provider: openai
+    id: test-model
 """
 
 
@@ -2263,6 +2267,7 @@ def test_docker_projection_maps_workspace_paths_without_resolving_them(
         config_text=(
             "knowledge_bases:\n  docs:\n    path: ${MINDROOM_STORAGE_PATH}/agents/code/workspace/kb\n"
             "agents:\n  code:\n    display_name: Code\n    knowledge_bases: [docs]\n"
+            "models:\n  default:\n    provider: openai\n    id: test-model\n"
         ),
         runtime_paths=runtime_paths,
         storage_path=storage,
@@ -2380,6 +2385,10 @@ agents:
   code:
     display_name: Code
     knowledge_bases: [docs]
+models:
+  default:
+    provider: openai
+    id: test-model
 """.lstrip(),
         storage_path=tmp_path / "storage",
     )
@@ -4067,9 +4076,11 @@ models:
     assert projected_config["agents"]["alpha"]["delegate_to"] == []
     assert "calls" not in projected_config
 
+    # A dedicated worker loads its projection in runner mode, which runs no model.
     projected_runtime_paths = resolve_runtime_paths(
         config_path=projection_root / "config.yaml",
         storage_path=tmp_path / "projected-storage",
+        process_env={"MINDROOM_SANDBOX_RUNNER_MODE": "true"},
     )
 
     assert set(load_config(projected_runtime_paths).agents) == {"alpha"}
@@ -4591,6 +4602,10 @@ agents:
 knowledge_bases:
   threads:
     path: ./agents/alpha/workspace/thread_exports
+models:
+  default:
+    provider: openai
+    id: test-model
 """,
     )
     key = "v1:default:shared:alpha" if worker_scope == "shared" else "v1:default:user_agent:@alice:example.org:alpha"
@@ -4832,9 +4847,11 @@ models:
         projection_root / ".mindroom-worker-assets" / "agents" / "alpha" / "private" / "template_dir" / "README.md"
     ).read_text(encoding="utf-8") == "template scaffold\n"
 
+    # A dedicated worker loads its projection in runner mode, which runs no model.
     projected_runtime_paths = resolve_runtime_paths(
         config_path=projection_root / "config.yaml",
         storage_path=tmp_path / "projected-storage",
+        process_env={"MINDROOM_SANDBOX_RUNNER_MODE": "true"},
     )
     projected_runtime_config = load_config(projected_runtime_paths)
     workspace = resolve_agent_workspace_from_state_path(
@@ -5298,6 +5315,10 @@ agents:
   alpha:
     display_name: Alpha
     worker_scope: user
+models:
+  default:
+    provider: openai
+    id: test-model
 """.lstrip()
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
     workspace = tmp_path / "agents" / "alpha" / "workspace"

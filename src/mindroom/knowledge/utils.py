@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING
 
+from mindroom.config.resolution import agent_knowledge_base_ids
 from mindroom.embeddings.errors import extract_classified_embedder_detail
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.file_memory_knowledge import resolve_agent_file_memory_knowledge
@@ -180,7 +181,7 @@ def semantic_agent_knowledge_base_ids(agent_name: str, config: Config) -> tuple[
     """Return the configured knowledge bases an agent searches semantically."""
     return tuple(
         base_id
-        for base_id in config.resolve_entity(agent_name).knowledge_base_ids
+        for base_id in agent_knowledge_base_ids(config, agent_name)
         if config.get_knowledge_base_config(base_id).mode == "semantic"
     )
 

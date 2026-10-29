@@ -30,11 +30,11 @@ def run_key(run: RunRecord) -> tuple[int, str]:
     return (run.created_at, run.run_id)
 
 
-def updated_sessions(storage: ConversationStore, agent_name: str, *, since: int) -> list[tuple[str, int]]:
-    """Return ``(session_id, updated_at)`` for the agent's conversations updated after ``since``, oldest first."""
+def updated_sessions(storage: ConversationStore, *, since: int) -> list[tuple[str, int]]:
+    """Return ``(session_id, updated_at)`` of ``storage``'s conversations updated after ``since``, oldest first."""
     return [
         (session_id, updated_at)
-        for session_id, updated_at in storage.list_updated_sessions(agent_name, since=since)
+        for session_id, updated_at in storage.list_updated_sessions(since=since)
         if _WORKFLOW_SESSION_MARKER not in session_id
     ]
 

@@ -25,6 +25,7 @@ from mindroom.matrix.personal_room_store import (
 )
 from mindroom.message_target import MessageTarget
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -36,6 +37,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.tool_approval_helpers import gated_functions
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -70,6 +72,7 @@ def _tool_context(
                 else {}
             ),
             router=RouterConfig(model="default", accept_invites=accept_invites),
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
         ),
         test_runtime_paths(tmp_path),
     )
@@ -123,15 +126,19 @@ def test_matrix_agents_get_zero_argument_invite_router_in_standard_tool_environm
         runtime_paths_for(config),
         execution_identity=identity,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths_for(config), "code"),
     )
 
     [toolkit] = [toolkit for toolkit in agent.spec.toolkits if toolkit.name == "invite_router"]
     [function] = toolkit.functions
-    definition = {"name": function.name, "description": function.description, "parameters": function.parameters}
+    properties = dict(function.parameters["properties"])
+    # Like every eligible function of an agent, it also takes the optional argument that saves its output to a file.
+    assert properties.pop(OUTPUT_PATH_ARGUMENT)["default"] is None
+    own_parameters = {**function.parameters, "properties": properties}
+    definition = {"name": function.name, "description": function.description, "parameters": own_parameters}
     definition_tokens = estimate_text_tokens(stable_serialize([definition]))
 
-    assert function.parameters["properties"] == {}
+    assert properties == {}
     assert function.parameters.get("required", []) == []
     assert definition_tokens <= 36
     assert toolkit.instructions is None
@@ -171,7 +178,7 @@ def test_matrix_runtime_ignores_authored_invite_router_function_filters(tmp_path
         runtime_paths_for(config),
         execution_identity=identity,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths_for(config), "code"),
     )
 
     [toolkit] = [toolkit for toolkit in agent.spec.toolkits if toolkit.name == "invite_router"]
@@ -203,7 +210,7 @@ def test_invite_router_stays_hidden_without_matrix_room_context(tmp_path: Path) 
         runtime_paths_for(config),
         execution_identity=identity,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths_for(config), "code"),
     )
 
     assert "invite_router" not in {toolkit.name for toolkit in agent.spec.toolkits}
@@ -261,7 +268,7 @@ def test_matrix_agents_reject_local_invite_router_function_collisions(
             runtime_paths_for(config),
             execution_identity=identity,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, runtime_paths_for(config), "code"),
         )
 
 
@@ -461,6 +468,7 @@ async def test_invite_router_cannot_require_router_backed_approval(tmp_path: Pat
     config = bind_runtime_paths(
         Config(
             agents={"code": AgentConfig(display_name="Code", role="Write code")},
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
             tool_approval={"default": "require_approval"},
         ),
         test_runtime_paths(tmp_path),
@@ -476,6 +484,7 @@ async def test_same_named_external_function_does_not_bypass_approval(tmp_path: P
     config = bind_runtime_paths(
         Config(
             agents={"code": AgentConfig(display_name="Code", role="Write code")},
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
             tool_approval={"default": "require_approval"},
         ),
         test_runtime_paths(tmp_path),

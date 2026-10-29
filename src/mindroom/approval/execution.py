@@ -14,12 +14,7 @@ from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agent_cli.cli_approval_recovery import CliFollowUpTurn, continue_cli_approval
 from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agents import create_agent
-from mindroom.ai import (
-    agent_run_metadata_content,
-    collect_streamed_response_content,
-    run_delegated_child_response,
-    stream_agent_response,
-)
+from mindroom.ai import agent_run_metadata_content, run_delegated_child_response, stream_agent_response
 from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import ResumeRunner, approval_decisions
 from mindroom.approval.tool_owners import (
@@ -41,7 +36,9 @@ from mindroom.response_turn import (
     PausedAttempt,
     ResponsePausedForApproval,
     ResponseTurnContext,
-    ResumedAttempt,
+    TurnResume,
+    TurnSinks,
+    collect_streamed_response_content,
     own_approved_calls,
     pause_without_approval_error,
     paused_attempt_from_response,
@@ -56,6 +53,7 @@ from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import runtime_context_from_dispatch_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
+from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -76,6 +74,7 @@ if TYPE_CHECKING:
     from mindroom.streaming import ProgressPublisher
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolDispatchContext, ToolRuntimeSupport
+    from mindroom.turn_model import TurnModel
 
 
 @dataclass(frozen=True)
@@ -162,6 +161,21 @@ async def _persisted_events(persisted: RunRecord) -> AsyncIterator[RunEvent]:
     yield RunFinished(persisted)
 
 
+def _continuation_model(config: Config, runtime_paths: RuntimePaths, continuation: ApprovalContinuation) -> TurnModel:
+    """Return the model a paused agent run resumes on: the one it ran, else the one its room and thread choose now."""
+    return resolve_turn_model(
+        config,
+        runtime_paths,
+        ModelScope(
+            entity=continuation.entity_name,
+            room_id=continuation.room_id,
+            thread_id=continuation.thread_id,
+            explicit=continuation.runtime_model_name,
+        ),
+        None,
+    )
+
+
 async def _continue_persisted_agent(
     build: AgentBuild,
     continuation: ApprovalContinuation,
@@ -178,13 +192,13 @@ async def _continue_persisted_agent(
     tool_trace_collector: list[ToolTraceEntry],
     tool_dispatch: ToolDispatchContext,
     progress: ProgressPublisher | None,
+    model_name: str,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Resume a persisted agent with event streaming so presentation order is retained.
 
     A run the delegation driver owns resumes through it with the decisions on its children's calls; any other run
     resumes with the decisions on its own calls, and the driver continues it if it pauses on a delegation.
     """
-    model_name = continuation.runtime_model_name or config.resolve_entity(continuation.entity_name).model_name
     runner = ResumeRunner(
         build=build,
         config=config,
@@ -265,7 +279,7 @@ async def _continue_persisted_agent(
         _continuation_turn_context(continuation, model_name=model_name, metadata=response.metadata),
         presentation,
         prompt=continuation.request_body,
-        resumed_attempt=ResumedAttempt(attempt, continuation_count=continuation.continuation_count),
+        resume=TurnResume(attempt, continuation_count=continuation.continuation_count),
         config=config,
         runtime_paths=runtime_paths,
         knowledge=knowledge,
@@ -310,19 +324,18 @@ async def _stream_continuation_turn(
     tool_trace_collector: list[ToolTraceEntry],
     tool_dispatch: ToolDispatchContext,
     progress: ProgressPublisher | None,
-    resumed_attempt: ResumedAttempt | None = None,
+    resume: TurnResume,
     reusable_build: AgentBuild | None = None,
-    initial_continuation_count: int = 0,
     delegation_depth: int = 0,
     media: MediaInputs | None = None,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Stream resumed work and any fresh attempts into the continued reply through the shared response driver.
 
     The reply shows tool calls when ``presentation`` does. A recovered CLI call runs without a model request, so its
-    follow-up, the turn with no ``resumed_attempt``, reads the approval receipt in its first attempt's run; a resumed
-    run already read it.
+    follow-up, the turn whose ``resume`` restores no attempt, reads the approval receipt in its first attempt's run; a
+    resumed run already read it.
     """
-    if resumed_attempt is None:
+    if resume.attempt is None:
         run_id = str(uuid4())
         ctx = replace(ctx, run_id=run_id)
         add_approval_receipt_reader(run_id)
@@ -330,23 +343,23 @@ async def _stream_continuation_turn(
     run_metadata: dict[str, Any] = {}
     completed: list[CompletedAttempt] = []
     stream = stream_agent_response(
-        ctx,
-        prompt=prompt,
-        runtime_paths=runtime_paths,
-        config=config,
-        knowledge=knowledge,
-        execution_identity=tool_dispatch.execution_identity,
-        refresh_scheduler=refresh_scheduler,
-        run_metadata_collector=run_metadata,
-        show_tool_calls=presentation.show_tool_calls,
-        tool_function_filter=tool_context.tool_function_filter if tool_context is not None else None,
-        supports_native_tool_approval=True,
-        reusable_build=reusable_build,
-        resumed_attempt=resumed_attempt,
-        initial_continuation_count=initial_continuation_count,
-        delegation_depth=delegation_depth,
-        media=media,
-        on_completed=completed.append,
+        replace(
+            ctx,
+            prompt=prompt,
+            media=media,
+            show_tool_calls=presentation.show_tool_calls,
+            execution_identity=tool_dispatch.execution_identity,
+            refresh_scheduler=refresh_scheduler,
+            knowledge=knowledge,
+            tool_function_filter=tool_context.tool_function_filter if tool_context is not None else None,
+            delegation_depth=delegation_depth,
+            supports_native_tool_approval=True,
+            reusable_build=reusable_build,
+        ),
+        runtime_paths,
+        config,
+        sinks=TurnSinks(run_metadata_collector=run_metadata, on_completed=completed.append),
+        resume=resume,
     )
     try:
         response_text, tool_trace = await collect_streamed_response_content(
@@ -421,7 +434,7 @@ class AgentApprovalExecution:
         )
         store = await asyncio.to_thread(storage_factory)
         set_consumption_storage(storage_factory)
-        session = await asyncio.to_thread(store.load_session, continuation.session_id, "agent")
+        session = await asyncio.to_thread(store.load_session, continuation.session_id)
         persisted = await asyncio.to_thread(store.get_run, continuation.run_id)
         if (
             session is None
@@ -450,7 +463,10 @@ class AgentApprovalExecution:
             config=config,
             runtime_paths=self.runtime_paths,
             execution_identity=execution_identity,
+            delegation_depth=cli_call.delegation_depth if cli_call is not None else 0,
         )
+        # The build and the resumed run use one model, even if a room or thread override changes meanwhile.
+        model = _continuation_model(config, self.runtime_paths, continuation)
         build = await asyncio.to_thread(
             create_agent,
             continuation.entity_name,
@@ -458,7 +474,7 @@ class AgentApprovalExecution:
             self.runtime_paths,
             execution_identity,
             history_storage=store,
-            active_model_name=continuation.runtime_model_name,
+            model=model,
             knowledge=knowledge,
             refresh_scheduler=self.refresh_scheduler(),
             supports_native_tool_approval=True,
@@ -519,7 +535,7 @@ class AgentApprovalExecution:
                                 recovered.presentation,
                                 prompt=recovered.prompt,
                                 reusable_build=recovered.reusable_build,
-                                initial_continuation_count=recovered.initial_continuation_count,
+                                resume=TurnResume(continuation_count=recovered.initial_continuation_count),
                                 delegation_depth=recovered.delegation_depth,
                                 media=recovered.media,
                                 config=config,
@@ -556,6 +572,7 @@ class AgentApprovalExecution:
                             tool_trace_collector=tool_trace_collector,
                             tool_dispatch=tool_dispatch,
                             progress=progress,
+                            model_name=model.model_name,
                         )
                     result = await self.tool_runtime.run_in_context(
                         tool_context=runtime_context,

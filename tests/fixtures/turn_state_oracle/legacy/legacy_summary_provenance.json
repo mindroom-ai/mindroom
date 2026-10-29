@@ -1,0 +1,334 @@
+{
+ "scenario": {
+  "actions": [
+   {
+    "days": 31,
+    "op": "cleanup"
+   },
+   {
+    "op": "reopen"
+   },
+   {
+    "edit": "$e4",
+    "op": "edit",
+    "source": "$m1",
+    "ts": 40
+   },
+   {
+    "op": "reopen"
+   }
+  ],
+  "ids": [
+   "$e1",
+   "$e2",
+   "$e3",
+   "$e4",
+   "$m1",
+   "$r1",
+   "$thread-a"
+  ],
+  "input": "legacy_summary_provenance"
+ },
+ "steps": [
+  {
+   "action": null,
+   "changes": {
+    "is_handled": {
+     "$e2": true,
+     "$m1": true
+    },
+    "record_for_response": {
+     "$r1": {
+      "anchor": "$m1",
+      "completed": true,
+      "history_scope": "agent:agent",
+      "prompts": {
+       "$m1": "latest"
+      },
+      "replay": {
+       "$e1": {
+        "legacy_summary_provenance": true,
+        "redacted": true,
+        "response_event_id": "$r1",
+        "source_event_id": "$m1",
+        "timestamp_ms": 10
+       },
+       "$e2": {
+        "legacy_summary_provenance": true,
+        "redacted": true,
+        "response_event_id": null,
+        "source_event_id": "$m1",
+        "timestamp_ms": 20
+       },
+       "$e3": {
+        "legacy_summary_provenance": false,
+        "redacted": false,
+        "response_event_id": null,
+        "source_event_id": "$m1",
+        "timestamp_ms": 30
+       }
+      },
+      "requester": "@alice:example.org",
+      "response": "$r1",
+      "response_owner": "agent",
+      "revisions": {
+       "$m1": [
+        30,
+        "$e3"
+       ]
+      },
+      "sources": [
+       "$m1"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-a",
+       "room_id": "!a:example.org",
+       "session_id": "!a:example.org:$thread-a",
+       "source_thread_id": "$thread-a"
+      }
+     }
+    },
+    "redacted_event_ids": {
+     "a": [
+      "$e2"
+     ],
+     "b": [
+      "$e2"
+     ]
+    },
+    "redacted_history_events": {
+     "a": {
+      "$e1": "$m1",
+      "$e2": "$m1"
+     }
+    },
+    "turn_record": {
+     "$e2": {
+      "anchor": "$e2",
+      "completed": false,
+      "redacted": [
+       "$e2"
+      ],
+      "sources": [
+       "$e2"
+      ]
+     },
+     "$m1": {
+      "anchor": "$m1",
+      "completed": true,
+      "history_scope": "agent:agent",
+      "prompts": {
+       "$m1": "latest"
+      },
+      "replay": {
+       "$e1": {
+        "legacy_summary_provenance": true,
+        "redacted": true,
+        "response_event_id": "$r1",
+        "source_event_id": "$m1",
+        "timestamp_ms": 10
+       },
+       "$e2": {
+        "legacy_summary_provenance": true,
+        "redacted": true,
+        "response_event_id": null,
+        "source_event_id": "$m1",
+        "timestamp_ms": 20
+       },
+       "$e3": {
+        "legacy_summary_provenance": false,
+        "redacted": false,
+        "response_event_id": null,
+        "source_event_id": "$m1",
+        "timestamp_ms": 30
+       }
+      },
+      "requester": "@alice:example.org",
+      "response": "$r1",
+      "response_owner": "agent",
+      "revisions": {
+       "$m1": [
+        30,
+        "$e3"
+       ]
+      },
+      "sources": [
+       "$m1"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-a",
+       "room_id": "!a:example.org",
+       "session_id": "!a:example.org:$thread-a",
+       "source_thread_id": "$thread-a"
+      }
+     }
+    }
+   },
+   "outcome": null
+  },
+  {
+   "action": {
+    "days": 31,
+    "op": "cleanup"
+   },
+   "changes": {
+    "is_handled": {
+     "$e2": null
+    },
+    "redacted_event_ids": {
+     "a": null,
+     "b": null
+    },
+    "turn_record": {
+     "$e2": null
+    }
+   },
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "op": "reopen"
+   },
+   "changes": {},
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "edit": "$e4",
+    "op": "edit",
+    "source": "$m1",
+    "ts": 40
+   },
+   "changes": {
+    "record_for_response": {
+     "$r1": {
+      "anchor": "$m1",
+      "completed": true,
+      "history_scope": "agent:agent",
+      "prompts": {
+       "$m1": "$m1 as of $e4"
+      },
+      "replay": {
+       "$e1": {
+        "legacy_summary_provenance": true,
+        "redacted": true,
+        "response_event_id": "$r1",
+        "source_event_id": "$m1",
+        "timestamp_ms": 10
+       },
+       "$e2": {
+        "legacy_summary_provenance": true,
+        "redacted": true,
+        "response_event_id": null,
+        "source_event_id": "$m1",
+        "timestamp_ms": 20
+       },
+       "$e3": {
+        "legacy_summary_provenance": false,
+        "redacted": false,
+        "response_event_id": null,
+        "source_event_id": "$m1",
+        "timestamp_ms": 30
+       },
+       "$e4": {
+        "legacy_summary_provenance": false,
+        "redacted": false,
+        "response_event_id": null,
+        "source_event_id": "$m1",
+        "timestamp_ms": 40
+       }
+      },
+      "requester": "@alice:example.org",
+      "response": "$r1",
+      "response_owner": "agent",
+      "revisions": {
+       "$m1": [
+        40,
+        "$e4"
+       ]
+      },
+      "sources": [
+       "$m1"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-a",
+       "room_id": "!a:example.org",
+       "session_id": "!a:example.org:$thread-a",
+       "source_thread_id": "$thread-a"
+      }
+     }
+    },
+    "turn_record": {
+     "$m1": {
+      "anchor": "$m1",
+      "completed": true,
+      "history_scope": "agent:agent",
+      "prompts": {
+       "$m1": "$m1 as of $e4"
+      },
+      "replay": {
+       "$e1": {
+        "legacy_summary_provenance": true,
+        "redacted": true,
+        "response_event_id": "$r1",
+        "source_event_id": "$m1",
+        "timestamp_ms": 10
+       },
+       "$e2": {
+        "legacy_summary_provenance": true,
+        "redacted": true,
+        "response_event_id": null,
+        "source_event_id": "$m1",
+        "timestamp_ms": 20
+       },
+       "$e3": {
+        "legacy_summary_provenance": false,
+        "redacted": false,
+        "response_event_id": null,
+        "source_event_id": "$m1",
+        "timestamp_ms": 30
+       },
+       "$e4": {
+        "legacy_summary_provenance": false,
+        "redacted": false,
+        "response_event_id": null,
+        "source_event_id": "$m1",
+        "timestamp_ms": 40
+       }
+      },
+      "requester": "@alice:example.org",
+      "response": "$r1",
+      "response_owner": "agent",
+      "revisions": {
+       "$m1": [
+        40,
+        "$e4"
+       ]
+      },
+      "sources": [
+       "$m1"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-a",
+       "room_id": "!a:example.org",
+       "session_id": "!a:example.org:$thread-a",
+       "source_thread_id": "$thread-a"
+      }
+     }
+    }
+   },
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "op": "reopen"
+   },
+   "changes": {},
+   "outcome": "ok"
+  }
+ ]
+}

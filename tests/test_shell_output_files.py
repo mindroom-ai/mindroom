@@ -50,7 +50,7 @@ def shell_toolkit(request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: p
         yield get_tool_by_name(
             "shell",
             runtime_paths,
-            disable_sandbox_proxy=True,
+            runs_in_worker=False,
             worker_target=None,
             tool_init_overrides={"base_dir": str(tmp_path)},
             tool_output_workspace_root=tmp_path,

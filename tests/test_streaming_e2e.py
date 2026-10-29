@@ -35,14 +35,29 @@ from tests.conftest import (
     orchestrator_runtime_paths,
     runtime_paths_for,
 )
+from tests.streaming_helpers import FakeReplyRecords
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Callable
     from pathlib import Path
+
+    from mindroom.response_turn import ResponseTurnContext
 
 
 def _matrix_client_mock() -> AsyncMock:
     return make_matrix_client_mock()
+
+
+def _answer_stream(text: str) -> Callable[..., AsyncGenerator[str, None]]:
+    """Return a turn stream that answers ``text`` each time a turn runs."""
+
+    def stream(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
+        async def chunks() -> AsyncGenerator[str, None]:
+            yield text
+
+        return chunks()
+
+    return stream
 
 
 @pytest.mark.asyncio
@@ -146,10 +161,7 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
         await asyncio.sleep(0.02)
         yield "x" * 300
 
-    with (
-        patch("mindroom.streaming.send_message_result", new=AsyncMock(side_effect=record_send)),
-        patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
-    ):
+    with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
         await send_streaming_response(
             client=client,
             target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
@@ -158,6 +170,7 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
             response_stream=stream(),
             show_tool_calls=False,
             streaming_cls=FastProgressStreamingResponse,
+            **FakeReplyRecords(send=record_send, edit=record_edit).hooks(),
         )
 
     assert len(deliveries) == 6
@@ -309,66 +322,64 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     orchestrator_runtime = orchestrator_runtime_paths(tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime)
 
-    # Patch the config loading to assign rooms
-    with patch("mindroom.orchestrator.load_config") as mock_config:
-        mock_cfg = Config(
-            agents={
-                "helper": AgentConfig(display_name="HelperAgent", rooms=[test_room_id]),
-                "calculator": AgentConfig(display_name="CalculatorAgent", rooms=[test_room_id]),
-            },
-            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
-            defaults=DefaultsConfig(thread_summary_first_threshold=100),
-            memory={"backend": "none"},
-            router=RouterConfig(model="default"),
-        )
-        mock_config.return_value = mock_cfg
+    # The config startup loaded, with rooms assigned
+    mock_cfg = Config(
+        agents={
+            "helper": AgentConfig(display_name="HelperAgent", rooms=[test_room_id]),
+            "calculator": AgentConfig(display_name="CalculatorAgent", rooms=[test_room_id]),
+        },
+        models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
+        defaults=DefaultsConfig(thread_summary_first_threshold=100),
+        memory={"backend": "none"},
+        router=RouterConfig(model="default"),
+    )
 
-        # Patch create_bot_for_entity to create bots with proper user_ids
-        with (
-            patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
-            patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
-        ):
+    # Patch create_bot_for_entity to create bots with proper user_ids
+    with (
+        patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
+        patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
+    ):
 
-            def create_bot_side_effect(
-                entity_name: str,
-                agent_user: object,
-                config: object,
-                runtime_paths: object,
-                storage_path: Path,
-                *,
-                config_path: Path | None = None,
-            ) -> object:
-                del config_path
-                # Update the agent_user with proper user_id
-                if entity_name == "helper":
-                    agent_user.user_id = "@mindroom_helper:localhost"
-                elif entity_name == "calculator":
-                    agent_user.user_id = "@mindroom_calculator:localhost"
-                elif entity_name == "router":
-                    agent_user.user_id = "@mindroom_router:localhost"
+        def create_bot_side_effect(
+            entity_name: str,
+            agent_user: object,
+            config: object,
+            runtime_paths: object,
+            storage_path: Path,
+            *,
+            config_path: Path | None = None,
+        ) -> object:
+            del config_path
+            # Update the agent_user with proper user_id
+            if entity_name == "helper":
+                agent_user.user_id = "@mindroom_helper:localhost"
+            elif entity_name == "calculator":
+                agent_user.user_id = "@mindroom_calculator:localhost"
+            elif entity_name == "router":
+                agent_user.user_id = "@mindroom_router:localhost"
 
-                # Create the actual bot with config
-                runtime_config = bind_runtime_paths(config, runtime_paths)
-                return make_test_agent_bot(
-                    agent_user,
-                    storage_path,
-                    runtime_config,
-                    runtime_paths_for(runtime_config),
-                    rooms=[test_room_id],
-                )
+            # Create the actual bot with config
+            runtime_config = bind_runtime_paths(config, runtime_paths)
+            return make_test_agent_bot(
+                agent_user,
+                storage_path,
+                runtime_config,
+                runtime_paths_for(runtime_config),
+                rooms=[test_room_id],
+            )
 
-            mock_create_bot.side_effect = create_bot_side_effect
-            await orchestrator.initialize()
+        mock_create_bot.side_effect = create_bot_side_effect
+        await orchestrator.initialize(mock_cfg)
 
     # Start the orchestrator (in background). This test uses a deliberately small
     # MagicMock config, so keep unrelated runtime services stubbed.
     support_services_patch = patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock())
     support_services_patch.start()
-    room_setup_patch = patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock())
+    room_setup_patch = patch.object(orchestrator._rooms, "setup", new=AsyncMock())
     room_setup_patch.start()
     wait_for_homeserver_patch = patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock())
     wait_for_homeserver_patch.start()
-    start_task = asyncio.create_task(orchestrator.start())
+    start_task = asyncio.create_task(orchestrator.start(mock_cfg))
 
     try:
         # Give the bots time to start
@@ -378,13 +389,13 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         helper_bot = orchestrator.agent_bots["helper"]
         calc_bot = orchestrator.agent_bots["calculator"]
         empty_thread_snapshot = thread_history_result([], is_full_history=False)
-        helper_bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
+        helper_bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(
             return_value=empty_thread_snapshot,
         )
-        calc_bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(return_value=empty_thread_snapshot)
+        calc_bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(return_value=empty_thread_snapshot)
 
         # Ensure calculator bot has streaming disabled for this test
-        calc_bot.enable_streaming = False
+        calc_bot.config.defaults.enable_streaming = False
 
         # Simulate user mentioning helper
         user_event = MagicMock(spec=nio.RoomMessageText)
@@ -414,34 +425,23 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
             del requester_user_id
             return enable_streaming
 
-        async def stream_response(
-            _agent_name: str,
-            _prompt: str,
-            _session_id: str,
-            _storage_path: object,
-            _thread_history: list[object],
-            _room_id: str,
-        ) -> AsyncGenerator[str, None]:
-            yield "I can help! Let me ask "
-            yield "@mindroom_calculator:localhost what's 2+2?"
+        def stream_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
+            async def chunks() -> AsyncGenerator[str, None]:
+                if ctx.entity_label == "helper":
+                    yield "I can help! Let me ask "
+                    yield "@mindroom_calculator:localhost what's 2+2?"
+                else:
+                    yield "The answer is 4"
+
+            return chunks()
 
         with (
             patch(
                 "mindroom.response_runner.should_use_streaming",
                 new=AsyncMock(side_effect=should_use_streaming_for_test),
             ),
-            patch("mindroom.response_runner.stream_agent_response") as mock_streaming,
-            patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="The answer is 4")),
+            patch("mindroom.response_runner.stream_agent_response", side_effect=stream_response),
         ):
-            mock_streaming.return_value = stream_response(
-                "helper",
-                user_event.body,
-                "session",
-                tmp_path,
-                [],
-                test_room_id,
-            )
-
             # Mock that helper is mentioned
             with patch("mindroom.conversation_resolver.check_agent_mentioned") as mock_check:
                 mock_check.return_value = (["helper"], True, False)
@@ -602,6 +602,7 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
             ),
             orchestrator_runtime_paths(tmp_path),
         )
+        config.defaults.enable_streaming = False
 
         bot = make_test_agent_bot(
             calc_user,
@@ -609,7 +610,6 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
             config,
             runtime_paths_for(config),
             rooms=["!test:localhost"],
-            enable_streaming=False,
         )
         install_runtime_journal_support(bot)
         await bot.start()
@@ -664,9 +664,9 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
             },
         }
 
-        # Mock AI response
-        with patch("mindroom.response_runner.ai_response") as mock_ai:
-            mock_ai.return_value = "2+2 equals 4"
+        # Mock the turn's answer
+        with patch("mindroom.response_runner.stream_agent_response") as mock_stream:
+            mock_stream.side_effect = _answer_stream("2+2 equals 4")
 
             # Mock that calculator is mentioned
             with patch("mindroom.conversation_resolver.check_agent_mentioned") as mock_check:

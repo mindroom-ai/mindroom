@@ -51,8 +51,9 @@ def _config(tmp_path: Path, *, dedicated_workers: bool = False, **bob_overrides:
     return bind_runtime_paths(
         Config(
             agents={
-                "alice": AgentConfig(display_name="Alice", access=allowed),
-                "bob": AgentConfig(**{"display_name": "Bob", "access": allowed, **bob_overrides}),
+                # Their file tools read shared directories where those tools run.
+                "alice": AgentConfig(display_name="Alice", access=allowed, tools=["file"]),
+                "bob": AgentConfig(**{"display_name": "Bob", "access": allowed, "tools": ["file"], **bob_overrides}),
                 "carol": AgentConfig(display_name="Carol", access=allowed, private=AgentPrivateConfig(per="user")),
             },
             teams={"crew": TeamConfig(display_name="Crew", role="Crew", agents=["alice", "bob"])},
@@ -265,12 +266,12 @@ def test_paths_name_the_worker_mount_when_tools_run_in_a_dedicated_worker(
         process_env={"MATRIX_HOMESERVER": "http://localhost:8008", **backend_env},
     )
     config = bind_runtime_paths(
-        Config(agents={"alice": AgentConfig(display_name="Alice", worker_tools=["shell"])}),
+        Config(agents={"alice": AgentConfig(display_name="Alice", tools=["shell"], worker_tools=["shell"])}),
         runtime_paths,
     )
     create_shared_directory(runtime_paths, owner="alice", name="report")
     in_primary = bind_runtime_paths(
-        Config(agents={"alice": AgentConfig(display_name="Alice", worker_tools=[])}),
+        Config(agents={"alice": AgentConfig(display_name="Alice", tools=["shell"], worker_tools=[])}),
         runtime_paths,
     )
 

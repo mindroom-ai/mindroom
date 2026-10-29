@@ -59,7 +59,7 @@ from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.access_schema_support import with_responder_access
 from tests.agent_loop.helpers import collect, spec, toolkit
 from tests.conftest import FakeApprovalTransport
@@ -1482,7 +1482,15 @@ async def test_only_a_top_level_delegate_offers_background_waits(tmp_path: Path,
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     try:
-        delegate = DelegateTools("leader", ["code"], paths, config, execution_identity=owner, delegation_depth=depth)
+        delegate = DelegateTools(
+            "leader",
+            ["code"],
+            paths,
+            config,
+            agent_workspace_root_path(paths.storage_root, "leader"),
+            execution_identity=owner,
+            delegation_depth=depth,
+        )
         description = delegate.async_functions["run_subagent"].description or ""
         offered = "background_after" in description
         instructed = config.get_prompt("DELEGATE_BACKGROUND_JOB_INSTRUCTIONS") in (delegate.instructions or "")

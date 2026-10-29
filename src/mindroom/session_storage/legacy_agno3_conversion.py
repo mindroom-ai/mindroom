@@ -1,8 +1,8 @@
-"""The one-way conversion of a conversation database from the Agno layout to storage v2.
+"""The one-way conversion of a conversation database from the Agno layout to the current layout.
 
 A store's open (``agent_storage.prepare_conversation_database``) hands this module a database that holds tables but not
 the current layout, and the startup sweep hands it every such database under the session state root. Each converts in
-one write transaction, after the byte-for-byte backup beside it (``legacy_agno3_backup``), so a crash or an error
+one write transaction, after the byte-for-byte backup beside it (``legacy_conversion_backup``), so a crash or an error
 leaves the file as it was and the next open converts it again.
 
 Worker code can write session directories, so every database is untrusted input: the conversion follows no link to the
@@ -34,21 +34,28 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.codec import decode_json, run_kind
-from mindroom.session_storage.legacy_agent_session_owners import adopt_agent_session_owners, upgrade_storage_v2
+from mindroom.session_storage.legacy_agent_session_owners import adopt_agent_session_owners
 from mindroom.session_storage.legacy_agno2_runs import stored_timestamp
-from mindroom.session_storage.legacy_agno3_backup import write_conversion_backup
 from mindroom.session_storage.legacy_agno3_schema import (
     AGNO_SCHEMA_VERSIONS_TABLE,
+    READ_SESSION_COLUMNS,
     AgnoTableNames,
     agno_schema_sql,
     run_from_row,
 )
+from mindroom.session_storage.legacy_conversion_backup import leave_write_ahead_log, write_conversion_backup
+from mindroom.session_storage.legacy_session_columns import (
+    convert_session_columns,
+    stored_counts,
+    team_owner,
+    upgrade_layout,
+)
 from mindroom.session_storage.schema import (
-    SESSION_COLUMNS,
+    LOG_VERSION,
     TableNames,
-    index_name,
+    create_log_schema,
     is_current_layout,
-    log_schema_sql,
+    layout_version,
     table_names,
 )
 from mindroom.session_storage.store import (
@@ -62,7 +69,7 @@ from mindroom.session_storage.store import (
     upsert_run,
 )
 from mindroom.usage.legacy_usage_storage import seed_usage_ledger
-from mindroom.usage.storage import SYSTEM_USAGE_STORAGE_NAME, quote_identifier
+from mindroom.usage.storage import SYSTEM_USAGE_OWNER, SYSTEM_USAGE_STORAGE_NAME, quote_identifier
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -74,6 +81,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# The suffix of the backup a database in the Agno layout gets before its conversion.
+BACKUP_SUFFIX = ".pre-storage-v2"
 # Startup skips a locked database at once; its owner converts it with the full timeout when it next opens it.
 _STARTUP_LOCK_TIMEOUT_SECONDS = 0.0
 # The dropped Agno tables leave their pages free; compacting the file pays off once they are a quarter of it.
@@ -86,18 +95,19 @@ def convert_conversation_database(
     names: TableNames,
     descriptors: ExitStack,
     *,
-    agent_name: str | None,
+    owner: HistoryScope,
 ) -> None:
-    """Convert the database ``connection`` holds open at ``path``, in an older layout, to storage v2.
+    """Convert the database ``connection`` holds open at ``path``, in an older layout, to the current layout.
 
     In one ``BEGIN IMMEDIATE``: the backup, the Agno-era steps (usage ledger seeding, summary-row adoption with Agno 2
-    blob runs and positions), the conversion, the drop of the Agno tables and dead columns, and the v2 tables and meta
-    row, which records the current version, so in agent ``agent_name``'s database its session rows then name it
-    (``adopt_agent_session_owners``). A file in write-ahead-log mode returns to the rollback journal first, which
-    checkpoints its log. The file is then compacted when that pays off (``_compact``), and its conversion is logged.
-    ``descriptors`` takes the backup's descriptor of the file, which the caller closes after ``connection``.
+    blob runs and positions), the conversion, the drop of the Agno tables, the log tables and the meta row, which
+    records the current version and ``owner``, and, once an agent ``owner``'s session rows name it
+    (``adopt_agent_session_owners``), the sessions table's conversion (``convert_session_columns``). A file in
+    write-ahead-log mode returns to the rollback journal first, which checkpoints its log. The file is then compacted
+    when that pays off (``_compact``), and its conversion is logged. ``descriptors`` takes the backup's descriptor of
+    the file, which the caller closes after ``connection``.
     """
-    _leave_wal_mode(connection, path)
+    leave_write_ahead_log(connection, path)
     started = time.monotonic()
     with begun(connection, write=True):
         # Asked again under the lock: another opener may have converted the file while this one waited, and backing up
@@ -106,13 +116,13 @@ def convert_conversation_database(
             return
         # SQLite keeps whatever bytes worker code stores as text; the conversion's own connection reads them.
         connection.text_factory = _TEXT_WITH_REPLACEMENT_CHARACTERS
-        _convert(connection, AgnoTableNames(names.storage_name), path, descriptors)
-        if agent_name is not None:
-            adopt_agent_session_owners(connection, names, agent_name)
-        runs, messages = connection.execute(
-            f"SELECT (SELECT count(*) FROM {quote_identifier(names.log_runs)}), "  # noqa: S608
-            f"(SELECT count(*) FROM {quote_identifier(names.log_messages)})",
-        ).fetchone()
+        held_sessions = names.sessions in table_names(connection)
+        _convert(connection, AgnoTableNames(names.storage_name), path, descriptors, owner)
+        if held_sessions:
+            if owner.kind == "agent":
+                adopt_agent_session_owners(connection, names, owner.scope_id)
+            convert_session_columns(connection, names)
+        runs, messages = stored_counts(connection, names)
     compacted = _compact(connection, path)
     logger.info(
         "conversation_converted",
@@ -156,38 +166,49 @@ async def migrate_conversation_storage(runtime_paths: RuntimePaths) -> None:
 
 def _migrate_databases(runtime_paths: RuntimePaths) -> None:
     root = resolve_session_state_root(runtime_paths.storage_root, runtime_paths)
-    # Each agent's directory, shared or in a private instance, is named after its agent.
+    # Each agent's directory, shared or in a private instance, is named after its agent, its database's owner.
     agents = _directories(root / "agents")
     for scope in _directories(root / "private_instances"):
         agents.extend(_directories(scope))
-    others = _directories(root / "teams")
+    stores: list[tuple[Path, HistoryScope | None]] = [
+        (directory, HistoryScope(kind="agent", scope_id=directory.name)) for directory in agents
+    ]
+    # A team scope's directory is named after a digest of its scope, so its rows name the owner.
+    stores.extend((directory, None) for directory in _directories(root / "teams"))
     # The system usage store, which records internal provider calls, is a conversation database of its own.
     system = root / SYSTEM_USAGE_STORAGE_NAME
     if not system.is_symlink() and system.is_dir():
-        others.append(system)
-    stores = [(directory, directory.name) for directory in agents] + [(directory, None) for directory in others]
-    for directory, agent_name in stores:
+        stores.append((system, SYSTEM_USAGE_OWNER))
+    for directory, owner in stores:
         names = TableNames(directory.name)
         path = names.database_path(directory)
         try:
             # A store that never wrote has no database to convert; its first open creates one.
             if path.is_symlink() or path.exists():
-                _convert_at_startup(path, names, agent_name)
+                _convert_at_startup(path, names, owner)
         except Exception as error:
             # Worker code can write session databases, so one that is linked, unreadable, locked, or malformed must not
             # stop startup. Its owner converts it with the full lock timeout when it next opens it, or fails alone.
             logger.warning("conversation_conversion_skipped_store", path=str(path), error=str(error))
 
 
-def _convert_at_startup(path: Path, names: TableNames, agent_name: str | None) -> None:
+def _convert_at_startup(path: Path, names: TableNames, owner: HistoryScope | None) -> None:
+    """Convert one database the sweep found, ``owner``'s, or a team's, whose rows name it, when it needs converting."""
     with (
         ExitStack() as descriptors,
         closing(connect_by_name(path, timeout=_STARTUP_LOCK_TIMEOUT_SECONDS)) as connection,
     ):
-        if is_current_layout(connection, names):
-            upgrade_storage_v2(connection, names, agent_name)
-        elif table_names(connection):
-            convert_conversation_database(connection, path, names, descriptors, agent_name=agent_name)
+        version = layout_version(connection, names)
+        if (version is not None and version >= LOG_VERSION) or not table_names(connection):
+            return
+        owner = owner or team_owner(connection, names)
+        if owner is None:
+            # A team's database with no session row naming its scope converts at that scope's next store open.
+            return
+        if version is not None:
+            upgrade_layout(connection, path, names, descriptors, owner)
+        else:
+            convert_conversation_database(connection, path, names, descriptors, owner=owner)
 
 
 def _directories(root: Path) -> list[Path]:
@@ -205,25 +226,26 @@ def _directories(root: Path) -> list[Path]:
 _TEXT_WITH_REPLACEMENT_CHARACTERS = partial(str, encoding="utf-8", errors="replace")
 
 
-def _leave_wal_mode(connection: sqlite3.Connection, path: Path) -> None:
-    """Return a file another tool put in write-ahead-log mode to the rollback journal, checkpointing its log.
-
-    MindRoom never sets the mode. Leaving it moves every commit into the file before the backup copies it, and no
-    checkpoint can change the file under the conversion's lock.
-    """
-    try:
-        mode = connection.execute("PRAGMA journal_mode = DELETE").fetchone()
-    except sqlite3.OperationalError as error:
-        mode = error
-    if mode != ("delete",):
-        msg = f"Converting {path} to storage v2 needs its write-ahead log checkpointed, which failed: {mode}"
-        raise RuntimeError(msg)
-
-
-def _convert(connection: sqlite3.Connection, names: AgnoTableNames, path: Path, descriptors: ExitStack) -> None:
-    """Convert the database in the caller's write transaction; one without a sessions table only gets the v2 tables."""
+def _convert(
+    connection: sqlite3.Connection,
+    names: AgnoTableNames,
+    path: Path,
+    descriptors: ExitStack,
+    owner: HistoryScope,
+) -> None:
+    """Convert the runs in the caller's write transaction; one without a sessions table only gets the current tables."""
     tables = table_names(connection)
-    write_conversion_backup(path, descriptors, copied_bytes=adoption_copy_bytes(connection, names))
+    # The backup takes the file's size and the converted file grows by about as much again before compaction:
+    # measured at up to 2.2 times the size in all (a 391 MB database's backup and an 860 MB converted file), so two and a
+    # half times leaves a margin. Copying Agno 2 blobs or archived runs first journals about their size again: measured
+    # at 2.94 times with 80% of the runs archived and 3.16 times with every run in blobs.
+    write_conversion_backup(
+        path,
+        descriptors,
+        suffix=BACKUP_SUFFIX,
+        size_factor=2.5,
+        copied_bytes=adoption_copy_bytes(connection, names),
+    )
     if names.sessions in tables:
         _session_text_as_utf8(connection, names)
         _session_json_encoded_once(connection, names)
@@ -233,8 +255,7 @@ def _convert(connection: sqlite3.Connection, names: AgnoTableNames, path: Path, 
         # Every Agno table then exists, so each step reads its rows from it.
         for statement in agno_schema_sql(names):
             connection.execute(statement)
-    for statement in log_schema_sql(names):
-        connection.execute(statement)
+    create_log_schema(connection, names, owner)
     if names.sessions not in tables:
         return
     seqs = count(1)
@@ -247,7 +268,6 @@ def _convert(connection: sqlite3.Connection, names: AgnoTableNames, path: Path, 
             _convert_segment(connection, names, session_id, row, places)
     _copy_removed(connection, names)
     _drop_agno_tables(connection, names)
-    _drop_dead_session_columns(connection, names)
     _write_meta(connection, names, next(seqs))
 
 
@@ -289,10 +309,10 @@ def _session_text_as_utf8(connection: sqlite3.Connection, names: AgnoTableNames)
     """
     sessions = quote_identifier(names.sessions)
     rows = connection.execute(
-        f"SELECT CAST(session_id AS BLOB), {', '.join(SESSION_COLUMNS)} FROM {sessions}",  # noqa: S608
+        f"SELECT CAST(session_id AS BLOB), {', '.join(READ_SESSION_COLUMNS)} FROM {sessions}",  # noqa: S608
     ).fetchall()
     for key, *values in rows:
-        for column, value in zip(SESSION_COLUMNS, values, strict=True):
+        for column, value in zip(READ_SESSION_COLUMNS, values, strict=True):
             # Only a value read with a replacement character can differ from what is stored.
             if not (isinstance(value, str) and "\ufffd" in value):
                 continue
@@ -828,29 +848,13 @@ def _drop_agno_tables(connection: sqlite3.Connection, names: AgnoTableNames) -> 
     connection.execute(f"DROP TABLE IF EXISTS {quote_identifier(AGNO_SCHEMA_VERSIONS_TABLE)}")
 
 
-# LEGACY_COMPAT: Sessions-table columns only Agno wrote.
-# Legacy format: `workflow_id`, `agent_data`, `team_data`, `workflow_data`, and `summary` on every Agno sessions table,
-# the unused `created_at` index, and, on files Agno 2 created, its cleared `runs` blob column.
-# Last legacy release: v2026.10.608 for the five columns and the index; replacement: the next release, the nine columns
-# storage v2 keeps. The `runs` column: v2026.9.11 (agno 2.6.12); replacement: v2026.9.12 (agno 3.0.5) created
-# sessions tables without it.
-# Handling: Every column outside `SESSION_COLUMNS` is dropped, and the index, so an older release started on the
-# converted file finds its required columns missing and archives the sessions directory instead of writing into it.
-# Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_a_converted_database_holds_only_the_v2_layout.
-def _drop_dead_session_columns(connection: sqlite3.Connection, names: TableNames) -> None:
-    sessions = quote_identifier(names.sessions)
-    connection.execute(f"DROP INDEX IF EXISTS {quote_identifier(index_name(names.sessions, 'created_at'))}")
-    for (column,) in connection.execute("SELECT name FROM pragma_table_info(?)", (names.sessions,)).fetchall():
-        if column not in SESSION_COLUMNS:
-            connection.execute(f"ALTER TABLE {sessions} DROP COLUMN {quote_identifier(column)}")
-
-
 def _write_meta(connection: sqlite3.Connection, names: TableNames, next_seq: int) -> None:
     """Set the run counter one past the largest ``seq`` the conversion handed out."""
     connection.execute(f"UPDATE {quote_identifier(names.log_meta)} SET next_seq = ? WHERE id = 1", (next_seq,))  # noqa: S608
 
 
 __all__ = [
+    "BACKUP_SUFFIX",
     "convert_conversation_database",
     "migrate_conversation_storage",
 ]

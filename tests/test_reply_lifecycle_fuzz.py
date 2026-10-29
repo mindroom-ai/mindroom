@@ -102,7 +102,7 @@ class _Model:
     removed: bool = False
     # Logical sources the user deleted: no settlement answers their turn.
     deleted: set[str] = field(default_factory=set)
-    # The turn ledger recorded the turn answered, which suppresses a later replay of its original source.
+    # The turn rows recorded the turn answered, which suppresses a later replay of its original source.
     turn_answered: bool = False
     # Pending sources a settlement answered.
     answered: set[str] = field(default_factory=set)

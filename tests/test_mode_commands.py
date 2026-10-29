@@ -31,6 +31,7 @@ from tests.conftest import make_conversation_reader_mock, unwrap_extracted_colla
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _plain_request
 from tests.test_agent_cli_authority import _runtime_context as _authority_runtime_context
+from tests.turn_model_helpers import turn_model
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
@@ -94,7 +95,7 @@ async def test_mode_command_matches_response_runner_session(
     config.administrators = ["@user:localhost"]
     target = MessageTarget.resolve("!room:localhost", "$thread", "$next", room_mode=thread_mode == "room")
     request = _plain_request(target)
-    runtime = await runner.prepare_response_runtime(request)
+    runtime = await runner.prepare_response_runtime(request, show_tool_calls=True)
     root = resolve_agent_storage("general", config, paths, runtime.tool_dispatch.execution_identity).state_root
     set_agent_mode(paths, root, "general", target.session_id, "minimal")
     result = mode_commands.handle_mode_command(
@@ -110,7 +111,9 @@ async def test_mode_command_matches_response_runner_session(
         runtime=runtime,
         run_id="run",
         active_event_ids={"$next"},
+        knowledge=None,
         transient_enrichment_items=(),
+        compaction_lifecycle=None,
     )
     expected = "minimal" if action == "show" else "standard"
     assert turn.agent_mode == expected
@@ -129,7 +132,7 @@ async def test_private_agent_mode_is_isolated_per_requester(tmp_path: Path) -> N
     config.administrators = ["@user:localhost", "@other:localhost"]
     target = MessageTarget.resolve("!room:localhost", "$thread", "$next")
     request = _plain_request(target)
-    runtime = await runner.prepare_response_runtime(request)
+    runtime = await runner.prepare_response_runtime(request, show_tool_calls=True)
     root = resolve_agent_storage("general", config, paths, runtime.tool_dispatch.execution_identity).state_root
     set_agent_mode(paths, root, "general", target.session_id, "minimal")
 
@@ -397,7 +400,7 @@ def test_selection_checks_effective_shell_permissions(
         identity,
         persist_runtime_state=False,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(context.config, paths, "helper"),
     )
     shell_functions = {
         function.name

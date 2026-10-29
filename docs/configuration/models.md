@@ -29,6 +29,7 @@ The same model can have different IDs on different providers; check the [OpenAI]
 
 Letter case, surrounding spaces, and `-` versus `_` do not matter, so `Llama-CPP` means `llama_cpp`.
 A `provider` value that does not match one of these fails config load with an error that names the model and lists these values, even when no agent uses that model.
+Config load and `mindroom config validate` also fail, naming each reference, when an agent, a team, or the router (including the implicit `default` an entity without a `model` uses), a `room_models` or `room_thread_summary_models` entry, `defaults.thread_summary_model`, or `voice.intelligence.model` while voice is enabled names a model that `models` does not define.
 
 To generate a starter config for one provider, use `mindroom config init --provider <preset>` (see [Getting Started](../getting-started.md)).
 The [macOS app's local model setup](../installation/macos-app.md#local-ai-models) downloads and runs models with one click, with hardware recommendations including Qwen3.8 27B when memory permits.

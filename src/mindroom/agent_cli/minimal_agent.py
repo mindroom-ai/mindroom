@@ -208,9 +208,6 @@ def bind_minimal_owner(
     if lifetime is None or runtime.orchestrator is None:
         msg = "Minimal Bash requires an active managed response owner"
         raise RuntimeError(msg)
-    if build.surface.output_file_policy is None:
-        msg = "Minimal Bash requires a canonical agent workspace"
-        raise RuntimeError(msg)
     return bind_response_owner(
         catalog,
         lifetime=lifetime,

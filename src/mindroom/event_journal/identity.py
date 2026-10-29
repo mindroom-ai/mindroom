@@ -37,6 +37,21 @@ def decode_thread_id(stored_thread_id: str) -> str | None:
     return None if stored_thread_id == _UNTHREADED_STORAGE_VALUE else stored_thread_id
 
 
+def journal_principal_id(agent_name: str, matrix_user_id: str) -> str:
+    """Return the journal principal of one Matrix login of an agent: ``agent@mxid``, as agent names hold no ``@``."""
+    return f"{agent_name}@{matrix_user_id}"
+
+
+def agent_of_principal(principal_id: str) -> str:
+    """Return the agent a journal principal belongs to."""
+    return principal_id.partition("@")[0]
+
+
+def matrix_user_of_principal(principal_id: str) -> str:
+    """Return the Matrix login a journal principal belongs to."""
+    return principal_id.partition("@")[2]
+
+
 def delivery_transaction_id(principal_id: str, delivery_id: str, stage: str) -> str:
     """Return the deterministic Matrix transaction ID for one delivery stage.
 

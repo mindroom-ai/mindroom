@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import threading
 import weakref
 from contextlib import ExitStack, contextmanager
@@ -19,13 +18,17 @@ from pydantic import ValidationError
 from mindroom import constants
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.legacy_access import validate_access_migration_source
+from mindroom.config.load_attempt import (
+    ConfigLoad,
+    ConfigLoadResult,
+    config_error_detail,
+    load_config_attempt,
+    raw_source_fingerprint,
+)
 from mindroom.config.main import (
     CONFIG_LOAD_USER_ERROR_TYPES,
     Config,
-    ConfigLoadUserError,
     ConfigRuntimeValidationError,
-    config_validation_issues,
-    validate_loaded_config_source,
 )
 from mindroom.config.personal_agents import (
     expand_personal_agents,
@@ -34,7 +37,6 @@ from mindroom.config.personal_agents import (
 )
 from mindroom.config.yaml_includes import (
     load_yaml_config_source_with_digests,
-    partial_source_files,
     partial_source_uses_includes,
     source_files_fingerprint,
 )
@@ -56,8 +58,9 @@ if TYPE_CHECKING:
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.watch import KnowledgeSourceWatcher
-    from mindroom.response_activity import ActiveScriptRunInfo, ResponseIdentity
+    from mindroom.response_activity import ActiveResponseIdentity, ActiveScriptRunInfo
     from mindroom.response_admission import ResponseAdmissionGate
+    from mindroom.scheduling.runtime import ScheduledTaskRuntime
     from mindroom.thread_export.workspace_sync import WorkspaceThreadExportRunner
     from mindroom.worker_computer.sessions import ComputerSessionStore
     from mindroom.workers.backend import WorkerBackend
@@ -69,16 +72,6 @@ CONFIG_USES_INCLUDES_HEADER = "x-mindroom-config-uses-includes"
 CONFIG_PENDING_RESTART_HEADER = "x-mindroom-config-pending-restart"
 _REGISTERED_API_APPS: weakref.WeakSet[FastAPI] = weakref.WeakSet()
 _REGISTERED_API_APPS_LOCK = threading.Lock()
-
-
-@dataclass(frozen=True)
-class ConfigLoadResult:
-    """Outcome of one API config-file load attempt."""
-
-    success: bool
-    error_status_code: int | None = None
-    error_detail: object | None = None
-    uses_includes: bool | None = False
 
 
 @dataclass
@@ -139,11 +132,15 @@ class _MindroomAppState:
     thread_export_runner: WorkspaceThreadExportRunner | None = None
     leave_matrix_room: Callable[[str, str], Awaitable[bool]] | None = None
     external_trigger_runtime: ExternalTriggerRuntime | None = None
+    # Each bound integration's runtime by integration name; the integration's own routes read its entry.
+    integration_runtimes: dict[str, object] = field(default_factory=dict)
     agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=AgentReplyMembershipIndex)
     response_admission_gate: ResponseAdmissionGate | None = None
     budget_monitor: BudgetMonitor | None = None
-    openai_responses: set[ResponseIdentity] = field(default_factory=set)
-    active_calls: Callable[[], list[ResponseIdentity]] | None = None
+    # The embedded runtime's scheduled-task owner, whose bots back schedule edits the router may not write.
+    scheduled_tasks: ScheduledTaskRuntime | None = None
+    openai_responses: set[ActiveResponseIdentity] = field(default_factory=set)
+    active_calls: Callable[[], list[ActiveResponseIdentity]] | None = None
     active_script_runs: Callable[[], Awaitable[list[ActiveScriptRunInfo]]] | None = None
     config_reload_status: Callable[[], ConfigReloadStatus] | None = None
     script_worker_keepalive: Callable[[WorkerBackend], None] | None = None
@@ -180,129 +177,6 @@ def require_api_state(api_app: FastAPI) -> ApiState:
         msg = "API context is not initialized"
         raise TypeError(msg)
     return api_state
-
-
-def _config_error_detail(
-    exc: ConfigLoadUserError,
-) -> list[dict[str, object]]:
-    """Return the API error payload for an invalid config, with the messages every config surface shows."""
-    return [
-        {"loc": location, "msg": message, "type": "value_error"} for location, message in config_validation_issues(exc)
-    ]
-
-
-def _source_fingerprint(source: bytes | str) -> str:
-    """Return the stable identity used for raw config stale-write protection."""
-    source_bytes = source.encode("utf-8") if isinstance(source, str) else source
-    return hashlib.sha256(source_bytes).hexdigest()
-
-
-def _load_config_result(
-    runtime_paths: constants.RuntimePaths,
-) -> tuple[ConfigLoadResult, dict[str, Any] | None, Config | None, str | None, frozenset[Path] | None]:
-    """Load and validate one config file without mutating shared app state."""
-    source_fingerprint: str | None = None
-    source_files: frozenset[Path] | None = None
-    uses_includes: bool | None = None
-    try:
-        source_bytes = runtime_paths.config_path.read_bytes()
-        source_fingerprint = _source_fingerprint(source_bytes)
-        # Parse the bytes already read so a mid-load file edit can never publish
-        # config under a fingerprint computed from different content.
-        data, source_digests, uses_includes = load_yaml_config_source_with_digests(
-            runtime_paths.config_path,
-            source=source_bytes,
-        )
-        source_files = frozenset(source_digests)
-        source_fingerprint = source_files_fingerprint(runtime_paths.config_path, source_digests)
-        runtime_config, source_digests = validate_loaded_config_source(
-            data,
-            source_digests,
-            source_bytes,
-            runtime_paths,
-            uses_includes=uses_includes,
-            tolerate_plugin_load_errors=True,
-        )
-        source_files = frozenset(source_digests)
-        source_fingerprint = source_files_fingerprint(runtime_paths.config_path, source_digests)
-        validated_payload = runtime_config.authored_model_dump()
-    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
-        detail = _config_error_detail(exc)
-        logger.warning(
-            "Failed to load API config due to validation",
-            config_path=str(runtime_paths.config_path),
-            errors=detail,
-        )
-        if source_files is None:
-            # A parse-time failure never reached the full set; the files read
-            # so far keep the watcher covering a broken new include file.
-            source_files = partial_source_files(exc)
-        if uses_includes is None:
-            uses_includes = partial_source_uses_includes(exc)
-        return (
-            ConfigLoadResult(
-                success=False,
-                error_status_code=422,
-                error_detail=detail,
-                uses_includes=uses_includes,
-            ),
-            None,
-            None,
-            source_fingerprint,
-            source_files,
-        )
-    except Exception:
-        logger.exception("Failed to load API config", config_path=str(runtime_paths.config_path))
-        return (
-            ConfigLoadResult(
-                success=False,
-                error_status_code=500,
-                error_detail="Failed to load configuration",
-                uses_includes=uses_includes,
-            ),
-            None,
-            None,
-            source_fingerprint,
-            source_files,
-        )
-    else:
-        logger.info(
-            "loaded_agent_configuration",
-            path=str(runtime_paths.config_path),
-            source_file_count=len(source_files),
-        )
-        logger.info("loaded_agent_configuration_count", agent_count=len(runtime_config.agents))
-        logger.info("Loaded API config", config_path=str(runtime_paths.config_path))
-        return (
-            ConfigLoadResult(success=True, uses_includes=uses_includes),
-            validated_payload,
-            runtime_config,
-            source_fingerprint,
-            source_files,
-        )
-
-
-def _source_fingerprint_for_published_runtime_config(
-    runtime_paths: constants.RuntimePaths,
-    validated_payload: dict[str, Any],
-) -> tuple[str, frozenset[Path] | None, bool | None]:
-    """Return the runtime fingerprint and source metadata safe to publish.
-
-    Unmatched disk bytes cannot identify the runtime config, so their source set
-    stays unpublished. Observed include usage still blocks structured writes;
-    a negative or missing observation cannot clear the previous include guard.
-    """
-    canonical_source = yaml.dump(
-        validated_payload,
-        default_flow_style=False,
-        sort_keys=True,
-        allow_unicode=True,
-    )
-    canonical_fingerprint = _source_fingerprint(canonical_source)
-    result, disk_payload, _disk_config, disk_fingerprint, disk_source_files = _load_config_result(runtime_paths)
-    if result.success and disk_payload == validated_payload and disk_fingerprint is not None:
-        return disk_fingerprint, disk_source_files, result.uses_includes
-    return canonical_fingerprint, None, True if result.uses_includes else None
 
 
 def _raise_for_config_load_result(result: ConfigLoadResult | None) -> None:
@@ -380,7 +254,7 @@ def _save_config_to_file(
         allow_unicode=True,
     )
     _save_raw_config_source_to_file(source, runtime_paths, config)
-    return _source_fingerprint(source)
+    return raw_source_fingerprint(source)
 
 
 def _save_raw_config_source_to_file(
@@ -626,7 +500,7 @@ def _structured_write_errors(error_prefix: str) -> Iterator[None]:
     except _ConfigComposedFromIncludesError as e:
         raise _composed_from_includes_http_error(e) from e
     except (ValidationError, ConfigRuntimeValidationError) as e:
-        raise HTTPException(status_code=422, detail=_config_error_detail(e)) from e
+        raise HTTPException(status_code=422, detail=config_error_detail(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"{error_prefix}: {e!s}") from e
 
@@ -738,32 +612,37 @@ def _build_and_commit_raw_replacement(
     except HTTPException:
         raise
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
-        raise HTTPException(status_code=422, detail=_config_error_detail(exc)) from exc
+        raise HTTPException(status_code=422, detail=config_error_detail(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"{error_prefix}: {exc!s}") from exc
 
 
-def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI) -> bool:
-    """Load config from disk into one API app's committed config cache."""
+def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI) -> ConfigLoad:
+    """Load config from disk into one API app's committed config cache unless a newer commit wins."""
     initial_state = require_api_state(api_app)
     snapshot = initial_state.snapshot
-    result, validated_payload, runtime_config, source_fingerprint, source_files = _load_config_result(runtime_paths)
+    attempt = load_config_attempt(runtime_paths)
+    result = attempt.result
+    payload = attempt.config.authored_model_dump() if attempt.config is not None else None
     with initial_state.config_lock:
         current_state = require_api_state(api_app)
         current = current_state.snapshot
         if current.revision != snapshot.revision or current.runtime_paths != runtime_paths:
             logger.info(
-                "Discarding stale API config load after runtime swap",
+                "Discarding API config load superseded by a newer commit",
                 load_config_path=str(runtime_paths.config_path),
                 active_config_path=str(current.runtime_paths.config_path),
             )
-            return False
-        same_source = source_fingerprint is not None and source_fingerprint == current.source_fingerprint
+            return replace(attempt, superseded=True)
+        same_source = (
+            attempt.source_fingerprint is not None and attempt.source_fingerprint == current.source_fingerprint
+        )
         # A failed load publishes the union of the last good source set and the
         # files the failed attempt read, so the watcher never loses last-good
         # coverage while still covering newly added include files whose edit
         # broke the config; the next successful load replaces the union with
         # the real set, shrinking it back.
+        source_files = attempt.source_files
         published_source_files = source_files if source_files is not None else current.source_files
         if not result.success and source_files is not None and current.source_files is not None:
             published_source_files = source_files | current.source_files
@@ -773,72 +652,14 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
         current_state.snapshot = _published_snapshot(
             current,
             increment_generation=not same_source,
-            config_data=validated_payload if validated_payload is not None else current.config_data,
-            runtime_config=runtime_config if runtime_config is not None else current.runtime_config,
+            config_data=payload if payload is not None else current.config_data,
+            runtime_config=attempt.config if attempt.config is not None else current.runtime_config,
             config_load_result=result,
-            source_fingerprint=source_fingerprint,
+            source_fingerprint=attempt.source_fingerprint,
             source_files=published_source_files,
             uses_includes=published_uses_includes,
         )
-    return result.success
-
-
-def _publish_runtime_config_into_app(
-    runtime_config: Config,
-    runtime_paths: constants.RuntimePaths,
-    api_app: FastAPI,
-) -> bool:
-    """Publish one already-validated runtime config into one API app's committed cache."""
-    initial_state = require_api_state(api_app)
-    snapshot = initial_state.snapshot
-    validated_payload = runtime_config.authored_model_dump()
-    source_fingerprint, source_files, uses_includes = _source_fingerprint_for_published_runtime_config(
-        runtime_paths,
-        validated_payload,
-    )
-    if uses_includes is None and runtime_config.uses_includes:
-        # A failed disk observation cannot erase the incoming source's include
-        # evidence. A newer committed source still wins under the lock below.
-        uses_includes = True
-    with initial_state.config_lock:
-        current_state = require_api_state(api_app)
-        current = current_state.snapshot
-        if current.runtime_paths != runtime_paths:
-            logger.info(
-                "Discarding stale API config publish after runtime swap",
-                publish_config_path=str(runtime_paths.config_path),
-                active_config_path=str(current.runtime_paths.config_path),
-            )
-            return False
-        same_config = current.config_data == validated_payload
-        if current.revision != snapshot.revision and not same_config:
-            logger.info(
-                "Discarding stale API config publish after config changed",
-                publish_config_path=str(runtime_paths.config_path),
-            )
-            return False
-        published_source_fingerprint: str | None = source_fingerprint
-        if current.revision != snapshot.revision:
-            # Equal payloads still permit runtime publication, but a newer
-            # commit owns the source metadata observed after this read began.
-            published_source_fingerprint = current.source_fingerprint
-            source_files = current.source_files
-            uses_includes = current.uses_includes
-        same_source = published_source_fingerprint == current.source_fingerprint
-        published_uses_includes = uses_includes if uses_includes is not None else current.uses_includes
-        current_state.snapshot = _published_snapshot(
-            current,
-            increment_generation=not (same_source or same_config),
-            config_data=validated_payload,
-            runtime_config=runtime_config,
-            config_load_result=ConfigLoadResult(success=True, uses_includes=published_uses_includes),
-            source_fingerprint=published_source_fingerprint,
-            # A publish that cannot be tied to disk keeps the last known source
-            # set so the watcher still covers the previous include files.
-            source_files=source_files if source_files is not None else current.source_files,
-            uses_includes=published_uses_includes,
-        )
-    return True
+    return attempt
 
 
 def _loaded_config_data(snapshot: ApiSnapshot) -> dict[str, Any]:

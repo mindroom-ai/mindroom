@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, ClassVar, cast
 from zoneinfo import ZoneInfo
 
 from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
+from mindroom.config.resolution import entity_timezone, memory_search
 from mindroom.constants import resolve_config_relative_path
 from mindroom.embeddings.errors import classified_embedder_error
 from mindroom.logging_config import get_logger
@@ -525,7 +526,7 @@ def _schedule_semantic_refresh_at(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
 ) -> None:
-    search_config = config.resolve_entity(agent_name).memory_search
+    search_config = memory_search(config, agent_name)
     if search_config.mode != "semantic":
         return
     schedule_semantic_file_memory_refresh(
@@ -1057,7 +1058,7 @@ def append_agent_daily_file_memory(
         agent_name=agent_name,
         execution_identity=execution_identity,
     )
-    current_date = datetime.now(ZoneInfo(config.get_entity_timezone(agent_name))).date().isoformat()
+    current_date = datetime.now(ZoneInfo(entity_timezone(config, agent_name))).date().isoformat()
     daily_relative_path = f"{FILE_MEMORY_DAILY_DIR}/{current_date}.md"
     scope_user_id = agent_scope_user_id(agent_name)
     result = _append_scope_memory_entry(
@@ -1238,7 +1239,7 @@ class FileMemoryBackend:
             return results
 
         degraded_reason: str | None = None
-        search_config = config.resolve_entity(agent_name).memory_search
+        search_config = memory_search(config, agent_name)
         # Semantic matches are read-only locators, so an editable search matches by keyword.
         if search_config.mode == "semantic" and not editable:
             scope_user_id = agent_scope_user_id(agent_name)

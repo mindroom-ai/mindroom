@@ -49,13 +49,12 @@ agents:
   assistant:
     display_name: Assistant
     role: A helpful assistant with direct file access to source docs
-    memory_backend: file
     tools: [file, shell]
     knowledge_bases: [source_docs]
 ```
 
 A files-mode base has no vector index, does not use the embedder, and does not provide `search_knowledge_base`.
-The agent needs a workspace, which `memory_backend: file` creates at `${MINDROOM_STORAGE_PATH}/agents/<agent>/workspace` (private agents use their private root).
+The agent's workspace is `${MINDROOM_STORAGE_PATH}/agents/<agent>/workspace` (private agents use their private root).
 When the base's path is inside that workspace and the folder exists, MindRoom exposes it as `knowledge/<base_id>` and tells the agent to use file tools on it.
 Bases outside the workspace are not linked, and with the default [`file_access: workspace`](configuration/agents.md#configuration-options) the agent's file tools cannot reach them.
 
@@ -76,7 +75,7 @@ knowledge_bases:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `description` | string | `""` | What the base contains; shown to agents in the `search_knowledge_base` tool description and in files-mode instructions so they know when to use it |
-| `mode` | `semantic` or `files` | `semantic` | `semantic` builds an embedding-backed search index; `files` skips embeddings and exposes the files to workspace-aware agents |
+| `mode` | `semantic` or `files` | `semantic` | `semantic` builds an embedding-backed search index; `files` skips embeddings and exposes the files to agents' file tools |
 | `path` | string | `./knowledge_docs` | Folder path, relative to the config file directory or absolute |
 | `watch` | bool | `true` | Watch the local folder and refresh in the background when files change. When `false`, direct external edits require an explicit reindex unless `poll_interval_seconds` is set; dashboard/API uploads and deletes still trigger a refresh |
 | `poll_interval_seconds` | int | `null` | Schedule a background refresh of the local folder this often (minimum `5`), for folders that another host writes to; see [Folders Written by Another Host](#folders-written-by-another-host). Unset means no polling. Semantic mode only, so `mode: files` bases reject it. Git-backed bases use `git.poll_interval_seconds` instead, and setting both is rejected |
@@ -482,7 +481,6 @@ agents:
   analyst:
     display_name: Analyst
     role: Answers questions from the team's knowledge bundles
-    memory_backend: file
     tools: [file]
     knowledge_bases: [acme_okf]
     skills: [open-knowledge-format]

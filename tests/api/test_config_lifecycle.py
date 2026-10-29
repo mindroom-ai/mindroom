@@ -18,6 +18,7 @@ from starlette.requests import Request
 
 from mindroom import constants
 from mindroom.api import config_lifecycle
+from mindroom.config.load_attempt import ConfigLoad
 from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.config.personal_agents import read_personal_agent_roster
 from mindroom.event_journal.opening import record_opened_event_journal
@@ -97,7 +98,7 @@ def runtime_paths(tmp_path: Path) -> constants.RuntimePaths:
 def loaded_app(runtime_paths: constants.RuntimePaths) -> FastAPI:
     """Return one API app with the temp config already loaded and committed."""
     api_app = _make_api_app(runtime_paths)
-    assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_app).loaded
     return api_app
 
 
@@ -115,6 +116,7 @@ def test_approved_egress_structured_save_preserves_authored_tool_defaults(
 ) -> None:
     """A structured save must preserve tool selection after the runtime overlay is disabled."""
     payload: dict[str, Any] = {
+        "models": {"default": {"provider": "ollama", "id": "test-model"}},
         "agents": {"research": {"display_name": "Research"}},
         "timezone": "Europe/Paris",
     }
@@ -132,7 +134,7 @@ def test_approved_egress_structured_save_preserves_authored_tool_defaults(
         config_lifecycle.validate_and_persist_config_payload(payload, paths)
     else:
         api_app = _make_api_app(paths)
-        assert config_lifecycle.load_config_into_app(paths, api_app) is True
+        assert config_lifecycle.load_config_into_app(paths, api_app).loaded
         config_lifecycle.replace_committed_config(_request_for(api_app), payload, error_prefix="Save failed")
 
     saved = yaml.safe_load(config_path.read_text())
@@ -144,7 +146,7 @@ def test_approved_egress_structured_save_preserves_authored_tool_defaults(
         process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": "false"},
     )
     reloaded = load_config(disabled_paths)
-    assert reloaded.resolve_entity("research").available_tools == defaults.get("tools", ["scheduler"])
+    assert reloaded.resolve_agent("research").tools.tool_names == tuple(defaults.get("tools", ["scheduler"]))
 
 
 @pytest.mark.parametrize("writer", ["persist", "structured", "raw"])
@@ -157,7 +159,7 @@ def test_save_refuses_a_name_a_personal_agent_reserved_after_validation(
     paths = test_runtime_paths(tmp_path)
     _write_config(paths.config_path, PERSONAL_AGENTS_BASE)
     api_app = _make_api_app(paths)
-    assert config_lifecycle.load_config_into_app(paths, api_app) is True
+    assert config_lifecycle.load_config_into_app(paths, api_app).loaded
     saved = paths.config_path.read_bytes()
     payload = copy.deepcopy(PERSONAL_AGENTS_BASE)
     payload["agents"] = {"mind_alice_smith": {"display_name": "Authored", "model": "default"}}
@@ -208,7 +210,7 @@ class TestLoadAndValidationFailure:
     def test_initial_load_publishes_committed_snapshot(self, runtime_paths: constants.RuntimePaths) -> None:
         """A successful first load publishes data, runtime config, and generation 1."""
         api_app = _make_api_app(runtime_paths)
-        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
+        assert config_lifecycle.load_config_into_app(runtime_paths, api_app).loaded
         snapshot = _snapshot(api_app)
         assert snapshot.generation == 1
         assert snapshot.config_data["agents"]["test_agent"]["display_name"] == "Test Agent"
@@ -228,7 +230,7 @@ class TestLoadAndValidationFailure:
         )
         api_app = _make_api_app(runtime_paths)
 
-        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
+        assert config_lifecycle.load_config_into_app(runtime_paths, api_app).loaded
 
         snapshot = _snapshot(api_app)
         rewritten = config_path.read_bytes()
@@ -241,7 +243,7 @@ class TestLoadAndValidationFailure:
     def test_reload_of_unchanged_source_does_not_bump_generation(self, loaded_app: FastAPI) -> None:
         """Reloading byte-identical source keeps the generation stable."""
         generation = _snapshot(loaded_app).generation
-        assert config_lifecycle.load_config_into_app(_snapshot(loaded_app).runtime_paths, loaded_app) is True
+        assert config_lifecycle.load_config_into_app(_snapshot(loaded_app).runtime_paths, loaded_app).loaded
         assert _snapshot(loaded_app).generation == generation
 
     def test_read_before_any_load_raises_500(self, runtime_paths: constants.RuntimePaths) -> None:
@@ -257,7 +259,7 @@ class TestLoadAndValidationFailure:
         runtime_paths = snapshot.runtime_paths
         runtime_paths.config_path.write_text("agents: not-a-mapping\n", encoding="utf-8")
 
-        assert config_lifecycle.load_config_into_app(runtime_paths, loaded_app) is False
+        assert not config_lifecycle.load_config_into_app(runtime_paths, loaded_app).loaded
 
         failed = _snapshot(loaded_app)
         # The failed load still bumps the generation (the on-disk source changed).
@@ -278,11 +280,11 @@ class TestLoadAndValidationFailure:
         """A malformed external edit fails the load; a later good edit fully recovers."""
         runtime_paths = _snapshot(loaded_app).runtime_paths
         runtime_paths.config_path.write_text("agents: [unclosed\n", encoding="utf-8")
-        assert config_lifecycle.load_config_into_app(runtime_paths, loaded_app) is False
+        assert not config_lifecycle.load_config_into_app(runtime_paths, loaded_app).loaded
         assert _snapshot(loaded_app).config_data["agents"]["test_agent"]["role"] == "A test agent"
 
         _write_config(runtime_paths.config_path, VALID_CONFIG)
-        assert config_lifecycle.load_config_into_app(runtime_paths, loaded_app) is True
+        assert config_lifecycle.load_config_into_app(runtime_paths, loaded_app).loaded
         recovered = _snapshot(loaded_app)
         assert recovered.config_load_result == config_lifecycle.ConfigLoadResult(success=True)
         result = config_lifecycle.read_committed_config(_request_for(loaded_app), lambda config: dict(config))
@@ -334,7 +336,7 @@ class TestGenerationTrackingAndWrites:
         committed = _snapshot(loaded_app)
         # The file watcher reloads after every write; the matching source fingerprint
         # must suppress a second generation bump for the API's own write.
-        assert config_lifecycle.load_config_into_app(committed.runtime_paths, loaded_app) is True
+        assert config_lifecycle.load_config_into_app(committed.runtime_paths, loaded_app).loaded
         assert _snapshot(loaded_app).generation == committed.generation
 
     def test_invalid_mutation_is_rejected_without_commit(self, loaded_app: FastAPI) -> None:
@@ -376,7 +378,7 @@ class TestGenerationTrackingAndWrites:
         """Full replacement skips the failed-load gate so the editor can repair a broken config."""
         runtime_paths = _snapshot(loaded_app).runtime_paths
         runtime_paths.config_path.write_text("agents: [unclosed\n", encoding="utf-8")
-        assert config_lifecycle.load_config_into_app(runtime_paths, loaded_app) is False
+        assert not config_lifecycle.load_config_into_app(runtime_paths, loaded_app).loaded
 
         # Unlike mutations, full replacement skips the failed-load gate so the
         # raw editor can repair a broken config through the API.
@@ -444,7 +446,7 @@ class TestFileWatcherReload:
         external["agents"]["test_agent"]["role"] = "Edited outside the API"
         _write_config(before.runtime_paths.config_path, external)
 
-        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app) is True
+        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app).loaded
         after = _snapshot(loaded_app)
         assert after.generation == before.generation + 1
         assert after.config_data["agents"]["test_agent"]["role"] == "Edited outside the API"
@@ -457,25 +459,19 @@ class TestFileWatcherReload:
         """A reload that loses the race to a concurrent commit is discarded entirely."""
         state = config_lifecycle.require_api_state(loaded_app)
         runtime_paths = state.snapshot.runtime_paths
-        real_load = config_lifecycle._load_config_result
+        real_load = config_lifecycle.load_config_attempt
 
-        def load_then_lose_race(
-            paths: constants.RuntimePaths,
-        ) -> tuple[
-            config_lifecycle.ConfigLoadResult,
-            dict[str, Any] | None,
-            Config | None,
-            str | None,
-            frozenset[Path] | None,
-        ]:
-            result = real_load(paths)
+        def load_then_lose_race(paths: constants.RuntimePaths) -> ConfigLoad:
+            attempt = real_load(paths)
             with state.config_lock:
                 state.snapshot = config_lifecycle._published_snapshot(state.snapshot)
-            return result
+            return attempt
 
-        monkeypatch.setattr(config_lifecycle, "_load_config_result", load_then_lose_race)
+        monkeypatch.setattr(config_lifecycle, "load_config_attempt", load_then_lose_race)
         racing_generation = state.snapshot.generation + 1
-        assert config_lifecycle.load_config_into_app(runtime_paths, loaded_app) is False
+        published = config_lifecycle.load_config_into_app(runtime_paths, loaded_app)
+        assert published.superseded
+        assert published.config is not None
         # The concurrent commit's snapshot is left untouched by the stale load.
         assert _snapshot(loaded_app).generation == racing_generation
 
@@ -515,7 +511,7 @@ class TestCommitRevision:
         request = _request_for(loaded_app)
         pinned = config_lifecycle.bind_current_request_snapshot(request)
 
-        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app) is True
+        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app).loaded
         republished = _snapshot(loaded_app)
         assert republished.generation == pinned.generation, "this test only bites while the generation stands still"
         assert republished.revision > pinned.revision

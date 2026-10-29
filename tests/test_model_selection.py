@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
-import json
+from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.handled_turns import TurnRecordCodec, _merge_same_identity_records
+from mindroom.event_journal import turn_rows
+from mindroom.message_target import MessageTarget
 from mindroom.model_selection import MODEL_SELECTION_CONTENT_KEY, parse_model_selection
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
-from mindroom.turn_store import _backfill_missing_turn_facts
+
+if TYPE_CHECKING:
+    from mindroom.event_journal import EventJournalStore
+
+_TARGET = MessageTarget.resolve("!room:localhost", None, "$command")
 
 
 def test_absent_metadata_preserves_text_commands() -> None:
@@ -96,41 +101,70 @@ def test_command_checkpoint_copies_freezes_and_filters_metadata() -> None:
     assert canonicalize_turn_record(record, command_result_text=None).command_result_extra_content is None
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "metadata",
     [None, {"io.mindroom.model_selection_result": {"status": "applied", "override": "default"}}],
 )
-def test_checkpoint_codec_roundtrip_and_legacy_missing_metadata(metadata: dict | None) -> None:
-    """Old records remain readable and new acknowledgements survive serialization."""
-    record = TurnRecord.create(["$command"], command_result_text="saved", command_result_extra_content=metadata)
-    raw = json.loads(json.dumps(TurnRecordCodec._to_ledger_record(record)))
-    restored = TurnRecordCodec._from_ledger_record("$command", raw)
+async def test_checkpoint_round_trips_through_turn_rows(
+    journal_store: EventJournalStore,
+    metadata: dict | None,
+) -> None:
+    """A command result and its acknowledgement metadata survive storage, and a result without metadata stays bare."""
+    record = TurnRecord.create(
+        ["$command"],
+        completed=False,
+        command_result_text="saved",
+        command_result_extra_content=metadata,
+        conversation_target=_TARGET,
+    )
+    await journal_store.backend.write(
+        lambda transaction: turn_rows.record_pending_turn(transaction, "agent", record, room_id=_TARGET.room_id),
+    )
+    restored = await journal_store.backend.read(
+        lambda transaction: turn_rows.get_turn_record(transaction, "agent", "$command"),
+    )
     assert restored is not None
     assert restored.command_result_text == "saved"
     assert restored.command_result_extra_content == metadata
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("with_metadata", [False, True])
-def test_result_merges_keep_text_and_metadata_from_same_snapshot(*, with_metadata: bool) -> None:
-    """A newer plain/uncertain result must never inherit older applied metadata."""
+async def test_a_stored_result_keeps_its_text_and_metadata_together(
+    journal_store: EventJournalStore,
+    *,
+    with_metadata: bool,
+) -> None:
+    """The first checkpointed result is kept whole: a later result never pairs its text with the earlier metadata."""
     older = TurnRecord.create(
         ["$command"],
-        timestamp=1,
+        completed=False,
         command_result_text="old applied",
         command_result_extra_content={
             "io.mindroom.model_selection_result": {"status": "applied", "override": "default"},
         },
+        conversation_target=_TARGET,
     )
     metadata = {"io.mindroom.model_selection_result": {"status": "rejected", "error": "new"}} if with_metadata else None
-    newer = TurnRecord.create(
-        ["$command"],
-        timestamp=2,
-        command_result_text="new result",
-        command_result_extra_content=metadata,
+    for record in (
+        older,
+        canonicalize_turn_record(older, command_result_text="new result", command_result_extra_content=metadata),
+    ):
+        await journal_store.backend.write(
+            lambda transaction, record=record: turn_rows.record_pending_turn(
+                transaction,
+                "agent",
+                record,
+                room_id=_TARGET.room_id,
+            ),
+        )
+    stored = await journal_store.backend.read(
+        lambda transaction: turn_rows.get_turn_record(transaction, "agent", "$command"),
     )
-    for merged in (_merge_same_identity_records(newer, older), _backfill_missing_turn_facts(newer, older)):
-        assert merged.command_result_text == "new result"
-        assert merged.command_result_extra_content == metadata
+    assert stored is not None
+    assert stored.command_result_text == "old applied"
+    assert stored.command_result_extra_content == older.command_result_extra_content
 
 
 @pytest.mark.parametrize(

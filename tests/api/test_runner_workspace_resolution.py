@@ -47,7 +47,7 @@ _AGENTS = {
     "general": AgentConfig(display_name="General", memory_backend="file"),
     "coder": AgentConfig(display_name="Coder", worker_scope="user", memory_backend="file"),
     "writer": AgentConfig(display_name="Writer", private=AgentPrivateConfig(per="user_agent", root="workspace")),
-    # A shared agent without a workspace: no private root and a memory backend other than "file".
+    # A shared agent without file memory, which still works in its own workspace.
     "bare": AgentConfig(display_name="Bare", memory_backend="none"),
 }
 _PAYLOAD = b"payload"
@@ -130,7 +130,7 @@ def _shape(tmp_path: Path, *, scope: str | None, agent: str | None, client_base_
             process_env={"MINDROOM_SANDBOX_RUNNER_MODE": "true"},
         )
         worker_key = None
-        if agent is not None and agent != "bare":
+        if agent is not None:
             labels["agent"] = agent_workspace_root_path(storage_root, agent)
     else:
         worker_key = resolve_worker_key(scope, identity, agent_name=agent)
@@ -153,7 +153,7 @@ def _shape(tmp_path: Path, *, scope: str | None, agent: str | None, client_base_
         )
         if agent == "writer":
             labels["agent"] = private_instance_scope_root_path(storage_root, worker_key) / "writer" / "workspace"
-        elif agent is not None and agent != "bare":
+        elif agent is not None:
             labels["agent"] = agent_workspace_root_path(storage_root, agent)
         labels["worker_default"] = worker_root / "workspace"
         labels["worker_root"] = worker_root
@@ -290,14 +290,13 @@ def _row(*values: str | None) -> dict[str, str | None]:
             _row("client", "client", "client", "client", "client", "client", "fail:tool"),
             id="unkeyed-absolute-base-dir",
         ),
-        # Unkeyed request routed to an agent without a workspace has none: shell keeps the runner's own HOME and
-        # cwd, and save-attachment and view-file refuse the call.
+        # An agent without file memory still has a workspace, so an unkeyed request routed to it acts there.
         pytest.param(
             None,
             "bare",
             "none",
-            _row("runner_home", None, "runner_cwd", None, "fail:tool", "fail:tool", "fail:tool"),
-            id="unkeyed-agent-without-workspace",
+            _row("agent", "agent", "agent", "agent", "agent", "agent", "fail:tool"),
+            id="unkeyed-agent-without-file-memory",
         ),
         # Keyed dedicated shared-scope worker: without a base_dir the routing agent's workspace.
         pytest.param(
@@ -322,21 +321,13 @@ def _row(*values: str | None) -> dict[str, str | None]:
             _row("client", "client", "client", "client", "client", "client", "client"),
             id="shared-scratch-base-dir",
         ),
-        # Keyed shared worker routed to an agent without a workspace acts in the worker's default workspace.
+        # A keyed shared worker routed to an agent without file memory acts in that agent's workspace.
         pytest.param(
             "shared",
             "bare",
             "none",
-            _row(
-                "worker_default",
-                "worker_default",
-                "worker_default",
-                "worker_default",
-                "worker_default",
-                "worker_default",
-                "worker_default",
-            ),
-            id="shared-agent-without-workspace",
+            _row("agent", "agent", "agent", "agent", "agent", "agent", "agent"),
+            id="shared-agent-without-file-memory",
         ),
         # Keyed user-scope worker routed to a user-scope agent.
         pytest.param(

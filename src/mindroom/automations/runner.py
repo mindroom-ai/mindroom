@@ -26,8 +26,9 @@ from croniter import croniter
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, Ask, AutomationContext, Done
 from mindroom.automations.threads import automations_tracking_root, record_automation_thread
-from mindroom.background_tasks import create_background_task
+from mindroom.background_tasks import SupervisedLoop, create_background_task
 from mindroom.config.automations import PluginAutomation
+from mindroom.config.resolution import agent_automations, memory_backend
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
@@ -50,7 +51,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.automations.registry import AutomationDefinition
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.config.automations import Automation
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -112,7 +113,7 @@ def _instances(config: Config, runtime_paths: RuntimePaths) -> list[_Instance]:
     return agent_instances(
         config,
         runtime_paths,
-        [agent_name for agent_name in config.agents if config.resolve_entity(agent_name).automations],
+        [agent_name for agent_name in config.agents if agent_automations(config, agent_name)],
     )
 
 
@@ -151,7 +152,7 @@ def _check(
 ) -> Ask | None:
     """Run one automation's check; raises ``OSError`` or ``ValueError`` when it cannot read what it checks."""
     agent_name, automation = chain.agent_name, chain.settings
-    if definition.requires_file_memory and config.resolve_entity(agent_name).memory_backend != "file":
+    if definition.requires_file_memory and memory_backend(config, agent_name) != "file":
         logger.warning(
             "Automation needs file memory; skipped",
             agent=agent_name,
@@ -180,7 +181,7 @@ def _check(
         settings=MappingProxyType(deepcopy(dict(definition.settings))),
         requester_id=chain.requester_id,
         execution_identity=identity,
-        workspace=runtime.workspace.root if runtime.workspace is not None else None,
+        workspace=runtime.workspace.root,
         state_dir=_state_dir(runtime_paths, chain, runtime.state_root),
     )
     return definition.check(context)
@@ -190,9 +191,10 @@ def _check(
 class AutomationRunner:
     """Own the automation schedule loop, the prompts it posts, and the steps that follow their runs."""
 
+    name = "automations"
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
-    bot_provider: Callable[[str], AgentBot | TeamBot | None]
+    bot_provider: Callable[[str], AgentBot | None]
     # The automations the active plugin snapshot provides, beside the built-ins, by name.
     definition_provider: Callable[[str], AutomationDefinition | None]
     # Who may use which agent, which a private instance's requester must still pass before a run on their behalf.
@@ -203,20 +205,20 @@ class AutomationRunner:
     # never overlap, because each one's run can change the memory files the other measures or applies to.
     _active: set[_Instance] = field(default_factory=set, init=False)
     _pending: dict[str, _PendingRun] = field(default_factory=dict, init=False)
-    _task: asyncio.Task[None] | None = field(default=None, init=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    _loop: SupervisedLoop = field(init=False)
 
-    def start(self) -> None:
+    def __post_init__(self) -> None:
+        """Create the supervised schedule loop."""
+        self._loop = SupervisedLoop("automation_runner", self._run)
+
+    async def sync(self, config: Config) -> None:  # noqa: ARG002 - each tick reads the active config
         """Start the schedule loop once."""
-        if self._task is None or self._task.done():
-            self._task = asyncio.create_task(self._run(), name="automation_runner")
+        self._loop.start()
 
     async def stop(self) -> None:
         """Stop the schedule loop; prompts already posted keep their state until the process exits."""
-        task, self._task = self._task, None
-        if task is not None:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        await self._loop.stop()
 
     def response_finished(self, source_event_ids: Sequence[str]) -> None:
         """Continue an automation once the response its prompt started is final."""
@@ -235,8 +237,9 @@ class AutomationRunner:
         clock_offset = now - datetime.now(UTC)
         for instance in instances:
             agent_name, _requester_id = instance
-            timezone = config.get_entity_timezone(agent_name)
-            for automation in config.resolve_entity(agent_name).automations:
+            resolved = config.resolve_agent(agent_name)
+            timezone = resolved.timezone
+            for automation in resolved.automations:
                 key = _key(instance, automation.name)
                 enabled.add(key)
                 schedule = (automation.cron, timezone)
@@ -391,14 +394,14 @@ class AutomationRunner:
             if not posted:
                 self._release(chain.instance)
 
-    async def _notify(self, bot: AgentBot | TeamBot, chain: _Chain, thread_id: str | None, text: str) -> None:
+    async def _notify(self, bot: AgentBot, chain: _Chain, thread_id: str | None, text: str) -> None:
         """Post ``text`` as a notice whose mentions no agent acts on, so it starts no run."""
         await bot._hook_send_message(chain.room_id, text, thread_id, chain.hook_source, {SKIP_MENTIONS_KEY: True})
 
     async def _post(
         self,
         config: Config,
-        bot: AgentBot | TeamBot,
+        bot: AgentBot,
         chain: _Chain,
         thread_id: str | None,
         ask: Ask,
@@ -433,7 +436,7 @@ class AutomationRunner:
         )
         return True
 
-    async def _resolve_thread(self, bot: AgentBot | TeamBot, chain: _Chain, thread_id: str) -> None:
+    async def _resolve_thread(self, bot: AgentBot, chain: _Chain, thread_id: str) -> None:
         """Mark a finished chain's thread as resolved."""
         if bot.client is None:
             return
@@ -456,7 +459,7 @@ class AutomationRunner:
     async def _post_mention(
         self,
         config: Config,
-        bot: AgentBot | TeamBot,
+        bot: AgentBot,
         chain: _Chain,
         text: str,
         thread_id: str | None,

@@ -127,7 +127,7 @@ class ToolManagedInitArg(str, Enum):
     WORKER_TARGET = "worker_target"
     RUNTIME_CONFIG = "runtime_config"
     TOOL_OUTPUT_WORKSPACE_ROOT = "tool_output_workspace_root"
-    WORKER_TOOLS_OVERRIDE = "worker_tools_override"
+    WORKSPACE_IN_WORKER = "workspace_in_worker"
     CURRENT_ROOM_ID = "current_room_id"
     AGENT_NAME = "agent_name"
     FILE_ACCESS = "file_access"

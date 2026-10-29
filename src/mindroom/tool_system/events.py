@@ -29,6 +29,7 @@ _VISIBLE_TOOL_MARKER_INDEX_PATTERN = re.compile(r"(?<= \[)\d{1,9}(?=\](?: ⏳)?\
 _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN = re.compile(r"^\s{0,3}---\s*$")
 _StructuredResultDict = dict[str, object]
 _StructuredResultList = list[object]
+_MALFORMED_TRACE = "Durable tool trace contains a malformed event"
 
 
 @dataclass(slots=True)
@@ -40,9 +41,11 @@ class ToolTraceEntry:
     args_preview: str | None = None
     result_preview: str | None = None
     truncated: bool = False
-    # Internal continuation identity; public Matrix metadata omits this field.
+    # Internal continuation identity; public Matrix metadata omits these fields.
     tool_call_id: str | None = field(default=None, compare=False)
-    scope_key: str | None = field(default=None, compare=False)
+    # The team member whose slot shows the call, by config name; None for a team leader's call and any call outside a
+    # team.
+    member_id: str | None = field(default=None, compare=False)
     parent_bash_call_id: str | None = field(default=None, compare=False)
     toolkit_name: str | None = field(default=None, compare=False)
     # Whether the completed call failed, as its run recorded it, so an interrupted replay can say so. Internal like
@@ -61,7 +64,7 @@ class StructuredStreamChunk:
 
 @dataclass(frozen=True, slots=True)
 class _PendingStreamingTool:
-    scope_key: str
+    member_id: str | None
     tool_name: str
     trace_entry: ToolTraceEntry
     tool_call_id: str | None = None
@@ -80,20 +83,24 @@ class StreamingToolTracker:
         self,
         call: ReportedCall,
         *,
-        scope_key: str = "",
+        member_id: str | None = None,
         tool_index: int | None = None,
         origin: ToolCallOrigin | None = None,
     ) -> tuple[str, ToolTraceEntry | None]:
-        """Record one started tool call and return its visible marker, or no trace entry for a call already pending."""
+        """Record one started tool call and return its visible marker, or no trace entry for a call already pending.
+
+        ``member_id`` names the team member whose run made the call, None for a leader's or another reply's.
+        """
         if any(
-            pending.scope_key == scope_key and pending.tool_call_id == call.tool_call_id
+            pending.member_id == member_id and pending.tool_call_id == call.tool_call_id
             for pending in self.pending_tools
         ):
             return "", None
         visible_text, trace_entry = format_tool_started_event(call, tool_index=tool_index, origin=origin)
+        trace_entry.member_id = member_id
         self.pending_tools.append(
             _PendingStreamingTool(
-                scope_key=scope_key,
+                member_id=member_id,
                 tool_name=trace_entry.tool_name,
                 trace_entry=trace_entry,
                 tool_call_id=call.tool_call_id,
@@ -107,13 +114,14 @@ class StreamingToolTracker:
         self,
         call: ReportedCall,
         *,
-        scope_key: str = "",
+        member_id: str | None = None,
         origin: ToolCallOrigin | None = None,
     ) -> tuple[_PendingStreamingTool | None, ToolTraceEntry]:
         """Record one completed tool call; return the pending slot it completes, if any, and its completed trace."""
-        pending_pos = self._find_pending_tool_index(scope_key=scope_key, call=call)
+        pending_pos = self._find_pending_tool_index(member_id=member_id, call=call)
         pending_tool = self.pending_tools.pop(pending_pos) if pending_pos is not None else None
         completed_trace = format_tool_completed_event(call, origin=origin)
+        completed_trace.member_id = member_id
         self.completed_tools.append(completed_trace)
         return pending_tool, completed_trace
 
@@ -142,7 +150,7 @@ class StreamingToolTracker:
                 continue
             self.pending_tools.append(
                 _PendingStreamingTool(
-                    scope_key=trace_entry.scope_key or "",
+                    member_id=trace_entry.member_id,
                     tool_name=trace_entry.tool_name,
                     trace_entry=trace_entry,
                     tool_call_id=trace_entry.tool_call_id,
@@ -162,16 +170,16 @@ class StreamingToolTracker:
             synchronized.append(replace(pending_tool, visible_tool_index=tool_index))
         self.pending_tools = synchronized
 
-    def _find_pending_tool_index(self, *, scope_key: str, call: ReportedCall) -> int | None:
+    def _find_pending_tool_index(self, *, member_id: str | None, call: ReportedCall) -> int | None:
         for pos in range(len(self.pending_tools) - 1, -1, -1):
             pending_tool = self.pending_tools[pos]
-            if pending_tool.scope_key == scope_key and pending_tool.tool_call_id == call.tool_call_id:
+            if pending_tool.member_id == member_id and pending_tool.tool_call_id == call.tool_call_id:
                 return pos
         # A slot restored from a trace that kept no call ids is matched by its tool's name.
         for pos in range(len(self.pending_tools) - 1, -1, -1):
             pending_tool = self.pending_tools[pos]
             if (
-                pending_tool.scope_key == scope_key
+                pending_tool.member_id == member_id
                 and pending_tool.tool_call_id is None
                 and pending_tool.tool_name == call.tool_name
             ):
@@ -188,6 +196,10 @@ class CollectedStreamPresentation:
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
     track_hidden_tools: bool = False
     canonical_final_body_candidate: str | None = None
+    # The structured state of a team document the stream showed whole, which a resume restores.
+    document_state: dict[str, object] | None = None
+    # Whether a text chunk replaces the collected text, as in a team's stream of whole documents, instead of continuing it.
+    replaces_text: bool = False
     tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker, init=False)
     separate_next_text: bool = field(default=False, init=False, repr=False)
 
@@ -195,6 +207,13 @@ class CollectedStreamPresentation:
         """Restore pending tool identity from the durable trace."""
         self.tool_tracker.restore_pending(self.tool_trace)
         self.separate_next_text = bool(self.response_text and self.tool_tracker.pending_tools)
+
+    def show_text(self, content: str) -> None:
+        """Apply one text chunk: it replaces the collected text in a stream of whole documents, else continues it."""
+        if self.replaces_text:
+            self.response_text = content
+            return
+        self.append_text(content)
 
     def append_text(self, content: object | None) -> None:
         """Append one provider content delta when it is non-empty."""
@@ -206,29 +225,27 @@ class CollectedStreamPresentation:
         if content:
             self.separate_next_text = False
 
-    def start_tool(self, call: ReportedCall, *, scope_key: str = "", origin: ToolCallOrigin | None = None) -> None:
+    def start_tool(self, call: ReportedCall, *, origin: ToolCallOrigin | None = None) -> None:
         """Record one tool start and append its marker when visible."""
         if not self.show_tool_calls and not self.track_hidden_tools:
             return
         tool_index = len(self.tool_trace) + 1
-        text, trace_entry = self.tool_tracker.start(call, scope_key=scope_key, tool_index=tool_index, origin=origin)
+        text, trace_entry = self.tool_tracker.start(call, tool_index=tool_index, origin=origin)
         if trace_entry is None:
             return
-        trace_entry.scope_key = scope_key or None
         self.tool_trace.append(trace_entry)
         if self.show_tool_calls:
             self.response_text += text
         elif self.response_text:
             self.separate_next_text = True
 
-    def complete_tool(self, call: ReportedCall, *, scope_key: str = "", origin: ToolCallOrigin | None = None) -> None:
+    def complete_tool(self, call: ReportedCall, *, origin: ToolCallOrigin | None = None) -> None:
         """Complete the exact pending slot represented by a provider event."""
         if not self.show_tool_calls and not self.track_hidden_tools:
             return
-        pending_tool, completed_trace = self.tool_tracker.complete(call, scope_key=scope_key, origin=origin)
+        pending_tool, completed_trace = self.tool_tracker.complete(call, origin=origin)
         if pending_tool is None or pending_tool.visible_tool_index is None:
             return
-        completed_trace.scope_key = scope_key or pending_tool.scope_key or None
         if self.show_tool_calls:
             self.response_text = complete_pending_tool_block(
                 self.response_text,
@@ -236,6 +253,13 @@ class CollectedStreamPresentation:
                 tool_index=pending_tool.visible_tool_index,
             )
         self.tool_tracker.update_visible_trace_entry(self.tool_trace, pending_tool, completed_trace)
+
+    def show_document(self, chunk: StructuredStreamChunk) -> None:
+        """Replace the collected presentation with a document the stream sent whole; one without a trace keeps it."""
+        self.response_text = chunk.content
+        if chunk.tool_trace is not None:
+            self.tool_trace = list(chunk.tool_trace)
+        self.document_state = chunk.presentation_state
 
     def final_text(self) -> str:
         """Return collected deltas, falling back to the provider's canonical final body."""
@@ -799,7 +823,7 @@ def _internal_fields(entry: ToolTraceEntry) -> dict[str, object]:
         "parent_bash_call_id": entry.parent_bash_call_id,
         "toolkit_name": entry.toolkit_name,
         "tool_call_id": entry.tool_call_id,
-        "scope_key": entry.scope_key,
+        "member_id": entry.member_id,
         "is_error": entry.is_error or None,
     }
     return {key: value for key, value in fields.items() if value is not None}
@@ -829,6 +853,28 @@ def serialize_tool_trace(
     return tuple(serialized)
 
 
+# LEGACY_COMPAT: Tool trace entries that name their team slot as a ``scope_key`` string.
+# Legacy format: an entry of the internal tool trace a reply record stores (``serialize_tool_trace(...,
+# include_internal=True)``) with ``scope_key`` ``team`` for a team leader's call or ``agent:<id>`` for a member's,
+# where ``<id>`` is the member's id in the version-2 team snapshot stored beside the trace.
+# Last legacy release: v2026.10.677, whose ``_internal_fields`` (``tool_system/events.py``) stored the scope the team
+# presentation (``teams/presentation.py``) gave each call; replacement: the next release, which stores a member's call
+# with ``member_id``, the member's config name, and a leader's call with neither key.
+# Handling: ``team`` reads as no member and ``agent:<id>`` as member ``<id>``, which the version-2 snapshot's reader
+# (``teams/legacy_team_presentation.py``) maps to the member's config name; any other value is a malformed entry, as
+# that release never wrote one.
+# Coverage: tests/test_tool_events.py::test_a_trace_entry_stored_with_a_scope_key_reads_as_its_member,
+#   tests/test_tool_events.py::test_durable_tool_trace_rejects_malformed_events,
+#   tests/teams/test_legacy_team_presentation.py::test_a_v2_reply_record_restores_with_its_members_keyed_by_config_name
+def _legacy_member_id(scope_key: object) -> str | None:
+    """Return the member a stored ``scope_key`` names, None for ``team``."""
+    if scope_key == "team":
+        return None
+    if isinstance(scope_key, str) and scope_key.startswith("agent:"):
+        return scope_key.removeprefix("agent:")
+    raise RuntimeError(_MALFORMED_TRACE)
+
+
 def deserialize_tool_trace(stored: Sequence[Mapping[str, object]]) -> list[ToolTraceEntry]:
     """Restore a trace snapshot while rejecting malformed event records."""
     restored: list[ToolTraceEntry] = []
@@ -838,7 +884,8 @@ def deserialize_tool_trace(stored: Sequence[Mapping[str, object]]) -> list[ToolT
         args_preview = event.get("args_preview")
         result_preview = event.get("result_preview")
         tool_call_id = event.get("tool_call_id")
-        scope_key = event.get("scope_key")
+        legacy_scope = event.get("scope_key")
+        member_id = event.get("member_id") if legacy_scope is None else _legacy_member_id(legacy_scope)
         parent_bash_call_id = event.get("parent_bash_call_id")
         toolkit_name = event.get("toolkit_name")
         truncated = event.get("truncated")
@@ -851,14 +898,13 @@ def deserialize_tool_trace(stored: Sequence[Mapping[str, object]]) -> list[ToolT
             or (args_preview is not None and not isinstance(args_preview, str))
             or (result_preview is not None and not isinstance(result_preview, str))
             or (tool_call_id is not None and (not isinstance(tool_call_id, str) or not tool_call_id))
-            or (scope_key is not None and (not isinstance(scope_key, str) or not scope_key))
+            or (member_id is not None and (not isinstance(member_id, str) or not member_id))
             or (parent_bash_call_id is not None and not isinstance(parent_bash_call_id, str))
             or (toolkit_name is not None and not isinstance(toolkit_name, str))
             or (truncated is not None and not isinstance(truncated, bool))
             or (is_error is not None and not isinstance(is_error, bool))
         ):
-            msg = "Durable tool trace contains a malformed event"
-            raise RuntimeError(msg)
+            raise RuntimeError(_MALFORMED_TRACE)
         restored.append(
             ToolTraceEntry(
                 type=cast("Literal['tool_call_started', 'tool_call_completed']", event_type),
@@ -867,7 +913,7 @@ def deserialize_tool_trace(stored: Sequence[Mapping[str, object]]) -> list[ToolT
                 result_preview=result_preview,
                 truncated=truncated is True,
                 tool_call_id=cast("str | None", tool_call_id),
-                scope_key=cast("str | None", scope_key),
+                member_id=cast("str | None", member_id),
                 parent_bash_call_id=parent_bash_call_id,
                 toolkit_name=toolkit_name,
                 is_error=is_error is True,

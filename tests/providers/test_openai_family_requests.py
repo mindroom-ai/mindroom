@@ -50,7 +50,7 @@ from mindroom.providers.openai.responses_wire import (
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.settings import ChatSettings
 from mindroom.providers.openai.tool_search import openai_native_tool_search_supported
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.types import ConversationSession
 from tests.agent_loop.helpers import collect, context, gated
 from tests.providers.golden_support import responses_events, streamed_reply
@@ -969,7 +969,7 @@ async def test_an_approval_resume_on_a_stored_chain_names_each_receipt_call_as_i
 
 def _stored(tmp_path: Path, run: RunRecord) -> RunRecord:
     """Save ``run`` to a conversation store and return it as the store loads it."""
-    store = create_state_storage("code", tmp_path / "state")
+    store = create_agent_state_storage("code", tmp_path / "state")
     store.save_run(ConversationSession(session_id="session-1", kind="agent", owner_id="code"), run, record_usage=False)
     stored = store.get_run(run.run_id)
     assert isinstance(stored, RunRecord)

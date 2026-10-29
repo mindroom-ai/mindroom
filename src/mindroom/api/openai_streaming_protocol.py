@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from html import escape
 from typing import TYPE_CHECKING
@@ -23,7 +24,7 @@ from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
 from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from starlette.background import BackgroundTask
     from starlette.types import Receive, Scope, Send
@@ -56,6 +57,10 @@ class _FinalizedResponse(Response):
             await super().__call__(scope, receive, send)
         except BaseException as error:
             response_error = error
+        try:
+            await self._close_body()
+        except BaseException as error:
+            response_error = response_error or error
         completed = self.completion_predicate() if self.completion_predicate is not None else response_error is None
         finalizer_error: BaseException | None = None
         if self.always_background is not None:
@@ -76,6 +81,9 @@ class _FinalizedResponse(Response):
         if finalizer_error is not None:
             raise finalizer_error
 
+    async def _close_body(self) -> None:
+        """Close what the response sent from, before the finalizers release what it held; a whole body has nothing."""
+
 
 class OpenAIJSONResponse(_FinalizedResponse, JSONResponse):
     """JSON response with separate completion-scoped and always-run finalizers."""
@@ -83,6 +91,17 @@ class OpenAIJSONResponse(_FinalizedResponse, JSONResponse):
 
 class OpenAIStreamingResponse(_FinalizedResponse, StreamingResponse):
     """Streaming response with completion-aware compaction and always-run finalizers."""
+
+    # Closes the stream the body reads from, which a body that never started, such as when sending the headers
+    # failed, cannot close itself.
+    close_stream: Callable[[], Awaitable[None]] | None = None
+
+    async def _close_body(self) -> None:
+        """Close a stream the client left early, so the turn cut short is stored while its session is still held."""
+        if isinstance(self.body_iterator, AsyncGenerator):
+            await self.body_iterator.aclose()
+        if self.close_stream is not None:
+            await self.close_stream()
 
 
 # ---------------------------------------------------------------------------

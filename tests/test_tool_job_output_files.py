@@ -32,6 +32,7 @@ from tests.tool_job_helpers import (
     start_job,
     tool_job_runtime,
 )
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -113,7 +114,7 @@ async def output_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Async
         execution_identity=owner,
         persist_runtime_state=False,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, paths, "leader"),
     )
     workspace = resolve_agent_runtime("leader", config, paths, execution_identity=owner).workspace
     assert workspace is not None

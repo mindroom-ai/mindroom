@@ -28,7 +28,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.media_inputs import MediaInputs
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
 from tests.history_helpers import compact_runs, log_of, replay_settings, stored_run_ids
@@ -48,7 +48,7 @@ _ALL_HISTORY = replay_settings()
 @pytest.fixture
 def storage(tmp_path: Path) -> ConversationStore:
     """Use the production conversation storage owner."""
-    return create_state_storage("code", tmp_path)
+    return create_agent_state_storage("code", tmp_path)
 
 
 def _run(
@@ -114,7 +114,7 @@ def _fold(
 
 
 def _loaded(storage: ConversationStore) -> ConversationSession:
-    session = storage.load_session("session", "agent")
+    session = storage.load_session("session")
     assert session is not None
     return session
 
@@ -139,8 +139,13 @@ def test_a_fold_sorts_after_the_runs_it_covers_and_its_run_after_it(storage: Con
 
 
 @pytest.mark.parametrize("scope", [_SCOPE, _TEAM_SCOPE], ids=lambda scope: scope.kind)
-def test_a_first_fold_writes_against_a_row_of_its_scopes_kind(storage: ConversationStore, scope: HistoryScope) -> None:
+def test_a_first_fold_writes_against_a_row_of_its_scopes_kind(
+    storage: ConversationStore,
+    team_store: ConversationStore,
+    scope: HistoryScope,
+) -> None:
     """The row a first turn's fold creates is the kind of session the scope's runs belong to."""
+    storage = team_store if scope.kind == "team" else storage
     running: AnyRunRecord = (
         TeamRunRecord(run_id="live", team_id="crew", session_id="session", status=RunStatus.running)
         if scope.kind == "team"
@@ -149,7 +154,7 @@ def test_a_first_fold_writes_against_a_row_of_its_scopes_kind(storage: Conversat
 
     assert _fold(storage, running, "S")
 
-    row = storage.load_session("session", scope.kind)
+    row = storage.load_session("session")
     assert row is not None
     assert (row.kind, row.owner_id) == (scope.kind, scope.scope_id)
 
@@ -198,7 +203,7 @@ def test_a_run_loads_without_the_messages_its_folds_took(storage: ConversationSt
         assert [message.content for message in loaded.runs[0].messages] == ["do it", "step after the fold"]
 
 
-def test_a_team_run_loads_without_the_messages_its_folds_took(storage: ConversationStore) -> None:
+def test_a_team_run_loads_without_the_messages_its_folds_took(team_store: ConversationStore) -> None:
     """Team sessions' folded runs load the same way."""
     prompt = Message(role="user", content="do it")
     call = Message(role="assistant", tool_calls=[{"id": "c1", "type": "function", "function": {"name": "probe"}}])
@@ -211,9 +216,9 @@ def test_a_team_run_loads_without_the_messages_its_folds_took(storage: Conversat
         status=RunStatus.paused,
         messages=[prompt, call, result, later],
     )
-    seed_session(storage, ConversationSession(session_id="session", kind="team", owner_id="crew", runs=[team_run]))
-    assert _fold(storage, team_run, "T", folded=[call, result])
-    team_loaded = storage.load_session("session", "team")
+    seed_session(team_store, ConversationSession(session_id="session", kind="team", owner_id="crew", runs=[team_run]))
+    assert _fold(team_store, team_run, "T", folded=[call, result])
+    team_loaded = team_store.load_session("session")
     assert team_loaded is not None
     stored_team_run = next(run for run in team_loaded.runs if run.run_id == "team-paused")
     assert [message.content for message in stored_team_run.messages] == ["do it", "step after the fold"]
@@ -414,7 +419,7 @@ def test_a_fold_keeps_the_events_its_turn_read_seen_after_the_turn_stops(storage
     assert "$context" in read_scope_seen_event_ids(storage, _loaded(storage), _SCOPE)
 
 
-def test_redacting_a_team_turn_that_folded_removes_its_member_runs(storage: ConversationStore) -> None:
+def test_redacting_a_team_turn_that_folded_removes_its_member_runs(team_store: ConversationStore) -> None:
     """A team turn's fold goes with the turn, and its delegated member runs go with it."""
     member = RunRecord(run_id="member", agent_id="helper", session_id="session", parent_run_id="team-run")
     team_run = TeamRunRecord(
@@ -430,21 +435,21 @@ def test_redacting_a_team_turn_that_folded_removes_its_member_runs(storage: Conv
         owner_id="crew",
         runs=[TeamRunRecord(run_id="t0", team_id="crew", session_id="session")],
     )
-    seed_session(storage, team_session)
+    seed_session(team_store, team_session)
     # The member run ended, and saved, before the fold took it; the team run saves when the turn ends.
-    storage.save_run(team_session, member, record_usage=False)
-    assert _fold(storage, team_run, "S", members=["member"])
-    _save(storage, team_run)
-    session = storage.load_session("session", "team")
+    team_store.save_run(team_session, member, record_usage=False)
+    assert _fold(team_store, team_run, "S", members=["member"])
+    _save(team_store, team_run)
+    session = team_store.load_session("session")
     assert session is not None
 
-    assert _remove_redacted_event_from_history(storage, session=session, event_id="$team")
+    assert _remove_redacted_event_from_history(team_store, session=session, event_id="$team")
 
-    assert log_of(storage, _TEAM_SCOPE.key, "session") == ["run:t0"]
-    reloaded = storage.load_session("session", "team")
+    assert log_of(team_store, _TEAM_SCOPE.key, "session") == ["run:t0"]
+    reloaded = team_store.load_session("session")
     assert reloaded is not None
     assert [run.run_id for run in reloaded.runs] == ["t0"]
-    assert stored_run_ids(storage, "session") == ["t0"]
+    assert stored_run_ids(team_store, "session") == ["t0"]
 
 
 def test_a_runs_folds_name_every_tool_call_they_summarized(storage: ConversationStore) -> None:

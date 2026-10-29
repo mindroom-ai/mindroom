@@ -11,7 +11,7 @@ import pytest
 
 from mindroom import constants, orchestrator
 from mindroom.api import config_lifecycle, main
-from mindroom.response_activity import ActiveScriptRunInfo, ResponseIdentity
+from mindroom.response_activity import ActiveResponseIdentity, ActiveScriptRunInfo
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from tests.api.conftest import trusted_upstream_env, trusted_upstream_headers
@@ -44,7 +44,7 @@ def _unbind_runtime(state: config_lifecycle._MindroomAppState) -> None:
 def _bind_runtime(
     state: config_lifecycle._MindroomAppState,
     *,
-    calls: list[ResponseIdentity] | None = None,
+    calls: list[ActiveResponseIdentity] | None = None,
     script_runs: list[ActiveScriptRunInfo] | None = None,
 ) -> ResponseAdmissionGate:
     """Bind the live sources the embedded orchestrator publishes to its API."""
@@ -124,7 +124,7 @@ def test_openai_request_blocks_idle(test_client: TestClient) -> None:
     state = config_lifecycle.app_state(main.app)
     _bind_runtime(state)
     set_runtime_ready()
-    state.openai_responses.add(ResponseIdentity("helper", "@alice:example.org"))
+    state.openai_responses.add(ActiveResponseIdentity("helper", "@alice:example.org"))
     response = test_client.get("/api/responses/activity")
     assert response.status_code == 200
     assert response.json()["status"] == "busy"
@@ -134,7 +134,7 @@ def test_openai_request_blocks_idle(test_client: TestClient) -> None:
 @pytest.mark.parametrize(
     ("calls", "script_runs", "status", "counts"),
     [
-        ([ResponseIdentity("helper", "@alice:example.org")], [], "busy", (1, 0, 0)),
+        ([ActiveResponseIdentity("helper", "@alice:example.org")], [], "busy", (1, 0, 0)),
         ([], [_script_run("script-1", recoverable=False)], "busy", (0, 1, 0)),
         ([], [_script_run("script-1", recoverable=True)], "idle", (0, 0, 1)),
     ],
@@ -142,7 +142,7 @@ def test_openai_request_blocks_idle(test_client: TestClient) -> None:
 )
 def test_calls_and_restart_interrupted_script_runs_block_idle(
     test_client: TestClient,
-    calls: list[ResponseIdentity],
+    calls: list[ActiveResponseIdentity],
     script_runs: list[ActiveScriptRunInfo],
     status: str,
     counts: tuple[int, int, int],
@@ -219,9 +219,12 @@ def test_response_activity_details_lists_responses_without_padding_admission_slo
     assert gate.admit()
     set_runtime_ready()
 
-    gate.response_identities.add(ResponseIdentity("helper", "@alice:example.org"))
+    gate.response_identities.add(ActiveResponseIdentity("helper", "@alice:example.org"))
     state.openai_responses.update(
-        [ResponseIdentity("general", "@alice:example.org"), ResponseIdentity("general", "@alice:example.org")],
+        [
+            ActiveResponseIdentity("general", "@alice:example.org"),
+            ActiveResponseIdentity("general", "@alice:example.org"),
+        ],
     )
     response = test_client.get(
         "/api/responses/activity/details",
@@ -271,7 +274,7 @@ def test_response_activity_details_lists_calls_and_script_runs(
     state = config_lifecycle.app_state(test_client.app)
     _bind_runtime(
         state,
-        calls=[ResponseIdentity("helper", "@bob:example.org")],
+        calls=[ActiveResponseIdentity("helper", "@bob:example.org")],
         script_runs=[_script_run("script-1", recoverable=False), _script_run("script-2", recoverable=True)],
     )
     set_runtime_ready()
@@ -320,11 +323,11 @@ def test_aggregate_response_activity_never_serializes_identities(test_client: Te
     state = config_lifecycle.app_state(test_client.app)
     _bind_runtime(
         state,
-        calls=[ResponseIdentity("helper", "@alice:example.org")],
+        calls=[ActiveResponseIdentity("helper", "@alice:example.org")],
         script_runs=[_script_run("script-1", recoverable=False)],
     )
     set_runtime_ready()
-    state.openai_responses.add(ResponseIdentity("helper", "@alice:example.org"))
+    state.openai_responses.add(ActiveResponseIdentity("helper", "@alice:example.org"))
     payload = test_client.get("/api/responses/activity").json()
     assert "responses" not in payload
     assert "script_runs" not in payload
@@ -342,7 +345,7 @@ async def test_embedded_api_binds_and_clears_live_sources(
     """The bundled server must report its orchestrator's gate, calls, and scripts, then unbind on shutdown."""
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
     live = orchestrator._MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    live.agent_bots["helper"] = SimpleNamespace(active_call_requesters=("@alice:example.org",))
+    live.fleet.add("helper", SimpleNamespace(active_call_requesters=("@alice:example.org",)))
     gate = ResponseAdmissionGate()
     assert gate.admit()
     shutdown_requested = asyncio.Event()

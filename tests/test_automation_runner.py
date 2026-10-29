@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom import requester_identity
+from mindroom import background_tasks, requester_identity
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.automations import automation
 from mindroom.automations import runner as runner_module
@@ -108,7 +108,7 @@ def _setup(
     )
     config = Config(agents={"mind": agent}, router=RouterConfig(model="default"))
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    root = resolve_agent_runtime("mind", config, paths, None, create=True).file_memory_root
+    root = resolve_agent_runtime("mind", config, paths, None, create=True).workspace.file_memory_path
     if root is not None:
         root.mkdir(parents=True, exist_ok=True)
         (root / "MEMORY.md").write_text(memory, encoding="utf-8")
@@ -184,6 +184,37 @@ async def test_the_internal_user_is_the_prompts_requester(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_a_tick_that_raises_is_logged_and_the_loop_runs_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crashed pass is logged and the schedule loop restarts instead of staying dead until the next reload."""
+    config, _paths, runner, _bot = _setup(tmp_path)
+    monkeypatch.setattr(background_tasks, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+    logger = MagicMock()
+    monkeypatch.setattr(background_tasks, "logger", logger)
+    ticks: list[datetime] = []
+    ticked_again = asyncio.Event()
+
+    async def tick(now: datetime) -> None:
+        ticks.append(now)
+        if len(ticks) == 1:
+            msg = "tick failed"
+            raise RuntimeError(msg)
+        ticked_again.set()
+
+    monkeypatch.setattr(runner, "_tick", tick)
+    await runner.sync(config)
+    try:
+        await asyncio.wait_for(ticked_again.wait(), SETTLE_TIMEOUT_SECONDS)
+    finally:
+        await runner.stop()
+
+    logger.exception.assert_called_once()
+    assert logger.exception.call_args.kwargs == {"task_name": "automation_runner"}
+
+
+@pytest.mark.asyncio
 async def test_a_configured_room_overrides_the_first_agent_room(tmp_path: Path) -> None:
     """`room` sends the prompt somewhere other than the agent's first room."""
     config, _paths, runner, bot = _setup(tmp_path)
@@ -239,7 +270,7 @@ async def test_a_run_outside_the_bounds_gets_one_recheck_the_agent_answers(tmp_p
     await _tick(runner, NOON)
     with patch("mindroom.automations.runner.mindroom_user_id", return_value="@mindroom_user:example.test"):
         await _tick(runner, DAY_LATER)
-        root = resolve_agent_runtime("mind", config, paths, None).file_memory_root
+        root = resolve_agent_runtime("mind", config, paths, None).workspace.file_memory_path
         assert root is not None
         (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
         runner.response_finished(["$event1"])
@@ -263,7 +294,7 @@ async def _finish_run(runner: AutomationRunner, config: Config, paths: RuntimePa
     await _tick(runner, NOON)
     await _tick(runner, DAY_LATER)
     if memory is not None:
-        root = resolve_agent_runtime("mind", config, paths, None).file_memory_root
+        root = resolve_agent_runtime("mind", config, paths, None).workspace.file_memory_path
         assert root is not None
         (root / "memory").mkdir(exist_ok=True)
         moved = MEMORY.split("## Topic 7\n")[1]
@@ -325,7 +356,7 @@ async def test_a_configured_model_runs_the_prompt_and_its_recheck(tmp_path: Path
     config.agents["mind"].automations = [PromptCurationAutomation(trigger_tokens=1_000, model="large")]
     await _tick(runner, NOON)
     await _tick(runner, DAY_LATER)
-    root = resolve_agent_runtime("mind", config, paths, None).file_memory_root
+    root = resolve_agent_runtime("mind", config, paths, None).workspace.file_memory_path
     assert root is not None
     (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
     runner.response_finished(["$event1"])
@@ -571,7 +602,7 @@ async def test_dreaming_runs_its_dream_and_review_through_the_runner(tmp_path: P
     )
     config = Config(agents={"mind": agent}, router=RouterConfig(model="default"))
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    root = resolve_agent_runtime("mind", config, paths, None, create=True).file_memory_root
+    root = resolve_agent_runtime("mind", config, paths, None, create=True).workspace.file_memory_path
     assert root is not None
     (root / "memory").mkdir(parents=True)
     (root / "memory" / "people.md").write_text("- Sam lives in Delft.\n", encoding="utf-8")
@@ -621,7 +652,7 @@ async def test_one_agents_automations_never_overlap(tmp_path: Path) -> None:
         DreamingAutomation(cron="0 4 * * *"),
         PromptCurationAutomation(trigger_tokens=1_000),
     ]
-    root = resolve_agent_runtime("mind", config, paths, None).file_memory_root
+    root = resolve_agent_runtime("mind", config, paths, None).workspace.file_memory_path
     assert root is not None
     (root / "thread_exports" / "room").mkdir(parents=True)
     (root / "thread_exports" / "room" / "thread.yaml").write_text("messages: [hello]\n", encoding="utf-8")
@@ -796,7 +827,7 @@ def _private_setup(
     roots: dict[str, Path] = {}
     for requester, memory in memories.items():
         identity = build_requester_execution_identity(agent_name="mind", runtime_paths=paths, requester_id=requester)
-        root = resolve_agent_runtime("mind", config, paths, identity, create=True).file_memory_root
+        root = resolve_agent_runtime("mind", config, paths, identity, create=True).workspace.file_memory_path
         assert root is not None
         (root / "MEMORY.md").write_text(memory, encoding="utf-8")
         roots[requester] = root

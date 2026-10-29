@@ -45,7 +45,7 @@ class WorkspaceFileGenerationTools(FileGenerationTools):
         if not save_files and output_directory is None:
             return
         if tool_output_workspace_root is None:
-            log_warning("File generation saves are disabled because this agent has no workspace")
+            log_warning("File generation saves are disabled because this toolkit was built without a workspace root")
             return
         if self._relative_output_directory.is_absolute() or ".." in self._relative_output_directory.parts:
             msg = "file_generation output_directory must be a relative path inside the agent workspace"

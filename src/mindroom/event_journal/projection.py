@@ -18,7 +18,8 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 
-from .identity import encode_thread_id
+from . import turn_rows
+from .identity import agent_of_principal, encode_thread_id
 from .interactive_questions import record_projected_prompt
 from .membership_state import claim_membership_epoch
 from .outbox import event_belongs_to_membership
@@ -127,64 +128,15 @@ def _loads(content_json: str) -> Mapping[str, object]:
     return cast("Mapping[str, object]", decoded)
 
 
-def is_tombstoned(
+def is_redacted(
     transaction: Transaction,
     principal_id: str,
     room_id: str,
     event_id: str,
 ) -> bool:
-    """Return whether one event was already redacted."""
-    row = transaction.fetchone(
-        """
-        SELECT 1 AS present FROM redaction_tombstones
-        WHERE principal_id = ? AND room_id = ? AND redacted_event_id = ?
-        """,
-        (principal_id, room_id, event_id),
-    )
-    return row is not None
-
-
-def tombstoned_event_ids(
-    transaction: Transaction,
-    principal_id: str,
-    room_id: str,
-    event_ids: tuple[str, ...],
-) -> frozenset[str]:
-    """Find exact physical tombstones among one bounded batch of recorded context."""
-    if not event_ids:
-        return frozenset()
-    placeholders = ", ".join("?" for _ in event_ids)
-    rows = transaction.fetchall(
-        f"""
-        SELECT redacted_event_id FROM redaction_tombstones
-        WHERE principal_id = ? AND room_id = ? AND redacted_event_id IN ({placeholders})
-        """,  # noqa: S608 - generated placeholders, bound values
-        (principal_id, room_id, *event_ids),
-    )
-    return frozenset(str(row["redacted_event_id"]) for row in rows)
-
-
-def _record_tombstone(
-    transaction: Transaction,
-    principal_id: str,
-    room_id: str,
-    redacted_event_id: str,
-) -> None:
-    """Remember a redaction before projecting it.
-
-    Recorded first so that an original or edit arriving later — a real ordering
-    on a server that backfills — cannot resurrect content the sender deleted.
-
-    The row is the whole fact. Every reader asks only whether one event is
-    tombstoned, so when the redaction was received is not part of the answer.
-    """
-    transaction.execute(
-        """
-        INSERT INTO redaction_tombstones (principal_id, room_id, redacted_event_id)
-        VALUES (?, ?, ?)
-        ON CONFLICT (principal_id, room_id, redacted_event_id) DO NOTHING
-        """,
-        (principal_id, room_id, redacted_event_id),
+    """Return whether one event was redacted in ``room_id``, as any Matrix login of this principal's agent saw it."""
+    return bool(
+        turn_rows.redacted_events(transaction, agent_of_principal(principal_id), room_id, (event_id,)),
     )
 
 
@@ -196,11 +148,13 @@ def project(
     receipt_order: int,
     membership_epoch: int,
 ) -> str | None:
-    """Fold one event and report tombstone authority to admission.
+    """Fold one event and report redaction authority to admission.
 
-    A redaction returns its target ID.
-    A newly admitted event with a preexisting tombstone returns its own ID.
-    Every other projection returns ``None``.
+    A redaction returns its target ID and changes nothing here: the caller
+    records it once for the agent and applies it to every login of the agent
+    (``journal.redact_for_agent``), in this transaction. A newly admitted
+    event that was already redacted returns its own ID. Every other projection
+    returns ``None``.
     """
     if not event_belongs_to_membership(
         transaction,
@@ -214,14 +168,8 @@ def project(
     ):
         return None
     if event.redacts_event_id is not None:
-        _project_redaction(
-            transaction,
-            principal_id,
-            event,
-            receipt_order=receipt_order,
-        )
         return event.redacts_event_id
-    if is_tombstoned(transaction, principal_id, event.room_id, event.event_id):
+    if is_redacted(transaction, principal_id, event.room_id, event.event_id):
         return event.event_id
     replaces = replacement_target(event.content)
     if replaces is None:
@@ -331,7 +279,7 @@ def _apply_unresolved_edit(
     )
     if held is None:
         return
-    if is_tombstoned(transaction, principal_id, event.room_id, held["edit_event_id"]):
+    if is_redacted(transaction, principal_id, event.room_id, held["edit_event_id"]):
         # Earlier surviving edits were discarded when this held revision won.
         # The original cannot stand in for them: ask the server for its winner.
         transaction.execute(
@@ -384,7 +332,7 @@ def _project_edit(
         (principal_id, event.room_id, target_event_id),
     )
     if current is None:
-        if is_tombstoned(transaction, principal_id, event.room_id, target_event_id):
+        if is_redacted(transaction, principal_id, event.room_id, target_event_id):
             return
         _hold_unresolved_edit(transaction, principal_id, event, target_event_id=target_event_id)
         return
@@ -446,9 +394,9 @@ def _hold_unresolved_edit(
 
     Both endings have to be spelled out, because the row holds a message body
     and only one of them is the ordinary case. A target that is redacted before
-    it ever arrives never lands afterwards -- ``project`` turns it away at the
-    tombstone -- so the arrival this row is waiting for is not coming, and
-    ``_project_redaction`` is the only thing left to collect it.
+    it ever arrives never lands afterwards -- ``project`` turns it away as
+    already redacted -- so the arrival this row is waiting for is not coming,
+    and ``scrub_redacted_projection`` is the only thing left to collect it.
 
     A target that neither arrives nor is redacted has no third ending, and the
     membership fence is the whole bound on it. That is deliberate: the row is
@@ -558,18 +506,19 @@ def _install_revision(
     )
 
 
-def _project_redaction(
+def scrub_redacted_projection(
     transaction: Transaction,
     principal_id: str,
-    event: ProjectedEvent,
     *,
+    room_id: str,
+    event_id: str,
     receipt_order: int,
 ) -> None:
-    """Apply a redaction to whatever the target turns out to be."""
-    target = event.redacts_event_id
-    if target is None:
-        return
-    _record_tombstone(transaction, principal_id, event.room_id, target)
+    """Remove a redacted event's text from one principal's projection of ``room_id``.
+
+    ``receipt_order`` is the redaction's; it becomes the refresh token of a
+    visible message whose current revision was redacted.
+    """
     # Prompt revisions retain their text for replay and consumed-revision
     # proof, so a redaction must erase that payload explicitly. Selections
     # bound to the revision disappear through their foreign-key cascade.
@@ -578,7 +527,7 @@ def _project_redaction(
         DELETE FROM interactive_questions
         WHERE principal_id = ? AND room_id = ? AND revision_event_id = ?
         """,
-        (principal_id, event.room_id, target),
+        (principal_id, room_id, event_id),
     )
     # Keep only identity and ordering proof so a late original requests a
     # refetch instead of silently forgetting any earlier surviving edit.
@@ -587,7 +536,7 @@ def _project_redaction(
         UPDATE unresolved_edits SET content_json = '{}'
         WHERE principal_id = ? AND room_id = ? AND edit_event_id = ?
         """,
-        (principal_id, event.room_id, target),
+        (principal_id, room_id, event_id),
     )
     # Held edits for this target, and not only when the target is visible. An
     # edit is held only while its target has no visible row, and the insert
@@ -597,7 +546,7 @@ def _project_redaction(
     #
     # Unguarded it collects the case that has no other ending. A target that is
     # redacted before it arrives never arrives afterwards either, because
-    # `project` turns it away at the tombstone, so the arrival the row waits
+    # `project` turns it away as already redacted, so the arrival the row waits
     # for is not coming. It would otherwise outlive the redaction for the whole
     # membership epoch holding the only copy of the replacement text left on
     # this host, settlement having already blanked the journal's `source_json`.
@@ -606,14 +555,14 @@ def _project_redaction(
         DELETE FROM unresolved_edits
         WHERE principal_id = ? AND room_id = ? AND target_event_id = ?
         """,
-        (principal_id, event.room_id, target),
+        (principal_id, room_id, event_id),
     )
     logical = transaction.fetchone(
         """
         SELECT logical_event_id FROM visible_messages
         WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
         """,
-        (principal_id, event.room_id, target),
+        (principal_id, room_id, event_id),
     )
     if logical is not None:
         transaction.execute(
@@ -621,7 +570,7 @@ def _project_redaction(
             DELETE FROM visible_messages
             WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
             """,
-            (principal_id, event.room_id, target),
+            (principal_id, room_id, event_id),
         )
         return
     # Redacting the revision that is currently on screen. The body must stop
@@ -634,7 +583,7 @@ def _project_redaction(
         SET content_json = NULL, refresh_token = ?
         WHERE principal_id = ? AND room_id = ? AND revision_event_id = ?
         """,
-        (receipt_order, principal_id, event.room_id, target),
+        (receipt_order, principal_id, room_id, event_id),
     )
 
 
@@ -669,15 +618,16 @@ def install_refetched_revision(
     all, so installing it unread would resolve the debt by satisfying it with
     the very text it was raised about.
 
-    The revision is checked against the tombstone table for a reason the token
-    cannot cover. Redacting a revision that is not the one on screen matches no
-    row, so it correctly moves no token -- but it does record a tombstone. A
-    refetch already in flight, having chosen that very revision from the server,
-    then still matches the token it was issued and would install a body the
-    sender deleted. Nothing later disturbs it: hydration does not re-run under
-    the same membership, so the deleted text would be served to every prompt,
-    summary and export of that room from then on. Every other install path
-    already asks the tombstone table; this was the one that did not.
+    The revision is checked against the agent's recorded redactions for a
+    reason the token cannot cover. Redacting a revision that is not the one on
+    screen matches no row, so it correctly moves no token -- but it does record
+    the redaction. A refetch already in flight, having chosen that very revision
+    from the server, then still matches the token it was issued and would
+    install a body the sender deleted. Nothing later disturbs it: hydration does
+    not re-run under the same membership, so the deleted text would be served to
+    every prompt, summary and export of that room from then on. Every other
+    install path already checks the recorded redactions; this was the one that
+    did not.
     """
     membership_is_current = claim_membership_epoch(
         transaction,
@@ -707,7 +657,7 @@ def install_refetched_revision(
         return 0 if dropped else None
     if holds_unresolved_sidecar(content):
         return None
-    if is_tombstoned(transaction, principal_id, room_id, revision_event_id):
+    if is_redacted(transaction, principal_id, room_id, revision_event_id):
         return None
     content_json = _dumps(content)
     row = transaction.fetchone(

@@ -123,7 +123,7 @@ async def test_catalog_construction_applies_site_pin(tmp_path: Path, monkeypatch
         credentials_manager=manager,
         tool_config_overrides={"site_url": f"{OTHER_SITE_URL}/wiki"},
         worker_target=worker_target(),
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
     )
 
     entrypoint = tool.async_functions["jira_search_issues"].entrypoint

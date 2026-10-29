@@ -298,7 +298,7 @@ async def test_registered_sync_tool_completes_through_the_loop(
         "coding",
         paths,
         worker_target=None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         tool_init_overrides={"base_dir": str(tmp_path)},
     )
     arguments: dict[str, object] = {"path": "input.txt"}
@@ -352,7 +352,7 @@ async def test_failed_shell_command_states_exit_code_inline_and_as_job(
         "shell",
         paths,
         worker_target=None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         tool_init_overrides={"base_dir": str(tmp_path)},
     )
     arguments: dict[str, object] = {"args": "echo partial; echo broken >&2; exit 7"}
@@ -930,7 +930,7 @@ async def test_a_cancel_of_an_ended_job_does_not_replay_its_outcome(tmp_path: Pa
         record = await cancel()
         assert not record.tools[0].is_error
         assert json.loads(str(record.tools[0].result))["job_id"] == job.job_id
-        session = storage.load_session(context.session_id, "agent")
+        session = storage.load_session(context.session_id)
         assert session is not None
         assert session.session_state.get("counter", 0) == 0
         # The job had already ended, so its outcome stays for the next notice or collect to report.

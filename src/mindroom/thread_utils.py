@@ -131,6 +131,27 @@ def check_agent_mentioned(
     return mentioned_agents, am_i_mentioned, has_non_agent_mentions
 
 
+def mentions_another_participant(
+    event_source: dict,
+    agent_id: MatrixID,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    room: nio.MatrixRoom,
+) -> bool | None:
+    """Return whom a message mentions: ``None`` nobody, ``False`` this agent, ``True`` only other agents or people."""
+    mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
+        event_source,
+        agent_id,
+        config,
+        runtime_paths,
+        room=room,
+    )
+    if am_i_mentioned:
+        return False
+    return True if mentioned_agents or has_non_agent_mentions else None
+
+
 def get_agents_in_thread(
     thread_history: Sequence[ResolvedVisibleMessage],
     config: Config,

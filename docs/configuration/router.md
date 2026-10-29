@@ -112,4 +112,4 @@ After accepting an invitation into a room with no message history, the router po
 At startup, empty configured rooms get a welcome listing their configured responders.
 Send [`!hi`](../chat-commands.md#hi) to see the welcome again, limited to responders visible to you.
 
-The router's other duties are documented on their own pages: [command handling](../chat-commands.md#command-handling), [room management](../rooms.md#room-management), [voice message processing](../voice.md#voice-message-processing), [configuration confirmations](../chat-commands.md#configuration-confirmations), and [scheduled task restoration](../scheduling.md#scheduled-task-restoration).
+The router's other duties are documented on their own pages: [command handling](../chat-commands.md#command-handling), [room management](../rooms.md#room-management), [voice message processing](../voice.md#voice-message-processing), [configuration confirmations](../chat-commands.md#configuration-confirmations), and [running scheduled tasks](../scheduling.md#scheduled-task-restoration).

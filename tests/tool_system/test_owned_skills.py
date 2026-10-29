@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
@@ -16,7 +15,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolArgumentError, ToolCallContext, execute_tool_call, parse_tool_arguments
-from mindroom.tool_system.output_files import ToolOutputFilePolicy
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFilePolicy
 from mindroom.tool_system.skills import (
     SKILL_FUNCTION_NAMES,
     SkillsToolkit,
@@ -25,16 +24,18 @@ from mindroom.tool_system.skills import (
 )
 from mindroom.tool_system.tool_access import tool_definition
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from tests.agno_parity.prompt_scenarios import FIXTURE_DIR
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.tool_system.tool_function import ToolFunction
 
-PROMPT_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "prompts"
 AGENT_NAME = "assistant"
 
 
 def _golden(name: str) -> dict[str, Any]:
-    return json.loads((PROMPT_FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
+    return json.loads((FIXTURE_DIR / f"{name}.json").read_text(encoding="utf-8"))
 
 
 def _write_skill(root: Path, name: str, description: str, *, body: str = "Follow the steps.") -> Path:
@@ -63,7 +64,7 @@ def _build(
             AGENT_NAME,
             config,
             runtime_paths,
-            workspace_root=None,
+            workspace_root=_workspace(tmp_path),
             output_file_policy=ToolOutputFilePolicy(workspace_root=_workspace(tmp_path)) if output_files else None,
         )
     assert toolkit is not None
@@ -79,24 +80,29 @@ def _write_golden_workspace(tmp_path: Path, golden: dict[str, Any]) -> None:
         _write_file(_workspace(tmp_path) / relative_path, text)
 
 
-def _golden_skill_tools(golden: dict[str, Any]) -> list[dict[str, Any]]:
-    tools = golden["requests"][0]["tools"]
-    return [tool for tool in tools if tool["name"] in SKILL_FUNCTION_NAMES]
+def _golden_skill_tools(golden: dict[str, Any], *, output_files: bool) -> list[dict[str, Any]]:
+    """Return the golden's skill tools, without the output-path argument when output files are off."""
+    tools = [tool for tool in golden["requests"][0]["tools"] if tool["name"] in SKILL_FUNCTION_NAMES]
+    if output_files:
+        return tools
+    plain = json.loads(json.dumps(tools))
+    for tool in plain:
+        del tool["parameters"]["properties"][OUTPUT_PATH_ARGUMENT]
+    return plain
 
 
-@pytest.mark.parametrize(
-    ("scenario", "output_files"),
-    [("skill_review_fork", False), ("agent_anthropic", True)],
-    ids=["plain", "output-files"],
-)
-def test_skill_functions_equal_the_prompt_goldens(tmp_path: Path, scenario: str, output_files: bool) -> None:
+@pytest.mark.parametrize("output_files", [False, True], ids=["plain", "output-files"])
+def test_skill_functions_equal_the_prompt_goldens(tmp_path: Path, output_files: bool) -> None:
     """The adapted skill functions are the golden's request tools, with and without output-file wrapping."""
-    golden = _golden(scenario)
+    golden = _golden("agent_anthropic")
     _write_golden_workspace(tmp_path, golden)
 
     functions = adapt_toolkit(_build(tmp_path, output_files=output_files)).functions
 
-    assert [tool_definition(function.definition()) for function in functions] == _golden_skill_tools(golden)
+    assert [tool_definition(function.definition()) for function in functions] == _golden_skill_tools(
+        golden,
+        output_files=output_files,
+    )
 
 
 def test_the_prompt_block_equals_the_prompt_golden(tmp_path: Path) -> None:

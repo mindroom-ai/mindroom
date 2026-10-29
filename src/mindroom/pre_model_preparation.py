@@ -14,14 +14,14 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from mindroom.agent_loop.build import AgentBuild
-    from mindroom.config.main import ResolvedRuntimeModel
     from mindroom.memory import MemoryPromptParts
     from mindroom.timing import DispatchPipelineTiming
+    from mindroom.turn_model import TurnModel
 
 # Agent preparation logs under the logger of the agent turns it serves.
 logger = get_logger("mindroom.ai")
 
-type _BuiltAgent = tuple[ResolvedRuntimeModel, AgentBuild]
+type _BuiltAgent = tuple[TurnModel, AgentBuild]
 type _AgentBuilder = Callable[[], _BuiltAgent]
 
 # Agent construction is synchronous and must stay off the event loop, but the
@@ -109,7 +109,7 @@ async def prepare_prompt_branches(
     build_agent: _AgentBuilder,
     agent_name: str,
     pipeline_timing: DispatchPipelineTiming | None,
-) -> tuple[MemoryPromptParts, ResolvedRuntimeModel, AgentBuild]:
+) -> tuple[MemoryPromptParts, TurnModel, AgentBuild]:
     """Overlap memory preparation with agent construction and join both, letting a cancelled build finish first."""
 
     async def _memory_branch() -> MemoryPromptParts | Exception:

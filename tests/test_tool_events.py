@@ -349,21 +349,21 @@ def test_streaming_tool_tracker_records_hidden_pending_and_completion() -> None:
     assert tracker.completed_tools[0].result_preview == "ok"
 
 
-def test_streaming_tool_tracker_uses_scope_for_name_fallback_matching() -> None:
-    """A slot restored from a trace that kept no call ids matches by tool name, never across team/member scopes."""
-    member_trace = ToolTraceEntry(type="tool_call_started", tool_name="search", scope_key="agent:code")
-    team_trace = ToolTraceEntry(type="tool_call_started", tool_name="search", scope_key="team")
+def test_streaming_tool_tracker_uses_the_member_for_name_fallback_matching() -> None:
+    """A slot restored from a trace that kept no call ids matches by tool name, never across team and member slots."""
+    member_trace = ToolTraceEntry(type="tool_call_started", tool_name="search", member_id="code")
+    team_trace = ToolTraceEntry(type="tool_call_started", tool_name="search")
     tracker = StreamingToolTracker()
-    tracker.restore_pending([member_trace, team_trace])
+    tracker.restore_pending([team_trace, member_trace])
 
-    matched_pending_tool, _completed_trace = tracker.complete(
+    matched_pending_tool, completed_trace = tracker.complete(
         ToolExecution(tool_call_id="call-search", tool_name="search", result="team result").call,
-        scope_key="team",
     )
 
     assert matched_pending_tool is not None
     assert matched_pending_tool.trace_entry is team_trace
     assert [pending.trace_entry for pending in tracker.pending_tools] == [member_trace]
+    assert completed_trace.member_id is None
 
 
 def test_streaming_tool_tracker_prefers_call_id_over_newest_same_named_tool() -> None:
@@ -386,24 +386,26 @@ def test_streaming_tool_tracker_scopes_reused_call_ids_to_team_members() -> None
     tracker = StreamingToolTracker()
     tracker.start(
         ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"item": "first"}).call,
-        scope_key="agent:first",
+        member_id="first",
         tool_index=1,
     )
     tracker.start(
         ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"item": "second"}).call,
-        scope_key="agent:second",
+        member_id="second",
         tool_index=2,
     )
 
-    matched_pending_tool, _completed_trace = tracker.complete(
+    matched_pending_tool, completed_trace = tracker.complete(
         ToolExecution(tool_call_id="call-1", tool_name="inspect", result="first done").call,
-        scope_key="agent:first",
+        member_id="first",
     )
 
     assert matched_pending_tool is not None
-    assert matched_pending_tool.scope_key == "agent:first"
-    assert [(pending.scope_key, pending.tool_call_id) for pending in tracker.pending_tools] == [
-        ("agent:second", "call-1"),
+    assert matched_pending_tool.member_id == "first"
+    assert matched_pending_tool.trace_entry.member_id == "first"
+    assert completed_trace.member_id == "first"
+    assert [(pending.member_id, pending.tool_call_id) for pending in tracker.pending_tools] == [
+        ("second", "call-1"),
     ]
 
 
@@ -604,13 +606,13 @@ def test_format_tool_completed_event_formats_its_trace() -> None:
 
 
 def test_durable_tool_trace_round_trip_keeps_internal_identity_private() -> None:
-    """Restart state keeps exact call/scope identity without exposing it to Matrix clients."""
+    """Restart state keeps exact call and member identity without exposing it to Matrix clients."""
     trace = ToolTraceEntry(
         type="tool_call_started",
         tool_name="inspect",
         args_preview="path=report.txt",
         tool_call_id="call-1",
-        scope_key="member:GeneralAgent",
+        member_id="general",
     )
 
     durable = serialize_tool_trace([trace], include_internal=True)
@@ -623,15 +625,26 @@ def test_durable_tool_trace_round_trip_keeps_internal_identity_private() -> None
             "tool_name": "inspect",
             "args_preview": "path=report.txt",
             "tool_call_id": "call-1",
-            "scope_key": "member:GeneralAgent",
+            "member_id": "general",
         },
     )
     assert public is not None
     public_event = public[_TOOL_TRACE_KEY]["events"][0]
     assert "tool_call_id" not in public_event
-    assert "scope_key" not in public_event
+    assert "member_id" not in public_event
     assert restored[0].tool_call_id == "call-1"
-    assert restored[0].scope_key == "member:GeneralAgent"
+    assert restored[0].member_id == "general"
+
+
+@pytest.mark.parametrize(("scope_key", "member_id"), [("team", None), ("agent:code-review", "code-review")])
+def test_a_trace_entry_stored_with_a_scope_key_reads_as_its_member(scope_key: str, member_id: str | None) -> None:
+    """A reply record v2026.10.674 stored names a team slot as ``team`` or ``agent:<id>``; it reads as that member."""
+    stored = {"type": "tool_call_started", "tool_name": "inspect", "tool_call_id": "call-1", "scope_key": scope_key}
+
+    [restored] = deserialize_tool_trace([stored])
+
+    assert restored.member_id == member_id
+    assert "scope_key" not in serialize_tool_trace([restored], include_internal=True)[0]
 
 
 def test_durable_tool_trace_keeps_a_failed_calls_flag_private() -> None:
@@ -660,7 +673,11 @@ def test_durable_tool_trace_keeps_a_failed_calls_flag_private() -> None:
         {"type": "unknown", "tool_name": "inspect"},
         {"type": "tool_call_started", "tool_name": 7},
         {"type": "tool_call_started", "tool_name": "inspect", "tool_call_id": 7},
+        {"type": "tool_call_started", "tool_name": "inspect", "member_id": []},
+        {"type": "tool_call_started", "tool_name": "inspect", "member_id": ""},
         {"type": "tool_call_started", "tool_name": "inspect", "scope_key": []},
+        {"type": "tool_call_started", "tool_name": "inspect", "scope_key": "member:general"},
+        {"type": "tool_call_started", "tool_name": "inspect", "scope_key": "agent:"},
         {"type": "tool_call_completed", "tool_name": "inspect", "truncated": "yes"},
         {"type": "tool_call_completed", "tool_name": "inspect", "is_error": "yes"},
     ],

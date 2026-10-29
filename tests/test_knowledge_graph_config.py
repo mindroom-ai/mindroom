@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.config.resolution import edits_knowledge_graph
 
 _MODELS = {
     "default": ModelConfig(provider="openai", id="gpt-6-astra"),
@@ -36,15 +37,15 @@ def test_agent_inherits_knowledge_graph_from_defaults() -> None:
         models=_MODELS,
         knowledge_graph={"model": "luna"},
     )
-    assert config.agent_uses_knowledge_graph("mind")
-    assert not config.agent_uses_knowledge_graph("scratch")
+    assert config.resolve_agent("mind").knowledge_graph
+    assert not config.resolve_agent("scratch").knowledge_graph
     assert config.knowledge_graph_agents() == ["mind"]
 
 
 def test_knowledge_graph_is_off_by_default() -> None:
     """Without any setting no agent builds a graph, and no model is required."""
     config = Config(agents={"mind": AgentConfig(display_name="Mind")}, models=_MODELS)
-    assert not config.agent_uses_knowledge_graph("mind")
+    assert not config.resolve_agent("mind").knowledge_graph
     assert config.knowledge_graph_agents() == []
 
 
@@ -59,10 +60,10 @@ def test_graph_edits_are_on_by_default_and_follow_defaults() -> None:
         models=_MODELS,
         knowledge_graph={"model": "luna"},
     )
-    assert config.agent_edits_knowledge_graph("mind")
-    assert not config.agent_edits_knowledge_graph("careful")
-    assert not config.agent_edits_knowledge_graph("plain")
-    assert not _config(defaults=DefaultsConfig(knowledge_graph_edits=False)).agent_edits_knowledge_graph("mind")
+    assert edits_knowledge_graph(config, "mind")
+    assert not edits_knowledge_graph(config, "careful")
+    assert not edits_knowledge_graph(config, "plain")
+    assert not edits_knowledge_graph(_config(defaults=DefaultsConfig(knowledge_graph_edits=False)), "mind")
 
 
 def test_graph_edits_need_a_graph() -> None:

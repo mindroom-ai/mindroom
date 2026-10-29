@@ -27,7 +27,7 @@ from mindroom.matrix.thread_membership import (
 )
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
-from mindroom.turn_policy import _DispatchPlan
+from mindroom.turn_policy import DispatchPlan
 from tests.conftest import (
     install_relation_lookup,
     request_envelope,
@@ -1500,18 +1500,18 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
         observed_targets = []
 
-        async def fake_plan(_room: object, _event: object, dispatch: object, **_kwargs: object) -> _DispatchPlan:
+        async def fake_plan(_room: object, _event: object, dispatch: object, **_kwargs: object) -> DispatchPlan:
             observed_targets.append(dispatch.target)
             assert dispatch.context.is_thread is False
             assert dispatch.context.thread_id is None
             assert dispatch.context.planning_thread_history == ()
-            return _DispatchPlan(kind="ignore")
+            return DispatchPlan(kind="ignore")
 
         with (
             patch.object(bot.client, "room_get_event", AsyncMock(return_value=root_response)),
             patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock(side_effect=fake_plan)),
         ):
-            await dispatch_test_turn(bot._turn_controller, room, event, "@user:localhost")
+            await dispatch_test_turn(bot._turn_dispatcher, room, event, "@user:localhost")
 
         assert observed_targets
         assert observed_targets[0].source_thread_id is None
@@ -1568,7 +1568,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         resolver = unwrap_extracted_collaborator(bot._conversation_resolver)
         observed_policy_targets = []
 
-        async def fake_plan(_room: object, _event: object, dispatch: object, **_kwargs: object) -> _DispatchPlan:
+        async def fake_plan(_room: object, _event: object, dispatch: object, **_kwargs: object) -> DispatchPlan:
             observed_policy_targets.append(dispatch.target)
             assert dispatch.context.is_thread is True
             assert dispatch.context.thread_id == "$thread_root:localhost"
@@ -1576,7 +1576,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             assert dispatch.context.planning_thread_history == tuple(full_history)
             assert dispatch.context.planning_thread_history_unavailable is False
             assert dispatch.context.requires_model_history_refresh is False
-            return _DispatchPlan(kind="ignore")
+            return DispatchPlan(kind="ignore")
 
         with (
             patch(
@@ -1585,7 +1585,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ),
             patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock(side_effect=fake_plan)),
         ):
-            await dispatch_test_turn(bot._turn_controller, room, event, "@user:localhost")
+            await dispatch_test_turn(bot._turn_dispatcher, room, event, "@user:localhost")
 
         assert observed_policy_targets[0].resolved_thread_id == "$thread_root:localhost"
 

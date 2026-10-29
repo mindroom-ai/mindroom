@@ -24,6 +24,7 @@ from mindroom.approval.tool_approval import ToolApprovalTransportError, schedule
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.entity_resolution import entity_identity_registry
@@ -41,6 +42,7 @@ from mindroom.event_journal import (
     approval_arguments_digest,
     scheduled_call_run_id,
 )
+from mindroom.event_journal.identity import journal_principal_id
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
@@ -58,10 +60,9 @@ from mindroom.scheduling.tasks import (
     ScheduledTaskRecord,
     ScheduledWorkflow,
     _parse_scheduled_task_record,
-    _run_once_task,
-    _scheduled_call_workflow_digest,
     cancel_scheduled_task,
     save_edited_scheduled_task,
+    scheduled_call_workflow_digest,
 )
 from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
 from mindroom.tool_jobs.execution import agent_tool_middleware
@@ -89,11 +90,12 @@ from tests.conftest import (
 from tests.fakes.scripted_model import ScriptedModel
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
-from tests.scheduling_helpers import joined_member_state
+from tests.scheduling_helpers import joined_member_state, run_once_task, scheduled_task_runtime, serve_full_room_state
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.test_scheduler_tool import _bind_runtime_paths, _make_context
 from tests.test_tool_hooks import _plugin
 from tests.tool_approval_helpers import gated_functions, scheduled_call_approvals
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -102,6 +104,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.approval.manager import ApprovalActionResult, ApprovalManager
     from mindroom.event_journal import ScheduledCallRefusal
+    from mindroom.scheduling.runtime import ScheduledTaskRuntime
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
 
 _ROOM = "!room:test"
@@ -221,7 +224,7 @@ async def _armed(manager: ApprovalManager, *, scope: str | None = None) -> None:
 
 async def _ordinary_card(journal: EventJournalStore, manager: ApprovalManager, name: str) -> ApprovalContinuation:
     """Pause one agent run on a gated call made directly, which asks for approval the ordinary way."""
-    responder = journal.principal("agent@" + _AGENT)
+    responder = journal.principal(journal_principal_id("agent", _AGENT))
     await responder.admit(
         InboundEvent(
             event_id="$source-" + name,
@@ -1029,6 +1032,7 @@ def _gated_config() -> Config:
     return _bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval=ToolApprovalConfig(
                 rules=[ApprovalRuleConfig(match="post_slack_message", action="require_approval")],
             ),
@@ -1039,6 +1043,7 @@ def _gated_config() -> Config:
 def _tool_context(config: Config, *, thread_id: str | None = "$thread") -> ToolRuntimeContext:
     context = _make_context(config)
     client = context.client
+    serve_full_room_state(client, "!room:localhost")
     client.room_put_state = AsyncMock(
         return_value=nio.RoomPutStateResponse.from_dict({"event_id": "$state"}, room_id="!room:localhost"),
     )
@@ -1048,8 +1053,12 @@ def _tool_context(config: Config, *, thread_id: str | None = "$thread") -> ToolR
     )
 
 
-def _responders(config: Config, *entity_names: str) -> AbstractContextManager[object]:
-    """Let only these agents or teams reply to the requester in the scheduling room."""
+def _responders(
+    config: Config,
+    *entity_names: str,
+    task_runtime: ScheduledTaskRuntime | None = None,
+) -> AbstractContextManager[object]:
+    """Let only these agents or teams reply to the requester in the scheduling room, and run saved tasks on ``task_runtime``."""
     registry = entity_identity_registry(config, runtime_paths_for(config))
     responder_ids = [registry.current_id(name) for name in entity_names]
     build_runtime = build_scheduling_runtime_from_tool_runtime_context
@@ -1058,6 +1067,7 @@ def _responders(config: Config, *entity_names: str) -> AbstractContextManager[ob
         side_effect=lambda context: replace(
             build_runtime(context),
             responder_candidates_for_room=AsyncMock(return_value=responder_ids),
+            task_runtime=task_runtime,
         ),
     )
 
@@ -1182,12 +1192,13 @@ async def test_schedule_tool_call_stores_the_call_and_keeps_its_arguments_out_of
     config = _gated_config()
     context = _tool_context(config)
     request = AsyncMock(return_value=True)
+    task_runtime = scheduled_task_runtime(runtime_paths_for(config), config=config)
 
     with (
         scheduled_call_approvals(request_scheduled_call_approval=request),
-        patch("mindroom.scheduling.tasks._start_new_scheduled_task") as start,
+        patch.object(task_runtime, "start_new_task") as start,
         tool_runtime_context(context),
-        _responders(context.config, "general"),
+        _responders(context.config, "general", task_runtime=task_runtime),
     ):
         result = await _schedule_from_tool()
 
@@ -1219,7 +1230,7 @@ async def test_schedule_tool_call_stores_the_call_and_keeps_its_arguments_out_of
         toolkit_name=_TOOLKIT,
         tool_name="post_slack_message",
         arguments_json=canonical_arguments({"channel": "U123", "text": "Good morning!"}),
-        workflow_digest=_scheduled_call_workflow_digest(record.task_id, workflow),
+        workflow_digest=scheduled_call_workflow_digest(record.task_id, workflow),
         execute_at_ns=int(workflow.execute_at.timestamp() * 1_000_000_000),
     )
     kwargs = request.await_args.kwargs
@@ -1241,7 +1252,6 @@ async def test_schedule_tool_call_stores_and_shows_the_agents_timezone() -> None
 
     with (
         scheduled_call_approvals(request_scheduled_call_approval=request),
-        patch("mindroom.scheduling.tasks._start_new_scheduled_task"),
         tool_runtime_context(context),
         _responders(context.config, "general"),
     ):
@@ -1272,7 +1282,6 @@ async def test_schedule_tool_call_offers_only_exact_approval_where_any_arguments
     with (
         scheduled_call_approvals(request_scheduled_call_approval=request),
         patch("mindroom.scheduling.tasks.resolve_tool_approval_approver", return_value=approver),
-        patch("mindroom.scheduling.tasks._start_new_scheduled_task"),
         tool_runtime_context(context),
         _responders(context.config, "general"),
     ):
@@ -1290,6 +1299,7 @@ async def test_schedule_tool_call_refuses_a_team() -> None:
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
             teams={"crew": TeamConfig(display_name="Crew", role="Ship things", agents=["general"])},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval=ToolApprovalConfig(
                 rules=[ApprovalRuleConfig(match="post_slack_message", action="require_approval")],
             ),
@@ -1335,7 +1345,6 @@ async def test_schedule_tool_call_stores_arguments_exactly_as_given() -> None:
 
     with (
         scheduled_call_approvals(request_scheduled_call_approval=request),
-        patch("mindroom.scheduling.tasks._start_new_scheduled_task"),
         tool_runtime_context(context),
         _responders(context.config, "general"),
     ):
@@ -1389,7 +1398,12 @@ async def test_schedule_tool_call_rejects_what_it_cannot_store(
     config = (
         _gated_config()
         if gated
-        else _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
+        else _bind_runtime_paths(
+            Config(
+                agents={"general": AgentConfig(display_name="General Agent")},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
+            ),
+        )
     )
     context = _tool_context(config, thread_id=thread_id)
     request = AsyncMock(return_value=True)
@@ -1429,12 +1443,13 @@ async def test_no_task_is_published_when_its_card_cannot_be_posted(
         else AsyncMock(return_value=request_outcome)
     )
     withdraw = AsyncMock()
+    task_runtime = scheduled_task_runtime(context.runtime_paths, config=context.config)
 
     with (
         scheduled_call_approvals(request_scheduled_call_approval=request, withdraw_scheduled_call_approval=withdraw),
-        patch("mindroom.scheduling.tasks._start_new_scheduled_task") as start,
+        patch.object(task_runtime, "start_new_task") as start,
         tool_runtime_context(context),
-        _responders(context.config, "general"),
+        _responders(context.config, "general", task_runtime=task_runtime),
         pytest.raises(raised),
     ):
         await _schedule_from_tool()
@@ -1455,12 +1470,13 @@ async def test_card_is_withdrawn_when_its_task_cannot_be_published() -> None:
     context.client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
     request = AsyncMock(return_value=True)
     withdraw = AsyncMock()
+    task_runtime = scheduled_task_runtime(context.runtime_paths, config=context.config)
 
     with (
         scheduled_call_approvals(request_scheduled_call_approval=request, withdraw_scheduled_call_approval=withdraw),
-        patch("mindroom.scheduling.tasks._start_new_scheduled_task") as start,
+        patch.object(task_runtime, "start_new_task") as start,
         tool_runtime_context(context),
-        _responders(context.config, "general"),
+        _responders(context.config, "general", task_runtime=task_runtime),
         pytest.raises(RuntimeError, match="Failed to schedule"),
     ):
         await _schedule_from_tool()
@@ -1486,21 +1502,21 @@ def test_workflow_digest_survives_matrix_state_round_trip() -> None:
     record = _parse_scheduled_task_record("!room:localhost", "task1234", stored)
 
     assert record is not None
-    assert _scheduled_call_workflow_digest("task1234", record.workflow) == _scheduled_call_workflow_digest(
+    assert scheduled_call_workflow_digest("task1234", record.workflow) == scheduled_call_workflow_digest(
         "task1234",
         workflow,
     )
-    original = _scheduled_call_workflow_digest("task1234", workflow)
+    original = scheduled_call_workflow_digest("task1234", workflow)
     for change in (
         {"message": workflow.message.replace("Grüße", "Hi")},
         {"execute_at": workflow.execute_at + timedelta(minutes=1)},
         {"thread_id": "$other"},
         {"created_by": "@other:localhost"},
     ):
-        assert _scheduled_call_workflow_digest("task1234", workflow.model_copy(update=change)) != original
+        assert scheduled_call_workflow_digest("task1234", workflow.model_copy(update=change)) != original
     # Fields that do not define the call, including ones a later release may add, leave the binding intact.
     assert (
-        _scheduled_call_workflow_digest("task1234", workflow.model_copy(update={"description": "Renamed"})) == original
+        scheduled_call_workflow_digest("task1234", workflow.model_copy(update={"description": "Renamed"})) == original
     )
 
 
@@ -1543,14 +1559,14 @@ async def test_firing_task_arms_its_approval_and_skips_a_denied_send(
     arm = AsyncMock(return_value=approval_state)
 
     with (
-        patch("mindroom.scheduling.tasks.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
+        patch("mindroom.scheduling.runtime.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
         scheduled_call_approvals(arm_scheduled_call_approval=arm),
         patch(
             "mindroom.scheduling.executor.execute_scheduled_workflow",
             new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
         ) as execute,
     ):
-        await _run_once_task(
+        await run_once_task(
             client,
             "task1234",
             workflow,
@@ -1561,7 +1577,7 @@ async def test_firing_task_arms_its_approval_and_skips_a_denied_send(
 
     arm.assert_awaited_once_with(
         "task1234",
-        _scheduled_call_workflow_digest("task1234", workflow),
+        scheduled_call_workflow_digest("task1234", workflow),
         any_arguments_allowed=True,
     )
     assert execute.await_count == int(fires)
@@ -1607,7 +1623,7 @@ async def test_a_trigger_that_never_went_out_leaves_no_armed_approval(
     withdraw = AsyncMock()
 
     with (
-        patch("mindroom.scheduling.tasks.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
+        patch("mindroom.scheduling.runtime.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
         scheduled_call_approvals(
             arm_scheduled_call_approval=AsyncMock(return_value=approval_state),
             withdraw_scheduled_call_approval=withdraw,
@@ -1617,7 +1633,7 @@ async def test_a_trigger_that_never_went_out_leaves_no_armed_approval(
             new=AsyncMock(return_value=ScheduledWorkflowOutcome(status=outcome, failure_reason="no")),
         ),
     ):
-        await _run_once_task(
+        await run_once_task(
             client,
             "task1234",
             workflow,
@@ -1764,14 +1780,14 @@ async def test_tasks_fire_without_an_armed_approval(
     arm = AsyncMock(side_effect=arm_error)
 
     with (
-        patch("mindroom.scheduling.tasks.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
+        patch("mindroom.scheduling.runtime.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
         scheduled_call_approvals(arm_scheduled_call_approval=arm),
         patch(
             "mindroom.scheduling.executor.execute_scheduled_workflow",
             new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
         ) as execute,
     ):
-        await _run_once_task(
+        await run_once_task(
             client,
             "task1234",
             workflow,
@@ -2000,6 +2016,7 @@ def _code_config() -> Config:
     return _bind_runtime_paths(
         Config(
             agents={_AGENT: AgentConfig(display_name="Code Agent")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval=ToolApprovalConfig(
                 rules=[ApprovalRuleConfig(match="post_slack_message", action="require_approval")],
             ),
@@ -2192,7 +2209,7 @@ def _agent_build(config: Config, monkeypatch: pytest.MonkeyPatch, agent_name: st
         None,
         supports_native_tool_approval=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths_for(config), agent_name),
     )
 
 
@@ -2238,7 +2255,7 @@ def test_only_a_build_offering_the_scheduler_binds_its_live_functions(
         None,
         supports_native_tool_approval=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths_for(config), _AGENT),
     )
 
     functions = build.spec.functions
@@ -2297,7 +2314,6 @@ async def test_scheduling_a_name_two_toolkits_share_stores_the_toolkit_the_run_o
 
     with (
         scheduled_call_approvals(request_scheduled_call_approval=request),
-        patch("mindroom.scheduling.tasks._start_new_scheduled_task"),
         tool_runtime_context(context),
         _responders(config, "general"),
     ):
@@ -2759,28 +2775,24 @@ class _AsyncStreamingSlackTools(Toolkit):
     [_StreamingSlackTools, _AsyncStreamingSlackTools],
     ids=["generator", "async-generator"],
 )
-@pytest.mark.parametrize("workspace", [False, True], ids=["no-workspace", "workspace"])
 async def test_a_streaming_tool_runs_to_the_end_of_its_stream(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     toolkit_class: type[Toolkit],
-    workspace: bool,
 ) -> None:
     """A tool that streams its result runs as a scheduled call through the agent's build and returns the whole stream.
 
-    An agent with a workspace runs it behind the output-file wrapper, which hands the stream on undrained.
+    The agent runs it behind the output-file wrapper, which hands the stream on undrained.
     """
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     config = _code_config()
     config.agents[_AGENT].tools = [_TOOLKIT]
-    if workspace:
-        config.agents[_AGENT].memory_backend = "file"
     with registered_toolkit(_TOOLKIT, toolkit_class):
         build = _agent_build(config, monkeypatch)
         parameters = build.spec.functions["post_slack_message"].parameters
-        assert ("mindroom_output_path" in parameters["properties"]) is workspace
+        assert "mindroom_output_path" in parameters["properties"]
         try:
             await _armed(manager)
 

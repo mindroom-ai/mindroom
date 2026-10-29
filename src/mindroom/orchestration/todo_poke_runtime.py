@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
+from mindroom.background_tasks import SupervisedLoop, run_coroutine_until_complete
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.custom_tools.todo_poke import (
     TodoPokeDeliveryUnavailableError,
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -43,25 +44,31 @@ logger = get_logger(__name__)
 class TodoPokeRuntimeCoordinator:
     """Own the todo poke worker lifecycle and its orchestrator-facing adapters."""
 
+    name = "todo_poke"
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
-    bot_provider: Callable[[str], AgentBot | TeamBot | None]
+    bot_provider: Callable[[str], AgentBot | None]
     agent_reply_memberships: AgentReplyMembershipIndex
-    _worker: TodoPokeWorker | None = field(default=None, init=False)
-    _task: asyncio.Task | None = field(default=None, init=False)
+    _loop: SupervisedLoop = field(init=False)
 
-    async def sync(self) -> None:
+    def __post_init__(self) -> None:
+        """Create the supervised worker loop."""
+        self._loop = SupervisedLoop("todo_poke_worker", self._run_worker)
+
+    async def sync(self, config: Config) -> None:  # noqa: ARG002 - the runtime env enables pokes, not the config
         """Start or stop the todo poke worker from runtime env policy."""
-        policy = todo_poke_policy(self.runtime_paths)
-        if self.config_provider() is None or policy.interval_seconds == 0:
+        if todo_poke_policy(self.runtime_paths).interval_seconds == 0:
             await self.stop()
             return
+        self._loop.start()
 
-        if self._task is not None and not self._task.done():
-            return
+    async def stop(self) -> None:
+        """Stop the todo poke worker once its scan in progress finishes."""
+        await self._loop.stop()
 
+    async def _run_worker(self) -> None:
         worker = TodoPokeWorker(
-            policy=policy,
+            policy=todo_poke_policy(self.runtime_paths),
             deps=TodoPokeDeps(
                 state_root=todo_state_root(self.runtime_paths),
                 schedule_query=self._schedule_query,
@@ -71,20 +78,8 @@ class TodoPokeRuntimeCoordinator:
                 clock=lambda: datetime.now(UTC),
             ),
         )
-        self._worker = worker
-        self._task = asyncio.create_task(worker.run(), name="todo_poke_worker")
-
-    async def stop(self) -> None:
-        """Stop the todo poke worker if running."""
-        worker = self._worker
-        task = self._task
-        self._worker = None
-        self._task = None
-
-        if worker is not None:
-            worker.stop()
-        if task is not None:
-            await asyncio.gather(task, return_exceptions=True)
+        # A stop lets the scan in progress finish, so a poke it sent is recorded and never sent again.
+        await run_coroutine_until_complete(worker.run(), on_cancelled=worker.stop)
 
     def _agent_is_idle(self, agent_name: str) -> bool:
         """Return whether an agent and its running configured teams are idle."""
@@ -104,7 +99,7 @@ class TodoPokeRuntimeCoordinator:
                 return False
         return True
 
-    def _agent_bot(self, agent_name: str) -> AgentBot | TeamBot | None:
+    def _agent_bot(self, agent_name: str) -> AgentBot | None:
         """Return the assigned agent bot when todo poke I/O is ready."""
         agent_bot = self.bot_provider(agent_name)
         if agent_bot is None or not agent_bot.running or agent_bot.client is None:
@@ -115,7 +110,7 @@ class TodoPokeRuntimeCoordinator:
         self,
         room_id: str,
         agent_names: tuple[str, ...],
-    ) -> AgentBot | TeamBot | None:
+    ) -> AgentBot | None:
         """Return the first ready candidate with authoritative membership in the target room."""
         for agent_name in agent_names:
             agent_bot = self._agent_bot(agent_name)

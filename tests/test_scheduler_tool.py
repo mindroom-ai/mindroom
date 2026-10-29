@@ -107,14 +107,11 @@ def test_scheduler_tool_requires_explicit_delivery_mode() -> None:
 
 @pytest.mark.asyncio
 async def test_scheduler_tool_uses_shared_backend() -> None:
-    """Tool should call the same scheduling backend path as !schedule."""
+    """Tool should call the same scheduling backend path as !schedule, running saved tasks on the orchestrator's runtime."""
     tools = SchedulerTools()
     config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
-    matrix_admin = object()
-    context = _make_context(config, matrix_admin=matrix_admin)
-
-    current_config = config
-    context = replace(context, config_provider=lambda: current_config)
+    orchestrator = MagicMock()
+    context = replace(_make_context(config), config_provider=lambda: config, orchestrator=orchestrator)
 
     with (
         patch(
@@ -149,20 +146,13 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         runtime_paths=context.runtime_paths,
         room=context.room,
         conversation_reader=context.conversation_reader,
-        matrix_admin=matrix_admin,
         agent_reply_memberships=context.agent_reply_memberships,
         responder_candidates_for_room=context.responder_candidates_for_current_room,
+        task_runtime=orchestrator.scheduled_tasks,
         agent_name=context.agent_name,
     )
-    config_providers = []
     for call_kwargs in (first_call, second_call, third_call):
-        runtime = call_kwargs.pop("runtime")
-        assert replace(runtime, config_provider=None) == expected_runtime
-        assert runtime.config_provider is not None
-        assert runtime.config_provider() is config
-        config_providers.append(runtime.config_provider)
-    current_config = config.model_copy(deep=True)
-    assert all(config_provider() is current_config for config_provider in config_providers)
+        assert call_kwargs.pop("runtime") == expected_runtime
     assert first_call == {
         "room_id": context.room_id,
         "thread_id": context.resolved_thread_id,
@@ -283,10 +273,7 @@ async def test_edit_schedule_tool_calls_backend() -> None:
     """Edit tool should call edit_scheduled_task with correct arguments."""
     tools = SchedulerTools()
     config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
-    context = _make_context(config)
-
-    current_config = config
-    context = replace(context, config_provider=lambda: current_config)
+    context = replace(_make_context(config), config_provider=lambda: config)
 
     with (
         patch(
@@ -321,15 +308,8 @@ async def test_edit_schedule_tool_calls_backend() -> None:
     first_call = mock_edit.await_args_list[0].kwargs.copy()
     second_call = mock_edit.await_args_list[1].kwargs.copy()
     third_call = mock_edit.await_args_list[2].kwargs.copy()
-    config_providers = []
     for call_kwargs in (first_call, second_call, third_call):
-        runtime = call_kwargs.pop("runtime")
-        assert replace(runtime, config_provider=None) == expected_runtime
-        assert runtime.config_provider is not None
-        assert runtime.config_provider() is config
-        config_providers.append(runtime.config_provider)
-    current_config = config.model_copy(deep=True)
-    assert all(config_provider() is current_config for config_provider in config_providers)
+        assert call_kwargs.pop("runtime") == expected_runtime
     assert first_call == {
         "room_id": context.room_id,
         "task_id": "task123",
@@ -442,11 +422,11 @@ async def test_cancel_schedule_tool_requires_context() -> None:
 
 @pytest.mark.asyncio
 async def test_cancel_schedule_tool_calls_backend() -> None:
-    """Cancel tool should call cancel_scheduled_task with correct arguments."""
+    """Cancel tool should call cancel_scheduled_task with correct arguments, ending the runner on the orchestrator's runtime."""
     tools = SchedulerTools()
     config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
-    matrix_admin = object()
-    context = _make_context(config, matrix_admin=matrix_admin)
+    orchestrator = MagicMock()
+    context = replace(_make_context(config), orchestrator=orchestrator)
 
     with (
         patch(
@@ -463,7 +443,7 @@ async def test_cancel_schedule_tool_calls_backend() -> None:
         room_id=context.room_id,
         task_id="task123",
         runtime_paths=context.runtime_paths,
-        matrix_admin=matrix_admin,
+        task_runtime=orchestrator.scheduled_tasks,
     )
 
 

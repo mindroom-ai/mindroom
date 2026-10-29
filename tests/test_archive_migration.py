@@ -20,11 +20,11 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.session_storage.agent_storage import create_state_storage
-from mindroom.session_storage.legacy_agno3_backup import ConversionSpaceError
+from mindroom.session_storage.legacy_conversion_backup import ConversionSpaceError
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
-from tests.history_helpers import folded_run_ids, stored_run_ids
-from tests.session_storage.agno_layout import write_agno_database
+from tests.history_helpers import folded_run_ids, stored_run_ids, summary_rows_of
+from tests.session_storage.agno_layout import recorded_owner, write_agno_database
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -78,7 +78,7 @@ def _db(tmp_path: Path) -> Path:
 
 
 def _open(tmp_path: Path) -> ConversationStore:
-    storage = create_state_storage("code", tmp_path)
+    storage = create_state_storage("code", tmp_path, recorded_owner(_db(tmp_path)))
     assert isinstance(storage, ConversationStore)
     return storage
 
@@ -163,7 +163,7 @@ class _Replay:
 
 def _replay(tmp_path: Path) -> _Replay:
     storage = _open(tmp_path)
-    session = storage.load_session("s1", "agent")
+    session = storage.load_session("s1")
     assert session is not None
     return _Replay(
         loaded=[run.run_id or "" for run in session.runs or []],
@@ -359,7 +359,7 @@ def test_archived_member_runs_return_with_their_team_run(tmp_path: Path) -> None
     )
 
     storage = _open(tmp_path)
-    session = storage.load_session("s1", "team")
+    session = storage.load_session("s1")
     stored = stored_run_ids(storage, "s1")
     folded = folded_run_ids(storage, "s1")
 
@@ -405,7 +405,7 @@ def test_a_generation_of_several_runs_sorts_after_its_last_top_level_run_with_th
                 (json.dumps(event_ids), json.dumps(seen_event_ids), run_id),
             )
 
-    session = _open(tmp_path).load_session("s1", "team")
+    session = _open(tmp_path).load_session("s1")
     with closing(sqlite3.connect(_db(tmp_path))) as connection:
         rows = connection.execute(
             "SELECT run.run_id, summary.event_ids, summary.seen_event_ids FROM code_sessions_log_summaries AS summary "
@@ -430,7 +430,11 @@ def test_rows_without_an_index_keep_their_place(tmp_path: Path) -> None:
 
 
 def test_two_scopes_keep_separate_summary_rows(tmp_path: Path) -> None:
-    """Each scope's runs load after that scope's own latest summary row."""
+    """Each scope's generations become summary rows of that scope.
+
+    An agent's database owns every top-level run in it, so another agent's runs, which no release stored there, join
+    the agent's history once converted and load after the agent's own summary row.
+    """
     _main_database(
         tmp_path,
         live=[_run("c1"), _run("o1", agent_id="other")],
@@ -443,8 +447,11 @@ def test_two_scopes_keep_separate_summary_rows(tmp_path: Path) -> None:
     replay = _replay(tmp_path)
 
     assert replay.stored == ["c0", "o0", "c1", "o1"]
-    assert replay.loaded == ["c1", "o1"]
+    assert replay.loaded == ["o0", "c1", "o1"]
     assert replay.summary == "code summary"
+    storage = _open(tmp_path)
+    assert [row.summary for row in summary_rows_of(storage, "agent:other", "s1")] == ["other summary"]
+    assert [row.summary for row in summary_rows_of(storage, _SCOPE.key, "s1")] == ["code summary"]
 
 
 def test_redaction_candidates_keep_what_the_archive_matched(tmp_path: Path) -> None:
@@ -596,14 +603,17 @@ def test_archive_text_that_is_not_utf8_reads_with_replacement_characters(tmp_pat
 
 @pytest.mark.parametrize("field", ["agent_id", "user_id"])
 def test_an_archived_run_with_a_lone_surrogate_returns_with_a_replacement_character(tmp_path: Path, field: str) -> None:
-    """A text field worker code archived with an escaped lone surrogate, which SQLite cannot store, reads as U+FFFD."""
+    """A text field worker code archived with an escaped lone surrogate, which SQLite cannot store, reads as U+FFFD.
+
+    The run's agent then becomes the database's agent, as every top-level run of an agent's conversations does.
+    """
     _main_database(tmp_path, live=[_run("r1")], generations=[_Generation("summary of r0", [_run("r0")])])
     _set_archived(tmp_path, "run_data", json.dumps({**_run("r0").to_dict(), field: "x\ud800"}))
 
     restored = _open(tmp_path).get_run("r0")
 
     assert restored is not None
-    assert restored.to_dict()[field] == "x\ufffd"
+    assert restored.to_dict()[field] == ("code" if field == "agent_id" else "x\ufffd")
     assert _replay(tmp_path).stored == ["r0", "r1"]
 
 

@@ -274,7 +274,6 @@ agents:
 Non-Workspace files over `max_read_size` return an error suggesting `google_drive_download_file` instead.
 Downloads larger than `max_download_size` are refused without leaving a partial file.
 Uploads and content replacement read local files according to the agent's [`file_access`](../architecture/security-posture.md#file-access) setting.
-Downloads need an agent workspace; for an agent without one, `download_file` is ignored and a warning is logged.
 To change the content of a native Google Doc, use [`google_docs`](#google_docs).
 If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link; see [Google Services OAuth For Local Installs](../deployment/google-services-user-oauth.md#connect).
 A connection that granted only read-only Drive access keeps working for reads, while writes ask the user to reconnect; see [Scope Rationale](../deployment/google-services-oauth.md#scope-rationale).

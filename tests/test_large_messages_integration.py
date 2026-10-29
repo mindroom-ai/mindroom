@@ -36,6 +36,7 @@ from mindroom.streaming import (
 )
 from mindroom.tool_system.events import _TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry
 from tests.conftest import push_stream_chunk
+from tests.streaming_helpers import reply_hooks
 
 
 class MockClient:
@@ -257,6 +258,7 @@ async def test_streaming_initial_message_under_limit() -> None:
         target=MessageTarget.resolve("!test:room", None, None),
         config=config,
         runtime_paths=_runtime_paths(),
+        **reply_hooks(),
     )
 
     # Small initial content
@@ -279,6 +281,7 @@ async def test_streaming_initial_message_over_limit() -> None:
         target=MessageTarget.resolve("!test:room", None, None),
         config=config,
         runtime_paths=_runtime_paths(),
+        **reply_hooks(),
     )
 
     # Large initial content (60KB - over normal limit)
@@ -286,7 +289,7 @@ async def test_streaming_initial_message_over_limit() -> None:
     streaming.accumulated_text = large_text
     streaming.last_update = float("-inf")  # Force immediate send
 
-    await streaming._send_or_edit_message(client, is_final=True)
+    await streaming.finalize(client)
 
     # Should have sent with large message handling
     assert len(client.messages_sent) == 1
@@ -306,12 +309,13 @@ async def test_streaming_edit_grows_over_limit() -> None:
         target=MessageTarget.resolve("!test:room", None, None),
         config=config,
         runtime_paths=_runtime_paths(),
+        **reply_hooks(),
     )
 
     # Start with small message
     streaming.accumulated_text = "Small start"
     streaming.last_update = float("-inf")
-    await streaming._send_or_edit_message(client, is_final=False)
+    await streaming._send_or_edit_message(client)
 
     # Should have an event ID now
     assert streaming.event_id is not None
@@ -322,7 +326,7 @@ async def test_streaming_edit_grows_over_limit() -> None:
     streaming.accumulated_text = large_text
 
     # This should trigger edit with large message handling
-    await streaming._send_or_edit_message(client, is_final=True)
+    await streaming.finalize(client)
 
     # Should have sent an edit
     assert len(client.messages_sent) == 2
@@ -358,6 +362,7 @@ async def test_streaming_multiple_edits_with_growth(monkeypatch: pytest.MonkeyPa
         target=MessageTarget.resolve("!test:room", None, None),
         config=config,
         runtime_paths=_runtime_paths(),
+        **reply_hooks(),
     )
 
     # Simulate progressive growth
@@ -371,9 +376,10 @@ async def test_streaming_multiple_edits_with_growth(monkeypatch: pytest.MonkeyPa
     for label, size in sizes:
         streaming.accumulated_text = "x" * size
         streaming.last_update = float("-inf")
-        is_final = label == "Larger"
-
-        await streaming._send_or_edit_message(client, is_final=is_final)
+        if label == "Larger":
+            await streaming.finalize(client)
+        else:
+            await streaming._send_or_edit_message(client)
         if cadence_edits:
             # Wait out the interval the latest in-progress edit reserved; every
             # oversized edit exceeds 27 KB, so it always outlasts the 5 s floor.
@@ -410,6 +416,7 @@ async def test_streaming_with_thread_context() -> None:
         target=MessageTarget.resolve("!test:room", "$thread_root", "$reply_to"),
         config=config,
         runtime_paths=_runtime_paths(),
+        **reply_hooks(),
     )
 
     # Large message
@@ -417,7 +424,7 @@ async def test_streaming_with_thread_context() -> None:
     streaming.accumulated_text = large_text
     streaming.last_update = float("-inf")
 
-    await streaming._send_or_edit_message(client, is_final=True)
+    await streaming.finalize(client)
 
     sent_content = client.messages_sent[0][2]
 
@@ -561,6 +568,7 @@ async def test_streaming_finalize() -> None:
         target=MessageTarget.resolve("!test:room", None, None),
         config=config,
         runtime_paths=_runtime_paths(),
+        **reply_hooks(),
     )
 
     # Large content
@@ -595,6 +603,7 @@ async def test_structured_stream_chunk_adds_tool_trace_metadata() -> None:
         runtime_paths=_runtime_paths(),
         response_stream=stream(),
         streaming_cls=ReplacementStreamingResponse,
+        **reply_hooks(),
     )
 
     event_id = outcome.last_physical_stream_event_id
@@ -625,6 +634,7 @@ async def test_streaming_with_extra_content_metadata() -> None:
         response_stream=stream(),
         streaming_cls=ReplacementStreamingResponse,
         extra_content=extra_content,
+        **reply_hooks(),
     )
 
     event_id = outcome.last_physical_stream_event_id
@@ -656,6 +666,7 @@ async def test_structured_stream_chunk_does_not_drop_trace_on_stale_snapshot() -
         runtime_paths=_runtime_paths(),
         response_stream=stream(),
         streaming_cls=ReplacementStreamingResponse,
+        **reply_hooks(),
     )
 
     event_id = outcome.last_physical_stream_event_id
@@ -686,6 +697,7 @@ async def test_replacement_streaming_preserves_text_on_tool_completion() -> None
         runtime_paths=_runtime_paths(),
         response_stream=stream(),
         streaming_cls=ReplacementStreamingResponse,
+        **reply_hooks(),
     )
 
     event_id = outcome.last_physical_stream_event_id
@@ -716,6 +728,7 @@ async def test_replacement_streaming_tool_start_preserves_prior_visible_text() -
         runtime_paths=_runtime_paths(),
         response_stream=stream(),
         streaming_cls=ReplacementStreamingResponse,
+        **reply_hooks(),
     )
     accumulated = outcome.canonical_final_body_candidate or outcome.rendered_body or ""
 
@@ -751,6 +764,7 @@ async def test_replacement_streaming_preserves_visible_tool_marker_across_snapsh
         runtime_paths=_runtime_paths(),
         response_stream=stream(),
         streaming_cls=ReplacementStreamingResponse,
+        **reply_hooks(),
     )
     accumulated = outcome.canonical_final_body_candidate or outcome.rendered_body or ""
 
@@ -787,6 +801,7 @@ async def test_hidden_tool_calls_coalesce_placeholder_spacing() -> None:
         runtime_paths=_runtime_paths(),
         response_stream=stream(),
         show_tool_calls=False,
+        **reply_hooks(),
     )
 
     event_id = outcome.last_physical_stream_event_id

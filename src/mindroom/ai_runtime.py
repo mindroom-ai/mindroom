@@ -358,7 +358,6 @@ def _finalize_queued_notice_in_new_session_storage(
     """Finalize one response in a worker-owned session storage handle, editing the messages of a fresh load."""
     target.storage_factory().rewrite_run_messages(
         target.session_id,
-        target.session_kind,
         partial(_finalize_queued_notice_in_runs, response_turn_id=response_turn_id),
     )
 
@@ -501,7 +500,7 @@ def scrub_queued_notice_session_context(
     try:
         # Only a loaded run holding a crash-left notice makes the reply rewrite stored messages.
         if recover(session.runs):
-            scope_context.storage.rewrite_run_messages(session.session_id, session.kind, recover, session=session)
+            scope_context.storage.rewrite_run_messages(session.session_id, recover, session=session)
     except Exception:
         logger.exception(
             "Failed to recover queued-message notice in loaded session history",

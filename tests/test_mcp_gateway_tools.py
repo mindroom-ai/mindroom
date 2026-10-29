@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 
     from mindroom.api.connection_agents import AgentToolContext
     from mindroom.mcp_gateway.types import InvocationResult
+    from mindroom.tool_system.agent_tools import AgentTools
 
 
 @pytest.fixture
@@ -748,8 +749,8 @@ async def test_gateway_call_context_covers_construction_body_and_cleanup(
         def close(self) -> None:
             check("close")
 
-    def build_toolkit(*_args: object, config: Config, **_kwargs: object) -> ScopedToolkit:
-        built_from.append(config)
+    def build_toolkit(*_args: object, agent_tools: AgentTools, **_kwargs: object) -> ScopedToolkit:
+        built_from.append(agent_tools.config)
         return ScopedToolkit()
 
     monkeypatch.setattr(agents, "build_agent_toolkit", build_toolkit)

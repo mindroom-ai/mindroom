@@ -107,7 +107,7 @@ async def test_process_shutdown_releases_typing_without_new_matrix_request() -> 
             await asyncio.Event().wait()
 
     runner = ResponseRunner(deps=AsyncMock())
-    task = runner.track_inbox_response(
+    task = runner.inbox.track_inbox_response(
         hold_typing(),
         name="test_process_shutdown_typing",
         recovery_proof_ready=lambda: False,
@@ -115,7 +115,7 @@ async def test_process_shutdown_releases_typing_without_new_matrix_request() -> 
     )
     await asyncio.wait_for(entered.wait(), timeout=1.0)
 
-    completed = await runner.drain_inbox_responses(
+    completed = await runner.inbox.drain_inbox_responses(
         cancel_after_seconds=0.1,
         shutdown_intent=ORDERLY_SHUTDOWN,
     )

@@ -101,10 +101,12 @@ class ToolExecution:
         return ReportedCall(self.tool_call_id, self.tool_name, self.tool_args, self.result, self.is_error)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the stored dict: every field, None included, under its stored key."""
-        # TODO(simplify): every field is stored, None defaults included. Store only the fields that hold a value,
-        # with the storage redesign (#3107, #3095). Stored data would change: new rows would omit unset fields.
-        return {_STORED_TOOL_KEYS.get(name, name): value for name, value in asdict(self).items()}
+        """Return the stored dict: each field not at its default under its stored key, as ``from_dict`` reads it."""
+        return {
+            _STORED_TOOL_KEYS.get(name, name): value
+            for name, value in asdict(self).items()
+            if value != _TOOL_DEFAULTS[name]
+        }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> ToolExecution:
@@ -143,6 +145,8 @@ class ToolExecution:
 
 # Each tool-execution field by its stored key.
 _TOOL_FIELDS = {_STORED_TOOL_KEYS.get(item.name, item.name): item.name for item in fields(ToolExecution)}
+# Each tool-execution field's default, ``MISSING`` for the call's id and name, which every stored dict holds.
+_TOOL_DEFAULTS = {item.name: item.default for item in fields(ToolExecution)}
 
 _DENIED_WITHOUT_REASON = "Not approved by requester"
 

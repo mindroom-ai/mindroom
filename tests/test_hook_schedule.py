@@ -22,8 +22,6 @@ from mindroom.scheduling.tasks import (
     CronSchedule,
     ScheduledTaskRecord,
     ScheduledWorkflow,
-    _run_cron_task,
-    _run_once_task,
 )
 from tests.conftest import (
     bind_runtime_paths,
@@ -31,6 +29,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.scheduling_helpers import run_cron_task, run_once_task
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -213,9 +212,9 @@ async def test_one_time_task_cancel_log_includes_workflow_thread_context(
         "!room:localhost",
     )
 
-    with patch("mindroom.scheduling.tasks._get_pending_task_record", new=fake_get_pending_task_record):
+    with patch("mindroom.scheduling.runtime._get_pending_task_record", new=fake_get_pending_task_record):
         task = asyncio.create_task(
-            _run_once_task(
+            run_once_task(
                 client,
                 "task-1",
                 workflow,
@@ -265,13 +264,12 @@ async def test_cron_task_cancel_log_includes_workflow_thread_context(
         await release_pending_read.wait()
         return SimpleNamespace(workflow=workflow)
 
-    with patch("mindroom.scheduling.tasks._get_pending_task_record", new=fake_get_pending_task_record):
+    with patch("mindroom.scheduling.runtime._get_pending_task_record", new=fake_get_pending_task_record):
         task = asyncio.create_task(
-            _run_cron_task(
+            run_cron_task(
                 AsyncMock(),
                 "task-1",
                 workflow,
-                {},
                 config,
                 runtime_paths_for(config),
                 _conversation_reader(),

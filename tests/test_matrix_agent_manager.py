@@ -1570,6 +1570,7 @@ space_room_id: null
         mindroom_username = agent_username_localpart(colliding_entity_name, runtime_paths=runtime_paths)
         config = Config.validate_with_runtime(
             {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "agents": agents,
                 "teams": teams,
                 "mindroom_user": {
@@ -1612,11 +1613,10 @@ space_room_id: null
         orchestrator = _MultiAgentOrchestrator(runtime_paths)
 
         with (
-            patch("mindroom.orchestrator.load_config", return_value=config),
             patch("mindroom.orchestrator.create_agent_user", new=recording_create_agent_user),
             pytest.raises(PermanentMatrixStartupError, match="localpart collision"),
         ):
-            await orchestrator.initialize()
+            await orchestrator.initialize(config)
 
         assert created_accounts == []
         assert MatrixState.load(runtime_paths=runtime_paths).accounts == {}

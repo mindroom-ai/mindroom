@@ -17,6 +17,7 @@ import typer
 from rich.markup import escape
 
 from mindroom import constants
+from mindroom.config.resolution import memory_backend
 from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_values
 from mindroom.credentials.sync import get_secret_from_env, get_stored_provider_key, sync_env_to_credentials
 from mindroom.embeddings.embedder_health import probe_embedder, semantic_embedder_configured
@@ -620,7 +621,7 @@ def _check_memory_config(config: Config, runtime_paths: RuntimePaths) -> tuple[i
     backends = (
         {config.memory.backend}
         if not config.agents
-        else {config.resolve_entity(agent_name).memory_backend for agent_name in config.agents}
+        else {memory_backend(config, agent_name) for agent_name in config.agents}
     )
     if "mem0" not in backends:
         if backends == {"none"}:

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
-import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -12,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from mindroom import reply_lifecycle as rl
-from mindroom import reply_scope
+from mindroom import reply_scope, turn_store
 from mindroom.event_journal import (
     ApprovalFailure,
     DeliveryStage,
@@ -22,7 +20,7 @@ from mindroom.event_journal import (
     replies,
     reply_messages,
     reply_spans,
-    turn_records,
+    turn_rows,
 )
 from mindroom.event_journal.approval_store import ApprovalStore
 from mindroom.event_journal.replies import (
@@ -33,7 +31,6 @@ from mindroom.event_journal.replies import (
     ReplyRowRequest,
     WakeApproval,
 )
-from mindroom.handled_turns import HandledTurnLedger, TurnRecordCodec
 from mindroom.reply_lifecycle import (
     ApprovalFailureKind,
     ClaimContext,
@@ -48,7 +45,7 @@ from mindroom.reply_presentation import Presentation, encode_presentation
 from mindroom.response_sources import ResponseSources
 from mindroom.stop import SpanRegistry
 from mindroom.tool_system.events import ToolTraceEntry
-from mindroom.turn_record import TurnRecord
+from mindroom.turn_record import SourceEventMetadata, TurnRecord
 from tests import test_event_journal_store as journal_tests
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval, reply_shown_for_approval
@@ -267,39 +264,27 @@ async def test_applying_a_terminal_transition_settles_the_span_sources(journal_s
     assert span.outcome is SpanOutcome.COMPLETED
 
 
-async def _pending_turn(journal_store: EventJournalStore, *source_ids: str) -> None:
-    pending = TurnRecord.create(list(source_ids), completed=False)
-    await journal_store.backend.write(
-        lambda tx: turn_records.write_record(
-            tx,
-            "agent",
-            index_event_ids=pending.indexed_event_ids,
-            anchor_event_id=pending.anchor_event_id,
-            record_json=json.dumps(TurnRecordCodec._to_ledger_record(pending)),
-        ),
-    )
+async def _pending_turn(journal_store: EventJournalStore, *source_ids: str, requester_id: str | None = None) -> None:
+    pending = TurnRecord.create(list(source_ids), completed=False, requester_id=requester_id)
+    result = await journal_store.turn_records("agent").write(turn_rows.record_pending_turn, pending, room_id=ROOM)
+    assert isinstance(result, turn_rows.Accepted)
+
+
+async def _turn(journal_store: EventJournalStore, source_id: str) -> TurnRecord:
+    record = await journal_store.turn_records("agent").read(turn_rows.get_turn_record, source_id)
+    assert record is not None
+    return record
 
 
 async def _answered(journal_store: EventJournalStore, source_id: str) -> bool:
-    record = await journal_store.backend.read(lambda tx: turn_records.load_record(tx, "agent", source_id))
-    assert record is not None
-    return record.completed
+    return (await _turn(journal_store, source_id)).completed
 
 
 async def test_settling_a_spans_sources_records_its_turn_answered(journal_store: EventJournalStore) -> None:
     """The reply rule that settles a turn's sources is what records the turn answered, in the same transaction."""
     principal = journal_store.principal(PRINCIPAL)
     await admit(principal, "$source")
-    pending = TurnRecord.create(["$source"], completed=False)
-    await journal_store.backend.write(
-        lambda tx: turn_records.write_record(
-            tx,
-            "agent",
-            index_event_ids=pending.indexed_event_ids,
-            anchor_event_id="$source",
-            record_json=json.dumps(TurnRecordCodec._to_ledger_record(pending)),
-        ),
-    )
+    await _pending_turn(journal_store, "$source")
     claim = _first_claim()
     await _apply(journal_store, claim)
     assert claim.reply is not None
@@ -315,65 +300,19 @@ async def test_settling_a_spans_sources_records_its_turn_answered(journal_store:
         ),
     )
 
-    record = await journal_store.backend.read(lambda tx: turn_records.load_record(tx, "agent", "$source"))
-    assert record is not None
+    assert applied.post_commit == ()
+    record = await _turn(journal_store, "$source")
     assert record.completed
     assert record.response_event_id is None
-    assert [effect.record for effect in applied.post_commit if isinstance(effect, replies.TurnCompleted)] == [record]
 
-    # A ledger write derived before the settlement arrives late; the turn stays answered.
-    await journal_store.backend.write(
-        lambda tx: turn_records.write_record(
-            tx,
-            "agent",
-            index_event_ids=pending.indexed_event_ids,
-            anchor_event_id="$source",
-            record_json=json.dumps(TurnRecordCodec._to_ledger_record(pending)),
-        ),
+    # A pending write derived before the settlement arrives late; the turn stays answered.
+    late = await journal_store.turn_records("agent").write(
+        turn_rows.record_pending_turn,
+        TurnRecord.create(["$source"], completed=False),
+        room_id=ROOM,
     )
-    late = await journal_store.backend.read(lambda tx: turn_records.load_record(tx, "agent", "$source"))
-    assert late is not None
-    assert late.completed
-
-
-async def test_a_late_ledger_write_keeps_the_edit_a_regeneration_answered(journal_store: EventJournalStore) -> None:
-    """A cached write derived before a regeneration answered cannot put the older prompt and revision back."""
-
-    async def write(record: TurnRecord) -> None:
-        assert record.anchor_event_id is not None
-        anchor = record.anchor_event_id
-        await journal_store.backend.write(
-            lambda tx: turn_records.write_record(
-                tx,
-                "agent",
-                index_event_ids=record.indexed_event_ids,
-                anchor_event_id=anchor,
-                record_json=json.dumps(TurnRecordCodec._to_ledger_record(record)),
-            ),
-        )
-
-    answered = TurnRecord.create(
-        ["$source"],
-        completed=True,
-        source_event_prompts={"$source": "edited"},
-        source_event_revisions={"$source": (20, "$edit")},
-        timestamp=1.0,
-    )
-    await write(answered)
-    # Derived from the turn as the first answer left it, and stamped later.
-    stale = TurnRecord.create(
-        ["$source"],
-        completed=True,
-        source_event_prompts={"$source": "original"},
-        timestamp=2.0,
-    )
-    await write(stale)
-
-    record = await journal_store.backend.read(lambda tx: turn_records.load_record(tx, "agent", "$source"))
-    assert record is not None
-    assert record.completed
-    assert record.source_event_revisions == {"$source": (20, "$edit")}
-    assert record.source_event_prompts == {"$source": "edited"}
+    assert isinstance(late, turn_rows.Answered)
+    assert await _answered(journal_store, "$source")
 
 
 async def test_post_commit_effects_are_returned(journal_store: EventJournalStore) -> None:
@@ -701,7 +640,6 @@ async def test_a_replay_lists_the_tool_calls_of_an_attempt_a_superseded_one_took
         entity_name="agent",
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
-        complete_turn=AsyncMock(),
         approval_ended=lambda _ended: None,
     )
     await principal.replies.record_tool_call(
@@ -743,7 +681,6 @@ async def test_a_regeneration_lists_only_the_tool_calls_of_its_own_edits_earlier
         entity_name="agent",
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
-        complete_turn=AsyncMock(),
         approval_ended=lambda _ended: None,
     )
     lost_regeneration = replace(
@@ -812,16 +749,7 @@ async def test_deleting_every_source_ends_the_reply_and_its_span(journal_store: 
     principal = journal_store.principal(PRINCIPAL)
     await admit(principal, "$first")
     await admit(principal, "$second")
-    pending = TurnRecord.create(["$first", "$second"], completed=False)
-    await journal_store.backend.write(
-        lambda tx: turn_records.write_record(
-            tx,
-            "agent",
-            index_event_ids=pending.indexed_event_ids,
-            anchor_event_id=pending.anchor_event_id,
-            record_json=json.dumps(TurnRecordCodec._to_ledger_record(pending)),
-        ),
-    )
+    await _pending_turn(journal_store, "$first", "$second")
     await principal.replies.write_generation("gen-1")
     request = replace(
         _request(source="$first"),
@@ -851,9 +779,7 @@ async def test_deleting_every_source_ends_the_reply_and_its_span(journal_store: 
     assert not await principal.is_pending("$first")
     assert not await principal.is_pending("$second")
     # The deleted sources settle through the reply's settlement, and nothing answered their turn.
-    record = await journal_store.backend.read(lambda tx: turn_records.load_record(tx, "agent", "$first"))
-    assert record is not None
-    assert not record.completed
+    assert not await _answered(journal_store, "$first")
     # The bot cancels exactly the span the deletion ended, once.
     assert await principal.replies.take_deletion_endings() == (reply_messages.DeletionEnding("reply-1", span.span_id),)
     assert await principal.replies.take_deletion_endings() == ()
@@ -1006,7 +932,6 @@ async def test_a_stop_still_cancels_its_span_when_waking_its_approval_fails(jour
         entity_name="agent",
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
-        complete_turn=AsyncMock(),
         approval_ended=ended.append,
         spans=_Spans(),
     )
@@ -1057,7 +982,6 @@ async def test_a_departure_cancels_a_span_claimed_before_its_task_registers(jour
         entity_name="agent",
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
-        complete_turn=AsyncMock(),
         approval_ended=lambda _ended: None,
     )
     runtime.spans.expect(span.span_id)
@@ -1083,7 +1007,6 @@ async def test_the_bot_cancels_the_spans_deletions_ended_and_a_restart_drops_the
         entity_name="agent",
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
-        complete_turn=AsyncMock(),
         approval_ended=lambda _ended: None,
         spans=spans,
     )
@@ -1317,7 +1240,6 @@ async def test_a_resume_behind_an_unresolved_row_of_its_reply_waits_for_it(journ
         entity_name="agent",
         generation="gen-2",
         retry_sources=lambda room_id, sources: retried.append((room_id, sources)),
-        complete_turn=AsyncMock(),
         approval_ended=lambda _ended: None,
     )
     await runtime.take_ownership()
@@ -1402,7 +1324,6 @@ async def test_an_approval_end_reaches_its_conversation_even_when_its_caller_is_
         entity_name="agent",
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
-        complete_turn=AsyncMock(),
         approval_ended=ended.append,
     )
     committing = asyncio.Event()
@@ -1558,14 +1479,7 @@ async def _stop_waiting_for_the_create(journal_store: EventJournalStore, stop_ro
     """
     principal = journal_store.principal(PRINCIPAL)
     reply, span = await _claimed(principal)
-    turns = journal_store.turn_records("agent")
-    pending_turn = TurnRecord.create(["$source"], requester_id="@user:localhost")
-    assert pending_turn.anchor_event_id is not None
-    await turns.upsert(
-        index_event_ids=pending_turn.indexed_event_ids,
-        anchor_event_id=pending_turn.anchor_event_id,
-        record_json=json.dumps(TurnRecordCodec._to_ledger_record(pending_turn)),
-    )
+    await _pending_turn(journal_store, "$source", requester_id="@user:localhost")
     await principal.enqueue_reply_row(
         ReplyRowRequest(
             reply_id=reply.reply_id,
@@ -1689,16 +1603,7 @@ async def test_settling_a_replay_without_a_turn_ends_the_reply_it_would_continue
     """Ingress settling the source a restart left for replay ends the reply in that commit; nothing replays it."""
     principal = journal_store.principal(PRINCIPAL)
     await _claimed(principal)
-    pending = TurnRecord.create(["$source"], completed=False)
-    await journal_store.backend.write(
-        lambda tx: turn_records.write_record(
-            tx,
-            "agent",
-            index_event_ids=pending.indexed_event_ids,
-            anchor_event_id="$source",
-            record_json=json.dumps(TurnRecordCodec._to_ledger_record(pending)),
-        ),
-    )
+    await _pending_turn(journal_store, "$source")
     await principal.replies.write_generation("gen-2")
     assert len(await principal.replies.owner_lost("gen-2", now_ns=80)) == 1
     waiting = await principal.replies.load("reply-1")
@@ -1712,9 +1617,7 @@ async def test_settling_a_replay_without_a_turn_ends_the_reply_it_would_continue
     assert ended.state is ReplyState.GONE
     assert await principal.settle("$source") == ()
     # Nothing answered the turn.
-    record = await journal_store.backend.read(lambda tx: turn_records.load_record(tx, "agent", "$source"))
-    assert record is not None
-    assert not record.completed
+    assert not await _answered(journal_store, "$source")
 
 
 async def test_a_replay_is_superseded_only_once_its_reply_owes_no_row(journal_store: EventJournalStore) -> None:
@@ -1848,7 +1751,64 @@ async def test_owner_lost_ends_what_an_older_instance_left_running(journal_store
     assert await principal.replies.owner_lost("gen-2", now_ns=60) == ()
 
 
-async def test_finished_replies_are_kept_as_long_as_the_ledger_keeps_their_turns() -> None:
+async def test_finished_replies_are_kept_as_long_as_their_turns() -> None:
     """Nothing reaches a finished reply after its turn is forgotten, so both retentions agree."""
-    ledger_default = inspect.signature(HandledTurnLedger._cleanup_old_events).parameters["max_age_days"].default
-    assert ledger_default * 24 * 60 * 60 * 1_000_000_000 == reply_scope._FINISHED_REPLY_RETENTION_NS
+    assert turn_store._RETENTION_MAX_AGE_SECONDS * 1_000_000_000 == reply_scope._FINISHED_REPLY_RETENTION_NS
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["streaming", "approval-held"])
+async def test_deleting_the_relayed_messages_ends_the_routed_reply(
+    journal_store: EventJournalStore,
+    held: bool,
+) -> None:
+    """A routed reply answers relays of a person's messages; deleting those messages ends it as deleting the relays would."""
+    alice = journal_store.principal(PRINCIPAL)
+    await journal_tests.TestApprovalContinuations.admit_sources(alice)
+    relays = TurnRecord.create(
+        ["$source-1", "$source-2"],
+        completed=False,
+        discovery_event_ids=["$human-1", "$human-2"],
+        source_event_metadata={
+            f"$source-{index}": SourceEventMetadata(sender="@user:localhost", discovery_event_id=f"$human-{index}")
+            for index in (1, 2)
+        },
+    )
+    assert isinstance(
+        await journal_store.turn_records("agent").write(turn_rows.record_pending_turn, relays, room_id=ROOM),
+        turn_rows.Accepted,
+    )
+    if held:
+        assert await paused_for_approval(
+            alice,
+            journal_tests.TestApprovalContinuations.continuation(state="waiting"),
+        )
+    else:
+        await alice.replies.write_generation("gen-1")
+        request = replace(
+            _request(source="$source-1"),
+            sources=ResponseSources(
+                pending_event_ids=("$source-1", "$source-2"),
+                logical_source_event_ids=("$source-1", "$source-2"),
+            ),
+        )
+        assert (await alice.replies.claim(request)).transition.claimed is not None
+
+    await _delete(alice, "$human-1")
+    running = await alice.replies.for_sources(("$source-1",))
+    assert running is not None
+    assert running.state is (ReplyState.PAUSED if held else ReplyState.ACTIVE)
+    await _delete(alice, "$human-2")
+
+    ended = await alice.replies.for_sources(("$source-1",))
+    assert ended is not None
+    assert ended.state is ReplyState.GONE
+    if held:
+        failing = await alice.approvals.approval_continuation("approval-1")
+        assert failing is not None
+        assert failing.state == "failing"
+        assert failing.failure == ApprovalFailure(ApprovalFailureKind.USER_STOP)
+    else:
+        assert len(await alice.replies.take_deletion_endings()) == 1
+        assert not await alice.is_pending("$source-1")
+        assert not await alice.is_pending("$source-2")
+    assert not await _answered(journal_store, "$source-1")

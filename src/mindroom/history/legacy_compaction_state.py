@@ -20,7 +20,7 @@ from mindroom.session_storage.legacy_agno3_schema import (
     agno_summary_rows_sql,
     delete_run_subtrees_in_transaction,
 )
-from mindroom.session_storage.schema import owner_scope_key, table_names
+from mindroom.session_storage.schema import table_names
 from mindroom.session_storage.store import decoded_mapping
 from mindroom.usage.storage import quote_identifier
 
@@ -104,6 +104,15 @@ def _needs_summary_rows(connection: sqlite3.Connection, names: AgnoTableNames) -
     return names.sessions in tables and names.summaries not in tables
 
 
+def _owner_scope_key(session_type: object, agent_id: object, team_id: object) -> str | None:
+    """Return the key of the scope that owns an Agno session row and its summary, if the row names one."""
+    if session_type == "team" and isinstance(team_id, str) and team_id:
+        return f"team:{team_id}"
+    if isinstance(agent_id, str) and agent_id:
+        return f"agent:{agent_id}"
+    return None
+
+
 def _adopt_legacy_sessions(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
     sessions = quote_identifier(names.sessions)
     summaries = quote_identifier(names.summaries)
@@ -119,7 +128,7 @@ def _adopt_legacy_sessions(connection: sqlite3.Connection, names: AgnoTableNames
         }
         seen_states = _scope_states(metadata, MINDROOM_MATRIX_HISTORY_METADATA_KEY)
         summary = _summary_text(decoded_mapping(raw_summary) or {})
-        summary_scope = owner_scope_key(session_type, agent_id, team_id) if summary is not None else None
+        summary_scope = _owner_scope_key(session_type, agent_id, team_id) if summary is not None else None
         if summary_scope is not None:
             scope_seen = json.dumps(_seen_event_ids(seen_states.get(summary_scope)))
             connection.execute(

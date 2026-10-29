@@ -27,8 +27,9 @@ from mindroom.reply_presentation import (
     with_trailing_note,
 )
 from mindroom.streaming import (
+    CANCELLED_RESPONSE_NOTE,
+    INTERRUPTED_RESPONSE_NOTE,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
-    build_cancelled_response_update,
     build_restart_interrupted_body,
     format_stream_error_note,
 )
@@ -42,7 +43,7 @@ def _trace(name: str, *, call_id: str | None = None) -> ToolTraceEntry:
         args_preview="{}",
         result_preview="ok",
         tool_call_id=call_id,
-        scope_key="scope" if call_id else None,
+        member_id="member" if call_id else None,
     )
 
 
@@ -60,7 +61,7 @@ def test_codec_round_trips_every_field() -> None:
                 kind="answer",
                 text="team body",
                 span_id="span-2",
-                team_state={"kind": "team_stream", "version": 2, "members": ["a"]},
+                team_state={"kind": "team_stream", "version": 3, "members": ["a"]},
             ),
         ),
         trailing_note=note_segment(NoteKind.ERROR, format_error_note("boom")),
@@ -72,7 +73,7 @@ def test_codec_round_trips_every_field() -> None:
 
     assert restored == presentation
     assert restored.segments[0].tool_trace[0].tool_call_id == "call-1"
-    assert restored.segments[0].tool_trace[0].scope_key == "scope"
+    assert restored.segments[0].tool_trace[0].member_id == "member"
 
 
 def test_codec_rejects_unknown_versions_and_malformed_segments() -> None:
@@ -91,11 +92,13 @@ def test_codec_rejects_unknown_versions_and_malformed_segments() -> None:
 )
 def test_cancel_and_interruption_bodies_match_main(visible: str) -> None:
     """A trailing cancel or interruption note renders exactly main's terminal text."""
-    for kind, cancel_source in ((NoteKind.CANCELLED, "user_stop"), (NoteKind.INTERRUPTED, "interrupted")):
+    for kind, note in (
+        (NoteKind.CANCELLED, CANCELLED_RESPONSE_NOTE),
+        (NoteKind.INTERRUPTED, INTERRUPTED_RESPONSE_NOTE),
+    ):
         presentation = Presentation(segments=(_answer(visible),) if visible else ())
         body, _trace_entries = render_body(with_trailing_note(presentation, note_segment(kind)))
-        expected, _status = build_cancelled_response_update(visible, cancel_source=cancel_source)
-        assert body == expected
+        assert body == (f"{visible}\n\n{note}" if visible else note)
 
 
 def test_error_note_matches_main() -> None:

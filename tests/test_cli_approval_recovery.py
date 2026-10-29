@@ -51,10 +51,11 @@ from mindroom.response_turn import (
     CompletedApprovalRun,
     PausedAnswer,
     ResponsePausedForApproval,
+    TurnResume,
     apply_exact_approval_decisions,
 )
 from mindroom.run_storage import RunStorage
-from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage, create_session_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
@@ -88,6 +89,7 @@ from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a py
 )
 from tests.response_runner_helpers import _bot
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -106,7 +108,7 @@ def _minimal_build(runtime: ToolRuntimeContext, **options) -> AgentBuild:
         build_execution_identity_from_runtime_context(runtime),
         agent_mode="minimal",
         supports_native_tool_approval=True,
-        **({"knowledge": None, "active_model_name": None} | options),
+        **({"knowledge": None, "model": turn_model(runtime.config, runtime.runtime_paths, "helper")} | options),
     )
 
 
@@ -128,7 +130,7 @@ def _saved(store: ConversationStore, session_id: str, record: RunRecord) -> tupl
         record,
         record_usage=False,
     )
-    session = store.load_session(session_id, "agent")
+    session = store.load_session(session_id)
     persisted = store.get_run(record.run_id)
     assert session is not None
     assert isinstance(persisted, RunRecord)
@@ -158,6 +160,7 @@ async def test_approval_tool_restore_requires_current_tool_search_assignment(tmp
         config=runtime.config,
         runtime_paths=runtime.runtime_paths,
         execution_identity=identity,
+        delegation_depth=0,
     )
     assert required == ("dynamic_tools",)
     runtime.config.agents["helper"].tools = ["shell"]
@@ -168,6 +171,7 @@ async def test_approval_tool_restore_requires_current_tool_search_assignment(tmp
             config=runtime.config,
             runtime_paths=runtime.runtime_paths,
             execution_identity=identity,
+            delegation_depth=0,
         )
 
 
@@ -308,10 +312,10 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
     monkeypatch.setattr(
         approval_execution,
         "stream_agent_response",
-        lambda *args, **kwargs: stream_agent_response(
+        lambda *args, sinks, **kwargs: stream_agent_response(
             *args,
+            sinks=replace(sinks, on_attempt_start=lambda run_id, _model_name: run_ids.append(run_id)),
             **kwargs,
-            on_attempt_start=lambda run_id, _model_name: run_ids.append(run_id),
         ),
     )
     with approval_receipt_context(RECEIPT_CALLS, run_id=continuation.run_id):
@@ -390,7 +394,7 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
         _minimal_build(runtime),
         _actions(name, action, requires_confirmation=True, stop_after_tool_call=bool(control)),
     )
-    store = create_state_storage("helper", tmp_path)
+    store = create_agent_state_storage("helper", tmp_path)
     persisted, session = _saved(
         store,
         "session",
@@ -537,7 +541,7 @@ async def test_a_later_save_of_the_recovered_session_keeps_the_state_the_recover
     runtime = _helper_runtime(tmp_path, tools=["shell"])
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
     build = _with_toolkit(_minimal_build(runtime), _actions("action", action, requires_confirmation=True))
-    store = create_state_storage("helper", tmp_path)
+    store = create_agent_state_storage("helper", tmp_path)
     persisted, session = _saved(
         store,
         "session",
@@ -644,7 +648,7 @@ async def test_restart_settles_outer_bash_approval_without_running_it(
     runtime = _helper_runtime(tmp_path, tools=["shell"])
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
     build = _minimal_build(runtime)
-    store = create_state_storage("helper", tmp_path)
+    store = create_agent_state_storage("helper", tmp_path)
     marker = tmp_path / "ran"
     arguments = {"command": f"touch {marker}"}
     requirement = _outer_bash_approval(arguments)
@@ -713,7 +717,7 @@ async def test_a_recovered_approval_saves_no_tool_call_its_fold_already_summariz
     runtime = _helper_runtime(tmp_path, tools=["shell"])
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
     build = _minimal_build(runtime)
-    store = create_state_storage("helper", tmp_path)
+    store = create_agent_state_storage("helper", tmp_path)
     folded = ToolExecution(
         tool_call_id="folded-bash",
         tool_name="run_shell_command",
@@ -790,7 +794,7 @@ async def test_a_recovered_approval_saves_no_tool_call_its_fold_already_summariz
             progress=None,
         )
 
-    stored = store.load_session("session", "agent")
+    stored = store.load_session("session")
     assert stored is not None
     saved = "\n".join(
         message.get_content_string() for run in stored.runs if run.run_id == "run" for message in run.messages
@@ -857,7 +861,7 @@ async def _checkpointed_batch(
     checkpoint.complete("call_completed", ToolOutcome(content="completed sibling result", images=(sibling_image,)))
     await checkpoint.persist_approval("old-bash")
     persisted = store.get_run("saved-run")
-    saved_session = store.load_session(runtime.session_id, "agent")
+    saved_session = store.load_session(runtime.session_id)
     assert isinstance(persisted, RunRecord)
     assert saved_session is not None
     return persisted, saved_session
@@ -1003,7 +1007,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
 
     async def approve(paused):
         # The batch of the Bash call waiting for approval is saved before the wait.
-        stored = store.load_session(runtime.session_id, "agent")
+        stored = store.load_session(runtime.session_id)
         assert stored is not None
         assert any(
             item.get("id") == paused.cli_call["parent_bash_call_id"]
@@ -1087,7 +1091,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
             recovered.presentation,
             prompt=recovered.prompt,
             reusable_build=recovered.reusable_build,
-            initial_continuation_count=recovered.initial_continuation_count,
+            resume=TurnResume(continuation_count=recovered.initial_continuation_count),
             delegation_depth=recovered.delegation_depth,
             media=MediaInputs(images=recovered.media.images),
             config=runtime.config,
@@ -1100,7 +1104,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
         )
 
     def stored_runs() -> list[dict]:
-        stored = store.load_session(runtime.session_id, "agent")
+        stored = store.load_session(runtime.session_id)
         assert stored is not None
         return [run.to_dict() for run in stored.runs]
 
@@ -1312,12 +1316,16 @@ async def test_an_approved_call_of_an_implied_toolkit_runs_after_its_bash_stoppe
     ScriptedProvider(steps=[[("bash", {"command": "list my attachments"})]]).install(monkeypatch)
     with tool_runtime_context(runtime), pytest.raises(ResponsePausedForApproval) as raised:
         await ai.ai_response(
-            replace(_turn_context(), agent_mode="minimal", run_id=None),
-            prompt="list my attachments",
-            runtime_paths=runtime.runtime_paths,
-            config=runtime.config,
-            execution_identity=identity,
-            supports_native_tool_approval=True,
+            replace(
+                _turn_context(),
+                agent_mode="minimal",
+                run_id=None,
+                prompt="list my attachments",
+                execution_identity=identity,
+                supports_native_tool_approval=True,
+            ),
+            runtime.runtime_paths,
+            runtime.config,
         )
     paused = raised.value.paused
     assert paused.cli_call is not None

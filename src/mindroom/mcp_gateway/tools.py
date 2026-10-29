@@ -28,9 +28,9 @@ from mindroom.mcp_gateway.types import (
     ToolSchemaResult,
 )
 from mindroom.oauth.providers import OAuthConnectionRequired
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.invocation import (
     DETACHED_SESSION_ID,
     CallResult,
@@ -86,14 +86,11 @@ def _handle(value: object) -> bool:
 
 def _entries(context: AgentToolContext) -> dict[str, EffectiveToolConfig]:
     ensure_tool_registry_loaded(context.runtime_paths, context.config)
-    entity = context.config.resolve_entity(context.agent_name)
-    authored = {entry.name for entry in entity.authored_tool_configs}
+    agent_tools = resolve_agent_tools(context.config, context.agent_name)
+    authored = {entry.name for entry in agent_tools.facts.authored}
     return {
         entry.name: entry
-        for entry in visible_tool_surface(
-            agent_name=context.agent_name,
-            config=context.config,
-        ).runtime_tool_configs
+        for entry in agent_tools.candidates()
         if entry.authored_name in authored
         and ((metadata := TOOL_METADATA.get(entry.name)) is None or metadata.mcp_available)
     }

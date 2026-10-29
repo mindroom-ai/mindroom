@@ -25,6 +25,7 @@ from mindroom.tool_jobs.runtime import (
     get_background_runtime,
 )
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, pending_background_tool_jobs_restart
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import make_turn_context, test_runtime_paths
 from tests.delegation_helpers import ScriptedAgents
 from tests.fakes.scripted_model import ScriptedModel, answer
@@ -36,6 +37,7 @@ from tests.tool_job_helpers import (
     run_built_turn,
     tool_job_journal,
 )
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -89,7 +91,7 @@ async def test_authority_stays_out_of_saved_metadata_with_startup_feature_settin
             owner,
             include_interactive_questions=False,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, paths, "lead"),
         )
         record = await run_built_turn(build, config=config, runtime_paths=paths, prompt="hello")
         assert "mindroom_tool_authority" not in (record.metadata or {})
@@ -145,7 +147,8 @@ async def test_recreated_coordinator_pins_its_own_setting(tmp_path: Path) -> Non
 def test_disabled_delegation_describes_only_available_tools(tmp_path: Path) -> None:
     """Default delegation must not promise a job API or reserved wait argument."""
     config = Config(agents={"lead": AgentConfig(display_name="Lead", delegate_to=["lead"])})
-    toolkit = DelegateTools("lead", ["lead"], test_runtime_paths(tmp_path), config)
+    paths = test_runtime_paths(tmp_path)
+    toolkit = DelegateTools("lead", ["lead"], paths, config, agent_workspace_root_path(paths.storage_root, "lead"))
     instructions = toolkit.instructions or ""
     description = toolkit.async_functions["run_subagent"].description or ""
     assert "background_after" not in instructions + description
@@ -168,10 +171,10 @@ def test_reload_reports_restart_and_keeps_effective_mode(tmp_path: Path, initial
             timezone="Europe/Amsterdam",
         )
         lifecycle = _make_lifecycle(tmp_path, current_config=config)
-        lifecycle.record_applied(changed)
+        lifecycle._record_applied(changed)
         assert background_tool_jobs_enabled(changed, paths) is initial
         assert lifecycle.status.status == "restart_required"
-        lifecycle.record_applied(config)
+        lifecycle._record_applied(config)
         assert lifecycle.status.status == "applied"
     finally:
         release_background_tool_jobs(paths, instance)
@@ -238,7 +241,7 @@ async def test_an_agent_admits_its_calls_as_jobs_only_when_enabled(
         execution_identity=None,
         persist_runtime_state=False,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, paths, "lead"),
     )
     assert (build.tool_jobs is not None) is enabled
     if build.tool_jobs is not None:

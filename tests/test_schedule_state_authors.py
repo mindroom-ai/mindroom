@@ -18,13 +18,16 @@ from tests.conftest import make_conversation_reader_mock, make_matrix_client_moc
 from tests.scheduling_helpers import (
     SCHEDULE_WRITER_ID,
     persist_schedule_writer,
+    run_once_task,
+    runnable_task,
     schedule_runtime_paths,
+    scheduled_task_runtime,
     scheduled_task_state_event,
+    scheduling_bot,
     serve_task_state_events,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -35,13 +38,6 @@ HUMAN_ID = "@mallory:server"
 RETIRED_AGENT_ID = "@mindroom_retired:server"
 TASK_STATE_PATH = "/_matrix/client/v3/rooms/%21test%3Aserver/state/com.mindroom.scheduled.task/task1?format=event"
 CREATE_STATE_PATH = "/_matrix/client/v3/rooms/%21test%3Aserver/state/m.room.create"
-
-
-@pytest.fixture(autouse=True)
-def _reset_scheduler_state() -> Generator[None, None, None]:
-    scheduling.clear_deferred_overdue_tasks()
-    yield
-    scheduling.clear_deferred_overdue_tasks()
 
 
 def _workflow(created_by: str | None) -> scheduling.ScheduledWorkflow:
@@ -94,7 +90,7 @@ async def _run_once(
         "mindroom.scheduling.executor.execute_scheduled_workflow",
         new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
     ) as execute:
-        await scheduling._run_once_task(
+        await run_once_task(
             client,
             TASK_ID,
             workflow,
@@ -144,18 +140,14 @@ async def test_creatorless_task_written_by_human_is_ignored_without_cancellation
     workflow = _workflow(created_by=None)
     client = _room_with_task(_pending_content(workflow), sender=HUMAN_ID)
 
+    bot = scheduling_bot(client)
+    runtime = scheduled_task_runtime(runtime_paths, bot, config=Config())
     with capture_logs() as logs:
-        restored = await scheduling.restore_scheduled_tasks(
-            client,
-            ROOM_ID,
-            Config(),
-            runtime_paths,
-            make_conversation_reader_mock(),
-        )
+        restored = await runtime.restore_room(bot, ROOM_ID)
     execute = await _run_once(client, workflow, runtime_paths)
 
     assert restored == 0
-    assert not scheduling.has_deferred_overdue_tasks()
+    assert not runtime._runners
     execute.assert_not_awaited()
     client.room_put_state.assert_not_awaited()
     assert [entry for entry in logs if entry["event"] == "scheduled_task_state_ignored_unmanaged_author"] == [
@@ -217,7 +209,7 @@ async def test_task_polls_read_one_state_event_and_never_full_room_state(tmp_pat
         new=AsyncMock(side_effect=AssertionError("task read failed")),
     ):
         for _ in range(3):
-            task = await scheduling._reconcile_runnable_task_retrying(
+            task = await runnable_task(
                 client,
                 ROOM_ID,
                 TASK_ID,
@@ -297,7 +289,7 @@ async def test_superseded_bot_task_named_by_state_content_never_fires(tmp_path: 
         patch("mindroom.scheduling.tasks.asyncio.sleep", new=AsyncMock(side_effect=asyncio.CancelledError)),
         pytest.raises(asyncio.CancelledError),
     ):
-        await scheduling._run_once_task(
+        await run_once_task(
             client,
             TASK_ID,
             workflow,

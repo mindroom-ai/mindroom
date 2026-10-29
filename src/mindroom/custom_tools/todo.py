@@ -36,10 +36,8 @@ from mindroom.path_confinement import (
     read_regular_file_within_root,
     resolve_path_within_root,
 )
-from mindroom.runtime_resolution import resolve_agent_runtime
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.skills import workspace_entry_names
-from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -292,28 +290,9 @@ def _template_path(name: str, template_dir: Path | None = None) -> Path:
 
 def _current_agent_workspace_root() -> Path | None:
     ctx = get_tool_runtime_context()
-    if ctx is None:
+    if ctx is None or ctx.agent_name not in ctx.config.agents:
         return None
-
-    agent_name = ctx.agent_name
-    agent_config = ctx.config.agents.get(agent_name)
-    if agent_config is None:
-        return None
-
-    if agent_config.private is not None:
-        execution_identity = build_execution_identity_from_runtime_context(ctx)
-        agent_runtime = resolve_agent_runtime(
-            agent_name,
-            ctx.config,
-            ctx.runtime_paths,
-            execution_identity=execution_identity,
-            create=True,
-        )
-        if agent_runtime.workspace is None:
-            return None
-        return agent_runtime.workspace.root
-
-    return agent_workspace_root_path(ctx.runtime_paths.storage_root, agent_name)
+    return ctx.agent_workspace_root(create=True)
 
 
 def _visible_template_roots() -> tuple[_TemplateRoot, ...]:

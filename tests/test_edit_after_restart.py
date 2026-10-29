@@ -11,11 +11,12 @@ import pytest
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.turn_record import TurnRecord
+from mindroom.turns.dispatch import TurnDispatcher
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
-from tests.conftest import install_runtime_journal_support, replace_turn_controller_deps, wrap_extracted_collaborators
+from tests.conftest import install_runtime_journal_support, replace_turn_deps, wrap_extracted_collaborators
 from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
@@ -78,7 +79,7 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
 
     # Mock logger
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
 
     # Create a room
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
@@ -91,12 +92,13 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
             [original_event_id],
             response_event_id=response_event_id,
         ),
+        room_id=room.room_id,
     )
 
     # Also mark the edit event as "seen" (simulating it was delivered before restart)
     # With the correct implementation, edits should still be processed
     edit_event_id = "$edit:example.com"
-    await bot._turn_store.record_turn(TurnRecord.create([edit_event_id]))
+    await bot._turn_store.record_turn(TurnRecord.create([edit_event_id]), room_id=room.room_id)
 
     # Create an edit event that would be redelivered after restart
     edit_event = nio.RoomMessageText.from_dict(
@@ -188,14 +190,14 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
 
     # Mock logger
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
 
     # Create a room
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
 
     # Mark a message as already responded to
     message_event_id = "$message:example.com"
-    await bot._turn_store.record_turn(TurnRecord.create([message_event_id]))
+    await bot._turn_store.record_turn(TurnRecord.create([message_event_id]), room_id=room.room_id)
 
     # Create a regular message event (not an edit)
     message_event = nio.RoomMessageText.from_dict(
@@ -222,7 +224,7 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
 
     # Mock methods
     with (
-        patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
+        patch.object(TurnDispatcher, "dispatch_turn", new_callable=AsyncMock) as mock_dispatch,
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
     ):
         # Process the redelivered message
