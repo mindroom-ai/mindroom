@@ -154,11 +154,6 @@ class _Rows:
     revisions: list[_Revision] = field(default_factory=list)
 
 
-def agent_of_principal(principal_id: str) -> str:
-    """Return the agent a journal principal belongs to; principals are ``agent@mxid`` and agent names hold no ``@``."""
-    return principal_id.partition("@")[0]
-
-
 def _placeholders(values: Collection[object]) -> str:
     return ", ".join("?" for _ in values)
 
@@ -1691,7 +1686,6 @@ __all__ = [
     "RetentionResult",
     "RevisionRegistration",
     "TurnRecordStore",
-    "agent_of_principal",
     "bind_final_delivery",
     "complete_bound_delivery",
     "complete_turn_of",

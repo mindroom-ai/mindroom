@@ -25,6 +25,7 @@ from mindroom.reply_lifecycle import (
 )
 
 from . import approval_continuations, journal, outbox, reply_messages, reply_spans, turn_rows
+from .identity import agent_of_principal
 from .membership_state import claim_membership_epoch
 
 logger = get_logger(__name__)
@@ -233,7 +234,7 @@ def end_replies_of_deleted_source(
     wakes those approvals, and redacts what the replies showed after the
     deletion commits.
     """
-    agent_name = turn_rows.agent_of_principal(principal_id)
+    agent_name = agent_of_principal(principal_id)
     deleted = (event_id, *turn_rows.sources_deleted_by(transaction, agent_name, room_id, event_id))
     reply_ids = dict.fromkeys(
         reply_id

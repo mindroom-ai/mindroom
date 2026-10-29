@@ -20,6 +20,7 @@ from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.resolution import entity_timezone
 from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_live_bot
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
+from mindroom.event_journal.identity import journal_principal_id
 from mindroom.event_journal.legacy_turn_rows import legacy_responses_file_path
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
@@ -529,7 +530,7 @@ class AgentBot:
             msg = f"Missing Matrix ID for {self.agent_name!r} during runtime initialization"
             raise PermanentMatrixStartupError(msg)
         runtime_matrix_id = self.matrix_id
-        self._journal_principal_id = f"{self.agent_name}@{runtime_matrix_id.full_id}"
+        self._journal_principal_id = journal_principal_id(self.agent_name, runtime_matrix_id.full_id)
         borrowed = self._borrowed_journal_store
         if borrowed is not None:
             self._journal_store = borrowed

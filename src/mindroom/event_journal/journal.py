@@ -34,7 +34,7 @@ from . import (
     reply_messages,
     turn_rows,
 )
-from .identity import decode_thread_id, encode_thread_id
+from .identity import agent_of_principal, decode_thread_id, encode_thread_id
 from .models import (
     TURN_BACKED_KINDS,
     AdmissionFacts,
@@ -877,7 +877,7 @@ def project_with_redactions(
     if projected.redacts_event_id is not None:
         redact_for_agent(
             transaction,
-            turn_rows.agent_of_principal(principal_id),
+            agent_of_principal(principal_id),
             room_id=projected.room_id,
             event_id=redacted_event_id,
             receipt_order=receipt_order,
@@ -947,9 +947,7 @@ def _principals_of_agent(transaction: Transaction, agent_name: str, *, room_id: 
         (room_id,),
     )
     return tuple(
-        principal_id
-        for row in rows
-        if turn_rows.agent_of_principal(principal_id := str(row["principal_id"])) == agent_name
+        principal_id for row in rows if agent_of_principal(principal_id := str(row["principal_id"])) == agent_name
     )
 
 

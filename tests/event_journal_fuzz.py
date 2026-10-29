@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 from mindroom.event_journal import AdmissionResult, EventClass, EventKind, InboundEvent, ProjectedEvent, turn_rows
-from mindroom.event_journal.turn_rows import agent_of_principal
+from mindroom.event_journal.identity import agent_of_principal
 
 if TYPE_CHECKING:
     from collections.abc import Callable

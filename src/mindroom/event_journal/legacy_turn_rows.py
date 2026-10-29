@@ -3,8 +3,8 @@
 Two stored shapes reach here: the ``turn_records`` table, one JSON blob per
 event that indexed a turn, converted by the schema upgrade; and the
 pre-journal JSON ledger file, converted when a runtime first loads the agent.
-Both decode with the handled-turn codec and run the same steps, so they agree
-on every rule below.
+Both decode with ``_decode``, which reads a blob as the removed handled-turn
+codec did, and run the same steps, so they agree on every rule below.
 
 Row ownership is the authority, not a blob's declared identity. Per-index
 copies of one turn can disagree (a stale pending copy beside a completed one,
@@ -38,6 +38,7 @@ from mindroom.turn_record import (
 )
 
 from . import journal, turn_rows
+from .identity import agent_of_principal
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -66,7 +67,7 @@ def legacy_responses_file_path(storage_path: Path, agent_name: str) -> Path:
 
 @dataclass(frozen=True, slots=True)
 class _Decoded:
-    """One stored blob as the handled-turn codec read it: its current facts and the legacy ones beside them."""
+    """One stored blob as the removed handled-turn codec read it: its current facts and the legacy ones beside them."""
 
     record: TurnRecord
     # Sources and aliases the blob recorded redacted, and the revisions it flagged redacted.
@@ -250,8 +251,8 @@ def _revision_replay(raw: object) -> tuple[dict[str, RevisionReplay], frozenset[
 
 # LEGACY_COMPAT: Turn records stored as one JSON blob per indexed event.
 # Legacy format: turn_records rows (agent_name, index_event_id, anchor_event_id, record_json), one copy of a turn's
-# record under each of its sources and discovery aliases, read by the handled-turn codec, whose own markers cover the
-# retired keys it drops on read.
+# record under each of its sources and discovery aliases, read by that release's handled-turn codec, whose retired keys
+# ``_decode`` drops on read as it did.
 # Last legacy release: v2026.10.667 (the table arrived in v2026.8.31); replacement: the next release stores turns in
 # turns, turn_sources, turn_aliases, and turn_revisions.
 # Handling: the schema upgrade converts every agent's rows by the rules marked below and drops turn_records, all in
@@ -313,7 +314,7 @@ def _record_redaction_tombstones(transaction: Transaction) -> tuple[tuple[str, s
         "SELECT principal_id, room_id, redacted_event_id FROM redaction_tombstones "
         "ORDER BY principal_id/*bytes*/, room_id/*bytes*/, redacted_event_id/*bytes*/",
     ):
-        if agent_name := turn_rows.agent_of_principal(str(row["principal_id"])):
+        if agent_name := agent_of_principal(str(row["principal_id"])):
             room_id, event_id = str(row["room_id"]), str(row["redacted_event_id"])
             turn_rows.record_redaction(transaction, agent_name, room_id=room_id, event_id=event_id)
             redactions.append((agent_name, room_id, event_id))
@@ -328,7 +329,7 @@ def _apply_redaction(transaction: Transaction, agent_name: str, room_id: str, ev
 def _groups(entries: Iterable[tuple[str, str, str]]) -> list[_Group]:
     """Group index entries by the exact blob they hold, decoding each blob once.
 
-    An entry whose blob the codec rejects, or does not declare its event,
+    An entry whose blob ``_decode`` rejects, or does not declare its event,
     belongs to no group, so the event reads as having no row, as the warm-up
     that dropped it read it.
     """
@@ -440,7 +441,7 @@ def _extract_redactions(transaction: Transaction, agent_name: str, groups: Seque
 
 
 # LEGACY_COMPAT: Revisions consumed only through a pre-v2026.9.43 source summary.
-# Legacy format: a revision_replay entry with legacy_summary_provenance, which the codec also restores for a record
+# Legacy format: a revision_replay entry with legacy_summary_provenance, which the old codec also restored for a record
 # with source_event_revisions and no revision_replay key.
 # Last legacy release: v2026.9.42 wrote source summaries without revision replay, and every later release carries the
 # flag forward; replacement: v2026.9.43 records per-revision provenance, and turn rows keep the summary mapping in
@@ -531,7 +532,7 @@ def _admitted_rooms(transaction: Transaction, agent_name: str, event_ids: set[st
             f"SELECT principal_id, event_id, room_id FROM journal_events WHERE event_id IN ({placeholders})",  # noqa: S608
             tuple(batch),
         ):
-            if turn_rows.agent_of_principal(str(row["principal_id"])) == agent_name:
+            if agent_of_principal(str(row["principal_id"])) == agent_name:
                 rooms.setdefault(str(row["event_id"]), set()).add(str(row["room_id"]))
     return rooms
 
@@ -614,7 +615,7 @@ def _outstanding_final_deliveries(transaction: Transaction) -> dict[str, dict[st
         "WHERE stage = 'final' AND reply_id IS NULL AND acknowledged_event_id IS NULL "
         "AND retired = 0 AND permanent_failure_reason IS NULL",
     ):
-        agent_name = turn_rows.agent_of_principal(str(row["principal_id"]))
+        agent_name = agent_of_principal(str(row["principal_id"]))
         found.setdefault(agent_name, {}).setdefault(str(row["delivery_id"]), []).append(str(row["room_id"]))
     return {
         agent_name: {delivery_id: rooms[0] for delivery_id, rooms in deliveries.items() if len(rooms) == 1}

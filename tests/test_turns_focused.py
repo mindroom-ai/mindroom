@@ -2117,24 +2117,21 @@ async def test_contended_claim_does_not_strand_the_winner_in_the_senders_lane(
     that keeps its slot across the wait closes the cycle: the batch is admitted
     to the gate and never dispatched, with no error logged anywhere.
     """
-    harness = _build_harness(config, tmp_path)
+    # The winner's batch waits in the gate, holding its claim, until the drain flushes it.
+    harness = _build_harness(config, tmp_path, debounce_seconds=60.0)
     room = _room_with_members(config, "general")
     event = _text_event(
         f"{_entity_user_id(config, 'general')} answer once",
         event_id="$duplicate-delivery:localhost",
     )
 
-    winner = asyncio.create_task(harness.ingress.handle_text_event(room, event))
-    await asyncio.sleep(0)
-    loser = asyncio.create_task(harness.ingress.handle_text_event(room, event))
-    try:
-        async with asyncio.timeout(10):
-            outcomes = await asyncio.gather(winner, loser)
-            await harness.gate.drain_all()
-            await harness.runner.settle_inbox_responses()
-    finally:
-        for task in (winner, loser):
-            task.cancel()
+    async with asyncio.timeout(10):
+        outcomes = [
+            await harness.ingress.handle_text_event(room, event),
+            await harness.ingress.handle_text_event(room, event),
+        ]
+        await harness.gate.drain_all()
+        await harness.runner.settle_inbox_responses()
 
     assert outcomes == [TurnDispatchOutcome.DEFERRED, TurnDispatchOutcome.DEFERRED]
     assert [batch.event.event_id for batch in harness.gate_batches] == [event.event_id]

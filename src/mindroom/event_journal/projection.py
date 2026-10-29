@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, cast
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 
 from . import turn_rows
-from .identity import encode_thread_id
+from .identity import agent_of_principal, encode_thread_id
 from .interactive_questions import record_projected_prompt
 from .membership_state import claim_membership_epoch
 from .outbox import event_belongs_to_membership
@@ -136,7 +136,7 @@ def is_redacted(
 ) -> bool:
     """Return whether one event was redacted in ``room_id``, as any Matrix login of this principal's agent saw it."""
     return bool(
-        turn_rows.redacted_events(transaction, turn_rows.agent_of_principal(principal_id), room_id, (event_id,)),
+        turn_rows.redacted_events(transaction, agent_of_principal(principal_id), room_id, (event_id,)),
     )
 
 

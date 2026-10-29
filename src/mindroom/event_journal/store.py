@@ -35,6 +35,7 @@ from . import (
     turn_rows,
 )
 from .approval_signals import ApprovalSignals
+from .identity import agent_of_principal
 from .membership_state import claim_active_membership_epoch
 from .models import (
     AdmissionResult,
@@ -229,7 +230,7 @@ class PrincipalStore:
 
     async def response_recovery_state(self, turn_record: TurnRecord) -> ResponseRecoveryState:
         """Read one response's durable handoff through the reserved recovery lane."""
-        agent_name = turn_rows.agent_of_principal(self._principal_id)
+        agent_name = agent_of_principal(self._principal_id)
 
         def load(transaction: Transaction) -> ResponseRecoveryState:
             source_event_ids = turn_record.source_event_ids
@@ -448,7 +449,7 @@ class PrincipalStore:
         return await self._backend.read(
             lambda transaction: turn_rows.deleted_events(
                 transaction,
-                turn_rows.agent_of_principal(self._principal_id),
+                agent_of_principal(self._principal_id),
                 room_id,
                 event_ids,
             ),
@@ -1018,7 +1019,7 @@ class PrincipalStore:
             if bound and may_project and terminal_response_event_id is not None:
                 turn_rows.complete_bound_delivery(
                     transaction,
-                    turn_rows.agent_of_principal(self._principal_id),
+                    agent_of_principal(self._principal_id),
                     delivery_id=delivery_id,
                     response_event_id=terminal_response_event_id,
                 )
@@ -1283,7 +1284,7 @@ def _enqueue_final_answer(
         if turn_key is None
         else turn_rows.bind_final_delivery(
             transaction,
-            turn_rows.agent_of_principal(principal_id),
+            agent_of_principal(principal_id),
             delivery_id=delivery_id,
             room_id=room_id,
             turn_key=turn_key,

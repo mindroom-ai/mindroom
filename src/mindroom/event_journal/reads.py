@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .identity import decode_thread_id, encode_thread_id
+from .identity import agent_of_principal, decode_thread_id, encode_thread_id
 from .membership_state import claim_membership_epoch
 from .models import (
     ConversationCursor,
@@ -19,7 +19,6 @@ from .models import (
     VisibleMessage,
 )
 from .projection import decode_content
-from .turn_rows import agent_of_principal
 
 if TYPE_CHECKING:
     from .backend import Row, Transaction
