@@ -26,7 +26,8 @@ from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
     tool_runtime_context,
 )
-from mindroom.tool_system.worker_routing import resolve_worker_key, visible_workspace_roots
+from mindroom.tool_system.worker_routing import resolve_unscoped_worker_key, resolve_worker_key, visible_workspace_roots
+from mindroom.workers.backends._dedicated_worker_common import plan_scoped_workspace_mounts
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -320,15 +321,24 @@ def test_the_instruction_runs_without_the_agent_shell_environment(
         "MINDROOM_DOCKER_WORKER_IMAGE": "worker:test",
         "MINDROOM_DOCKER_WORKER_STORAGE_MOUNT_PATH": str(worker_storage),
     }
-    with tool_runtime_context(_context(tmp_path, process_env=process_env)):
+    context = _context(tmp_path, process_env=process_env)
+    with tool_runtime_context(context):
         payload = _payload(CallbackManagerTools().mint_callback("background callback"))
-    if shell_in_worker:
-        # The worker sees the workspace only below its own storage mount, never at the primary's path.
-        storage_root = _runtime_paths(tmp_path).storage_root
-        shutil.copytree(storage_root, worker_storage)
-        shutil.rmtree(storage_root)
     script_path = Path(payload["script_path"])
     assert script_path.is_relative_to(worker_storage) == shell_in_worker
+    if shell_in_worker:
+        # The instruction names the script where the worker's mount planner puts the workspace.
+        [mount] = plan_scoped_workspace_mounts(
+            worker_key=resolve_unscoped_worker_key("coder"),
+            local_shared_storage_root=context.runtime_paths.storage_root,
+            worker_visible_shared_storage_root=worker_storage,
+            private_agent_names=frozenset(),
+            resolved_agent_policies=context.config.get_agent_policies(),
+        )
+        assert script_path.parent.parent.parent == mount.worker_visible_path
+        # The worker sees the workspace only below its own storage mount, never at the primary's path.
+        shutil.copytree(context.runtime_paths.storage_root, worker_storage)
+        shutil.rmtree(context.runtime_paths.storage_root)
     # Like a fresh tmux session, the task inherits none of the agent shell's variables, which tests may run inside.
     env = {name: value for name, value in os.environ.items() if name != "MINDROOM_AGENT_WORKSPACE"}
 

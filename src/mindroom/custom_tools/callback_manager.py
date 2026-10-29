@@ -146,6 +146,7 @@ def _shell_workspace_root(context: ToolRuntimeContext, workspace_root: Path) -> 
     # Read only for a worker shell: an unconfigured worker backend must not stop a local shell from minting.
     worker_root = worker_visible_storage_root(context.runtime_paths)
     if worker_root is None:
+        # A static_runner sandbox that sees agent workspaces mounts them at MindRoom's paths, as the Kubernetes sidecar does.
         return workspace_root
     # A dedicated worker mounts each workspace at its path below the storage root, under its own storage mount.
     return worker_root / workspace_root.relative_to(shared_storage_root(context.runtime_paths.storage_root))
