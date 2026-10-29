@@ -381,7 +381,8 @@ models:
 
 The form `kimi-code/k3.1-pro` is accepted.
 If Kimi Code state lives outside `~/.kimi-code`, set `KIMI_CODE_HOME` in the `.env` beside `config.yaml` or the process environment, or `extra_kwargs.kimi_home`; `~` prefixes are expanded.
-Kimi K3.1 Pro and K3 always reason before replying, so responses include reasoning tokens even for short answers.
+Kimi K3.1 Pro and K3 reason before replying by default, so responses include reasoning tokens even for short answers.
+Setting `extra_kwargs.reasoning_effort` to `none` makes K3.1 Pro requests fail with HTTP 400, while K3 then answers with K2.8 Preview without reasoning.
 The adapter depends on the Kimi Code CLI login format and backend, so a Kimi Code update can require a MindRoom update.
 
 ## OpenRouter Provider Routing
