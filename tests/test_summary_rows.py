@@ -684,7 +684,7 @@ def test_a_fold_keeps_what_its_turn_read_seen_after_the_turn_stops(store: Conver
 def test_folded_tool_call_ids_are_the_folded_messages_and_members_calls(team_store: ConversationStore) -> None:
     """Interrupted records leave out every call a fold summarized: folded calls, results, and folded members' tools.
 
-    The turn recorder's set from the live folds and the team_store's from the flagged rows are the same.
+    The turn recorder's set from the live folds and the store's from the flagged rows are the same.
     """
     team_run = _team_run("team-run", RunStatus.running)
     folded_member = _run("m1", parent="team-run", agent_id="helper")

@@ -32,7 +32,7 @@ from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import checkpoint_summary, replay_basis
 from mindroom.providers.openai.responses_wire import conversation_digest
 from mindroom.providers.registry import build_model_provider
-from mindroom.session_storage.agent_storage import create_agent_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
 from tests.conftest import install_model_providers, runtime_paths_for, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
@@ -624,7 +624,7 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
     config.agents["test_agent"].model = "member"
     config.teams["team"] = TeamConfig(agents=["test_agent"], display_name="Team", role="Coordinate work.")
     leader = responses_adapter(tmp_path, store=False)
-    db = create_agent_state_storage("test_agent", tmp_path)
+    db = create_state_storage("team", tmp_path, HistoryScope(kind="team", scope_id="team"))
     session = _team_session("session", team_id="team", runs=[_completed_team_run("run", team_id="team")])
     seed_session(db, session)
 

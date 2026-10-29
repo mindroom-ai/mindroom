@@ -16,7 +16,7 @@ from mindroom.history.storage import remove_history_of_redacted_events
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
-from mindroom.session_storage.agent_storage import create_agent_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
 from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
 from mindroom.session_storage.schema import LOG_VERSION, TableNames
@@ -52,9 +52,9 @@ def _session(session_id: str, owner_id: str, *, kind: str = "agent") -> Conversa
     return ConversationSession(session_id=session_id, kind=kind, owner_id=owner_id, runs=[_run(f"{session_id}-run")])
 
 
-def _v2_database(directory: Path, *sessions: ConversationSession) -> Path:
-    """Write ``sessions`` into the storage v2 database of the store directory ``directory``, at layout version 2."""
-    store = create_agent_state_storage(directory.name, directory)
+def _v2_database(directory: Path, *sessions: ConversationSession, owner: HistoryScope = _SCOPE) -> Path:
+    """Write ``sessions`` into the storage v2 database ``owner`` owns in the store directory ``directory``."""
+    store = create_state_storage(directory.name, directory, owner)
     for session in sessions:
         seed_session(store, session)
     return _as_layout_2(store, *sessions)
@@ -156,8 +156,13 @@ async def test_the_startup_sweep_adopts_agent_rows_and_leaves_team_and_system_ro
         root / "teams" / TableNames.of_team(crew).storage_name,
         _session("team-row", "crew", kind="team"),
         _session("agent-row", "crew"),
+        owner=crew,
     )
-    system = _v2_database(root / SYSTEM_USAGE_STORAGE_NAME, _session("usage", SYSTEM_USAGE_ENTITY))
+    system = _v2_database(
+        root / SYSTEM_USAGE_STORAGE_NAME,
+        _session("usage", SYSTEM_USAGE_ENTITY),
+        owner=SYSTEM_USAGE_OWNER,
+    )
 
     await migrate_conversation_storage(paths)
 

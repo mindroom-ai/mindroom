@@ -26,7 +26,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import HelperUsage, RunMetrics
 from mindroom.message_target import MessageTarget
-from mindroom.session_storage.agent_storage import create_agent_state_storage
+from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.runtime_context import (
@@ -263,7 +263,7 @@ def _reply(
         scope=scope or HistoryScope(kind="agent", scope_id="test_agent"),
         tool_dispatch=LiveToolDispatchContext.from_runtime_context(context),
     )
-    return reply, create_agent_state_storage(reply.scope.scope_id, tmp_path / "sessions")
+    return reply, create_state_storage(reply.scope.scope_id, tmp_path / "sessions", reply.scope)
 
 
 def _first_session(reply: ReplySession, session_id: str = SESSION_ID) -> ConversationSession:

@@ -26,7 +26,7 @@ from mindroom.history.types import (
 )
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.session_storage import store as store_module
-from mindroom.session_storage.agent_storage import create_agent_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import (
     seed_session,
@@ -65,9 +65,10 @@ def _shared_session(*, is_team: bool) -> ConversationSession:
     )
 
 
-def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path, storage: ConversationStore) -> None:
+def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path) -> None:
     _config, _runtime_paths_value = _make_config(tmp_path)
     scope = HistoryScope(kind="team", scope_id="team-123")
+    storage = create_state_storage("team_123", tmp_path / "seen", scope)
     session = _session("session-1")
 
     update_scope_seen_event_ids(storage, session, scope, ["event-1"])
@@ -104,9 +105,10 @@ def test_scope_seen_event_ids_include_persisted_response_event_ids(tmp_path: Pat
 
 
 @pytest.mark.parametrize("is_team", [False, True], ids=["agent", "team"])
-def test_seen_event_ids_match_model_history_visibility(storage: ConversationStore, *, is_team: bool) -> None:
+def test_seen_event_ids_match_model_history_visibility(tmp_path: Path, *, is_team: bool) -> None:
     entity_id = "team-123" if is_team else "test_agent"
     scope = HistoryScope(kind="team" if is_team else "agent", scope_id=entity_id)
+    storage = create_state_storage(entity_id, tmp_path / "seen", scope)
 
     def make_run(run_id: str, status: RunStatus, *, parent_run_id: str | None = None) -> RunRecord | TeamRunRecord:
         metadata = {"matrix_seen_event_ids": [f"{run_id}-event"]}
@@ -178,7 +180,7 @@ def test_queued_force_compaction_reads_the_session_row_without_its_runs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     agent_scope = HistoryScope(kind="agent", scope_id="test_agent")
-    team_scope = HistoryScope(kind="team", scope_id="team-123")
+    other_scope = HistoryScope(kind="agent", scope_id="other_agent")
     assert has_queued_force_compaction(storage, "flagged", agent_scope) is False
 
     flagged = _session("flagged", runs=[_completed_run("run-1")])
@@ -200,7 +202,7 @@ def test_queued_force_compaction_reads_the_session_row_without_its_runs(
     monkeypatch.setattr(store_module, "connect_conversation_database", traced_connect)
 
     assert has_queued_force_compaction(storage, "flagged", agent_scope) is True
-    assert has_queued_force_compaction(storage, "flagged", team_scope) is False
+    assert has_queued_force_compaction(storage, "flagged", other_scope) is False
     assert has_queued_force_compaction(storage, "idle", agent_scope) is False
     assert has_queued_force_compaction(storage, "missing", agent_scope) is False
     assert statements
@@ -241,16 +243,18 @@ def test_legacy_scope_state_metadata_is_ignored(tmp_path: Path) -> None:
     }
 
 
-def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path, storage: ConversationStore) -> None:
+def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path) -> None:
+    """A team's database holds the team's scope and its bot's agent path, whose seen ids stay apart."""
     _config, _runtime_paths_value = _make_config(tmp_path)
-    agent_scope = HistoryScope(kind="agent", scope_id="test_agent")
+    agent_scope = HistoryScope(kind="agent", scope_id="team-123")
     team_scope = HistoryScope(kind="team", scope_id="team-123")
+    storage = create_state_storage("team_123", tmp_path / "seen", team_scope)
     session = _session(
         "session-1",
         runs=[
             RunRecord(
                 run_id="agent-run",
-                agent_id="test_agent",
+                agent_id="team-123",
                 status=RunStatus.completed,
                 metadata={"matrix_seen_event_ids": ["agent-event"]},
             ),

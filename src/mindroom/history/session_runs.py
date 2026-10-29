@@ -31,7 +31,7 @@ def run_key(run: RunRecord) -> tuple[int, str]:
 
 
 def updated_sessions(storage: ConversationStore, *, since: int) -> list[tuple[str, int]]:
-    """Return ``(session_id, updated_at)`` for the conversations of ``storage``'s agent updated after ``since``, oldest first."""
+    """Return ``(session_id, updated_at)`` of ``storage``'s conversations updated after ``since``, oldest first."""
     return [
         (session_id, updated_at)
         for session_id, updated_at in storage.list_updated_sessions(since=since)
