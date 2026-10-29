@@ -24,7 +24,7 @@ from mindroom.file_locks import release_file_lock, try_exclusive_file_lock
 from mindroom.logging_config import get_logger
 
 from .offloading import ThreadOffload, settled
-from .schema import SQLITE_DIALECT, SchemaDialect, render, schema_statements
+from .schema import SQLITE_DIALECT, SchemaDialect, render
 from .upgrades import upgrade_schema
 from .write_queue import CLOSED_MESSAGE, WriteOutcome, WriteQueue
 
@@ -212,8 +212,6 @@ class SqliteBackend:
         connection.execute("BEGIN IMMEDIATE")
         try:
             upgrade_schema(_SqliteTransaction(connection), _SqliteSchemaInspector(connection))
-            for statement in schema_statements(SQLITE_DIALECT):
-                connection.execute(statement)
             connection.execute("COMMIT")
         except BaseException:
             connection.close()

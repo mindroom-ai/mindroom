@@ -29,7 +29,6 @@ from mindroom.event_journal import (
 from mindroom.event_journal.legacy_turn_rows import (
     import_legacy_ledger_file,
     legacy_summary_sources,
-    upgrade_turn_records_to_rows,
 )
 from mindroom.reply_lifecycle import ApprovalFailureKind, ReplyState
 from mindroom.response_sources import ResponseSources
@@ -82,8 +81,7 @@ _LEGACY_TABLES = (
 @contextmanager
 def without_conversion() -> Iterator[None]:
     """Open as an earlier release: the conversion does not run in the schema transaction."""
-    earlier = tuple(upgrade for upgrade in upgrades._JOURNAL_UPGRADES if upgrade is not upgrade_turn_records_to_rows)
-    with patch.object(upgrades, "_JOURNAL_UPGRADES", earlier):
+    with patch.object(upgrades, "upgrade_turn_records_to_rows", lambda *_args, **_kwargs: None):
         yield
 
 

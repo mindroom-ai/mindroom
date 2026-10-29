@@ -22,9 +22,8 @@ from mindroom.event_journal import (
     IngestionBatchAdmission,
     IngestionRecordAdmission,
     IngestionRecordDisposition,
-    postgres_backend,
-    sqlite_backend,
     turn_rows,
+    upgrades,
 )
 from tests.conftest import postgres_journal_schema_url
 from tests.test_event_journal_store import admit, message
@@ -250,11 +249,10 @@ async def test_clean_released_journal_needs_no_manual_adoption(legacy_database: 
 async def test_interrupted_upgrade_rolls_back_and_retries(legacy_database: _LegacyDatabase) -> None:
     """Failed DDL cannot publish the new marker while abandoning only part of old work."""
     legacy_database.execute(_OLD_EVENT)
-    module = postgres_backend if legacy_database.postgres else sqlite_backend
-    original = module.schema_statements
+    original = upgrades.schema_statements
     with (
         patch.object(
-            module,
+            upgrades,
             "schema_statements",
             side_effect=lambda dialect: (*original(dialect), "INVALID UPGRADE SQL"),
         ),

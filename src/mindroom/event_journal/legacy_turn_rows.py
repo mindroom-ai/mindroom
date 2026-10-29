@@ -38,7 +38,6 @@ from mindroom.turn_record import (
 )
 
 from . import journal, turn_rows
-from .schema import schema_statements
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -267,22 +266,17 @@ def _revision_replay(raw: object) -> tuple[dict[str, RevisionReplay], frozenset[
 def upgrade_turn_records_to_rows(transaction: Transaction, inspector: SchemaInspector) -> None:
     """Convert turn records and redaction tombstones into turn rows, inside the schema transaction.
 
-    The whole current schema runs first: a redaction's effects read
-    membership, reply, and continuation tables that a database from an
-    earlier release gains only from those statements, and running them twice
-    changes nothing. Each redaction is recorded before the turns are written,
-    so their payload drops what it deleted, and applied after, so its deletion
-    reaches the reply to a relay of the deleted message through the relay's turn.
+    It runs once the current schema exists. Each redaction is recorded before
+    the turns are written, so their payload drops what it deleted, and applied
+    after, so its deletion reaches the reply to a relay of the deleted message
+    through the relay's turn.
     """
     existing_tables = inspector.tables()
     if "turn_records" not in existing_tables and "redaction_tombstones" not in existing_tables:
         return
-    outbox_columns = inspector.columns("matrix_delivery_outbox")
-    for statement in schema_statements(inspector.dialect):
-        transaction.execute(statement)
     tombstones = _record_redaction_tombstones(transaction) if "redaction_tombstones" in existing_tables else ()
     if "turn_records" in existing_tables:
-        deliveries = _outstanding_final_deliveries(transaction) if outbox_columns else {}
+        deliveries = _outstanding_final_deliveries(transaction)
         agents = transaction.fetchall("SELECT agent_name FROM turn_records ORDER BY agent_name/*bytes*/")
         for agent_name in dict.fromkeys(str(row["agent_name"]) for row in agents):
             entries = transaction.fetchall(
