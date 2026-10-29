@@ -59,7 +59,7 @@ def _validated_embeddings(
     if len(embeddings) != expected_count:
         detail = f"embedder returned {len(embeddings)} embeddings for {expected_count} inputs"
         health_recorder.record(detail)
-        raise EmbedderRequestError(detail)
+        raise EmbedderRequestError(detail, kind="cardinality")
     if any(not embedding for embedding in embeddings):
         health_recorder.record(EMBEDDER_EMPTY_VECTOR_DETAIL)
         raise EmbedderRequestError(EMBEDDER_EMPTY_VECTOR_DETAIL)

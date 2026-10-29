@@ -30,8 +30,8 @@ from mindroom.constants import (
 from mindroom.embeddings.batching import RefreshEmbedder, plan_embedding_batches
 from mindroom.embeddings.errors import (
     classified_embedder_error,
+    embedder_credentials_rejected,
     embedder_failure_is_transient,
-    is_embedder_auth_failure_detail,
 )
 from mindroom.embeddings.factory import create_configured_embedder
 from mindroom.knowledge.candidate_checkpoint import (
@@ -970,7 +970,7 @@ class KnowledgeManager:
         if self._last_file_index_error is None:
             self._last_file_index_error = error
         self._file_index_errors[relative_path] = error
-        self._record_embedder_rejection(classified)
+        self._record_embedder_rejection(exc)
         logger.error("Failed to index knowledge file", base_id=self.base_id, path=str(file_path), exc_info=exc)
 
     def _handle_vectorless_file(
@@ -994,17 +994,18 @@ class KnowledgeManager:
     def _record_embedding_retry(self) -> None:
         self._embedding_retry_count += 1
 
-    def _record_embedder_rejection(self, classified: str | None) -> None:
+    def _record_embedder_rejection(self, exc: Exception) -> None:
         """Track evidence that the embedder is rejecting everything, not one file.
 
         Providers without a batch surface never reach the batch-embedding stop,
         so without this the same doomed request is issued once per remaining
         file.
         """
+        classified = classified_embedder_error(exc)
         if classified is None:
             return
         self._embedder_failure_streak += 1
-        if is_embedder_auth_failure_detail(classified):
+        if embedder_credentials_rejected(exc):
             # A rejected credential is global by construction; one file is proof enough.
             self._global_embedder_failure = classified
         elif self._embedder_failure_streak >= _GLOBAL_EMBEDDER_FAILURE_STREAK:

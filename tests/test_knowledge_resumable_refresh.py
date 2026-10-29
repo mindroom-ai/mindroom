@@ -309,7 +309,7 @@ def _published_state(config: Config, runtime_paths: RuntimePaths) -> PublishedIn
     return load_published_index_state(published_index_metadata_path(key))
 
 
-_AUTH_FAILURE = EmbedderRequestError("embedder authentication failed (HTTP 401)")
+_AUTH_FAILURE = EmbedderRequestError("embedder authentication failed (HTTP 401)", kind="credentials")
 
 
 def _server_error() -> EmbedderRequestError:
@@ -554,7 +554,7 @@ async def test_permanent_embedding_failure_never_publishes_and_reports_classifie
     published_collection = state.collection
 
     (docs_path / "b.md").write_text("secret sk-should-never-appear", encoding="utf-8")
-    embedder.fail_everything = EmbedderRequestError("embedder authentication failed (HTTP 401)")
+    embedder.fail_everything = EmbedderRequestError("embedder authentication failed (HTTP 401)", kind="credentials")
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
@@ -2452,7 +2452,7 @@ async def test_single_input_wrong_cardinality_still_fails_and_does_not_publish(
     config = _config(tmp_path, docs_path)
     runtime_paths = runtime_paths_for(config)
     embedder.failures["content 0"] = [
-        EmbedderRequestError("embedder returned 0 embeddings for 1 inputs") for _ in range(10)
+        EmbedderRequestError("embedder returned 0 embeddings for 1 inputs", kind="cardinality") for _ in range(10)
     ]
 
     manager = _manager(config)
@@ -2548,7 +2548,7 @@ async def test_credential_rejection_during_fallback_still_fails_fast(
     config = _config(tmp_path, docs_path)
     runtime_paths = runtime_paths_for(config)
     embedder.short_batch = True
-    embedder.fail_everything = EmbedderRequestError("embedder authentication failed (HTTP 401)")
+    embedder.fail_everything = EmbedderRequestError("embedder authentication failed (HTTP 401)", kind="credentials")
 
     manager = _manager(config)
     outcome = await manager.reindex_all()
@@ -2882,7 +2882,7 @@ async def test_globally_failing_embedder_stops_a_non_batching_refresh(
     config = _config(tmp_path, docs_path)
     runtime_paths = runtime_paths_for(config)
     embedder = _use_non_batching_embedder(monkeypatch)
-    embedder.fail_everything = EmbedderRequestError("embedder authentication failed (HTTP 401)")
+    embedder.fail_everything = EmbedderRequestError("embedder authentication failed (HTTP 401)", kind="credentials")
 
     manager = _manager(config)
     outcome = await manager.reindex_all()
@@ -2923,13 +2923,13 @@ def test_unrelated_failure_does_not_reset_embedder_rejection_streak(
     docs_path = tmp_path / "docs"
     _write_corpus(docs_path, 1)
     manager = _manager(_config(tmp_path, docs_path))
-    rejection = "embedder request failed (HTTP 404)"
+    rejection = EmbedderRequestError("embedder request failed (HTTP 404)")
 
     manager._record_embedder_rejection(rejection)
-    manager._record_embedder_rejection(None)
+    manager._record_embedder_rejection(RuntimeError("unrelated"))
     manager._record_embedder_rejection(rejection)
 
-    assert manager._global_embedder_failure == rejection
+    assert manager._global_embedder_failure == str(rejection)
 
 
 @pytest.mark.asyncio
