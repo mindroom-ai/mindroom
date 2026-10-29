@@ -5949,11 +5949,9 @@ class FinalStateAuditor:
         self.oracle.journal_event_states = {event_id: row.state for event_id, row in snapshot.sources.items()}
         # MindRoom regenerates a reply only for an edit of the latest message of its conversation; once it settles
         # an edit without a completed regeneration, such as one of a message it never answered, nothing more changes.
+        declined = _declined_edits(snapshot, self.pending_edit_markers)
         self.oracle.declined_edit_sources = frozenset(
-            source
-            for source, edits in self.pending_edit_markers.items()
-            if all((row := snapshot.sources.get(event_id)) is not None and row.state == "settled" for event_id in edits)
-            and snapshot.regenerated_edits.isdisjoint(edits)
+            source for source, edits in self.pending_edit_markers.items() if declined.issuperset(edits)
         )
         # Final audit already validated this view; live polling must validate
         # with the same retained ancestry before joining durable ownership.
