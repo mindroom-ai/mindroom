@@ -1414,7 +1414,7 @@ async def test_router_cleanup_loads_invited_rooms_off_event_loop(
 
 
 @pytest.mark.asyncio
-async def test_router_invite_keeps_memory_after_transient_persistence_failure(
+async def test_router_invite_retries_after_transient_persistence_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1434,13 +1434,14 @@ async def test_router_invite_keeps_memory_after_transient_persistence_failure(
     bot.client.rooms = {}
 
     attempts = 0
+    save = invited_rooms_store._save_invited_rooms
 
     def fail_first_save(path: Path, room_ids: set[str]) -> bool:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
             return False
-        return invited_rooms_store._save_invited_rooms(path, room_ids)
+        return save(path, room_ids)
 
     monkeypatch.setattr("mindroom.matrix.invited_rooms_store._save_invited_rooms", fail_first_save)
     monkeypatch.setattr(
