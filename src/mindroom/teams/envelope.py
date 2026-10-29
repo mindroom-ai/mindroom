@@ -64,7 +64,6 @@ from mindroom.teams.attempt import TeamAttempt, team_tool_executions
 from mindroom.teams.leader import LeaderRun
 from mindroom.teams.members import (
     ResolvedExactTeamMembers,
-    allow_direct_private_team_agents,
     build_team_spec,
     materialized_team_label,
     requested_team_agent_names,
@@ -81,7 +80,7 @@ from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import StructuredStreamChunk
-from mindroom.turn_model import ModelScope, TurnModel, resolve_team_turn_models, resolve_turn_model
+from mindroom.turn_model import ModelScope, TurnModel, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
@@ -348,9 +347,9 @@ class TeamTurnSpec:
     agent_names: Sequence[str]
     mode: TeamMode
     orchestrator: OrchestratorRuntime
+    # The members' models chosen for the turn.
+    member_model_names: Mapping[str, str]
     model_name: str | None = None
-    # The members' models chosen for the turn; None resolves them from the room and thread.
-    member_model_names: Mapping[str, str] | None = None
     configured_team_name: str | None = None
     # The Matrix account the team's reply is sent from, which its prompt names.
     response_sender_id: str | None = None
@@ -758,7 +757,7 @@ class _TeamTurn:
 def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext, sinks: TurnSinks) -> _TeamTurn | str:
     """Resolve the team's members and return the turn's constants, or the text that explains why it cannot run.
 
-    Resolving the members' knowledge and models reads the filesystem, so the caller runs this off the event loop
+    Resolving the members' knowledge reads the filesystem, so the caller runs this off the event loop
     (#1260); the members themselves build on their first delegation.
     """
     orchestrator = spec.orchestrator
@@ -768,24 +767,6 @@ def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext, sinks: TurnSinks) -
         raise ValueError(msg)
     config = orchestrator.config
     requested_agent_names = requested_team_agent_names(spec.agent_names)
-    config.assert_team_agents_supported(
-        requested_agent_names,
-        allow_direct_private_agents=allow_direct_private_team_agents(
-            ctx.execution_identity,
-            configured_team_name=spec.configured_team_name,
-        ),
-    )
-    active_member_model_names = (
-        dict(spec.member_model_names)
-        if spec.member_model_names is not None
-        else resolve_team_turn_models(
-            config,
-            orchestrator.runtime_paths,
-            ModelScope(entity=spec.configured_team_name, room_id=ctx.room_id, thread_id=ctx.thread_id),
-            requested_agent_names,
-            None,
-        ).member_model_names
-    )
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     try:
         team_members = resolve_team_members(
@@ -796,7 +777,7 @@ def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext, sinks: TurnSinks) -
             unavailable_bases=unavailable_bases,
             reason_prefix=spec.reason_prefix,
             configured_team_name=spec.configured_team_name,
-            active_model_names=active_member_model_names,
+            active_model_names=spec.member_model_names,
         )
     except ValueError as exc:
         return str(exc)

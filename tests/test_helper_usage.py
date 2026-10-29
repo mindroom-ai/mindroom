@@ -230,6 +230,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                         agent_names=["general", "second"],
                         mode=TeamMode.COORDINATE,
                         orchestrator=orchestrator,
+                        member_model_names={"general": "default", "second": "default"},
                         configured_team_name="reviewers",
                     ),
                     turn,

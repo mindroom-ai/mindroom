@@ -12,6 +12,7 @@ import pytest
 
 from mindroom import reply_lifecycle as rl
 from mindroom.budgets.monitor import BudgetMonitor
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import TOOL_TRACE_CONTENT_KEY
@@ -36,6 +37,7 @@ from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponseEffectsSupport
 from mindroom.response_runner import (
+    PostLockRequestPreparationError,
     ResponseRequest,
     ResponseRunner,
 )
@@ -75,7 +77,7 @@ from tests.conftest import (
     runtime_paths_for,
     unwrap_extracted_collaborator,
 )
-from tests.identity_helpers import entity_ids
+from tests.identity_helpers import entity_ids, persist_entity_accounts
 from tests.reply_span_helpers import seed_finished_reply
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.team_turn_helpers import scripted_team_stream
@@ -218,6 +220,61 @@ class TestAgentBot(AgentBotTestBase):
         spec, _ctx = team_stream.call_args.args
         assert spec.model_name == "large"
         assert spec.member_model_names == {"calculator": "large", "general": "large"}
+
+    @pytest.mark.asyncio
+    async def test_a_team_whose_member_delegates_to_a_private_agent_is_refused_before_it_runs(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A member that reaches a private agent through delegation keeps the team from running at all."""
+        config = self._config_for_storage(tmp_path)
+        config.agents["mind"] = AgentConfig(
+            display_name="Mind",
+            private=AgentPrivateConfig(per="user", root="mind_data"),
+        )
+        config.agents["general"].delegate_to = ["mind"]
+        runtime_paths = runtime_paths_for(config)
+        persist_entity_accounts(config, runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = _make_matrix_client_mock()
+        bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths)
+        coordinator = unwrap_extracted_collaborator(bot._response_runner)
+        team_stream = scripted_team_stream("Team reply")
+
+        with (
+            patch(
+                "mindroom.delivery_gateway.send_message_outcome",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
+            ),
+            patch_response_runner_module(
+                typing_indicator=_noop_typing_indicator,
+                should_use_streaming=AsyncMock(return_value=False),
+                team_response_stream=team_stream,
+            ),
+            pytest.raises(PostLockRequestPreparationError) as raised,
+        ):
+            await coordinator.generate_team_response_helper(
+                ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$team-root",),
+                        logical_source_event_ids=("$team-root",),
+                    ),
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    prompt="team prompt",
+                    response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
+                    correlation_id="corr-team",
+                ),
+                member_names=["calculator", "general"],
+                team_mode="collaborate",
+            )
+
+        assert str(raised.value.__cause__) == (
+            "Team request includes agent 'general' which reaches private agent 'mind' via delegation; "
+            "private delegation is not supported for teams"
+        )
+        team_stream.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_scheduled_model_overrides_coordinator_and_members(
