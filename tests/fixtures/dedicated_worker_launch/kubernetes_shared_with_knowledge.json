@@ -22,6 +22,7 @@
           "mindroom.ai/failure-count": "0",
           "mindroom.ai/worker-status": "starting",
           "mindroom.ai/last-started-at": "10.0",
+          "mindroom.ai/failure-reason": "",
           "mindroom.ai/template-hash": "2a01dbae1d653c6f3f7afbbdda9e815c8e5db9c5cdc88746fde30acd0cdd7b9e",
           "mindroom.ai/workspace-template-hash": "2a01dbae1d653c6f3f7afbbdda9e815c8e5db9c5cdc88746fde30acd0cdd7b9e",
           "mindroom.ai/private-agent-names": "[\"mind\"]"
@@ -326,6 +327,7 @@
             "mindroom.ai/failure-count": "0",
             "mindroom.ai/worker-status": "ready",
             "mindroom.ai/last-started-at": "10.0",
+            "mindroom.ai/failure-reason": "",
             "mindroom.ai/template-hash": "2a01dbae1d653c6f3f7afbbdda9e815c8e5db9c5cdc88746fde30acd0cdd7b9e",
             "mindroom.ai/workspace-template-hash": "2a01dbae1d653c6f3f7afbbdda9e815c8e5db9c5cdc88746fde30acd0cdd7b9e",
             "mindroom.ai/private-agent-names": "[\"mind\"]"

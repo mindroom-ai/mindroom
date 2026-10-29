@@ -90,18 +90,18 @@ _READY_POLL_INTERVAL_SECONDS = 1.0
 _DELETE_POLL_INTERVAL_SECONDS = 0.2
 _HOSTNAME_ENV = "HOSTNAME"
 
-ANNOTATION_CREATED_AT = "mindroom.ai/created-at"
-ANNOTATION_LAST_USED_AT = "mindroom.ai/last-used-at"
-ANNOTATION_LAST_STARTED_AT = "mindroom.ai/last-started-at"
-ANNOTATION_STARTUP_COUNT = "mindroom.ai/startup-count"
-ANNOTATION_FAILURE_COUNT = "mindroom.ai/failure-count"
-ANNOTATION_FAILURE_REASON = "mindroom.ai/failure-reason"
+_ANNOTATION_CREATED_AT = "mindroom.ai/created-at"
+_ANNOTATION_LAST_USED_AT = "mindroom.ai/last-used-at"
+_ANNOTATION_LAST_STARTED_AT = "mindroom.ai/last-started-at"
+_ANNOTATION_STARTUP_COUNT = "mindroom.ai/startup-count"
+_ANNOTATION_FAILURE_COUNT = "mindroom.ai/failure-count"
+_ANNOTATION_FAILURE_REASON = "mindroom.ai/failure-reason"
 ANNOTATION_WORKER_KEY = "mindroom.ai/worker-key"
-ANNOTATION_WORKER_STATUS = "mindroom.ai/worker-status"
+_ANNOTATION_WORKER_STATUS = "mindroom.ai/worker-status"
 ANNOTATION_STATE_SUBPATH = "mindroom.ai/state-subpath"
 _ANNOTATION_STARTUP_MANIFEST_HASH = "mindroom.ai/startup-manifest-hash"
 _ANNOTATION_RUNNER_TOKEN_HASH = "mindroom.ai/runner-token-hash"  # noqa: S105
-_ANNOTATION_TEMPLATE_HASH = "mindroom.ai/template-hash"
+ANNOTATION_TEMPLATE_HASH = "mindroom.ai/template-hash"
 _ANNOTATION_PRIVATE_AGENT_NAMES = "mindroom.ai/private-agent-names"
 _ANNOTATION_STATE_SCOPE_WORKER_KEY = "mindroom.ai/state-scope-worker-key"
 _ANNOTATION_RESOURCE_PROFILE = "mindroom.ai/resource-profile"
@@ -402,10 +402,14 @@ def _worker_credentials_encryption_key_secret_key(worker_id: str) -> str:
     return f"{worker_id}.{_CREDENTIALS_ENCRYPTION_KEY_SECRET_SUFFIX}"
 
 
-def parse_annotation_float(annotations: dict[str, str], key: str, default: float) -> float:
-    """Parse one float annotation, falling back to a caller-provided default."""
+def _parse_annotation_float[DefaultT: float | None](
+    annotations: Mapping[str, str],
+    key: str,
+    default: DefaultT,
+) -> float | DefaultT:
+    """Parse one float annotation, falling back to ``default`` when it is missing, blank, or not a number."""
     raw = annotations.get(key)
-    if raw is None:
+    if not raw:
         return default
     try:
         return float(raw)
@@ -413,69 +417,55 @@ def parse_annotation_float(annotations: dict[str, str], key: str, default: float
         return default
 
 
-def parse_annotation_int(annotations: dict[str, str], key: str, default: int = 0) -> int:
-    """Parse one integer annotation, falling back to a caller-provided default."""
+def _parse_annotation_int(annotations: Mapping[str, str], key: str) -> int:
+    """Parse one integer annotation, falling back to zero when it is missing, blank, or not a number."""
     raw = annotations.get(key)
-    if raw is None:
-        return default
+    if not raw:
+        return 0
     try:
         return int(raw)
     except ValueError:
-        return default
+        return 0
+
+
+def lifecycle_annotations(state: WorkerLifecycleState) -> dict[str, str]:
+    """Serialize every lifecycle field of one worker to Deployment annotations.
+
+    An unset value is written blank rather than omitted, so a merge patch clears the old value
+    (it is read back as ``None``).
+    """
+    return {
+        _ANNOTATION_CREATED_AT: str(state.created_at),
+        _ANNOTATION_LAST_USED_AT: str(state.last_used_at),
+        _ANNOTATION_STARTUP_COUNT: str(state.startup_count),
+        _ANNOTATION_FAILURE_COUNT: str(state.failure_count),
+        _ANNOTATION_WORKER_STATUS: state.status,
+        _ANNOTATION_LAST_STARTED_AT: "" if state.last_started_at is None else str(state.last_started_at),
+        _ANNOTATION_FAILURE_REASON: state.failure_reason or "",
+    }
 
 
 def metadata_annotations(*, worker_key: str, state_subpath: str, state: WorkerLifecycleState) -> dict[str, str]:
     """Build the worker identity and lifecycle annotations a Deployment is applied with."""
-    annotations = {
+    return {
         ANNOTATION_WORKER_KEY: worker_key,
         ANNOTATION_STATE_SUBPATH: state_subpath,
-        ANNOTATION_CREATED_AT: str(state.created_at),
-        ANNOTATION_LAST_USED_AT: str(state.last_used_at),
-        ANNOTATION_STARTUP_COUNT: str(state.startup_count),
-        ANNOTATION_FAILURE_COUNT: str(state.failure_count),
-        ANNOTATION_WORKER_STATUS: state.status,
+        **lifecycle_annotations(state),
     }
-    if state.last_started_at is not None:
-        annotations[ANNOTATION_LAST_STARTED_AT] = str(state.last_started_at)
-    if state.failure_reason:
-        annotations[ANNOTATION_FAILURE_REASON] = state.failure_reason
-    return annotations
 
 
-def lifecycle_from_annotations(annotations: dict[str, str], *, now: float) -> WorkerLifecycleState:
-    """Project the lifecycle state persisted on a worker Deployment's annotations.
-
-    Lets the Kubernetes backend reuse the shared worker-lifecycle transitions
-    instead of mutating status annotations inline.
-    """
-    last_used_at = parse_annotation_float(annotations, ANNOTATION_LAST_USED_AT, now)
-    created_at = parse_annotation_float(annotations, ANNOTATION_CREATED_AT, last_used_at)
-    last_started_raw = annotations.get(ANNOTATION_LAST_STARTED_AT)
+def lifecycle_from_annotations(annotations: Mapping[str, str], *, now: float) -> WorkerLifecycleState:
+    """Parse the lifecycle state persisted on a worker Deployment's annotations."""
+    last_used_at = _parse_annotation_float(annotations, _ANNOTATION_LAST_USED_AT, now)
     return WorkerLifecycleState(
-        created_at=created_at,
+        created_at=_parse_annotation_float(annotations, _ANNOTATION_CREATED_AT, last_used_at),
         last_used_at=last_used_at,
-        status=cast("WorkerStatus", annotations.get(ANNOTATION_WORKER_STATUS, "starting")),
-        last_started_at=float(last_started_raw) if last_started_raw else None,
-        startup_count=parse_annotation_int(annotations, ANNOTATION_STARTUP_COUNT),
-        failure_count=parse_annotation_int(annotations, ANNOTATION_FAILURE_COUNT),
-        failure_reason=annotations.get(ANNOTATION_FAILURE_REASON) or None,
+        status=cast("WorkerStatus", annotations.get(_ANNOTATION_WORKER_STATUS, "starting")),
+        last_started_at=_parse_annotation_float(annotations, _ANNOTATION_LAST_STARTED_AT, None),
+        startup_count=_parse_annotation_int(annotations, _ANNOTATION_STARTUP_COUNT),
+        failure_count=_parse_annotation_int(annotations, _ANNOTATION_FAILURE_COUNT),
+        failure_reason=annotations.get(_ANNOTATION_FAILURE_REASON) or None,
     )
-
-
-def apply_lifecycle_annotations(annotations: dict[str, str], state: WorkerLifecycleState) -> None:
-    """Write one lifecycle state onto a Deployment's annotations dict in place.
-
-    The failure reason is blanked rather than dropped so the merge-based
-    deployment patch clears it (it is read back as ``None``).
-    """
-    annotations[ANNOTATION_CREATED_AT] = str(state.created_at)
-    annotations[ANNOTATION_LAST_USED_AT] = str(state.last_used_at)
-    annotations[ANNOTATION_WORKER_STATUS] = state.status
-    if state.last_started_at is not None:
-        annotations[ANNOTATION_LAST_STARTED_AT] = str(state.last_started_at)
-    annotations[ANNOTATION_STARTUP_COUNT] = str(state.startup_count)
-    annotations[ANNOTATION_FAILURE_COUNT] = str(state.failure_count)
-    annotations[ANNOTATION_FAILURE_REASON] = state.failure_reason or ""
 
 
 def _template_hash(template: dict[str, object]) -> str:
@@ -823,7 +813,7 @@ class KubernetesResourceManager:
             desired_annotations = cast("dict[str, str]", desired_metadata.get("annotations", {}))
             if (
                 recreate
-                or existing_annotations.get(_ANNOTATION_TEMPLATE_HASH) != desired_annotations[_ANNOTATION_TEMPLATE_HASH]
+                or existing_annotations.get(ANNOTATION_TEMPLATE_HASH) != desired_annotations[ANNOTATION_TEMPLATE_HASH]
             ):
                 self._recreate_deployment(worker_id, manifest, timeout_seconds=self.config.ready_timeout_seconds)
                 return _DeploymentApplyResult(recreated=True)
@@ -1309,7 +1299,7 @@ class KubernetesResourceManager:
             state_scope_worker_key=state_scope_worker_key,
             resource_profile=resource_profile,
         )
-        recorded_hash = dict(deployment.metadata.annotations or {}).get(_ANNOTATION_TEMPLATE_HASH)
+        recorded_hash = dict(deployment.metadata.annotations or {}).get(ANNOTATION_TEMPLATE_HASH)
         return recorded_hash != _template_hash(template)
 
     def _pod_template(
@@ -1485,8 +1475,8 @@ class KubernetesResourceManager:
         if owner_reference is not None:
             metadata["ownerReferences"] = [owner_reference]
         desired_annotations = dict(annotations)
-        desired_annotations[_ANNOTATION_TEMPLATE_HASH] = _template_hash(template)
-        desired_annotations[ANNOTATION_WORKSPACE_TEMPLATE_HASH] = desired_annotations[_ANNOTATION_TEMPLATE_HASH]
+        desired_annotations[ANNOTATION_TEMPLATE_HASH] = _template_hash(template)
+        desired_annotations[ANNOTATION_WORKSPACE_TEMPLATE_HASH] = desired_annotations[ANNOTATION_TEMPLATE_HASH]
         if private_agent_names is not None:
             desired_annotations[_ANNOTATION_PRIVATE_AGENT_NAMES] = json.dumps(
                 sorted(private_agent_names),

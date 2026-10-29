@@ -43,6 +43,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers.backend import (
     WorkerBackendError,
+    filter_and_sort_worker_handles,
     mirrored_credential_services,
 )
 from mindroom.workers.backends._dedicated_worker_common import (
@@ -53,14 +54,14 @@ from mindroom.workers.backends._dedicated_worker_common import (
     validate_unique_worker_visible_paths,
 )
 from mindroom.workers.backends._lifecycle import (
+    WorkerLifecycleState,
     initial_worker_lifecycle_state,
     mark_worker_failed,
     mark_worker_idle,
     mark_worker_ready,
     prepare_worker_ensure_lifecycle,
-    read_lifecycle_state,
     touch_worker_lifecycle,
-    write_lifecycle_state,
+    worker_handle,
 )
 from mindroom.workers.backends._metadata_store import (
     list_worker_state_paths,
@@ -371,18 +372,12 @@ class _DockerWorkerMetadata:
     endpoint: str
     backend_name: str
     container_name: str
-    created_at: float
-    last_used_at: float
-    status: WorkerStatus
+    lifecycle: WorkerLifecycleState
     host_port: int | None = None
     container_id: str | None = None
     image: str | None = None
     publish_host: str | None = None
     worker_port: int = DEFAULT_WORKER_PORT
-    last_started_at: float | None = None
-    startup_count: int = 0
-    failure_count: int = 0
-    failure_reason: str | None = None
     launch_config_hash: str | None = None
     # The container's startup manifest is written once, when it is created, so its hash tells whether it is current.
     startup_manifest_hash: str | None = None
@@ -567,10 +562,7 @@ class DockerWorkerBackend:
                 except WorkerBackendError as exc:
                     failures.append(str(exc))
                     continue
-                write_lifecycle_state(
-                    metadata,
-                    mark_worker_idle(read_lifecycle_state(metadata)),
-                )
+                metadata.lifecycle = mark_worker_idle(metadata.lifecycle)
                 metadata.endpoint = self._endpoint_for_host_port(None)
                 metadata.host_port = None
                 metadata.container_id = None
@@ -631,14 +623,13 @@ class DockerWorkerBackend:
                 spec=spec,
                 launch_config=launch_config,
             )
-            lifecycle_state = prepare_worker_ensure_lifecycle(
-                read_lifecycle_state(metadata),
+            metadata.lifecycle = prepare_worker_ensure_lifecycle(
+                metadata.lifecycle,
                 now=timestamp,
                 should_restart=should_restart,
             )
-            write_lifecycle_state(metadata, lifecycle_state)
             self._save_metadata(paths, metadata)
-            cold_start_emitted = lifecycle_state.status == "starting"
+            cold_start_emitted = metadata.lifecycle.status == "starting"
             if cold_start_emitted:
                 emit_progress("cold_start")
 
@@ -658,13 +649,10 @@ class DockerWorkerBackend:
                 try:
                     endpoint = self._wait_for_ready(container)
                 except _WorkerImageIncompatibleError as stale_error:
-                    write_lifecycle_state(
-                        metadata,
-                        prepare_worker_ensure_lifecycle(
-                            read_lifecycle_state(metadata),
-                            now=timestamp,
-                            should_restart=True,
-                        ),
+                    metadata.lifecycle = prepare_worker_ensure_lifecycle(
+                        metadata.lifecycle,
+                        now=timestamp,
+                        should_restart=True,
                     )
                     self._save_metadata(paths, metadata)
                     if not cold_start_emitted:
@@ -686,10 +674,7 @@ class DockerWorkerBackend:
                     raise
                 raise WorkerBackendError(failure_reason) from exc
 
-            write_lifecycle_state(
-                metadata,
-                mark_worker_ready(read_lifecycle_state(metadata), now=timestamp),
-            )
+            metadata.lifecycle = mark_worker_ready(metadata.lifecycle, now=timestamp)
             metadata.endpoint = endpoint
             metadata.host_port = self._container_host_port(container)
             metadata.container_id = self._container_id(container)
@@ -710,10 +695,7 @@ class DockerWorkerBackend:
             metadata = self._load_metadata(paths, expected_worker_key=worker_key)
             if metadata is None:
                 return None
-            write_lifecycle_state(
-                metadata,
-                touch_worker_lifecycle(read_lifecycle_state(metadata), now=timestamp),
-            )
+            metadata.lifecycle = touch_worker_lifecycle(metadata.lifecycle, now=timestamp)
             container = self._read_owned_container(metadata.worker_key)
             metadata = self._reconcile_missing_container_metadata(paths, metadata, container)
             self._save_metadata(paths, metadata)
@@ -733,15 +715,8 @@ class DockerWorkerBackend:
                     continue
                 container = self._read_owned_container(metadata.worker_key)
                 metadata = self._reconcile_missing_container_metadata(paths, metadata, container)
-                handle = self._to_handle(
-                    metadata,
-                    container,
-                    now=timestamp,
-                    paths=paths,
-                )
-            if include_idle or handle.status != "idle":
-                handles.append(handle)
-        return sorted(handles, key=lambda handle: handle.last_used_at, reverse=True)
+                handles.append(self._to_handle(metadata, container, now=timestamp, paths=paths))
+        return filter_and_sort_worker_handles(handles, include_idle)
 
     def cleanup_idle_workers(self, *, now: float | None = None) -> list[WorkerHandle]:
         """Stop idle containers while retaining worker-owned state."""
@@ -758,13 +733,10 @@ class DockerWorkerBackend:
                 container = self._read_owned_container(metadata.worker_key)
                 metadata = self._reconcile_missing_container_metadata(paths, metadata, container)
                 handle = self._to_handle(metadata, container, now=timestamp, paths=paths)
-                idle_timed_out = timestamp - metadata.last_used_at >= self.idle_timeout_seconds
+                idle_timed_out = timestamp - metadata.lifecycle.last_used_at >= self.idle_timeout_seconds
                 if handle.status == "idle" and self._container_is_running(container):
                     self._stop_container(container)
-                    write_lifecycle_state(
-                        metadata,
-                        mark_worker_idle(read_lifecycle_state(metadata)),
-                    )
+                    metadata.lifecycle = mark_worker_idle(metadata.lifecycle)
                     self._save_metadata(paths, metadata)
                     cleaned.append(self._to_handle(metadata, container, now=timestamp, paths=paths))
                 elif handle.status == "failed" and container is not None and idle_timed_out:
@@ -776,7 +748,7 @@ class DockerWorkerBackend:
                     self._stop_container(container)
                     self._remove_container(container)
                     self._reconcile_missing_container_metadata(paths, metadata, None)
-        return sorted(cleaned, key=lambda handle: handle.last_used_at, reverse=True)
+        return filter_and_sort_worker_handles(cleaned, True)
 
     def retire_worker(self, worker_key: str) -> None:
         """Remove one exact Docker worker container and all backend-owned state."""
@@ -840,7 +812,7 @@ class DockerWorkerBackend:
                 paths,
                 expected_worker_key=worker_key,
             ) or self._default_metadata(worker_key, timestamp)
-            if startup_count is not None and metadata.startup_count != startup_count:
+            if startup_count is not None and metadata.lifecycle.startup_count != startup_count:
                 # The request failed on a container this worker has since replaced.
                 return self._to_handle(metadata, None, now=timestamp, paths=paths)
             return self._record_failure_locked(paths, metadata, failure_reason, now=timestamp, stop_container=True)
@@ -856,7 +828,7 @@ class DockerWorkerBackend:
         now = time.time()
         for worker_key in worker_keys:
             metadata = self._default_metadata(worker_key, now)
-            write_lifecycle_state(metadata, mark_worker_idle(read_lifecycle_state(metadata)))
+            metadata.lifecycle = mark_worker_idle(metadata.lifecycle)
             self._save_metadata(self._worker_paths(worker_key), metadata)
 
     def _worker_lock(self, worker_key: str) -> threading.Lock:
@@ -878,16 +850,13 @@ class DockerWorkerBackend:
         launch_config_hash: str | None = None,
     ) -> _DockerWorkerMetadata:
         worker_id = self._container_name_for_worker(worker_key)
-        lifecycle = initial_worker_lifecycle_state(now=now)
         return _DockerWorkerMetadata(
             worker_id=worker_id,
             worker_key=worker_key,
             endpoint=self._endpoint_for_host_port(None),
             backend_name=self.backend_name,
             container_name=worker_id,
-            created_at=lifecycle.created_at,
-            last_used_at=lifecycle.last_used_at,
-            status=lifecycle.status,
+            lifecycle=initial_worker_lifecycle_state(now=now),
             image=self.config.image,
             publish_host=self.config.publish_host,
             worker_port=self.config.worker_port,
@@ -1051,7 +1020,7 @@ class DockerWorkerBackend:
         launch_config: _DockerLaunchConfig,
     ) -> bool:
         container = self._require_owned_container(metadata.worker_key)
-        if metadata.status == "failed":
+        if metadata.lifecycle.status == "failed":
             return True
         if container is None:
             return True
@@ -1284,14 +1253,7 @@ class DockerWorkerBackend:
         container = self._read_owned_container(metadata.worker_key)
         if stop_container:
             self._stop_container(container)
-        write_lifecycle_state(
-            metadata,
-            mark_worker_failed(
-                read_lifecycle_state(metadata),
-                now=now,
-                failure_reason=failure_reason,
-            ),
-        )
+        metadata.lifecycle = mark_worker_failed(metadata.lifecycle, now=now, failure_reason=failure_reason)
         self._save_metadata(paths, metadata)
         return self._to_handle(metadata, container, now=now, paths=paths)
 
@@ -1736,15 +1698,16 @@ class DockerWorkerBackend:
         *,
         now: float,
     ) -> WorkerStatus:
-        if metadata.status == "failed":
+        lifecycle = metadata.lifecycle
+        if lifecycle.status == "failed":
             return "failed"
 
         if container is None or not self._container_is_running(container):
-            return "idle" if metadata.status != "starting" else "starting"
+            return "idle" if lifecycle.status != "starting" else "starting"
 
-        if metadata.status == "starting":
+        if lifecycle.status == "starting":
             return "starting"
-        if now - metadata.last_used_at >= self.idle_timeout_seconds:
+        if now - lifecycle.last_used_at >= self.idle_timeout_seconds:
             return "idle"
         return "ready"
 
@@ -1758,20 +1721,14 @@ class DockerWorkerBackend:
     ) -> WorkerHandle:
         host_port = self._container_host_port(container) or metadata.host_port
         endpoint = self._endpoint_for_host_port(host_port)
-        return WorkerHandle(
+        return worker_handle(
             worker_id=metadata.worker_id,
             worker_key=metadata.worker_key,
+            lifecycle=metadata.lifecycle,
             endpoint=endpoint,
             auth_token=self._control_token(metadata.worker_key),
             status=self._effective_status(metadata, container, now=now),
             backend_name=self.backend_name,
-            last_used_at=metadata.last_used_at,
-            created_at=metadata.created_at,
-            last_started_at=metadata.last_started_at,
-            expires_at=None,
-            startup_count=metadata.startup_count,
-            failure_count=metadata.failure_count,
-            failure_reason=metadata.failure_reason,
             debug_metadata={
                 "container_name": metadata.container_name,
                 "container_id": self._container_id(container) or metadata.container_id or "",

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, TextIO
 
 import pytest
@@ -166,10 +165,7 @@ def test_local_backend_touch_revives_idle_worker_and_clears_failure(tmp_path: Pa
             worker_key=worker_key,
             endpoint="/api/sandbox-runner/execute",
             backend_name=backend.backend_name,
-            created_at=0.0,
-            last_used_at=0.0,
-            status="idle",
-            failure_reason="boom",
+            lifecycle=WorkerLifecycleState(created_at=0.0, last_used_at=0.0, status="idle", failure_reason="boom"),
         ),
     )
 
@@ -177,6 +173,39 @@ def test_local_backend_touch_revives_idle_worker_and_clears_failure(tmp_path: Pa
     assert touched is not None
     assert touched.status == "ready"
     assert touched.failure_reason is None
+
+
+def test_worker_metadata_stores_its_lifecycle_flat_beside_its_other_fields(tmp_path: Path) -> None:
+    """A record round-trips through one flat sorted-key document, and a document with an unknown key is no record."""
+    backend = local_module._LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=1800.0,
+    )
+    paths = local_module._local_worker_state_paths("v1:t:shared:a", worker_root=backend.worker_root)
+    metadata = backend._default_metadata("v1:t:shared:a", 1.0)
+    metadata.lifecycle = mark_worker_failed(metadata.lifecycle, now=2.0, failure_reason="boom")
+    save_worker_metadata(paths, metadata, ensure_root=True)
+
+    document = json.loads(paths.metadata_file.read_text(encoding="utf-8"))
+    assert list(document) == sorted(document)
+    assert document == {
+        "backend_name": "local_sandbox_runner",
+        "created_at": 1.0,
+        "endpoint": "/api/sandbox-runner/execute",
+        "failure_count": 1,
+        "failure_reason": "boom",
+        "last_started_at": None,
+        "last_used_at": 2.0,
+        "startup_count": 0,
+        "status": "failed",
+        "worker_id": metadata.worker_id,
+        "worker_key": "v1:t:shared:a",
+    }
+    assert backend._load_metadata(paths) == metadata
+
+    paths.metadata_file.write_text(json.dumps({**document, "lifecycle": {}}), encoding="utf-8")
+    assert backend._load_metadata(paths) is None
 
 
 def test_worker_metadata_replace_preserves_previous_document_when_serialization_fails(
@@ -190,8 +219,7 @@ def test_worker_metadata_replace_preserves_previous_document_when_serialization_
         idle_timeout_seconds=1800.0,
     )
     paths = local_module._local_worker_state_paths("v1:t:shared:a", worker_root=backend.worker_root)
-    original = SimpleNamespace(worker_key="v1:t:shared:a", last_used_at=1.0)
-    save_worker_metadata(paths, original, ensure_root=True)
+    save_worker_metadata(paths, backend._default_metadata("v1:t:shared:a", 1.0), ensure_root=True)
     original_bytes = paths.metadata_file.read_bytes()
 
     def fail_after_partial_write(_payload: object, stream: TextIO, **_kwargs: object) -> None:
@@ -202,9 +230,6 @@ def test_worker_metadata_replace_preserves_previous_document_when_serialization_
     monkeypatch.setattr(json, "dump", fail_after_partial_write)
 
     with pytest.raises(RuntimeError, match="serialization interrupted"):
-        metadata_store_module.save_worker_metadata(
-            paths,
-            SimpleNamespace(worker_key="v1:t:shared:a", last_used_at=2.0),
-        )
+        metadata_store_module.save_worker_metadata(paths, backend._default_metadata("v1:t:shared:a", 2.0))
 
     assert paths.metadata_file.read_bytes() == original_bytes

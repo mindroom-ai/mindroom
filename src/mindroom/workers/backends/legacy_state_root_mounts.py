@@ -11,8 +11,9 @@ from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends import docker, kubernetes
 from mindroom.workers.backends._lifecycle import mark_worker_idle
 from mindroom.workers.backends.kubernetes_resources import (
+    ANNOTATION_TEMPLATE_HASH,
     ANNOTATION_WORKSPACE_TEMPLATE_HASH,
-    apply_lifecycle_annotations,
+    lifecycle_annotations,
     lifecycle_from_annotations,
 )
 from mindroom.workers.runtime import primary_worker_backend_name
@@ -25,8 +26,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Every release's Kubernetes backend writes these keys on its worker Deployments and their pods.
-_ANNOTATION_TEMPLATE_HASH = "mindroom.ai/template-hash"
+# Every release's Kubernetes backend writes this label on its worker Deployments and their pods.
 _LABEL_WORKER_ID = "mindroom.ai/worker-id"
 # Bounds each Kubernetes call, so an unreachable API server fails startup instead of stalling it.
 _REQUEST_TIMEOUT_SECONDS = 30.0
@@ -86,7 +86,7 @@ def _remove_docker_workers_mounting_state_roots(runtime_paths: RuntimePaths) -> 
 
 
 def _written_by_older_release(annotations: Mapping[str, str]) -> bool:
-    template_hash = annotations.get(_ANNOTATION_TEMPLATE_HASH)
+    template_hash = annotations.get(ANNOTATION_TEMPLATE_HASH)
     return template_hash is None or annotations.get(ANNOTATION_WORKSPACE_TEMPLATE_HASH) != template_hash
 
 
@@ -118,7 +118,7 @@ def _stop_kubernetes_workers_mounting_state_roots(resources: KubernetesResourceM
         if not deployment.spec.replicas:
             continue
         annotations = dict(deployment.metadata.annotations or {})
-        apply_lifecycle_annotations(annotations, mark_worker_idle(lifecycle_from_annotations(annotations, now=now)))
+        annotations.update(lifecycle_annotations(mark_worker_idle(lifecycle_from_annotations(annotations, now=now))))
         try:
             apps_api.patch_namespaced_deployment(
                 deployment.metadata.name,

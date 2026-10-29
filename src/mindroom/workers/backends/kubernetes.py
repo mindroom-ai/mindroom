@@ -32,12 +32,14 @@ from mindroom.workers.backends._dedicated_worker_common import (
     resolve_state_scope_worker_key,
 )
 from mindroom.workers.backends._lifecycle import (
+    WorkerLifecycleState,
     initial_worker_lifecycle_state,
     mark_worker_failed,
     mark_worker_idle,
     mark_worker_ready,
     prepare_worker_ensure_lifecycle,
     touch_worker_lifecycle,
+    worker_handle,
 )
 from mindroom.workers.compatibility import ready_worker_protocol_mismatch
 from mindroom.workers.models import (
@@ -102,6 +104,8 @@ class _ReadyWorkerCacheEntry:
     # The applied launch the worker was provisioned from; another one means the worker must be re-applied.
     launch_digest: str
     handle: WorkerHandle
+    # The lifecycle the handle shows, so a cached touch rewrites every lifecycle annotation without a read.
+    lifecycle: WorkerLifecycleState
     validated_at: float
     workspace_mounts: tuple[ScopedWorkspaceMount, ...]
     shared_directory_mounts: tuple[SharedDirectoryMount, ...]
@@ -572,10 +576,11 @@ class KubernetesWorkerBackend:
                 # the template is unchanged, so only a new pod pulls the tag again under `Always`.
                 replacing_stale_worker = True
             destructive_failure_allowed = False
+            lifecycle = mark_worker_ready(lifecycle, now=timestamp)
             final_annotations = resources.metadata_annotations(
                 worker_key=worker_key,
                 state_subpath=state_subpath,
-                state=mark_worker_ready(lifecycle, now=timestamp),
+                state=lifecycle,
             )
             self._resources.patch_deployment(worker_id, annotations=final_annotations)
         except Exception as exc:
@@ -609,6 +614,7 @@ class KubernetesWorkerBackend:
                 spec=spec,
                 launch_digest=launch.digest,
                 handle=handle,
+                lifecycle=lifecycle,
                 validated_at=timestamp,
                 workspace_mounts=workspace_mounts,
                 shared_directory_mounts=shared_directory_mounts,
@@ -644,11 +650,12 @@ class KubernetesWorkerBackend:
                 return None
 
             annotations = dict(deployment.metadata.annotations or {})
-            resources.apply_lifecycle_annotations(
-                annotations,
-                touch_worker_lifecycle(
-                    resources.lifecycle_from_annotations(annotations, now=timestamp),
-                    now=timestamp,
+            annotations.update(
+                resources.lifecycle_annotations(
+                    touch_worker_lifecycle(
+                        resources.lifecycle_from_annotations(annotations, now=timestamp),
+                        now=timestamp,
+                    ),
                 ),
             )
             self._resources.patch_deployment(worker_id, annotations=annotations)
@@ -739,9 +746,10 @@ class KubernetesWorkerBackend:
                 if handle.status != "idle" or int(live.spec.replicas or 0) == 0:
                     continue
                 annotations = dict(live.metadata.annotations or {})
-                resources.apply_lifecycle_annotations(
-                    annotations,
-                    mark_worker_idle(resources.lifecycle_from_annotations(annotations, now=now)),
+                annotations.update(
+                    resources.lifecycle_annotations(
+                        mark_worker_idle(resources.lifecycle_from_annotations(annotations, now=now)),
+                    ),
                 )
                 self._resources.patch_deployment(handle.worker_id, replicas=0, annotations=annotations)
                 self._resources.delete_service(handle.worker_id)
@@ -945,12 +953,13 @@ class KubernetesWorkerBackend:
         annotations = dict(deployment.metadata.annotations or {})
         if annotations_override is not None:
             annotations.update(annotations_override)
-        resources.apply_lifecycle_annotations(
-            annotations,
-            mark_worker_failed(
-                resources.lifecycle_from_annotations(annotations, now=now),
-                now=now,
-                failure_reason=failure_reason,
+        annotations.update(
+            resources.lifecycle_annotations(
+                mark_worker_failed(
+                    resources.lifecycle_from_annotations(annotations, now=now),
+                    now=now,
+                    failure_reason=failure_reason,
+                ),
             ),
         )
         self._resources.patch_deployment(worker_id, replicas=0, annotations=annotations)
@@ -1073,19 +1082,16 @@ class KubernetesWorkerBackend:
 
     def _patch_cached_worker_usage(self, entry: _ReadyWorkerCacheEntry, *, now: float) -> WorkerHandle | None:
         # A cached worker was ready when cached, so its touch writes it as ready without reading its Deployment.
+        lifecycle = mark_worker_ready(entry.lifecycle, now=now)
         handle = replace(entry.handle, last_used_at=now, status="ready", failure_reason=None)
         exists = self._resources.patch_deployment_annotations(
             handle.worker_id,
-            annotations={
-                resources.ANNOTATION_LAST_USED_AT: str(now),
-                resources.ANNOTATION_WORKER_STATUS: "ready",
-                resources.ANNOTATION_FAILURE_REASON: "",
-            },
+            annotations=resources.lifecycle_annotations(lifecycle),
         )
         if not exists:
             self._invalidate_ready_worker(entry.spec.worker_key)
             return None
-        self._store_ready_worker(replace(entry, handle=handle))
+        self._store_ready_worker(replace(entry, handle=handle, lifecycle=lifecycle))
         return handle
 
     def _record_startup_failure_or_cleanup_secret(
@@ -1153,30 +1159,16 @@ class KubernetesWorkerBackend:
             raise WorkerBackendError(msg)
 
         worker_id = str(metadata.name)
-        last_used_at = resources.parse_annotation_float(annotations, resources.ANNOTATION_LAST_USED_AT, now)
-        created_at = resources.parse_annotation_float(annotations, resources.ANNOTATION_CREATED_AT, last_used_at)
-        last_started_at = annotations.get(resources.ANNOTATION_LAST_STARTED_AT)
-        status = self._effective_status(
-            deployment,
-            now=now,
-            annotations_override=annotations,
-            replicas_override=replicas_override,
-        )
+        lifecycle = resources.lifecycle_from_annotations(annotations, now=now)
         endpoint_root = resources.service_host(worker_id, self.config.namespace, self.config.worker_port)
-        return WorkerHandle(
+        return worker_handle(
             worker_id=worker_id,
             worker_key=worker_key,
+            lifecycle=lifecycle,
             endpoint=f"{endpoint_root}/api/sandbox-runner/execute",
             auth_token=resources.worker_auth_token(self.auth_token, worker_key),
-            status=status,
+            status=self._effective_status(deployment, lifecycle, now=now, replicas_override=replicas_override),
             backend_name=self.backend_name,
-            last_used_at=last_used_at,
-            created_at=created_at,
-            last_started_at=float(last_started_at) if last_started_at is not None else None,
-            expires_at=None,
-            startup_count=resources.parse_annotation_int(annotations, resources.ANNOTATION_STARTUP_COUNT),
-            failure_count=resources.parse_annotation_int(annotations, resources.ANNOTATION_FAILURE_COUNT),
-            failure_reason=annotations.get(resources.ANNOTATION_FAILURE_REASON) or None,
             debug_metadata={
                 "namespace": self.config.namespace,
                 "deployment_name": worker_id,
@@ -1189,23 +1181,18 @@ class KubernetesWorkerBackend:
     def _effective_status(
         self,
         deployment: resources.KubernetesDeployment,
+        lifecycle: WorkerLifecycleState,
         *,
         now: float,
-        annotations_override: dict[str, str] | None = None,
-        replicas_override: int | None = None,
+        replicas_override: int | None,
     ) -> WorkerStatus:
-        annotations = (
-            dict(deployment.metadata.annotations or {}) if annotations_override is None else annotations_override
-        )
-        stored_status = annotations.get(resources.ANNOTATION_WORKER_STATUS, "starting")
-        if stored_status == "failed":
+        if lifecycle.status == "failed":
             return "failed"
         replicas = int(deployment.spec.replicas or 0) if replicas_override is None else replicas_override
         if replicas == 0:
             return "idle"
-        last_used_at = resources.parse_annotation_float(annotations, resources.ANNOTATION_LAST_USED_AT, now)
-        idle_status = effective_idle_status("ready", last_used_at, self.idle_timeout_seconds, now)
-        if stored_status == "ready" and idle_status == "idle":
+        idle_status = effective_idle_status("ready", lifecycle.last_used_at, self.idle_timeout_seconds, now)
+        if lifecycle.status == "ready" and idle_status == "idle":
             return "idle"
         if not self._deployment_ready(deployment):
             return "starting"

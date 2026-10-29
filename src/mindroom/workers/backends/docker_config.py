@@ -35,6 +35,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
     build_backend_config_signature,
     validate_dedicated_worker_extra_env,
 )
+from mindroom.workers.backends._lifecycle import DEFAULT_IDLE_TIMEOUT_SECONDS
 from mindroom.workers.backends.worker_security import docker_worker_security_policy_signature
 
 if TYPE_CHECKING:
@@ -56,7 +57,6 @@ __all__ = [
     "validate_docker_mount_layout",
 ]
 
-_DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
 _DEFAULT_READY_TIMEOUT_SECONDS = 60.0
 DEFAULT_WORKER_PORT = 8766
 _DEFAULT_WORKER_PORT = DEFAULT_WORKER_PORT
@@ -253,7 +253,7 @@ class _DockerWorkerBackendConfig:
             or _DEFAULT_STORAGE_MOUNT_PATH,
             config_path=read_env(env, _CONFIG_PATH_ENV, _DEFAULT_CONFIG_PATH) or _DEFAULT_CONFIG_PATH,
             host_config_path=_read_host_config_path(runtime_paths, env),
-            idle_timeout_seconds=read_float_env(env, _IDLE_TIMEOUT_ENV, _DEFAULT_IDLE_TIMEOUT_SECONDS),
+            idle_timeout_seconds=read_float_env(env, _IDLE_TIMEOUT_ENV, DEFAULT_IDLE_TIMEOUT_SECONDS),
             ready_timeout_seconds=read_float_env(env, _READY_TIMEOUT_ENV, _DEFAULT_READY_TIMEOUT_SECONDS),
             name_prefix=read_env(env, _NAME_PREFIX_ENV, _DEFAULT_NAME_PREFIX) or _DEFAULT_NAME_PREFIX,
             publish_host=publish_host,

@@ -84,7 +84,6 @@ def test_worker_api_modules_share_response_dtos_and_serializer() -> None:
             last_used_at=12.0,
             created_at=1.0,
             last_started_at=2.0,
-            expires_at=30.0,
             startup_count=3,
             failure_count=2,
             failure_reason="startup failed",
@@ -96,7 +95,6 @@ def test_worker_api_modules_share_response_dtos_and_serializer() -> None:
     assert serialized_worker["failure_reason"] == "startup failed"
     assert serialized_worker["debug_metadata"] == {"namespace": "mindroom-instances"}
     assert serialized_worker["last_started_at"] == 2.0
-    assert serialized_worker["expires_at"] == 30.0
 
 
 def _runtime_paths(tmp_path: Path, *, process_env: dict[str, str] | None = None) -> constants.RuntimePaths:

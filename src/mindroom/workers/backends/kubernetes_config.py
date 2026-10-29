@@ -34,6 +34,7 @@ from mindroom.workers.backends._config_helpers import (
     read_json_object_list_env,
 )
 from mindroom.workers.backends._dedicated_worker_common import stable_signature_json
+from mindroom.workers.backends._lifecycle import DEFAULT_IDLE_TIMEOUT_SECONDS
 from mindroom.workers.backends.kubernetes_pod_names import (
     RESERVED_EXTRA_CONTAINER_NAMES,
     RESERVED_EXTRA_VOLUME_NAMES,
@@ -52,7 +53,6 @@ class _WorkerSeccompProfile(TypedDict):
     localhostProfile: str
 
 
-_DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
 _DEFAULT_READY_TIMEOUT_SECONDS = 60.0
 _DEFAULT_WORKER_PORT = 8766
 _DEFAULT_IMAGE_PULL_POLICY = "IfNotPresent"
@@ -552,7 +552,7 @@ class KubernetesWorkerBackendConfig:
             or _DEFAULT_STORAGE_MOUNT_PATH,
             storage_subpath_prefix=read_env(env, _STORAGE_SUBPATH_PREFIX_ENV, _DEFAULT_STORAGE_SUBPATH_PREFIX)
             or _DEFAULT_STORAGE_SUBPATH_PREFIX,
-            idle_timeout_seconds=read_float_env(env, _IDLE_TIMEOUT_ENV, _DEFAULT_IDLE_TIMEOUT_SECONDS),
+            idle_timeout_seconds=read_float_env(env, _IDLE_TIMEOUT_ENV, DEFAULT_IDLE_TIMEOUT_SECONDS),
             ready_timeout_seconds=read_float_env(env, _READY_TIMEOUT_ENV, _DEFAULT_READY_TIMEOUT_SECONDS),
             name_prefix=read_env(env, _NAME_PREFIX_ENV, _DEFAULT_NAME_PREFIX) or _DEFAULT_NAME_PREFIX,
             node_name=read_env(env, _NODE_NAME_ENV) or None,

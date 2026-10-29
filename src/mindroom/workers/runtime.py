@@ -29,8 +29,8 @@ from mindroom.workers.backends.kubernetes_config import (
     kubernetes_backend_cleanup_signature,
     kubernetes_backend_config_signature,
 )
-from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend, normalize_static_runner_api_root
-from mindroom.workers.models import WorkerLaunchConfig
+from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
+from mindroom.workers.models import WorkerLaunchConfig, normalize_sandbox_runner_api_root
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -397,7 +397,7 @@ def _static_runner_backend_config_signature(
 ) -> tuple[str, ...]:
     return (
         "static_runner",
-        normalize_static_runner_api_root(proxy_url or ""),
+        normalize_sandbox_runner_api_root(proxy_url or ""),
         proxy_token or "",
     )
 
@@ -460,7 +460,7 @@ def _build_primary_worker_manager(
     resolved_storage_root = (storage_root or runtime_paths.storage_root).expanduser().resolve()
     if backend_name == "static_runner":
         return StaticSandboxRunnerBackend(
-            api_root=normalize_static_runner_api_root(proxy_url or ""),
+            api_root=normalize_sandbox_runner_api_root(proxy_url or ""),
             auth_token=proxy_token,
         )
     if backend_name == "docker":

@@ -2,17 +2,21 @@
 
 The dedicated (docker, kubernetes, local) and shared (static) worker backends persist
 the same lifecycle fields and apply the same status-transition rules. This module is
-the single source of truth for those rules; each backend converts its own metadata
-(Kubernetes: Deployment annotations) to and from :class:`WorkerLifecycleState` at the edge.
+the single source of truth for those rules; each backend keeps one :class:`WorkerLifecycleState`
+on its worker record (Kubernetes: converts Deployment annotations to and from it at the edge).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
+
+from mindroom.workers.models import WorkerHandle
 
 if TYPE_CHECKING:
     from mindroom.workers.models import WorkerStatus
+
+DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,40 +32,33 @@ class WorkerLifecycleState:
     failure_reason: str | None = None
 
 
-class _MutableLifecycleMetadata(Protocol):
-    """Structural view of a backend metadata record carrying lifecycle fields."""
-
-    created_at: float
-    last_used_at: float
-    status: WorkerStatus
-    last_started_at: float | None
-    startup_count: int
-    failure_count: int
-    failure_reason: str | None
-
-
-def read_lifecycle_state(metadata: _MutableLifecycleMetadata) -> WorkerLifecycleState:
-    """Project the lifecycle fields of one backend metadata record."""
-    return WorkerLifecycleState(
-        created_at=metadata.created_at,
-        last_used_at=metadata.last_used_at,
-        status=metadata.status,
-        last_started_at=metadata.last_started_at,
-        startup_count=metadata.startup_count,
-        failure_count=metadata.failure_count,
-        failure_reason=metadata.failure_reason,
+def worker_handle(
+    *,
+    worker_id: str,
+    worker_key: str,
+    lifecycle: WorkerLifecycleState,
+    endpoint: str,
+    auth_token: str | None,
+    status: WorkerStatus,
+    backend_name: str,
+    debug_metadata: dict[str, str],
+) -> WorkerHandle:
+    """Build one worker's handle from its lifecycle state and the backend's effective status and endpoint."""
+    return WorkerHandle(
+        worker_id=worker_id,
+        worker_key=worker_key,
+        endpoint=endpoint,
+        auth_token=auth_token,
+        status=status,
+        backend_name=backend_name,
+        last_used_at=lifecycle.last_used_at,
+        created_at=lifecycle.created_at,
+        last_started_at=lifecycle.last_started_at,
+        startup_count=lifecycle.startup_count,
+        failure_count=lifecycle.failure_count,
+        failure_reason=lifecycle.failure_reason,
+        debug_metadata=debug_metadata,
     )
-
-
-def write_lifecycle_state(metadata: _MutableLifecycleMetadata, state: WorkerLifecycleState) -> None:
-    """Write one lifecycle state back onto a backend metadata record in place."""
-    metadata.created_at = state.created_at
-    metadata.last_used_at = state.last_used_at
-    metadata.status = state.status
-    metadata.last_started_at = state.last_started_at
-    metadata.startup_count = state.startup_count
-    metadata.failure_count = state.failure_count
-    metadata.failure_reason = state.failure_reason
 
 
 def initial_worker_lifecycle_state(*, now: float) -> WorkerLifecycleState:

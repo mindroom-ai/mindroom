@@ -61,7 +61,7 @@ from mindroom.workers.backends.kubernetes_resources import (
     _ANNOTATION_RUNNER_TOKEN_HASH,
     _ANNOTATION_STARTUP_MANIFEST_HASH,
     _ANNOTATION_STATE_SCOPE_WORKER_KEY,
-    _ANNOTATION_TEMPLATE_HASH,
+    ANNOTATION_TEMPLATE_HASH,
     ANNOTATION_WORKER_KEY,
     worker_auth_token,
 )
@@ -1471,7 +1471,7 @@ def test_kubernetes_backend_recreate_failure_removes_orphaned_tenant_auth_secret
     )
     handle = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
     deployment = apps_api.deployments[handle.worker_id]
-    deployment.metadata.annotations[_ANNOTATION_TEMPLATE_HASH] = "stale"
+    deployment.metadata.annotations[ANNOTATION_TEMPLATE_HASH] = "stale"
 
     def recreate_with_failure(deployment_name: str, _manifest: dict[str, object], *, timeout_seconds: float) -> None:
         _ = timeout_seconds
@@ -2993,7 +2993,7 @@ router:
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
     backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
     backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
-    initial_hash = apps_api.created_bodies[0]["metadata"]["annotations"][_ANNOTATION_TEMPLATE_HASH]
+    initial_hash = apps_api.created_bodies[0]["metadata"]["annotations"][ANNOTATION_TEMPLATE_HASH]
 
     config_path.write_text(
         f"""
@@ -3024,7 +3024,7 @@ router:
     updated_backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=20.0)
 
     recreated = apps_api.created_bodies[-1]
-    updated_hash = recreated["metadata"]["annotations"][_ANNOTATION_TEMPLATE_HASH]
+    updated_hash = recreated["metadata"]["annotations"][ANNOTATION_TEMPLATE_HASH]
     assert apps_api.deleted_names == [recreated["metadata"]["name"]]
     assert updated_hash != initial_hash
     volume_mounts = recreated["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
@@ -3977,8 +3977,8 @@ def test_kubernetes_backend_provisions_a_waiting_request_from_the_launch_applied
     _BACKEND_LAUNCHES[newer_backend] = newer
     newer_handle = newer_backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
     assert (
-        deployment.metadata.annotations[_ANNOTATION_TEMPLATE_HASH]
-        == newer_apps_api.deployments[newer_handle.worker_id].metadata.annotations[_ANNOTATION_TEMPLATE_HASH]
+        deployment.metadata.annotations[ANNOTATION_TEMPLATE_HASH]
+        == newer_apps_api.deployments[newer_handle.worker_id].metadata.annotations[ANNOTATION_TEMPLATE_HASH]
     )
 
 
@@ -3987,7 +3987,7 @@ def test_kubernetes_backend_reprovisions_a_cached_worker_when_the_launch_changes
     runtime_paths = _write_two_shared_agents_config(tmp_path, research_scope="shared")
     backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
     first = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
-    first_template_hash = apps_api.deployments[first.worker_id].metadata.annotations[_ANNOTATION_TEMPLATE_HASH]
+    first_template_hash = apps_api.deployments[first.worker_id].metadata.annotations[ANNOTATION_TEMPLATE_HASH]
     deployment_reads_before = len(apps_api.read_names)
 
     changed = _launch(_write_two_shared_agents_config(tmp_path, research_scope="user"))
@@ -3999,7 +3999,7 @@ def test_kubernetes_backend_reprovisions_a_cached_worker_when_the_launch_changes
     assert len(apps_api.read_names) > deployment_reads_before
     assert apps_api.deleted_names == []
     assert len(apps_api.created_bodies) == 1
-    assert apps_api.deployments[first.worker_id].metadata.annotations[_ANNOTATION_TEMPLATE_HASH] == first_template_hash
+    assert apps_api.deployments[first.worker_id].metadata.annotations[ANNOTATION_TEMPLATE_HASH] == first_template_hash
 
 
 def test_kubernetes_backend_reuses_a_cached_worker_for_an_equal_launch(tmp_path: Path) -> None:
@@ -4383,8 +4383,8 @@ def test_kubernetes_backend_reconcile_revalidates_live_state_before_recreating(t
     assert int(live_deployment.spec.replicas) == 1
     assert live_deployment.metadata.annotations[ANNOTATION_WORKER_KEY] == _TEST_SCOPED_WORKER_KEY_A
     assert (
-        live_deployment.metadata.annotations[_ANNOTATION_TEMPLATE_HASH]
-        != stale_deployment.metadata.annotations[_ANNOTATION_TEMPLATE_HASH]
+        live_deployment.metadata.annotations[ANNOTATION_TEMPLATE_HASH]
+        != stale_deployment.metadata.annotations[ANNOTATION_TEMPLATE_HASH]
     )
 
 
@@ -4630,6 +4630,20 @@ def test_kubernetes_backend_touch_revives_idle_worker_and_clears_stale_failure_r
     assert touched is not None
     assert touched.status == "ready"
     assert touched.failure_reason is None
+
+
+def test_kubernetes_backend_reensure_after_failure_clears_the_failure_reason() -> None:
+    """A worker started again after a failure reports no stale failure reason, in its handle or in listings."""
+    backend, apps_api, _core_api = _backend()
+    handle = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    backend.record_failure(_TEST_SCOPED_WORKER_KEY_A, "boom", now=11.0)
+
+    restarted = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=12.0)
+
+    assert (restarted.status, restarted.failure_reason) == ("ready", None)
+    listed = backend.list_workers(now=13.0)[0]
+    assert (listed.status, listed.failure_reason) == ("ready", None)
+    assert apps_api.deployments[handle.worker_id].metadata.annotations.get("mindroom.ai/failure-reason", "") == ""
 
 
 def test_kubernetes_backend_pins_workers_to_control_plane_node(

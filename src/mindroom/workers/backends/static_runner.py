@@ -16,34 +16,28 @@ from mindroom.workers.backend import (
     filter_and_sort_worker_handles,
 )
 from mindroom.workers.backends._lifecycle import (
+    DEFAULT_IDLE_TIMEOUT_SECONDS,
+    WorkerLifecycleState,
     initial_worker_lifecycle_state,
     mark_worker_failed,
     mark_worker_idle,
     mark_worker_ready,
     prepare_worker_ensure_lifecycle,
-    read_lifecycle_state,
     touch_worker_lifecycle,
-    write_lifecycle_state,
+    worker_handle,
 )
 from mindroom.workers.compatibility import ready_worker_protocol_mismatch
-from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerSpec, WorkerStatus
+from mindroom.workers.models import (
+    SANDBOX_RUNNER_API_ROOT,
+    ProgressSink,
+    WorkerHandle,
+    WorkerSpec,
+    WorkerStatus,
+    normalize_sandbox_runner_api_root,
+)
 
-_DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
 _HEALTH_CHECK_TIMEOUT_SECONDS = 5.0
-_SANDBOX_RUNNER_API_ROOT = "/api/sandbox-runner"
 _OLDER_RUNNER_HINT = "Restart the runner on this release, pulling its image again when it runs a tag such as ':latest'."
-
-
-def normalize_static_runner_api_root(base_url: str) -> str:
-    """Normalize a configured sandbox-runner URL into its API root."""
-    normalized = base_url.strip().rstrip("/")
-    if not normalized:
-        return normalized
-    if normalized.endswith("/execute"):
-        return normalized.removesuffix("/execute")
-    if normalized.endswith(_SANDBOX_RUNNER_API_ROOT):
-        return normalized
-    return f"{normalized}{_SANDBOX_RUNNER_API_ROOT}"
 
 
 def _read_runner_health(runner_root: str) -> httpx.Response:
@@ -56,13 +50,7 @@ def _read_runner_health(runner_root: str) -> httpx.Response:
 class _StaticWorkerMetadata:
     worker_id: str
     worker_key: str
-    created_at: float
-    last_used_at: float
-    status: WorkerStatus
-    last_started_at: float | None = None
-    startup_count: int = 0
-    failure_count: int = 0
-    failure_reason: str | None = None
+    lifecycle: WorkerLifecycleState
 
 
 class StaticSandboxRunnerBackend:
@@ -76,9 +64,9 @@ class StaticSandboxRunnerBackend:
         *,
         api_root: str,
         auth_token: str | None,
-        idle_timeout_seconds: float = _DEFAULT_IDLE_TIMEOUT_SECONDS,
+        idle_timeout_seconds: float = DEFAULT_IDLE_TIMEOUT_SECONDS,
     ) -> None:
-        self.api_root = normalize_static_runner_api_root(api_root)
+        self.api_root = normalize_sandbox_runner_api_root(api_root)
         self.auth_token = auth_token
         self.idle_timeout_seconds = max(1.0, idle_timeout_seconds)
         self._lock = threading.Lock()
@@ -111,15 +99,10 @@ class StaticSandboxRunnerBackend:
                 should_restart = True
             else:
                 should_restart = self._effective_status(metadata, timestamp) == "idle"
-            write_lifecycle_state(
-                metadata,
-                prepare_worker_ensure_lifecycle(
-                    read_lifecycle_state(metadata),
-                    now=timestamp,
-                    should_restart=should_restart,
-                ),
+            metadata.lifecycle = mark_worker_ready(
+                prepare_worker_ensure_lifecycle(metadata.lifecycle, now=timestamp, should_restart=should_restart),
+                now=timestamp,
             )
-            write_lifecycle_state(metadata, mark_worker_ready(read_lifecycle_state(metadata), now=timestamp))
             self._workers[spec.worker_key] = metadata
             return self._to_handle(metadata, now=timestamp)
 
@@ -140,7 +123,7 @@ class StaticSandboxRunnerBackend:
             failures_before_probe = self._recorded_failures
             if self._compatible_since_failures == failures_before_probe:
                 return
-        runner_root = self.api_root.removesuffix(_SANDBOX_RUNNER_API_ROOT)
+        runner_root = self.api_root.removesuffix(SANDBOX_RUNNER_API_ROOT)
         try:
             response = _read_runner_health(runner_root)
             response.raise_for_status()
@@ -166,7 +149,7 @@ class StaticSandboxRunnerBackend:
             metadata = self._workers.get(worker_key)
             if metadata is None:
                 return None
-            write_lifecycle_state(metadata, touch_worker_lifecycle(read_lifecycle_state(metadata), now=timestamp))
+            metadata.lifecycle = touch_worker_lifecycle(metadata.lifecycle, now=timestamp)
             return self._to_handle(metadata, now=timestamp)
 
     def list_workers(self, *, include_idle: bool = True, now: float | None = None) -> list[WorkerHandle]:
@@ -182,8 +165,8 @@ class StaticSandboxRunnerBackend:
         cleaned_workers: list[WorkerHandle] = []
         with self._lock:
             for metadata in self._workers.values():
-                if metadata.status == "ready" and self._effective_status(metadata, timestamp) == "idle":
-                    write_lifecycle_state(metadata, mark_worker_idle(read_lifecycle_state(metadata)))
+                if metadata.lifecycle.status == "ready" and self._effective_status(metadata, timestamp) == "idle":
+                    metadata.lifecycle = mark_worker_idle(metadata.lifecycle)
                     cleaned_workers.append(self._to_handle(metadata, now=timestamp))
         return filter_and_sort_worker_handles(cleaned_workers, True)
 
@@ -202,40 +185,29 @@ class StaticSandboxRunnerBackend:
             # The runner may have been replaced by one from another release, so the next call asks again.
             self._recorded_failures += 1
             metadata = self._workers.get(worker_key) or self._new_metadata(worker_key, timestamp)
-            write_lifecycle_state(
-                metadata,
-                mark_worker_failed(read_lifecycle_state(metadata), now=timestamp, failure_reason=failure_reason),
-            )
+            metadata.lifecycle = mark_worker_failed(metadata.lifecycle, now=timestamp, failure_reason=failure_reason)
             self._workers[worker_key] = metadata
             return self._to_handle(metadata, now=timestamp)
 
     def _new_metadata(self, worker_key: str, now: float) -> _StaticWorkerMetadata:
-        lifecycle = initial_worker_lifecycle_state(now=now)
         return _StaticWorkerMetadata(
             worker_id=worker_dir_name(worker_key),
             worker_key=worker_key,
-            created_at=lifecycle.created_at,
-            last_used_at=lifecycle.last_used_at,
-            status=lifecycle.status,
+            lifecycle=initial_worker_lifecycle_state(now=now),
         )
 
     def _effective_status(self, metadata: _StaticWorkerMetadata, now: float) -> WorkerStatus:
-        return effective_idle_status(metadata.status, metadata.last_used_at, self.idle_timeout_seconds, now)
+        lifecycle = metadata.lifecycle
+        return effective_idle_status(lifecycle.status, lifecycle.last_used_at, self.idle_timeout_seconds, now)
 
     def _to_handle(self, metadata: _StaticWorkerMetadata, *, now: float) -> WorkerHandle:
-        return WorkerHandle(
+        return worker_handle(
             worker_id=metadata.worker_id,
             worker_key=metadata.worker_key,
+            lifecycle=metadata.lifecycle,
             endpoint=f"{self.api_root}/execute",
             auth_token=self.auth_token,
             status=self._effective_status(metadata, now),
             backend_name=self.backend_name,
-            last_used_at=metadata.last_used_at,
-            created_at=metadata.created_at,
-            last_started_at=metadata.last_started_at,
-            expires_at=None,
-            startup_count=metadata.startup_count,
-            failure_count=metadata.failure_count,
-            failure_reason=metadata.failure_reason,
             debug_metadata={"api_root": self.api_root},
         )
