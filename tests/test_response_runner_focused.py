@@ -3695,15 +3695,8 @@ def test_hidden_textless_team_pause_keeps_internal_continuation_snapshot() -> No
     )
     state = {
         "kind": "team_stream",
-        "version": 2,
-        "members": [
-            {
-                "id": "member-a",
-                "config_name": "member-a",
-                "display_name": "Member A",
-                "content": "",
-            },
-        ],
+        "version": 3,
+        "members": [{"id": "member-a", "display_name": "Member A", "content": ""}],
         "consensus": "",
     }
     error = ResponsePausedForApproval(

@@ -51,7 +51,7 @@ from mindroom.session_storage.store import ConversationStore
 from mindroom.teams.envelope import prepare_materialized_team_execution, team_response_stream
 from mindroom.teams.formation import resolve_live_shared_agent_names
 from mindroom.teams.members import build_team_spec, resolve_team_members
-from mindroom.teams.presentation import TeamStreamPresentation, url_safe_member_id
+from mindroom.teams.presentation import TeamStreamPresentation
 from mindroom.teams.spec import TeamMode
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.turn_model import ModelScope, resolve_turn_model
@@ -450,13 +450,13 @@ async def test_a_member_s_pending_call_gets_its_own_line_under_the_member_s_name
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("show_tool_calls", [True, False])
-async def test_a_pause_keys_a_member_by_its_url_safe_id_and_keeps_its_config_name(
+async def test_a_pause_keys_a_member_by_its_config_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     show_tool_calls: bool,
 ) -> None:
-    """Stored documents key a member by Agno's url-safe id; the approval still names the authored member."""
+    """Stored documents key a member by its config name, the name the approval gives the member too."""
     team = _team(
         tmp_path,
         monkeypatch,
@@ -476,12 +476,10 @@ async def test_a_pause_keys_a_member_by_its_url_safe_id_and_keeps_its_config_nam
 
     paused = await _paused(team, show_tool_calls=show_tool_calls)
 
-    member_id = url_safe_member_id("Code_Review")
-    assert member_id == "code-review"
     [member] = paused.response_presentation_state["members"]
-    assert (member["id"], member["config_name"], member["display_name"]) == (member_id, "Code_Review", "Code Review")
+    assert (member["id"], member["display_name"]) == ("Code_Review", "Code Review")
     assert str(member["content"]).startswith("Member answer.")
-    assert paused.tool_trace[0].scope_key == f"agent:{member_id}"
+    assert paused.tool_trace[0].scope_key == "agent:Code_Review"
     assert paused.toolkit_owners[("Code_Review", "touch")] == PROBE_TOOL
     require_ordered_pause_presentation(paused, show_tool_calls=show_tool_calls)
 

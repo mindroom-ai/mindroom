@@ -204,6 +204,7 @@ Matrix sync callback
 | `teams/delegate_tools.py` | `delegate_task_to_member` and `delegate_task_to_members`, the member result texts, the pause a paused member propagates to the team run, and the answer its resumed run gives the waiting call |
 | `teams/runtime.py` | `run_team` and `continue_team` over the agent loop: members as child runs, member decisions routed by member and call, team usage |
 | `teams/presentation.py` | The team reply document: header, member slots, consensus, tool trace, the durable `team_stream` snapshot an approval resume restores, the live document a resumed run publishes, and the document's text without tool markers that a reply records |
+| `teams/legacy_team_presentation.py` | Team reply snapshots of version 2, which keyed member slots by Agno's url-safe member id, read as version 3 when an approval resume restores one |
 | `teams/envelope.py` | `team_response_stream`: prepare a team turn, run its leader through the turn driver, and render the reply; `run_prepared_team` runs an OpenAI-compatible API team turn under the same leader hooks and storage |
 | `teams/leader.py` | `LeaderRun`: how a team's leader runs in one turn or resume, its storage, hooks, request settings, and model, which a live turn and a saved approval's resume both build to start or continue the leader's run |
 | `teams/attempt.py` | One attempt of a team run, a turn's or a resume's: the reply document its events build, the records the run hands over, the text an interrupted turn records (its document without tool markers), and its run metadata |

@@ -1,4 +1,4 @@
-"""The team reply document: member slots, consensus, tool markers, the durable snapshot, member ids, finished runs.
+"""The team reply document: member slots, consensus, tool markers, the durable snapshot, finished runs.
 
 The finished runs are the records a team run hands over.
 """
@@ -20,7 +20,6 @@ from mindroom.teams.presentation import (
     format_team_header,
     render_team_member_slots,
     strip_team_display,
-    url_safe_member_id,
 )
 from mindroom.teams.runtime import MemberEvent
 from tests.teams.squad import resolved_members, scripted, team_spec
@@ -30,22 +29,6 @@ def _presentation(*, show_tool_calls: bool = False) -> TeamStreamPresentation:
     return TeamStreamPresentation.new(["ledger_agent", "scout"], ["Ledger", "Scout"], show_tool_calls=show_tool_calls)
 
 
-@pytest.mark.parametrize(
-    ("config_name", "member_id"),
-    [
-        ("ledger_agent", "ledger-agent"),
-        ("CamelCase", "camel-case"),
-        ("Two Words", "two-words"),
-        ("dots.kept", "dots.kept"),
-        ("trailing__under", "trailing-under"),
-        ("mixed-Case_name 2", "mixed-case-name-2"),
-    ],
-)
-def test_member_ids_keep_the_keys_of_stored_reply_snapshots(config_name: str, member_id: str) -> None:
-    """Stored reply snapshots key members by these ids, so a configured name keeps the id main gave it."""
-    assert url_safe_member_id(config_name) == member_id
-
-
 def test_member_and_leader_events_land_in_their_slots() -> None:
     presentation = _presentation()
     apply_team_event(presentation, MemberEvent("ledger_agent", "Ledger", "run-1", TextDelta("Three ")))
@@ -53,7 +36,7 @@ def test_member_and_leader_events_land_in_their_slots() -> None:
     apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", TextDelta("Two more.")))
     apply_team_event(presentation, TextDelta("Five in all."))
 
-    assert presentation.per_member == {"ledger-agent": "Three vendors.", "scout": "Two more."}
+    assert presentation.per_member == {"ledger_agent": "Three vendors.", "scout": "Two more."}
     assert presentation.consensus == "Five in all."
     assert presentation.render_body(finished=True) == (
         "🤝 **Team Response** (Ledger, Scout):\n\n"
@@ -229,22 +212,51 @@ def test_a_snapshot_for_other_members_is_refused() -> None:
         )
 
 
+@pytest.mark.parametrize("version", [1, 4])
+def test_a_snapshot_of_another_version_is_refused(version: int) -> None:
+    with pytest.raises(RuntimeError, match="snapshot is invalid"):
+        TeamStreamPresentation.restore(
+            config_names=["ledger_agent", "scout"],
+            show_tool_calls=False,
+            state={**_presentation().to_state(), "version": version},
+            tool_trace=(),
+        )
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        "ledger_agent",
+        {"id": "ledger_agent", "display_name": "Ledger"},
+        {"id": "ledger_agent", "display_name": None, "content": ""},
+    ],
+)
+def test_a_snapshot_with_a_malformed_member_slot_is_refused(member: object) -> None:
+    with pytest.raises(RuntimeError, match="snapshot is invalid"):
+        TeamStreamPresentation.restore(
+            config_names=["ledger_agent"],
+            show_tool_calls=False,
+            state={"kind": "team_stream", "version": 3, "members": [member], "consensus": ""},
+            tool_trace=(),
+        )
+
+
 def test_members_with_the_same_display_name_keep_their_own_slots() -> None:
-    """Slots are keyed by member id, so equal display names share neither text nor tools."""
+    """Slots are keyed by config name, so equal display names share neither text nor tools."""
     presentation = TeamStreamPresentation.new(["member_a", "member_b"], ["Same", "Same"], show_tool_calls=True)
 
-    presentation.append_member("member-a", "First answer.")
-    presentation.append_member("member-b", "Second answer.")
+    presentation.append_member("member_a", "First answer.")
+    presentation.append_member("member_b", "Second answer.")
     presentation.start_member_tool(
-        "member-b",
+        "member_b",
         ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}).call,
     )
 
     assert presentation.per_member == {
-        "member-a": "First answer.",
-        "member-b": "Second answer.\n\n🔧 `inspect` [1] ⏳\n\n",
+        "member_a": "First answer.",
+        "member_b": "Second answer.\n\n🔧 `inspect` [1] ⏳\n\n",
     }
-    assert presentation.tool_trace[0].scope_key == "agent:member-b"
+    assert presentation.tool_trace[0].scope_key == "agent:member_b"
     assert presentation.render_body(finished=True).count("**Same**:") == 2
 
 

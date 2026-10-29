@@ -2,14 +2,12 @@
 """The team reply as the user reads it: the header, one slot per member, the consensus, and the tool trace.
 
 ``TeamStreamPresentation`` is the structured document a streamed or collected team run renders from and the durable
-``team_stream`` snapshot an approval continuation restores. Member slots are keyed by ``url_safe_member_id`` of the
-member's config name, the id stored snapshots and reply records carry. ``publish_team_presentation`` shows a resumed
-run's document live in the reply it continues.
+``team_stream`` snapshot an approval continuation restores. Member slots are keyed by the member's config name, its
+member id. ``publish_team_presentation`` shows a resumed run's document live in the reply it continues.
 """
 
 from __future__ import annotations
 
-import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
@@ -17,6 +15,7 @@ from typing import TYPE_CHECKING, cast
 from mindroom.delegation.state import member_slot_id
 from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
 from mindroom.matrix.message_builder import opens_with_markdown_block
+from mindroom.teams.legacy_team_presentation import upgrade_v2_team_snapshot
 from mindroom.teams.runtime import MemberEvent
 from mindroom.tool_system.events import (
     StreamingToolTracker,
@@ -35,15 +34,6 @@ if TYPE_CHECKING:
     from mindroom.llm.events import ReportedCall
     from mindroom.streaming import ProgressPublisher
     from mindroom.teams.runtime import TeamRunEvent
-
-
-def url_safe_member_id(input_string: str) -> str:
-    """Return Agno's ``url_safe_string`` of a member's config name, the member id of stored reply snapshots.
-
-    Spaces, camelCase boundaries, and underscores become dashes, punctuation other than dots goes, dash runs collapse.
-    """
-    kebab = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", input_string.replace(" ", "-")).lower().replace("_", "-")
-    return re.sub(r"-+", "-", re.sub(r"[^\w\-.]", "", kebab))
 
 
 _TEAM_HEADER_PREFIX = "🤝 **Team Response** ("
@@ -106,25 +96,24 @@ def render_team_member_slots(
 
 
 _INVALID_SNAPSHOT = "Team continuation presentation snapshot is invalid"
+_SNAPSHOT_VERSION = 3
 # The run a restored slot's text is attributed to: none a resumed run can have, since every run id is non-empty.
 _RUN_BEFORE_THE_PAUSE = ""
 
 
 def _is_snapshot_member(member: object) -> bool:
-    """Return whether one stored member slot holds text fields, its id and config name non-empty."""
+    """Return whether one stored member slot holds its id, display name, and content as text."""
     if not isinstance(member, dict):
         return False
     fields = cast("dict[str, object]", member)
-    keys = ("id", "config_name", "display_name", "content")
-    return all(isinstance(fields.get(key), str) for key in keys) and bool(fields["id"]) and bool(fields["config_name"])
+    return all(isinstance(fields.get(key), str) for key in ("id", "display_name", "content"))
 
 
 @dataclass
 class TeamStreamPresentation:
-    """Structured team document that survives an approval continuation."""
+    """Structured team document that survives an approval continuation; its member ids are the members' config names."""
 
     member_ids: list[str]
-    config_names_by_id: dict[str, str]
     display_names_by_id: dict[str, str]
     show_tool_calls: bool
     per_member: dict[str, str]
@@ -153,13 +142,12 @@ class TeamStreamPresentation:
         show_tool_calls: bool,
     ) -> TeamStreamPresentation:
         """Create an empty presentation for a new team run."""
-        ids = [url_safe_member_id(config_name) for config_name in config_names]
+        ids = list(config_names)
         if len(ids) != len(display_names) or len(ids) != len(set(ids)) or not all(ids):
             msg = "Team presentation member identities are invalid"
             raise RuntimeError(msg)
         return cls(
             member_ids=ids,
-            config_names_by_id=dict(zip(ids, config_names, strict=True)),
             display_names_by_id=dict(zip(ids, display_names, strict=True)),
             show_tool_calls=show_tool_calls,
             per_member=dict.fromkeys(ids, ""),
@@ -177,20 +165,22 @@ class TeamStreamPresentation:
         """Restore a durable structured snapshot without interpreting its rendered Markdown.
 
         The snapshot must hold the slots of ``config_names`` in order, and every tool call of ``tool_trace`` one of
-        them; a hidden tool call separates only slot text written before it.
+        them; a hidden tool call separates only slot text written before it. A snapshot an earlier release stored as
+        version 2 restores as the version 3 it stands for (``upgrade_v2_team_snapshot``).
         """
-        if state is None or state.get("kind") != "team_stream" or state.get("version") != 2:
+        if state is not None and state.get("kind") == "team_stream" and state.get("version") == 2:
+            upgraded = upgrade_v2_team_snapshot(state, tool_trace)
+            if upgraded is None:
+                raise RuntimeError(_INVALID_SNAPSHOT)
+            state, tool_trace = upgraded
+        if state is None or state.get("kind") != "team_stream" or state.get("version") != _SNAPSHOT_VERSION:
             raise RuntimeError(_INVALID_SNAPSHOT)
         stored_members = state.get("members")
         if not isinstance(stored_members, list) or not all(_is_snapshot_member(member) for member in stored_members):
             raise RuntimeError(_INVALID_SNAPSHOT)
         members = cast("list[dict[str, str]]", stored_members)
         member_ids = [member["id"] for member in members]
-        if (
-            member_ids != [url_safe_member_id(config_name) for config_name in config_names]
-            or len(member_ids) != len(set(member_ids))
-            or [member["config_name"] for member in members] != list(config_names)
-        ):
+        if member_ids != list(config_names):
             raise RuntimeError(_INVALID_SNAPSHOT)
         valid_tool_scopes = {"team", *(f"agent:{member_id}" for member_id in member_ids)}
         if any(entry.scope_key not in valid_tool_scopes for entry in tool_trace):
@@ -214,7 +204,6 @@ class TeamStreamPresentation:
             raise RuntimeError(_INVALID_SNAPSHOT)
         restored = cls(
             member_ids=member_ids,
-            config_names_by_id={member["id"]: member["config_name"] for member in members},
             display_names_by_id={member["id"]: member["display_name"] for member in members},
             show_tool_calls=show_tool_calls,
             per_member=per_member,
@@ -230,11 +219,10 @@ class TeamStreamPresentation:
         """Serialize only the structure needed to reproduce the current body."""
         state: dict[str, object] = {
             "kind": "team_stream",
-            "version": 2,
+            "version": _SNAPSHOT_VERSION,
             "members": [
                 {
                     "id": member_id,
-                    "config_name": self.config_names_by_id[member_id],
                     "display_name": self.display_names_by_id[member_id],
                     "content": self.per_member[member_id],
                 }
@@ -252,7 +240,7 @@ class TeamStreamPresentation:
 
         A run record's member identity is optional, and a run that names no member has no slot.
         """
-        return member_slot_id(self.config_names_by_id, agent_id, reported_name)
+        return member_slot_id(self.member_ids, agent_id, reported_name)
 
     def append_member(self, member_id: str, content: object | None, *, separate: bool = False) -> None:
         """Append a member content delta to the slot of ``member_id``, which ``resolve_member_id`` returned.
@@ -421,5 +409,4 @@ __all__ = [
     "publish_team_presentation",
     "render_team_member_slots",
     "strip_team_display",
-    "url_safe_member_id",
 ]

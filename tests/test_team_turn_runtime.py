@@ -758,7 +758,7 @@ async def test_a_member_approval_pauses_the_team_with_the_member_s_identity_and_
     assert paused.approval_agent_name is None
     assert paused.runtime_model_name == "default"
     assert paused.team_member_model_names == (("checker", "checker-model"), ("writer", "writer-model"))
-    assert [member["config_name"] for member in paused.response_presentation_state["members"]] == [
+    assert [member["id"] for member in paused.response_presentation_state["members"]] == [
         "writer",
         "checker",
     ]
