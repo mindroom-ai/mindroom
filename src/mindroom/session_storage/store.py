@@ -376,6 +376,21 @@ class ConversationStore:
         with self.transaction(write=False) as connection:
             return _read_runs(connection, self.names, "run.session_id = ?", (session_id,))
 
+    def runs_after(self, session_id: str, seq: int) -> list[LoggedRun]:
+        """Return the session's top-level runs placed after ``seq`` in its log, in ``seq`` order, each in its replay view.
+
+        A run that finishes after the turns it waited for takes the next ``seq``, so a reader that has read through
+        ``seq`` finds every run that finished since among these.
+        """
+        condition, parameters = "run.session_id = ? AND run.parent_run_id IS NULL AND run.seq > ?", (session_id, seq)
+        with self.transaction(write=False) as connection:
+            seqs = connection.execute(
+                f"SELECT seq FROM {quote_identifier(self.names.log_runs)} AS run WHERE {condition} ORDER BY seq",  # noqa: S608
+                parameters,
+            ).fetchall()
+            runs = _read_runs(connection, self.names, condition, parameters)
+        return [LoggedRun(run_seq, run) for (run_seq,), run in zip(seqs, runs, strict=True)]
+
     def _write_state(
         self,
         connection: sqlite3.Connection,
@@ -465,6 +480,13 @@ class ConversationStore:
             connection.execute(usage_upsert_sql(self.names), (session_id, usage_id, json.dumps(snapshot)))
         if created is not None:
             report_created_row(created)
+
+
+class LoggedRun(NamedTuple):
+    """A stored run and its place in its session's log."""
+
+    seq: int
+    run: AnyRunRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -1156,6 +1178,7 @@ def _counted_value(value: object) -> int:
 __all__ = [
     "BUSY_TIMEOUT_SECONDS",
     "ConversationStore",
+    "LoggedRun",
     "SaveOutcome",
     "begun",
     "connect_by_name",
