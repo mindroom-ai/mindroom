@@ -438,10 +438,7 @@ class _TaskRunner:
                     if task is None:
                         return None
                     if departed_task != task:
-                        membership_config = runtime.config_provider()
-                        if membership_config is None:
-                            msg = "Scheduled task membership configuration is unavailable"
-                            raise ScheduledTaskStateReadError(msg)  # noqa: TRY301
+                        membership_config = runtime._config()
                         creator_joined = await _scheduled_task_creator_is_joined(
                             client,
                             task,
