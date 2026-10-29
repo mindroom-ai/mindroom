@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -612,6 +613,26 @@ class TestCompletion:
         owner = await read(store, turn_rows.turn_for_response_event, "$echo2")
         assert owner is not None
         assert owner.turn_key == found.turn_key
+
+    async def test_a_write_read_before_the_echo_was_replaced_keeps_the_replacement(
+        self,
+        store: EventJournalStore,
+    ) -> None:
+        """A write carrying the echo as it was before its replacement landed keeps the replacement."""
+        await write(store, turn_rows.record_visible_echo, room_id=ROOM, source_event_id="$v", echo_event_id="$e")
+        stale = await accepted(store, turn(["$v"]))
+        assert stale.visible_echoes == {"$v": SourceVisibleEcho("$e")}
+        await write(
+            store,
+            turn_rows.record_finalized_visible_echo,
+            source_event_id="$v",
+            echo_event_id="$e",
+            is_fallback=False,
+        )
+
+        await write(store, turn_rows.record_responded_turn, replace(stale, response_event_id="$relay"), room_id=ROOM)
+
+        assert await read(store, turn_rows.visible_echo, "$v") == SourceVisibleEcho("$e", is_fallback=False)
 
     async def test_a_transcript_is_never_overwritten_by_a_fallback(self, store: EventJournalStore) -> None:
         """A transcript is never overwritten by a fallback."""

@@ -1242,7 +1242,9 @@ def _apply_payload(
     Eligibility is judged against the state after this write: a deleted source
     keeps no prompt or checkpoint, and a prompt taken from a redacted revision
     is never stored, while a newer valid edit still is. A prompt follows its
-    revision, so a stored selection newer than the candidate's is kept.
+    revision, so a stored selection newer than the candidate's is kept. A
+    stored echo or checkpoint is kept, as its own writer may have moved it on
+    since the candidate was read.
     """
     room_id = turn.room_id
     deleted = _deleted_among(transaction, agent_name, room_id, sources)
@@ -1259,7 +1261,7 @@ def _apply_payload(
     )
     for source in sources:
         echo = (candidate.visible_echoes or {}).get(source.event_id)
-        if echo is not None:
+        if echo is not None and source.visible_echo_event_id is None:
             source.visible_echo_event_id = echo.event_id
             source.visible_echo_is_fallback = echo.is_fallback
         if source.event_id in deleted:
