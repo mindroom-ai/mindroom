@@ -714,7 +714,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Cancellation during async knowledge lookup must preserve the interrupted turn."""
+        """A cancellation during knowledge lookup comes before the turn driver starts, so no interrupted turn is stored."""
         config = _runtime_bound_config(
             Config(
                 agents={
