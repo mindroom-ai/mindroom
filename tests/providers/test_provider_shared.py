@@ -180,6 +180,37 @@ def test_an_account_out_of_credit_or_past_its_limits_fails_at_once(
 
 
 @pytest.mark.parametrize(
+    ("message", "status", "code", "error_type"),
+    [
+        # OpenRouter's account or API key without credit, whose code is the status, on an HTTP error and on an error
+        # event inside a stream.
+        ("Insufficient credits. Add more using https://openrouter.ai/credits", 402, "402", None),
+        ("Insufficient credits. Add more using https://openrouter.ai/credits", None, "402", None),
+        # The status outranks wording that names the credentials, as OpenRouter's error docs word its 402.
+        ("Your account or API key has insufficient credits. Add more credits and retry the request.", 402, "402", None),
+        # DeepSeek's account without balance, whose type and code name no billing failure.
+        ("Insufficient Balance", 402, "invalid_request_error", "unknown_error"),
+    ],
+)
+def test_a_payment_required_status_fails_at_once_as_a_billing_stop(
+    message: str,
+    status: int | None,
+    code: str | None,
+    error_type: str | None,
+) -> None:
+    """Every provider that sends a 402 means the account cannot pay for the request, which no retry changes."""
+    error = classify_provider_error(message, provider="Test", status_code=status, code=code, error_type=error_type)
+
+    assert (type(error), error.retryable, error.code, error.provider_code, str(error)) == (
+        ProviderError,
+        False,
+        QUOTA_EXHAUSTED,
+        code,
+        message,
+    )
+
+
+@pytest.mark.parametrize(
     ("message", "code", "error_type", "expected"),
     [
         ("Slow down", None, "rate_limit_error", RateLimited),

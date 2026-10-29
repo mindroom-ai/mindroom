@@ -42,6 +42,9 @@ __all__ = [
 
 _RATE_LIMIT_STATUS = 429
 _UNAUTHORIZED_STATUS = 401
+# Payment Required, which OpenRouter and DeepSeek send for an account or key without credit, Gemini for used-up prepaid
+# credit, and Anthropic for a billing or payment problem: no retry passes until the account's billing changes.
+_PAYMENT_REQUIRED_STATUS = 402
 # Statuses after which an unchanged request can succeed, the ones the OpenAI and Claude SDKs retried: a request
 # timeout, OpenAI's transient conflict (409), and every server error, among them Anthropic's overloaded model (529),
 # which the error message reports as temporary unavailability rather than a rate limit, and a CDN's origin failures
@@ -200,8 +203,8 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
     7. An invalid-request status is ``InvalidRequest``.
     8. Anything else, such as a 403 or an unknown status, is a final ``ProviderError``.
 
-    A name or wording that says the account has no credit left or reached its monthly spend or usage limit outranks
-    every rule: whatever its status, it is a final ``ProviderError`` marked ``QUOTA_EXHAUSTED``, since no wait lets it
+    A 402 status, or a name or wording that says the account has no credit left or reached its monthly spend or usage
+    limit, outranks every rule: it is a final ``ProviderError`` marked ``QUOTA_EXHAUSTED``, since no wait lets it
     through.
     """
     status = status_code if status_code is not None else (int(code) if code is not None and code.isdecimal() else None)
@@ -219,7 +222,11 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
             retry_after_seconds=retry_after_seconds,
         )
 
-    if names & _QUOTA_EXHAUSTED_NAMES or any(wording in lowered for wording in _QUOTA_EXHAUSTED_WORDING):
+    if (
+        status == _PAYMENT_REQUIRED_STATUS
+        or names & _QUOTA_EXHAUSTED_NAMES
+        or any(wording in lowered for wording in _QUOTA_EXHAUSTED_WORDING)
+    ):
         return typed(ProviderError, marker=QUOTA_EXHAUSTED)
     over_tokens_per_minute = _REQUEST_TOO_LARGE in lowered
     if status == _RATE_LIMIT_STATUS or (names & _RATE_LIMIT_NAMES and (status is None or over_tokens_per_minute)):
