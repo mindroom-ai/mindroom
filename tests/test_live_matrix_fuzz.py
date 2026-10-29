@@ -2029,7 +2029,7 @@ async def test_restart_room_read_finds_history_the_answer_never_projected(
     runner = None
     try:
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
-        agent = f"general@{stack.agent_id}"
+        agent = journal_principal_id("general", stack.agent_id)
         for logical_event_id in ("$old-text", "$old-media"):
             _seed_visible_message(stack, principal=agent, room_id=room, logical_event_id=logical_event_id)
         _seed_visible_message(
@@ -2182,7 +2182,7 @@ def test_restart_regression_waits_for_projected_event_and_drained_source(debt: s
                     membership_epoch
                 ) VALUES (?, ?, ?, '', '@sender:example', 1, ?, 1, '{}', 0)
                 """,
-                (f"general@{stack.agent_id}", "!target:example", "$fresh", "$fresh"),
+                (journal_principal_id("general", stack.agent_id), "!target:example", "$fresh", "$fresh"),
             )
             fixture_database.commit()
         for name, user in (("router", "@router:example"), ("general", stack.agent_id)):
@@ -2230,7 +2230,7 @@ def test_restart_regression_reads_exact_durable_journal_state() -> None:
     try:
         stack.agent_id = "@agent:example"
         store = EventJournalStore.open_sqlite(stack.storage_path / "tracking" / "event_journal.db")
-        principal_id = f"general@{stack.agent_id}"
+        principal_id = journal_principal_id("general", stack.agent_id)
         database_path = stack.storage_path / "tracking" / "event_journal.db"
 
         async def admit() -> None:
@@ -2425,7 +2425,7 @@ def test_recovery_debt_counts_only_exact_workload_final_rows() -> None:
     """Only attempted unacknowledged FINAL debt for general workload roots is evidence."""
     stack = ManagedTuwunelStack(profile="sustained-stream-capacity")
     stack.agent_id = "@mindroom_general:example"
-    expected_principal = f"general@{stack.agent_id}"
+    expected_principal = journal_principal_id("general", stack.agent_id)
     try:
         database_path = stack.storage_path / "tracking" / "event_journal.db"
         database_path.parent.mkdir(parents=True)
@@ -2471,7 +2471,7 @@ def test_managed_stream_reaction_state_filters_exact_principal_event_and_kind() 
             assert stack.managed_stream_reaction_state("$reaction") is None
             database.execute(
                 "INSERT INTO journal_events VALUES (?, '$reaction', 'reaction', 'settled')",
-                (f"general@{stack.agent_id}",),
+                (journal_principal_id("general", stack.agent_id),),
             )
             database.commit()
         assert stack.managed_stream_reaction_state("$reaction") == "settled"
@@ -4179,7 +4179,7 @@ def test_missing_reply_diagnosis_reads_the_production_journal_schema() -> None:
     stack = ManagedTuwunelStack()
     try:
         stack.agent_id = "@agent:example"
-        principal_id = f"general@{stack.agent_id}"
+        principal_id = journal_principal_id("general", stack.agent_id)
         store = EventJournalStore.open_sqlite(stack.storage_path / "tracking" / "event_journal.db")
 
         async def seed() -> None:

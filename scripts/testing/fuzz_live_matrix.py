@@ -3330,8 +3330,8 @@ class ManagedTuwunelStack:
             WHERE principal_id IN (?, ?) AND room_id = ? AND logical_event_id IN (?, ?)
             """,
             (
-                self._journal_principal_id(self.agent_id),
-                self._journal_principal_id(self.router_id, agent_name=ROUTER_NAME),
+                journal_principal_id(AGENT_NAME, self.agent_id),
+                journal_principal_id(ROUTER_NAME, self.router_id),
                 room_id,
                 *event_ids,
             ),
@@ -3443,7 +3443,7 @@ class ManagedTuwunelStack:
                   AND attempted = 1 AND acknowledged_event_id IS NULL
                   AND delivery_id IN ({placeholders})
                 """,  # noqa: S608 - placeholders are generated, values remain bound
-                (self._journal_principal_id(self.agent_id), *source_ids),
+                (journal_principal_id(AGENT_NAME, self.agent_id), *source_ids),
             ).fetchone()
         return int(cast("int", row[0]))
 
@@ -3454,7 +3454,7 @@ class ManagedTuwunelStack:
             SELECT state FROM journal_events
             WHERE principal_id = ? AND event_id = ? AND kind = 'reaction'
             """,
-            (self._journal_principal_id(self.agent_id), event_id),
+            (journal_principal_id(AGENT_NAME, self.agent_id), event_id),
         )
         return str(rows[0][0]) if rows else None
 
@@ -3462,14 +3462,9 @@ class ManagedTuwunelStack:
         """Return whether the managed agent durably projected one exact event."""
         rows = self._journal_query(
             "SELECT 1 FROM visible_messages WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?",
-            (self._journal_principal_id(self.agent_id), room_id, event_id),
+            (journal_principal_id(AGENT_NAME, self.agent_id), room_id, event_id),
         )
         return bool(rows)
-
-    @staticmethod
-    def _journal_principal_id(matrix_id: str, *, agent_name: str = AGENT_NAME) -> str:
-        """Return the journal's composite principal identity for one managed bot."""
-        return journal_principal_id(agent_name, matrix_id)
 
     def _restart_source_settled(self) -> bool:
         """Read committed producer progress without interpreting opaque sync tokens."""
@@ -5830,7 +5825,7 @@ def _historical_call_observed(
         return True
     cutoff = _runtime_redaction_cutoff(
         runtime_redaction_path,
-        ManagedTuwunelStack._journal_principal_id(agent_id),
+        journal_principal_id(AGENT_NAME, agent_id),
         evidence.edit_event_id,
     )
     observation = _ModelHandler.timed_observations_snapshot().get(call_id)
