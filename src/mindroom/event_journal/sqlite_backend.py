@@ -325,8 +325,11 @@ class SqliteBackend:
             )
         return self._hold is not None
 
-    async def still_held(self) -> bool:
-        """Return whether this runtime holds the database; an open descriptor holds it until close."""
+    async def still_usable(self) -> bool:
+        """Return whether this runtime holds the database; an open descriptor holds it until close.
+
+        A local file's connections cannot be lost, so holding the database is all that keeps the journal usable.
+        """
         return self._hold is not None
 
     async def _finish_close(self) -> None:

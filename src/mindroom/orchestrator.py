@@ -113,7 +113,7 @@ from mindroom.runtime_state import (
 from mindroom.scheduling.executor import set_scheduling_hook_registry
 from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
 from mindroom.skill_learning.runner import SkillReviewRunner
-from mindroom.startup_errors import EventJournalHoldLostError, PermanentStartupError
+from mindroom.startup_errors import EventJournalLostError, PermanentStartupError
 from mindroom.startup_maintenance import StartupMaintenanceController
 from mindroom.tool_system.plugins import (
     PluginReloadResult,
@@ -213,7 +213,7 @@ _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0
 _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
 _EMBEDDED_API_SHUTDOWN_GRACE_SECONDS = 5.0
 _DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS = 5.0
-_EVENT_JOURNAL_HOLD_CHECK_SECONDS = 30.0
+_EVENT_JOURNAL_CHECK_SECONDS = 30.0
 
 
 async def _gather_periodic_shutdown_phase(
@@ -2467,10 +2467,10 @@ class _MultiAgentOrchestrator:
         # Every bot follows the paused replies of its principal from these on.
         await store.load_approval_signals()
 
-    async def event_journal_still_held(self) -> bool:
-        """Return whether this runtime still holds the journal it claimed; true before it claims one."""
+    async def event_journal_still_usable(self) -> bool:
+        """Return whether this runtime still holds the journal it claimed and can still use it; true before it claims one."""
         journal = self._open_journal
-        return journal is None or not self._journal_held or await journal.store.still_held()
+        return journal is None or not self._journal_held or await journal.store.still_usable()
 
     def _shared_journal_store(self) -> EventJournalStore:
         """Return the one journal store every bot in this process borrows.
@@ -3108,17 +3108,20 @@ def _sync_credentials_and_prepare_storage(runtime_paths: RuntimePaths, storage_p
     storage_path.mkdir(parents=True, exist_ok=True)
 
 
-async def _watch_event_journal_hold(
+async def _watch_event_journal(
     orchestrator: _MultiAgentOrchestrator,
     shutdown_requested: asyncio.Event,
-    hold_lost: asyncio.Event,
+    journal_lost: asyncio.Event,
 ) -> None:
-    """Stop the runtime once it no longer holds its event journal, before another runtime can take it over."""
+    """Stop the runtime once it lost its event journal's lock session or one of the journal's connections.
+
+    Another runtime could take over a journal whose lock lapsed, and a lost connection never reconnects.
+    """
     while not shutdown_requested.is_set():
-        await asyncio.sleep(_EVENT_JOURNAL_HOLD_CHECK_SECONDS)
-        if not await orchestrator.event_journal_still_held():
-            logger.error("event_journal_hold_lost")
-            hold_lost.set()
+        await asyncio.sleep(_EVENT_JOURNAL_CHECK_SECONDS)
+        if not await orchestrator.event_journal_still_usable():
+            logger.error("event_journal_lost")
+            journal_lost.set()
             shutdown_requested.set()
             return
 
@@ -3127,7 +3130,7 @@ def _start_auxiliary_tasks(
     orchestrator: _MultiAgentOrchestrator,
     runtime_paths: RuntimePaths,
     shutdown_requested: asyncio.Event,
-    journal_hold_lost: asyncio.Event,
+    journal_lost: asyncio.Event,
 ) -> list[asyncio.Task]:
     """Start the non-critical background tasks that run beside the orchestrator."""
     # First, so an invalid heap task interval fails before any task exists that shutdown could not cancel.
@@ -3154,8 +3157,8 @@ def _start_auxiliary_tasks(
     ]
     tasks.append(
         create_background_task(
-            _watch_event_journal_hold(orchestrator, shutdown_requested, journal_hold_lost),
-            name="event_journal_hold_watch",
+            _watch_event_journal(orchestrator, shutdown_requested, journal_lost),
+            name="event_journal_watch",
         ),
     )
     # The heartbeat ends by itself for unpaired or rejected installs, so it must not be restarted;
@@ -3204,7 +3207,7 @@ async def _run_runtime(  # noqa: PLR0915
     orchestrator: _MultiAgentOrchestrator | None = None
     auxiliary_tasks: list[asyncio.Task] = []
     shutdown_requested = asyncio.Event()
-    journal_hold_lost = asyncio.Event()
+    journal_lost = asyncio.Event()
     api_server = _EmbeddedApiServerContext(host=api_host, port=api_port)
     orchestrator_task: asyncio.Task[None] | None = None
     shutdown_wait_task: asyncio.Task[bool] | None = None
@@ -3236,7 +3239,7 @@ async def _run_runtime(  # noqa: PLR0915
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=api)
         set_runtime_starting()
         auxiliary_tasks.extend(
-            _start_auxiliary_tasks(orchestrator, runtime_paths, shutdown_requested, journal_hold_lost),
+            _start_auxiliary_tasks(orchestrator, runtime_paths, shutdown_requested, journal_lost),
         )
 
         if api:
@@ -3311,7 +3314,7 @@ async def _run_runtime(  # noqa: PLR0915
             cleanup_task,
             shutdown_was_requested=shutdown_was_requested,
         )
-    if journal_hold_lost.is_set():
+    if journal_lost.is_set():
         # Exiting with a failure lets a supervisor that restarts only on failure bring the runtime back.
-        msg = "MindRoom stopped because it no longer holds its event journal"
-        raise EventJournalHoldLostError(msg)
+        msg = "MindRoom stopped because it lost its event journal's lock session or one of its database connections"
+        raise EventJournalLostError(msg)

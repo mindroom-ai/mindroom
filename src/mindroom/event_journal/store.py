@@ -1674,9 +1674,9 @@ class EventJournalStore:
         """Claim this journal for one runtime until it closes; ``False`` when another runtime holds it."""
         return await self.backend.hold_exclusively(identity)
 
-    async def still_held(self) -> bool:
-        """Return whether this runtime's claim on the journal still holds."""
-        return await self.backend.still_held()
+    async def still_usable(self) -> bool:
+        """Return whether this runtime's claim on the journal still holds and the journal can still be used."""
+        return await self.backend.still_usable()
 
     async def end_entity_replies(self, ends: Callable[[str], bool], *, now_ns: int) -> int:
         """End the open replies of the entities ``ends`` names; return how many ended."""
