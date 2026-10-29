@@ -89,8 +89,15 @@ def create_configured_embedder(
     runtime_paths: RuntimePaths,
     *,
     health_recorder: EmbedderHealthRecorder | None = None,
+    caller_retries: bool = False,
 ) -> Embedder:
-    """Create the configured embedding provider used for semantic indexes."""
+    """Create the configured embedding provider used for semantic indexes.
+
+    ``caller_retries`` turns off the OpenAI SDK's own retries for a caller that retries failed requests itself, as a
+    knowledge refresh does, so its classified failures alone decide what is sent again. Other callers keep the SDK's
+    retries, since nothing retries their requests in place: the knowledge graph retries only a whole episode minutes
+    later. The Ollama and local embedders do not retry on their own.
+    """
     settings = resolve_embedder_settings(config, runtime_paths)
 
     # Provider SDK modules are imported at first construction so only the configured provider's SDK loads (#1436).
@@ -104,6 +111,7 @@ def create_configured_embedder(
             dimensions=settings.dimensions,
             query_prefix=settings.query_prefix,
             document_prefix=settings.document_prefix,
+            max_retries=0 if caller_retries else None,
             health_recorder=capture_embedder_health_recorder() if health_recorder is None else health_recorder,
         )
 

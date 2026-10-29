@@ -14,7 +14,13 @@ import re
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-from mindroom.llm.errors import MALFORMED_TOOL_CALL, SAFEGUARD_REFUSAL, ContextWindowExceeded, ProviderError
+from mindroom.llm.errors import (
+    MALFORMED_TOOL_CALL,
+    QUOTA_EXHAUSTED,
+    SAFEGUARD_REFUSAL,
+    ContextWindowExceeded,
+    ProviderError,
+)
 from mindroom.logging_config import get_logger
 from mindroom.providers.pipeline.wrapped import Retry, attempts
 from mindroom.redaction import redact_sensitive_text
@@ -35,7 +41,7 @@ _UNSUPPORTED_VIEW_MESSAGE = (
     "The active model rejected the viewed image input; the retained attachment is still available."
 )
 # A retried media-free request must not repeat a failure the media cannot have caused.
-_NOT_MEDIA_RELATED_CODES = frozenset({SAFEGUARD_REFUSAL, MALFORMED_TOOL_CALL})
+_NOT_MEDIA_RELATED_CODES = frozenset({SAFEGUARD_REFUSAL, MALFORMED_TOOL_CALL, QUOTA_EXHAUSTED})
 _PAYLOAD_TOO_LARGE_STATUS = 413
 # Rejections naming one input's size or type prove only that this input failed, not the whole media kind.
 _INPUT_SPECIFIC_ERROR_MARKERS = ("exceed", "too large", "media_type", "mime type", "mime_type")

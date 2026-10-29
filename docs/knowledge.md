@@ -93,7 +93,7 @@ knowledge_bases:
 | `git` | object | `null` | Sync the folder from a Git repository; see [Git-Backed Knowledge Bases](#git-backed-knowledge-bases) |
 
 Set `skip_hidden: false` if the folder intentionally contains dot-prefixed files that should be indexed.
-Use a smaller `chunk_size` when your embedding server has lower token or batch limits; chunks that are too large make indexing fail with embedder 500 errors.
+Use a smaller `chunk_size` when your embedding server has lower token or batch limits; a chunk too long for the embedding model fails the file that holds it, and with it the refresh, for example with `embedder request failed (HTTP 400)` from OpenAI, or `(HTTP 500)` from a llama.cpp server whose physical batch size is smaller than the chunk.
 
 ### Keeping Indexes Fresh
 
@@ -107,7 +107,8 @@ Rewriting leaves free space inside an index file, which later writes reuse; once
 Changing `chunk_size`, `chunk_overlap`, `chunk_context_model`, the embedder, or any file filter re-embeds the whole base on the next refresh.
 An explicit reindex from the dashboard or API rebuilds every vector, which is how you replace an index you no longer trust.
 An interrupted or failed semantic build continues where it stopped on the next refresh instead of starting over.
-Temporary embedding failures (timeouts, connection errors, and HTTP 408, 409, 429, and any 5xx status) are retried, while permanent failures such as authentication errors stop the refresh until you fix the cause.
+Temporary embedding failures (timeouts, connection errors, and HTTP 408, 409, 429, and any 5xx status) are retried, while permanent failures such as authentication errors, or a 429 that says the OpenAI account has no credit left or reached its monthly spend or usage limit, stop the refresh until you fix the cause.
+A batch of chunks larger than the account's tokens-per-minute limit is embedded again one chunk per request.
 
 Knowledge base configuration hot-reloads.
 After a `chunk_size`, `chunk_overlap`, or `chunk_context_model` change, agents keep searching the previous index until the rebuild succeeds.

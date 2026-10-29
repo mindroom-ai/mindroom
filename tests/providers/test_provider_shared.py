@@ -11,6 +11,8 @@ import httpx
 import pytest
 
 from mindroom.llm.errors import (
+    QUOTA_EXHAUSTED,
+    TOKENS_PER_MINUTE,
     TRANSPORT_TIMEOUT,
     AuthenticationFailed,
     ContextWindowExceeded,
@@ -23,19 +25,23 @@ from mindroom.llm.messages import Message, model_provenance
 from mindroom.llm.provider import ModelIdentity, ReasoningDelta, StreamProgress, TextDelta, ToolCallReady, UsageReported
 from mindroom.llm.usage import MessageMetrics
 from mindroom.providers.assistant_turn import TurnTimer, stamp_finished_turn
-from mindroom.providers.errors import (
-    classify_provider_error,
-    is_context_window_error,
-    provider_failure,
-    retry_after_seconds,
-)
+from mindroom.providers.errors import classify_provider_error, provider_failure, retry_after_seconds
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
+
+# OpenAI's 429 for a request larger than the account's tokens-per-minute limit.
+_REQUEST_TOO_LARGE = (
+    "Request too large for gpt-6-astra in organization org-test on tokens per min (TPM): Limit 30000, "
+    "Requested 50000. The input or output tokens must be reduced in order to run successfully."
+)
 
 
 @pytest.mark.parametrize(
     ("status", "message", "code", "expected", "retryable"),
     [
         (429, "slow down", None, RateLimited, True),
+        # Context-window wording on a 429 other than "Request too large" is still a rate limit, such as Bedrock's.
+        (429, "Too many tokens, please wait before trying again.", None, RateLimited, True),
+        (429, "Rate limit reached for gpt-6-astra on tokens per min (TPM).", "rate_limit_exceeded", RateLimited, True),
         (529, "Overloaded", None, ProviderUnavailable, True),
         (503, "overloaded_error: the model is busy", None, ProviderUnavailable, True),
         (400, "The input token count exceeds the maximum number of tokens allowed", None, ContextWindowExceeded, False),
@@ -107,11 +113,55 @@ def test_a_retry_after_header_is_read_as_the_sdks_read_it(headers: dict[str, str
     assert retry_after_seconds(headers, now=now) == seconds
 
 
+@pytest.mark.parametrize("status", [429, None])
+def test_a_request_above_the_tokens_per_minute_limit_is_too_large_not_rate_limited(status: int | None) -> None:
+    """Only a smaller request passes, and the marker keeps its reply from blaming the context window."""
+    error = classify_provider_error(_REQUEST_TOO_LARGE, provider="Test", status_code=status, code="rate_limit_exceeded")
+
+    assert (type(error), error.retryable, error.code, error.provider_code, error.status_code) == (
+        ContextWindowExceeded,
+        False,
+        TOKENS_PER_MINUTE,
+        "rate_limit_exceeded",
+        status,
+    )
+
+
 def test_a_code_the_provider_sent_never_reads_as_a_mindroom_marker() -> None:
     """A server that names its failure ``timeout`` sent no transport timeout, which only MindRoom's marker reports."""
     error = classify_provider_error("upstream busy", provider="Test", status_code=500, code=TRANSPORT_TIMEOUT)
 
     assert (type(error), error.code, error.provider_code) == (ProviderUnavailable, None, TRANSPORT_TIMEOUT)
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "error_type"),
+    [
+        (429, "insufficient_quota", "insufficient_quota"),
+        (429, "credit_balance_exhausted", None),
+        (429, "organization_spend_limit_exceeded", None),
+        (429, "project_spend_limit_exceeded", None),
+        (429, "organization_usage_limit_exceeded", None),
+        (None, "insufficient_quota", None),
+        (None, None, "insufficient_quota"),
+    ],
+)
+def test_an_account_out_of_credit_or_past_its_limits_fails_at_once(
+    status: int | None,
+    code: str | None,
+    error_type: str | None,
+) -> None:
+    """No wait lets the request through until the account's billing or limits change, so the error is final."""
+    message = "You exceeded your current quota, please check your plan and billing details."
+    error = classify_provider_error(message, provider="Test", status_code=status, code=code, error_type=error_type)
+
+    assert (type(error), error.retryable, error.code, error.provider_code) == (
+        ProviderError,
+        False,
+        QUOTA_EXHAUSTED,
+        code,
+    )
+    assert (str(error), error.status_code) == (message, status)
 
 
 @pytest.mark.parametrize(
@@ -158,15 +208,25 @@ def test_an_error_event_without_a_status_is_classified_by_its_name_and_wording(
     assert (error.status_code, error.code, error.provider_code) == (None, None, code)
 
 
-def test_context_window_detection_reads_the_code_and_the_wording() -> None:
+@pytest.mark.parametrize(
+    ("message", "code", "expected"),
+    [
+        ("x", "context_length_exceeded", ContextWindowExceeded),
+        ("Request too large for gpt-6-astra", None, ContextWindowExceeded),
+        ("This request would exceed the context window", None, ContextWindowExceeded),
+        ("input length and `max_tokens` exceed context limit: 197000 + 8192 > 200000", None, ContextWindowExceeded),
+        ("the request exceeds the available context size, try increasing it", None, ContextWindowExceeded),
+        ("max_tokens must be positive", None, InvalidRequest),
+        ("The context size of a slot must be a positive number", None, InvalidRequest),
+    ],
+)
+def test_context_window_detection_reads_the_code_and_the_wording(
+    message: str,
+    code: str | None,
+    expected: type[ProviderError],
+) -> None:
     """The shared markers cover the wording every provider uses for an input that does not fit."""
-    assert is_context_window_error("x", code="context_length_exceeded")
-    assert is_context_window_error("Request too large for gpt-6-astra")
-    assert is_context_window_error("This request would exceed the context window")
-    assert is_context_window_error("input length and `max_tokens` exceed context limit: 197000 + 8192 > 200000")
-    assert is_context_window_error("the request exceeds the available context size, try increasing it")
-    assert not is_context_window_error("max_tokens must be positive")
-    assert not is_context_window_error("The context size of a slot must be a positive number")
+    assert type(classify_provider_error(message, provider="Test", status_code=400, code=code)) is expected
 
 
 def test_transport_failures_are_retryable_connection_errors() -> None:
