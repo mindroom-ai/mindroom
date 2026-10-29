@@ -49,25 +49,19 @@ def defer_toolkit(
     Native tool search expands only function definitions, so the toolkit keeps its instructions for the system
     prompt and each function's own instructions go in its description.
     """
+    deferral = ToolDeferral(
+        domain_name=domain_name,
+        description=description,
+        instructions=toolkit.instructions if portable_search else None,
+        function_instructions=toolkit.function_instructions if portable_search else {},
+    )
     if portable_search:
-        deferral = ToolDeferral(
-            domain_name=domain_name,
-            description=description,
-            instructions=toolkit.instructions,
-            function_instructions=toolkit.function_instructions,
-        )
         return deferral, replace(toolkit, instructions=None, function_instructions={})
     functions = tuple(
         _with_own_instructions(function, toolkit.function_instructions[function.name])
         if function.name in toolkit.function_instructions
         else function
         for function in toolkit.functions
-    )
-    deferral = ToolDeferral(
-        domain_name=domain_name,
-        description=description,
-        instructions=None,
-        function_instructions={},
     )
     return deferral, replace(toolkit, functions=functions, function_instructions={})
 
