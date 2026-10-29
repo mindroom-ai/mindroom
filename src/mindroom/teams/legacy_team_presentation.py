@@ -32,12 +32,14 @@ def _is_v2_member(member: object) -> bool:
 # LEGACY_COMPAT: Team reply snapshots of version 2, keyed by Agno's url-safe member id.
 # Legacy format: a reply record's ``team_state`` of ``{"kind": "team_stream", "version": 2}`` whose ``members`` each
 # hold an ``id``, Agno's ``url_safe_string`` of the member's ``config_name`` ("Code_Review" is "code-review"), beside
-# that ``config_name``; its ``separate_next_scopes`` and the ``scope_key`` of each entry of the tool trace stored with
-# it name a member slot as ``agent:<id>`` and the consensus as ``team``.
+# that ``config_name``, and whose ``separate_next_scopes`` name a member slot as ``agent:<id>`` and the consensus as
+# ``team``; the tool trace stored with it names each member call's slot by that ``<id>`` too (the trace's own
+# ``LEGACY_COMPAT`` rule in ``tool_system/events.py`` reads its ``scope_key``).
 # Last legacy release: v2026.10.674, whose ``TeamStreamPresentation.to_state`` (``teams/presentation.py``) wrote it, as
 # the Agno runtime did before it; replacement: the next release, whose version-3 snapshot keys each member by its
-# config name alone and names a member slot ``agent:<config name>``.
-# Handling: restoring the snapshot reads it as the version 3 it stands for, its ids, separators, and trace scopes
+# config name alone and lists the slots a hidden tool call separates as ``separate_next_slots``, a member's config
+# name or null for the consensus.
+# Handling: restoring the snapshot reads it as the version 3 it stands for, its ids, separators, and trace members
 # mapped to config names, so a team reply paused before the upgrade resumes in place with its member slots, pending
 # calls, and paragraph breaks. A snapshot whose ids are not the url-safe ids of their config names, or whose
 # separators or trace name a slot it does not hold, is refused, as v2026.10.674 refused it.
@@ -50,7 +52,7 @@ def upgrade_v2_team_snapshot(
     state: Mapping[str, object],
     tool_trace: Sequence[ToolTraceEntry],
 ) -> tuple[dict[str, object], list[ToolTraceEntry]] | None:
-    """Return a version-2 snapshot as version 3 and its tool trace with each slot named by config name.
+    """Return a version-2 snapshot as version 3 and its tool trace with each member named by config name.
 
     None when the snapshot is not one a version-2 writer stored: its member ids are the url-safe ids of their config
     names, each held once, and its separators and trace name only its own slots.
@@ -64,12 +66,15 @@ def upgrade_v2_team_snapshot(
         _url_safe_member_id(config_name) != member_id for member_id, config_name in config_names.items()
     ):
         return None
-    scopes = {"team": "team", **{f"agent:{member_id}": f"agent:{name}" for member_id, name in config_names.items()}}
+    slots: dict[str, str | None] = {
+        "team": None,
+        **{f"agent:{member_id}": name for member_id, name in config_names.items()},
+    }
     separators = state.get("separate_next_scopes", [])
     if (
         not isinstance(separators, list)
-        or not all(isinstance(scope, str) and scope in scopes for scope in separators)
-        or not all(entry.scope_key in scopes for entry in tool_trace)
+        or not all(isinstance(scope, str) and scope in slots for scope in separators)
+        or not all(entry.member_id is None or entry.member_id in config_names for entry in tool_trace)
     ):
         return None
     upgraded: dict[str, object] = {
@@ -82,8 +87,11 @@ def upgrade_v2_team_snapshot(
         "consensus": state.get("consensus"),
     }
     if separators:
-        upgraded["separate_next_scopes"] = [scopes[scope] for scope in cast("list[str]", separators)]
-    trace = [replace(entry, scope_key=scopes[cast("str", entry.scope_key)]) for entry in tool_trace]
+        upgraded["separate_next_slots"] = [slots[scope] for scope in cast("list[str]", separators)]
+    trace = [
+        entry if entry.member_id is None else replace(entry, member_id=config_names[entry.member_id])
+        for entry in tool_trace
+    ]
     return upgraded, trace
 
 

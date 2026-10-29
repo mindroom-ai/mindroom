@@ -2,8 +2,9 @@
 """The team reply as the user reads it: the header, one slot per member, the consensus, and the tool trace.
 
 ``TeamStreamPresentation`` is the structured document a streamed or collected team run renders from and the durable
-``team_stream`` snapshot an approval continuation restores. Member slots are keyed by the member's config name, its
-member id. ``publish_team_presentation`` shows a resumed run's document live in the reply it continues.
+``team_stream`` snapshot an approval continuation restores. A slot is named by its member's config name, its member id,
+and the consensus slot by None, in the document and in each tool call's ``ToolTraceEntry.member_id``.
+``publish_team_presentation`` shows a resumed run's document live in the reply it continues.
 """
 
 from __future__ import annotations
@@ -120,18 +121,14 @@ class TeamStreamPresentation:
     consensus: str = ""
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
     tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker, init=False)
-    separate_next_scopes: set[str] = field(default_factory=set, init=False, repr=False)
+    # The slots, a member id or None for the consensus, whose next text a hidden tool call separates.
+    separate_next_slots: set[str | None] = field(default_factory=set, init=False, repr=False)
     # The member run whose deltas last gave each member slot text.
     _last_text_run: dict[str, str] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        """Restore pending tool identity from the durable trace."""
+        """Restore pending tool identity from the durable trace; the snapshot restores which slots a call separates."""
         self.tool_tracker.restore_pending(self.tool_trace)
-        self.separate_next_scopes = {
-            pending.scope_key
-            for pending in self.tool_tracker.pending_tools
-            if pending.scope_key is not None and self._slot_text(pending.scope_key)
-        }
 
     @classmethod
     def new(
@@ -182,24 +179,24 @@ class TeamStreamPresentation:
         member_ids = [member["id"] for member in members]
         if member_ids != list(config_names):
             raise RuntimeError(_INVALID_SNAPSHOT)
-        valid_tool_scopes = {"team", *(f"agent:{member_id}" for member_id in member_ids)}
-        if any(entry.scope_key not in valid_tool_scopes for entry in tool_trace):
-            msg = "Team continuation durable tool scope is not a frozen presentation slot"
+        valid_slots = {None, *member_ids}
+        if any(entry.member_id not in valid_slots for entry in tool_trace):
+            msg = "Team continuation durable tool call is not in a frozen presentation slot"
             raise RuntimeError(msg)
         per_member = {member["id"]: member["content"] for member in members}
         consensus = state.get("consensus")
-        separators = state.get("separate_next_scopes", [])
+        separators = state.get("separate_next_slots", [])
         if (
             not isinstance(consensus, str)
             or not isinstance(separators, list)
-            or any(not isinstance(scope, str) or scope not in valid_tool_scopes for scope in separators)
+            or any(not isinstance(slot, str | None) or slot not in valid_slots for slot in separators)
         ):
             raise RuntimeError(_INVALID_SNAPSHOT)
-        scopes = cast("list[str]", separators)
+        slots = cast("list[str | None]", separators)
         if (
-            len(scopes) != len(set(scopes))
-            or (show_tool_calls and scopes)
-            or any(not (consensus if scope == "team" else per_member[scope.removeprefix("agent:")]) for scope in scopes)
+            len(slots) != len(set(slots))
+            or (show_tool_calls and slots)
+            or any(not (consensus if slot is None else per_member[slot]) for slot in slots)
         ):
             raise RuntimeError(_INVALID_SNAPSHOT)
         restored = cls(
@@ -210,7 +207,7 @@ class TeamStreamPresentation:
             consensus=consensus,
             tool_trace=list(deepcopy(tool_trace)),
         )
-        restored.separate_next_scopes.update(scopes)
+        restored.separate_next_slots.update(slots)
         # A restored slot's text came from runs before the pause, so any run's next text starts a paragraph of its own.
         restored._last_text_run = {member_id: _RUN_BEFORE_THE_PAUSE for member_id, text in per_member.items() if text}
         return restored
@@ -230,9 +227,9 @@ class TeamStreamPresentation:
             ],
             "consensus": self.consensus,
         }
-        if not self.show_tool_calls and self.separate_next_scopes:
-            document_scopes = [*(f"agent:{member_id}" for member_id in self.member_ids), "team"]
-            state["separate_next_scopes"] = [scope for scope in document_scopes if scope in self.separate_next_scopes]
+        if not self.show_tool_calls and self.separate_next_slots:
+            document_slots = [*self.member_ids, None]
+            state["separate_next_slots"] = [slot for slot in document_slots if slot in self.separate_next_slots]
         return state
 
     def resolve_member_id(self, agent_id: str | None, reported_name: str | None) -> str:
@@ -247,7 +244,7 @@ class TeamStreamPresentation:
 
         ``separate`` starts the content in a paragraph of its own when the slot already holds text.
         """
-        self._append_text(f"agent:{member_id}", content, separate=separate)
+        self._append_text(member_id, content, separate=separate)
 
     def append_member_run(self, member_id: str, run_id: str, content: str) -> None:
         """Append a delta of member run ``run_id``; text from another run than the slot's last text starts a paragraph."""
@@ -258,34 +255,30 @@ class TeamStreamPresentation:
 
     def append_consensus(self, content: object | None, *, separate: bool = False) -> None:
         """Append a coordinator content delta to the consensus slot; ``separate`` as for ``append_member``."""
-        self._append_text("team", content, separate=separate)
+        self._append_text(None, content, separate=separate)
 
-    def _append_text(self, scope_key: str, content: object | None, *, separate: bool) -> None:
+    def _append_text(self, member_id: str | None, content: object | None, *, separate: bool) -> None:
         """Append to a slot; text after a hidden tool call in that slot starts a paragraph of its own."""
-        separate = separate or scope_key in self.separate_next_scopes
-        self._set_slot_text(scope_key, append_stream_text(self._slot_text(scope_key), content, separate=separate))
+        separate = separate or member_id in self.separate_next_slots
+        self._set_slot_text(member_id, append_stream_text(self._slot_text(member_id), content, separate=separate))
         if content:
-            self.separate_next_scopes.discard(scope_key)
+            self.separate_next_slots.discard(member_id)
 
-    def _slot_text(self, scope_key: str) -> str:
-        if scope_key == "team":
-            return self.consensus
-        return self.per_member[scope_key.removeprefix("agent:")]
+    def _slot_text(self, member_id: str | None) -> str:
+        return self.consensus if member_id is None else self.per_member[member_id]
 
-    def _set_slot_text(self, scope_key: str, text: str) -> None:
-        if scope_key == "team":
+    def _set_slot_text(self, member_id: str | None, text: str) -> None:
+        if member_id is None:
             self.consensus = text
-            return
-        self.per_member[scope_key.removeprefix("agent:")] = text
+        else:
+            self.per_member[member_id] = text
 
     def _align_tool_trace_with_document(self) -> None:
         """Keep trace slots and visible indices in rendered document order."""
-        scope_order = {
-            **{f"agent:{member_id}": index for index, member_id in enumerate(self.member_ids)},
-            "team": len(self.member_ids),
-        }
+        slot_order: dict[str | None, int] = {member_id: index for index, member_id in enumerate(self.member_ids)}
+        slot_order[None] = len(self.member_ids)
         old_indices = {id(trace_entry): index for index, trace_entry in enumerate(self.tool_trace, start=1)}
-        self.tool_trace.sort(key=lambda trace_entry: scope_order[trace_entry.scope_key or "team"])
+        self.tool_trace.sort(key=lambda trace_entry: slot_order[trace_entry.member_id])
         index_map = {
             old_indices[id(trace_entry)]: new_index for new_index, trace_entry in enumerate(self.tool_trace, start=1)
         }
@@ -297,42 +290,32 @@ class TeamStreamPresentation:
             self.consensus = remap_visible_tool_marker_indices(self.consensus, index_map)
         self.tool_tracker.sync_visible_indices(self.tool_trace)
 
-    def start_tool(self, scope_key: str, call: ReportedCall) -> None:
-        """Record a tool start in its exact member or coordinator slot."""
+    def start_tool(self, call: ReportedCall, *, member_id: str | None = None) -> None:
+        """Record a tool start in the slot of ``member_id``, which ``resolve_member_id`` returned, or the consensus's."""
         tool_index = len(self.tool_trace) + 1
-        marker, trace_entry = self.tool_tracker.start(call, scope_key=scope_key, tool_index=tool_index)
+        marker, trace_entry = self.tool_tracker.start(call, member_id=member_id, tool_index=tool_index)
         if trace_entry is None:
             return
-        trace_entry.scope_key = scope_key
         self.tool_trace.append(trace_entry)
         if self.show_tool_calls:
-            self._set_slot_text(scope_key, self._slot_text(scope_key) + marker)
-        elif self._slot_text(scope_key):
-            self.separate_next_scopes.add(scope_key)
+            self._set_slot_text(member_id, self._slot_text(member_id) + marker)
+        elif self._slot_text(member_id):
+            self.separate_next_slots.add(member_id)
         self._align_tool_trace_with_document()
 
-    def complete_tool(self, scope_key: str, call: ReportedCall) -> None:
-        """Complete only the pending slot identified by this tool event."""
-        pending_tool, completed_trace = self.tool_tracker.complete(call, scope_key=scope_key)
+    def complete_tool(self, call: ReportedCall, *, member_id: str | None = None) -> None:
+        """Complete only the pending call of this tool event in the slot of ``member_id``, or the consensus's."""
+        pending_tool, completed_trace = self.tool_tracker.complete(call, member_id=member_id)
         if pending_tool is None or pending_tool.visible_tool_index is None:
             return
-        completed_trace.scope_key = scope_key
         if self.show_tool_calls:
             updated_text = complete_pending_tool_block(
-                self._slot_text(scope_key),
+                self._slot_text(member_id),
                 call.tool_name,
                 tool_index=pending_tool.visible_tool_index,
             )
-            self._set_slot_text(scope_key, updated_text)
+            self._set_slot_text(member_id, updated_text)
         self.tool_tracker.update_visible_trace_entry(self.tool_trace, pending_tool, completed_trace)
-
-    def start_member_tool(self, member_id: str, call: ReportedCall) -> None:
-        """Record a tool start in the slot of ``member_id``, which ``resolve_member_id`` returned."""
-        self.start_tool(f"agent:{member_id}", call)
-
-    def complete_member_tool(self, member_id: str, call: ReportedCall) -> None:
-        """Record a tool completion in the slot of ``member_id``, which ``resolve_member_id`` returned."""
-        self.complete_tool(f"agent:{member_id}", call)
 
     def text_without_tool_markers(self, *, finished: bool) -> str:
         """Return the document's slots without its header and tool markers: the text a streamed reply records.
@@ -379,15 +362,15 @@ def apply_team_event(presentation: TeamStreamPresentation, event: TeamRunEvent) 
         if isinstance(inner, TextDelta):
             presentation.append_member_run(member_id, event.run_id, inner.text)
         elif isinstance(inner, ToolStarted):
-            presentation.start_member_tool(member_id, inner.call)
+            presentation.start_tool(inner.call, member_id=member_id)
         elif isinstance(inner, ToolCompleted):
-            presentation.complete_member_tool(member_id, inner.call)
+            presentation.complete_tool(inner.call, member_id=member_id)
     elif isinstance(event, TextDelta):
         presentation.append_consensus(event.text)
     elif isinstance(event, ToolStarted):
-        presentation.start_tool("team", event.call)
+        presentation.start_tool(event.call)
     elif isinstance(event, ToolCompleted):
-        presentation.complete_tool("team", event.call)
+        presentation.complete_tool(event.call)
 
 
 async def publish_team_presentation(

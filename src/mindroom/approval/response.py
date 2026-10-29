@@ -85,7 +85,6 @@ def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls
     requirements_by_call_id = {
         requirement.tool_execution.tool_call_id: requirement for requirement in paused.requirements
     }
-    is_team_presentation = paused.response_presentation_state.get("kind") == "team_stream"
     member_ids = _team_member_ids(paused.response_presentation_state)
     for tool in paused.tools:
         call_id = tool.tool_call_id
@@ -98,10 +97,9 @@ def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls
         ]
         if not matches:
             raise RuntimeError(unordered)
-        # A member the document holds no slot for has no call in one either.
-        expected_scope = f"agent:{member_id}" if member_id is not None else ("team" if is_team_presentation else None)
-        # Call ids are unique only within one member's run, so another member's call may share the anchor's id.
-        if sum(entry.scope_key == expected_scope for entry in matches) != 1:
+        # Call ids are unique only within one member's run, so another member's call may share the anchor's id; a member
+        # the document holds no slot for has no call in one.
+        if sum(entry.member_id == member_id for entry in matches) != 1:
             raise RuntimeError(unordered)
 
 

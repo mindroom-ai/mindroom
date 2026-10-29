@@ -234,14 +234,9 @@ def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAtt
         if member_delegation_card(requirement, member_ids):
             continue
         member_id, _ = pending_call_slot(requirement, member_ids)
-        call = requirement.tool_execution.call
-        if member_id is None:
-            presentation.start_tool("team", call)
-        else:
-            presentation.start_member_tool(
-                presentation.resolve_member_id(member_id, requirement.member_display_name),
-                call,
-            )
+        if member_id is not None:
+            member_id = presentation.resolve_member_id(member_id, requirement.member_display_name)
+        presentation.start_tool(requirement.tool_execution.call, member_id=member_id)
     return replace(
         paused,
         response_text=presentation.render_body(finished=False),

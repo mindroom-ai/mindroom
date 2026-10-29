@@ -22,7 +22,7 @@ from mindroom.llm.runs import ToolExecution
 from mindroom.reply_presentation import Segment, decode_presentation
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.teams.presentation import TeamStreamPresentation
-from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_system.events import deserialize_tool_trace
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.team_turn_helpers import (
     PROBE_TOOL,
@@ -82,18 +82,18 @@ def test_a_v2_reply_record_restores_with_its_members_keyed_by_config_name(name: 
     assert restored.member_ids == _MEMBERS
     assert restored.display_names_by_id == {"Code_Review": "Code Review", "general": "GeneralAgent"}
     assert restored.render_body(finished=False) == segment.text
-    assert [(entry.tool_call_id, entry.scope_key, entry.type) for entry in restored.tool_trace] == [
-        ("call-touch", "agent:Code_Review", "tool_call_started"),
-        ("call-team", "team", "tool_call_completed"),
+    assert [(entry.tool_call_id, entry.member_id, entry.type) for entry in restored.tool_trace] == [
+        ("call-touch", "Code_Review", "tool_call_started"),
+        ("call-team", None, "tool_call_completed"),
     ]
     state = restored.to_state()
     assert state["version"] == 3
     assert [member["id"] for member in state["members"]] == _MEMBERS
-    assert state.get("separate_next_scopes") == (None if show_tool_calls else ["agent:Code_Review", "team"])
+    assert state.get("separate_next_slots") == (None if show_tool_calls else ["Code_Review", None])
 
-    restored.complete_member_tool(
-        "Code_Review",
+    restored.complete_tool(
         ToolExecution(tool_call_id="call-touch", tool_name="touch", result="touched").call,
+        member_id="Code_Review",
     )
     restored.append_member("Code_Review", "After approval.")
     restored.append_consensus("Done.")
@@ -197,8 +197,8 @@ async def test_a_team_reply_paused_by_v2026_10_674_resumes_in_place(
     assert f"**Code Review**: Before approval.\n\n{marker}After approval." in result.response_text
     assert result.response_text.endswith("Done.")
     # A reply that hides its tool calls collects no trace.
-    assert [(entry.tool_call_id, entry.scope_key, entry.type) for entry in trace] == (
-        [("call-touch", "agent:Code_Review", "tool_call_completed"), ("call-team", "team", "tool_call_completed")]
+    assert [(entry.tool_call_id, entry.member_id, entry.type) for entry in trace] == (
+        [("call-touch", "Code_Review", "tool_call_completed"), ("call-team", None, "tool_call_completed")]
         if show_tool_calls
         else []
     )
@@ -225,23 +225,25 @@ def test_a_v2_snapshot_keys_each_member_by_the_url_safe_id_of_its_config_name(co
         "consensus": "",
         "separate_next_scopes": [f"agent:{member_id}"],
     }
-    pending = ToolTraceEntry(
-        type="tool_call_started",
-        tool_name="touch",
-        tool_call_id="call-1",
-        scope_key=f"agent:{member_id}",
-    )
+    stored_trace = [
+        {
+            "type": "tool_call_started",
+            "tool_name": "touch",
+            "tool_call_id": "call-1",
+            "scope_key": f"agent:{member_id}",
+        },
+    ]
 
     restored = TeamStreamPresentation.restore(
         config_names=[config_name],
         show_tool_calls=False,
         state=state,
-        tool_trace=[pending],
+        tool_trace=deserialize_tool_trace(stored_trace),
     )
 
     assert restored.member_ids == [config_name]
-    assert restored.tool_trace[0].scope_key == f"agent:{config_name}"
-    assert restored.to_state()["separate_next_scopes"] == [f"agent:{config_name}"]
+    assert restored.tool_trace[0].member_id == config_name
+    assert restored.to_state()["separate_next_slots"] == [config_name]
 
 
 def _stored_v2(**changes: object) -> dict[str, Any]:
@@ -255,8 +257,10 @@ def _v2_member(member_id: str, config_name: str) -> dict[str, str]:
     return {"id": member_id, "config_name": config_name, "display_name": config_name, "content": ""}
 
 
+# Each case names the members of the stored trace's two calls as the trace's reader reads them: by version-2 id, the
+# leader's call by None.
 @pytest.mark.parametrize(
-    ("state", "scopes", "config_names"),
+    ("state", "trace_members", "config_names"),
     [
         # Ids that are not the url-safe ids of their config names, though the separators and trace use them.
         (
@@ -264,7 +268,7 @@ def _v2_member(member_id: str, config_name: str) -> dict[str, str]:
                 members=[_v2_member("Code_Review", "Code_Review"), _v2_member("general", "general")],
                 separate_next_scopes=["team"],
             ),
-            ("agent:Code_Review", "team"),
+            ("Code_Review", None),
             _MEMBERS,
         ),
         # Two members under one url-safe id, so a slot the trace names could be either's.
@@ -273,32 +277,31 @@ def _v2_member(member_id: str, config_name: str) -> dict[str, str]:
                 members=[_v2_member("code-review", "Code_Review"), _v2_member("code-review", "code-review")],
                 separate_next_scopes=["team"],
             ),
-            ("agent:code-review", "team"),
+            ("code-review", None),
             ["Code_Review", "code-review"],
         ),
         # A member slot without a config name.
         (
             _stored_v2(members=[{"id": "code-review", "display_name": "Code Review", "content": ""}]),
-            ("team", "team"),
+            (None, None),
             [],
         ),
         # A separator for a slot the snapshot does not hold, one that is not a slot, and separators not in a list.
-        (_stored_v2(separate_next_scopes=["agent:Code_Review"]), ("agent:code-review", "team"), _MEMBERS),
-        (_stored_v2(separate_next_scopes=[["team"]]), ("agent:code-review", "team"), _MEMBERS),
-        (_stored_v2(separate_next_scopes={"team": True}), ("agent:code-review", "team"), _MEMBERS),
-        # A tool call in a slot the snapshot does not hold, or in none.
-        (_stored_v2(), ("agent:Code_Review", "team"), _MEMBERS),
-        (_stored_v2(), ("agent:code-review", None), _MEMBERS),
+        (_stored_v2(separate_next_scopes=["agent:Code_Review"]), ("code-review", None), _MEMBERS),
+        (_stored_v2(separate_next_scopes=[["team"]]), ("code-review", None), _MEMBERS),
+        (_stored_v2(separate_next_scopes={"team": True}), ("code-review", None), _MEMBERS),
+        # A tool call in a slot the snapshot does not hold.
+        (_stored_v2(), ("Code_Review", None), _MEMBERS),
     ],
 )
 def test_a_malformed_v2_snapshot_is_refused(
     state: dict[str, Any],
-    scopes: tuple[str | None, str | None],
+    trace_members: tuple[str | None, str | None],
     config_names: list[str],
 ) -> None:
     """Only a snapshot a version-2 writer could have stored restores; anything else is refused before it is read."""
     segment, _ = _paused_segment("hidden")
-    trace = [replace(entry, scope_key=scope) for entry, scope in zip(segment.tool_trace, scopes, strict=True)]
+    trace = [replace(entry, member_id=member) for entry, member in zip(segment.tool_trace, trace_members, strict=True)]
 
     with pytest.raises(RuntimeError, match="snapshot is invalid"):
         TeamStreamPresentation.restore(config_names=config_names, show_tool_calls=False, state=state, tool_trace=trace)

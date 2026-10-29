@@ -72,7 +72,7 @@ def member_pause() -> PausedAttempt:
                 type="tool_call_started",
                 tool_name="dangerous",
                 tool_call_id="call-1",
-                scope_key="agent:test_agent",
+                member_id="test_agent",
             ),
         ),
         response_presentation_state={
@@ -125,22 +125,22 @@ def test_identify_approval_tools_keeps_simple_member_owner(member_pause: PausedA
 
 
 @pytest.mark.parametrize(
-    ("card_id", "anchor_id", "scope_key", "presented"),
+    ("card_id", "anchor_id", "member_id", "presented"),
     [
         # A member's own delegation card is shown by the member's call it asks about.
-        ("test_agent:call-1", "call-1", "agent:test_agent", True),
+        ("test_agent:call-1", "call-1", "test_agent", True),
         # A marker of its own in the team's slot is not that call.
-        ("test_agent:call-1", "test_agent:call-1", "team", False),
+        ("test_agent:call-1", "test_agent:call-1", None, False),
         # Another member's slot does not show it.
-        ("other:call-1", "call-1", "agent:test_agent", False),
+        ("other:call-1", "call-1", "test_agent", False),
         # A child's projected call names its delegation, not a member, and keeps its marker in the team's slot.
-        ("delegation-1:call-1", "delegation-1:call-1", "team", True),
+        ("delegation-1:call-1", "delegation-1:call-1", None, True),
     ],
 )
 def test_a_team_delegation_card_is_presented_by_the_call_it_asks_about(
     card_id: str,
     anchor_id: str,
-    scope_key: str,
+    member_id: str | None,
     presented: bool,
 ) -> None:
     """The card the delegation driver raises carries no member identity of its own, only its id."""
@@ -156,7 +156,7 @@ def test_a_team_delegation_card_is_presented_by_the_call_it_asks_about(
                 type="tool_call_started",
                 tool_name="run_subagent",
                 tool_call_id=anchor_id,
-                scope_key=scope_key,
+                member_id=member_id,
             ),
         ),
         response_presentation_state={
@@ -188,7 +188,7 @@ def test_two_members_pending_on_one_provider_call_id_are_each_presented_in_their
         type="tool_call_started",
         tool_name="run_subagent",
         tool_call_id="call-1",
-        scope_key="agent:test_agent",
+        member_id="test_agent",
     )
     paused = PausedAttempt(
         session_id="session-1",
@@ -202,7 +202,7 @@ def test_two_members_pending_on_one_provider_call_id_are_each_presented_in_their
                 type="tool_call_started",
                 tool_name="dangerous",
                 tool_call_id="call-1",
-                scope_key="agent:other",
+                member_id="other",
             ),
         ),
         response_presentation_state={
@@ -229,6 +229,20 @@ def test_two_members_pending_on_one_provider_call_id_are_each_presented_in_their
         require_ordered_pause_presentation(doubled, show_tool_calls=True)
 
 
+def test_a_member_s_pending_call_is_presented_in_its_slot_when_the_leader_used_its_id_too(
+    member_pause: PausedAttempt,
+) -> None:
+    """The leader's provider numbers its calls apart from the members', so a leader's call may share a member call's id."""
+    leader_call = ToolTraceEntry(type="tool_call_started", tool_name="delegate_task_to_member", tool_call_id="call-1")
+    paused = replace(
+        member_pause,
+        response_text=f"{member_pause.response_text}\n\n🔧 `delegate_task_to_member` [2] ⏳",
+        tool_trace=(*member_pause.tool_trace, leader_call),
+    )
+
+    require_ordered_pause_presentation(paused, show_tool_calls=True)
+
+
 def test_ordered_team_pause_rejects_a_coordinator_tool_in_a_member_scope() -> None:
     """A team-level approval requirement must be anchored in the coordinator slot."""
     tool = ToolExecution(
@@ -247,7 +261,7 @@ def test_ordered_team_pause_rejects_a_coordinator_tool_in_a_member_scope() -> No
                 type="tool_call_started",
                 tool_name="dangerous",
                 tool_call_id="call-1",
-                scope_key="agent:wrong-member",
+                member_id="wrong-member",
             ),
         ),
         response_presentation_state={

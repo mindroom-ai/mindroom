@@ -418,9 +418,9 @@ async def test_a_member_pause_shows_the_member_s_text_and_pending_call_beside_th
     assert "**GeneralAgent**: Member answer.\n\n🔧 `touch` [1] ⏳" in paused.response_text
     restored = _restored(paused, ["general"], show_tool_calls=True)
     assert restored.consensus.startswith("Consensus before approval.")
-    assert [(entry.tool_call_id, entry.scope_key) for entry in restored.tool_trace] == [
-        ("call-touch", "agent:general"),
-        ("call-team", "team"),
+    assert [(entry.tool_call_id, entry.member_id) for entry in restored.tool_trace] == [
+        ("call-touch", "general"),
+        ("call-team", None),
     ]
     assert paused.team_member_model_names == (("general", "general-model"),)
     record, [member] = team.stored_runs()
@@ -479,7 +479,7 @@ async def test_a_pause_keys_a_member_by_its_config_name(
     [member] = paused.response_presentation_state["members"]
     assert (member["id"], member["display_name"]) == ("Code_Review", "Code Review")
     assert str(member["content"]).startswith("Member answer.")
-    assert paused.tool_trace[0].scope_key == "agent:Code_Review"
+    assert paused.tool_trace[0].member_id == "Code_Review"
     assert paused.toolkit_owners[("Code_Review", "touch")] == PROBE_TOOL
     require_ordered_pause_presentation(paused, show_tool_calls=show_tool_calls)
 
@@ -504,9 +504,9 @@ async def test_two_members_reusing_one_call_id_keep_their_own_finished_and_pendi
     paused = await _paused(team)
 
     restored = _restored(paused, ["general", "research"], show_tool_calls=True)
-    assert [(entry.scope_key, entry.tool_call_id, entry.type) for entry in restored.tool_trace][:2] == [
-        ("agent:general", "call-1", "tool_call_completed"),
-        ("agent:research", "call-1", "tool_call_started"),
+    assert [(entry.member_id, entry.tool_call_id, entry.type) for entry in restored.tool_trace][:2] == [
+        ("general", "call-1", "tool_call_completed"),
+        ("research", "call-1", "tool_call_started"),
     ]
     assert "🔧 `scope` [1]" in restored.per_member["general"]
     assert "🔧 `touch` [2] ⏳" in restored.per_member["research"]
@@ -1381,9 +1381,9 @@ async def test_a_resume_shows_the_saved_document_first_then_each_change_and_coll
     assert "**GeneralAgent**: Before approval.\n\n🔧 `touch` [1]\n\nAfter approval." in result.response_text
     assert result.response_text.endswith("Done.")
     assert result.metadata_content[AI_RUN_METADATA_KEY]["status"] == "completed"
-    assert [(entry.tool_call_id, entry.scope_key, entry.type) for entry in trace] == [
-        ("call-touch", "agent:general", "tool_call_completed"),
-        ("call-team", "team", "tool_call_completed"),
+    assert [(entry.tool_call_id, entry.member_id, entry.type) for entry in trace] == [
+        ("call-touch", "general", "tool_call_completed"),
+        ("call-team", None, "tool_call_completed"),
     ]
 
 

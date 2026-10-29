@@ -3547,7 +3547,7 @@ async def test_pause_publication_rejects_an_unanchored_team_tool(
         type="tool_call_started",
         tool_name="inspect",
         tool_call_id="call-1",
-        scope_key="agent:member-a",
+        member_id="member-a",
     )
     error = ResponsePausedForApproval(
         PausedAttempt(
@@ -3614,7 +3614,7 @@ def test_pause_presentation_rejects_a_tool_in_the_wrong_member_scope() -> None:
                 type="tool_call_started",
                 tool_name="inspect",
                 tool_call_id="call-1",
-                scope_key="agent:member-b",
+                member_id="member-b",
             ),
         ),
         toolkit_owners={("general", "inspect"): "test_toolkit"},
@@ -3691,7 +3691,7 @@ def test_hidden_textless_team_pause_keeps_internal_continuation_snapshot() -> No
         type="tool_call_started",
         tool_name="inspect",
         tool_call_id="call-1",
-        scope_key="agent:member-a",
+        member_id="member-a",
     )
     state = {
         "kind": "team_stream",
