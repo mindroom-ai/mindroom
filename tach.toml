@@ -3011,7 +3011,6 @@ path = "mindroom.session_storage.summary_rows"
 depends_on = [
     "mindroom.session_storage.schema",
     "mindroom.session_storage.store",
-    "mindroom.session_storage.types",
 ]
 visibility = [
     "mindroom.history.storage",
@@ -9987,13 +9986,13 @@ depends_on = [
     "mindroom.history.runtime",
     "mindroom.history.storage",
     "mindroom.history.summary_message",
-    "mindroom.session_storage.summary_rows",
     "mindroom.history.types",
     "mindroom.llm",
     "mindroom.native_compaction",
     "mindroom.providers.anthropic.prompt_cache",
     "mindroom.session_storage.agent_storage",
     "mindroom.session_storage.lanes",
+    "mindroom.session_storage.summary_rows",
     "mindroom.tool_system.runtime_context",
     "mindroom.usage.storage",
 ]
