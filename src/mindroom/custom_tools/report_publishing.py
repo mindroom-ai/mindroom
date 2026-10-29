@@ -23,10 +23,8 @@ from mindroom.report_publishing.store import (
     ReportPublishingError,
     ReportPublishingStore,
 )
-from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
-    build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
 )
 from mindroom.workspaces import resolve_workspace_relative_path
@@ -176,18 +174,13 @@ def _resolve_static_site_source(
     _reject_unsupported_source_fields(source, _STATIC_SITE_SOURCE_KEYS, "static_site source")
     source_path = _required_source_text(source, "path", context="static_site source")
     title = _required_source_text(source, "title", context="static_site source")
-    workspace = resolve_agent_runtime(
-        context.agent_name,
-        context.config,
-        context.runtime_paths,
-        execution_identity=build_execution_identity_from_runtime_context(context),
-    ).workspace
-    if not workspace.root.is_dir():
+    workspace_root = context.agent_workspace_root()
+    if not workspace_root.is_dir():
         msg = "static_site publishing found no agent workspace yet; write the site into the workspace first."
         raise ReportPublishingError(msg)
     try:
         site_dir = resolve_workspace_relative_path(
-            workspace.root,
+            workspace_root,
             source_path,
             field_name="static_site source.path",
         )
@@ -200,7 +193,7 @@ def _resolve_static_site_source(
         title=title,
         requested_by=context.requester_id,
         artifact_kind=ARTIFACT_KIND_STATIC_SITE,
-        artifact_root=workspace.root,
+        artifact_root=workspace_root,
     )
 
 

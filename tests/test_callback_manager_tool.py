@@ -20,13 +20,13 @@ from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.custom_tools.callback_manager import CallbackManagerTools
 from mindroom.external_triggers.store import ExternalTriggerStore
 from mindroom.message_target import MessageTarget
-from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.runtime_state import reset_runtime_state, set_api_server_address
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_execution_identity_from_runtime_context,
     tool_runtime_context,
 )
+from mindroom.tool_system.worker_routing import resolve_worker_key, visible_workspace_roots
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -132,14 +132,18 @@ def test_a_private_agent_writes_its_callback_script_into_the_requester_workspace
         payload = _payload(CallbackManagerTools().mint_callback("issue-042 implementer"))
 
     assert payload["status"] == "ok"
-    workspace = resolve_agent_runtime(
-        "coder",
-        context.config,
-        context.runtime_paths,
-        execution_identity=build_execution_identity_from_runtime_context(context),
-    ).workspace.root
+    # The requester's user-scope worker mounts exactly the workspace the script landed in.
+    identity = build_execution_identity_from_runtime_context(context)
+    worker_key = resolve_worker_key("user", identity, agent_name="coder")
+    assert worker_key is not None
+    mounted = visible_workspace_roots(
+        context.runtime_paths.storage_root,
+        worker_key,
+        context.config.get_agent_policies(),
+        private_agent_names=frozenset({"coder"}),
+    )
     script_path = Path(payload["script_path"])
-    assert script_path.parent == workspace / ".mindroom" / "callbacks"
+    assert any(script_path.is_relative_to(root) for root in mounted)
     assert not script_path.is_relative_to(_workspace(tmp_path))
     assert script_path.is_file()
 
